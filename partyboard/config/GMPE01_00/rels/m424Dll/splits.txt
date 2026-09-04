@@ -1,0 +1,34 @@
+Sections:
+	.text       type:code align:4
+	.ctors      type:rodata align:4
+	.dtors      type:rodata align:4
+	.rodata     type:rodata align:8
+	.data       type:data align:8
+	.bss        type:bss align:8
+
+REL/executor.c:
+	.text       start:0x00000000 end:0x000000A0
+
+REL/m424Dll/main.c:
+	.text       start:0x000000A0 end:0x00001AB8
+	.rodata     start:0x00000000 end:0x00000090
+	.data       start:0x00000000 end:0x000000E0
+	.bss        start:0x00000000 end:0x00000050
+
+REL/m424Dll/map.c:
+	.text       start:0x00001AB8 end:0x00002720
+	.rodata     start:0x00000090 end:0x000000F8
+	.data       start:0x000000E0 end:0x00000150
+	.bss        start:0x00000050 end:0x00000058
+
+REL/m424Dll/ball.c:
+	.text       start:0x00002720 end:0x000093F0
+	.rodata     start:0x000000F8 end:0x00000218
+	.data       start:0x00000150 end:0x000001E0
+	.bss        start:0x00000058 end:0x00000640
+
+REL/m424Dll/claw.c:
+	.text       start:0x000093F0 end:0x0000D074
+	.rodata     start:0x00000218 end:0x00000310
+	.data       start:0x000001E0 end:0x000003CA
+	.bss        start:0x00000640 end:0x000006E0

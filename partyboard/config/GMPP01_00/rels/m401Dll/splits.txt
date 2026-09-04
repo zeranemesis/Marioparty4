@@ -1,0 +1,22 @@
+Sections:
+	.text       type:code align:4
+	.ctors      type:rodata align:4
+	.dtors      type:rodata align:4
+	.rodata     type:rodata align:8
+	.data       type:data align:8
+	.bss        type:bss align:8
+
+REL/executor.c:
+	.text       start:0x00000000 end:0x000000A0
+
+REL/m401Dll/main.c:
+	.text       start:0x000000A0 end:0x00010244
+	.rodata     start:0x00000000 end:0x00000450
+	.data       start:0x00000000 end:0x00000478
+	.bss        start:0x00000000 end:0x00000120
+
+REL/m401Dll/main_ex.c:
+	.text       start:0x00010244 end:0x00014E18
+	.rodata     start:0x00000450 end:0x000005E8
+	.data       start:0x00000478 end:0x00000498
+	.bss        start:0x00000120 end:0x00000254

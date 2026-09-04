@@ -1,0 +1,57 @@
+Sections:
+	.text       type:code align:4
+	.ctors      type:rodata align:4
+	.dtors      type:rodata align:4
+	.rodata     type:rodata align:8
+	.data       type:data align:8
+	.bss        type:bss align:8
+
+REL/executor.c:
+	.text       start:0x00000000 end:0x000000A0
+
+REL/mgmodedll/mgmode.c:
+	.text       start:0x000000A0 end:0x00006D28
+	.rodata     start:0x00000000 end:0x00000160
+	.data       start:0x00000000 end:0x000000A0
+	.bss        start:0x00000000 end:0x000002E0
+
+REL/mgmodedll/free_play.c:
+	.text       start:0x00006D28 end:0x0000D8D0
+	.rodata     start:0x00000160 end:0x000002F0
+	.data       start:0x000000A0 end:0x00000120
+	.bss        start:0x000002E0 end:0x00000370
+
+REL/mgmodedll/record.c:
+	.text       start:0x0000D8D0 end:0x0000E72C
+	.rodata     start:0x000002F0 end:0x00000390
+	.data       start:0x00000120 end:0x00000148
+	.bss        start:0x00000370 end:0x00000388
+
+REL/mgmodedll/battle.c:
+	.text       start:0x0000E72C end:0x00013418
+	.rodata     start:0x00000390 end:0x000004D8
+	.data       start:0x00000148 end:0x00000168
+	.bss        start:0x00000388 end:0x000003A8
+
+REL/mgmodedll/tictactoe.c:
+	.text       start:0x00013418 end:0x00018DF8
+	.rodata     start:0x000004D8 end:0x000005B0
+	.data       start:0x00000168 end:0x000001E0
+	.bss        start:0x000003A8 end:0x000003C0
+
+REL/mgmodedll/main.c:
+	.text       start:0x00018DF8 end:0x000267E8
+	.rodata     start:0x000005B0 end:0x00000718
+	.data       start:0x000001E0 end:0x00000490
+	.bss        start:0x000003C0 end:0x000020A8
+
+REL/mgmodedll/datalist.c:
+	.text       start:0x000267E8 end:0x00026C28
+	.rodata     start:0x00000718 end:0x00000728
+	.data       start:0x00000490 end:0x000009C0
+
+REL/mgmodedll/minigame.c:
+	.text       start:0x00026C28 end:0x00027CF0
+	.rodata     start:0x00000728 end:0x00000790
+	.data       start:0x000009C0 end:0x00000A02
+	.bss        start:0x000020A8 end:0x00002C9A

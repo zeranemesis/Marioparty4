@@ -1,0 +1,28 @@
+Sections:
+	.text       type:code align:4
+	.ctors      type:rodata align:4
+	.dtors      type:rodata align:4
+	.rodata     type:rodata align:8
+	.data       type:data align:8
+	.bss        type:bss align:8
+
+REL/executor.c:
+	.text       start:0x00000000 end:0x000000A0
+
+REL/m453Dll/main.c:
+	.text       start:0x000000A0 end:0x000064E8
+	.rodata     start:0x00000000 end:0x00000198
+	.data       start:0x00000000 end:0x00000158
+	.bss        start:0x00000000 end:0x00000060
+
+REL/m453Dll/map.c:
+	.text       start:0x000064E8 end:0x00008F48
+	.rodata     start:0x00000198 end:0x00000240
+	.data       start:0x00000158 end:0x00000BC0
+	.bss        start:0x00000060 end:0x000000C0
+
+REL/m453Dll/score.c:
+	.text       start:0x00008F48 end:0x00009674
+	.rodata     start:0x00000240 end:0x00000278
+	.data       start:0x00000BC0 end:0x00000BCC
+	.bss        start:0x000000C0 end:0x000000C8

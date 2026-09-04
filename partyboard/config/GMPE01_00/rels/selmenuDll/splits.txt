@@ -1,0 +1,16 @@
+Sections:
+	.text       type:code align:4
+	.ctors      type:rodata align:4
+	.dtors      type:rodata align:4
+	.rodata     type:rodata align:8
+	.data       type:data align:8
+	.bss        type:bss align:8
+
+REL/executor.c:
+	.text       start:0x00000000 end:0x000000A0
+
+REL/selmenuDll/main.c:
+	.text       start:0x000000A0 end:0x00005198
+	.rodata     start:0x00000000 end:0x00000084
+	.data       start:0x00000000 end:0x00000B3F
+	.bss        start:0x00000000 end:0x00000098

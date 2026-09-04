@@ -1,0 +1,43 @@
+Sections:
+	.text       type:code align:4
+	.ctors      type:rodata align:4
+	.dtors      type:rodata align:4
+	.rodata     type:rodata align:8
+	.data       type:data align:8
+	.bss        type:bss align:8
+
+REL/executor.c:
+	.text       start:0x00000000 end:0x000000A0
+
+REL/m447dll/main.c:
+	.text       start:0x000000A0 end:0x00001D90
+	.rodata     start:0x00000000 end:0x00000138
+	.data       start:0x00000000 end:0x000000A0
+	.bss        start:0x00000000 end:0x00000018
+
+REL/m447dll/stage.c:
+	.text       start:0x00001D90 end:0x00003130
+	.rodata     start:0x00000138 end:0x00000240
+	.data       start:0x000000A0 end:0x00000160
+
+REL/m447dll/camera.c:
+	.text       start:0x00003130 end:0x00003F84
+	.rodata     start:0x00000240 end:0x000002A0
+	.data       start:0x00000160 end:0x000001B0
+	.bss        start:0x00000018 end:0x00000098
+
+REL/m447dll/player.c:
+	.text       start:0x00003F84 end:0x00007B54
+	.rodata     start:0x000002A0 end:0x000005A0
+	.data       start:0x000001B0 end:0x00000278
+	.bss        start:0x00000098 end:0x000000A0
+
+REL/m447dll/player_col.c:
+	.text       start:0x00007B54 end:0x00008DF8
+	.rodata     start:0x000005A0 end:0x000005F8
+
+REL/m447dll/block.c:
+	.text       start:0x00008DF8 end:0x0000A274
+	.rodata     start:0x000005F8 end:0x00000740
+	.data       start:0x00000278 end:0x000002E3
+	.bss        start:0x000000A0 end:0x000000BC

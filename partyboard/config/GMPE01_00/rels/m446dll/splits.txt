@@ -1,0 +1,58 @@
+Sections:
+	.text       type:code align:4
+	.ctors      type:rodata align:4
+	.dtors      type:rodata align:4
+	.rodata     type:rodata align:8
+	.data       type:data align:8
+	.bss        type:bss align:8
+
+REL/executor.c:
+	.text       start:0x00000000 end:0x000000A0
+
+REL/m446Dll/main.c:
+	.text       start:0x000000A0 end:0x00001C64
+	.rodata     start:0x00000000 end:0x00000058
+	.data       start:0x00000000 end:0x00000150
+	.bss        start:0x00000000 end:0x00000018
+
+REL/m446Dll/card.c:
+	.text       start:0x00001C64 end:0x00003064
+	.rodata     start:0x00000058 end:0x000000D0
+	.data       start:0x00000150 end:0x000001A8
+	.bss        start:0x00000018 end:0x00000020
+
+REL/m446Dll/deck.c:
+	.text       start:0x00003064 end:0x00003924
+	.rodata     start:0x000000D0 end:0x00000138
+	.data       start:0x000001A8 end:0x000001E8
+	.bss        start:0x00000020 end:0x00000028
+
+REL/m446Dll/table.c:
+	.text       start:0x00003924 end:0x0000480C
+	.rodata     start:0x00000138 end:0x00000170
+	.data       start:0x000001E8 end:0x00000228
+	.bss        start:0x00000028 end:0x00000030
+
+REL/m446Dll/player.c:
+	.text       start:0x0000480C end:0x00006778
+	.rodata     start:0x00000170 end:0x00000208
+	.data       start:0x00000228 end:0x00000370
+	.bss        start:0x00000030 end:0x00000038
+
+REL/m446Dll/camera.c:
+	.text       start:0x00006778 end:0x000072E0
+	.rodata     start:0x00000208 end:0x00000268
+	.data       start:0x00000370 end:0x000003C8
+	.bss        start:0x00000038 end:0x00000098
+
+REL/m446Dll/cursor.c:
+	.text       start:0x000072E0 end:0x00007BF0
+	.rodata     start:0x00000268 end:0x000002A0
+	.data       start:0x000003C8 end:0x00000410
+	.bss        start:0x00000098 end:0x000000A0
+
+REL/m446Dll/stage.c:
+	.text       start:0x00007BF0 end:0x00008618
+	.rodata     start:0x000002A0 end:0x000002D8
+	.data       start:0x00000410 end:0x000004F6
+	.bss        start:0x000000A0 end:0x000000A4

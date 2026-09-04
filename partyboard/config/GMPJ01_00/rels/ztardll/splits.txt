@@ -1,0 +1,27 @@
+Sections:
+	.text       type:code align:4
+	.ctors      type:rodata align:4
+	.dtors      type:rodata align:4
+	.rodata     type:rodata align:8
+	.data       type:data align:8
+	.bss        type:bss align:8
+
+REL/executor.c:
+	.text       start:0x00000000 end:0x000000A0
+
+REL/ztardll/main.c:
+	.text       start:0x000000A0 end:0x00007820
+	.rodata     start:0x00000000 end:0x000001B8
+	.data       start:0x00000000 end:0x000000B0
+	.bss        start:0x00000000 end:0x00000070
+
+REL/ztardll/font.c:
+	.text       start:0x00007820 end:0x00007C9C
+	.rodata     start:0x000001B8 end:0x000001C0
+	.data       start:0x000000B0 end:0x00000578
+
+REL/ztardll/select.c:
+	.text       start:0x00007C9C end:0x00012358
+	.rodata     start:0x000001C0 end:0x00000298
+	.data       start:0x00000578 end:0x00000824
+	.bss        start:0x00000070 end:0x000002D8

@@ -1,0 +1,33 @@
+Sections:
+	.text       type:code align:4
+	.ctors      type:rodata align:4
+	.dtors      type:rodata align:4
+	.rodata     type:rodata align:8
+	.data       type:data align:8
+	.bss        type:bss align:8
+
+REL/executor.c:
+	.text       start:0x00000000 end:0x000000A0
+
+REL/mpexDll/main.c:
+	.text       start:0x000000A0 end:0x00003044
+	.rodata     start:0x00000000 end:0x000000A0
+	.data       start:0x00000000 end:0x00000240
+	.bss        start:0x00000000 end:0x000000A8
+
+REL/mpexDll/mpex.c:
+	.text       start:0x00003044 end:0x000125C4
+	.rodata     start:0x000000A0 end:0x00000538
+	.data       start:0x00000240 end:0x00000510
+	.bss        start:0x000000A8 end:0x00000440
+
+REL/mpexDll/charsel.c:
+	.text       start:0x000125C4 end:0x0001CAF8
+	.rodata     start:0x00000538 end:0x00000610
+	.data       start:0x00000510 end:0x00000780
+	.bss        start:0x00000440 end:0x000006AD
+
+REL/mpexDll/mgname.c:
+	.text       start:0x0001CAF8 end:0x0001D014
+	.rodata     start:0x00000610 end:0x00000620
+	.data       start:0x00000780 end:0x00000C40

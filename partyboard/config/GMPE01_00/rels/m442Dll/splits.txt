@@ -1,0 +1,22 @@
+Sections:
+	.text       type:code align:4
+	.ctors      type:rodata align:4
+	.dtors      type:rodata align:4
+	.rodata     type:rodata align:8
+	.data       type:data align:8
+	.bss        type:bss align:8
+
+REL/executor.c:
+	.text       start:0x00000000 end:0x000000A0
+
+REL/m442Dll/main.c:
+	.text       start:0x000000A0 end:0x000091AC
+	.rodata     start:0x00000000 end:0x000001E8
+	.data       start:0x00000000 end:0x00000268
+	.bss        start:0x00000000 end:0x00011F48
+
+REL/m442Dll/score.c:
+	.text       start:0x000091AC end:0x00009970
+	.rodata     start:0x000001E8 end:0x00000218
+	.data       start:0x00000268 end:0x00000274
+	.bss        start:0x00011F48 end:0x00011F50

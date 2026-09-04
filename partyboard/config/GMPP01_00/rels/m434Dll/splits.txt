@@ -1,0 +1,34 @@
+Sections:
+	.text       type:code align:4
+	.ctors      type:rodata align:4
+	.dtors      type:rodata align:4
+	.rodata     type:rodata align:8
+	.data       type:data align:8
+	.bss        type:bss align:8
+
+REL/executor.c:
+	.text       start:0x00000000 end:0x000000A0
+
+REL/m434Dll/main.c:
+	.text       start:0x000000A0 end:0x00001DB0
+	.rodata     start:0x00000000 end:0x000000B8
+	.data       start:0x00000000 end:0x00000100
+	.bss        start:0x00000000 end:0x000003D8
+
+REL/m434Dll/map.c:
+	.text       start:0x00001DB0 end:0x00004854
+	.rodata     start:0x000000B8 end:0x000001A8
+	.data       start:0x00000100 end:0x00000180
+	.bss        start:0x000003D8 end:0x00005870
+
+REL/m434Dll/player.c:
+	.text       start:0x00004854 end:0x00006860
+	.rodata     start:0x000001A8 end:0x000002C8
+	.data       start:0x00000180 end:0x000002C0
+	.bss        start:0x00005870 end:0x00005880
+
+REL/m434Dll/fish.c:
+	.text       start:0x00006860 end:0x0000918C
+	.rodata     start:0x000002C8 end:0x000004C8
+	.data       start:0x000002C0 end:0x000002C8
+	.bss        start:0x00005880 end:0x00007884

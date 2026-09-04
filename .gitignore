@@ -1,0 +1,20 @@
+# Local files must not be published with source snapshots.
+**/build/
+**/work/
+**/.env
+**/.env.*
+*.iso
+*.rvz
+*.gcm
+*.wbfs
+*.dol
+*.rel
+*.exe
+*.dll
+*.obj
+*.pdb
+*.dmp
+*.pcm
+*.log
+*.sav
+*.gci

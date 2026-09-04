@@ -1,0 +1,28 @@
+Sections:
+	.text       type:code align:4
+	.ctors      type:rodata align:4
+	.dtors      type:rodata align:4
+	.rodata     type:rodata align:8
+	.data       type:data align:8
+	.bss        type:bss align:8
+
+REL/executor.c:
+	.text       start:0x00000000 end:0x000000A0
+
+REL/m427Dll/main.c:
+	.text       start:0x000000A0 end:0x000032F4
+	.rodata     start:0x00000000 end:0x000000D8
+	.data       start:0x00000000 end:0x000000E8
+	.bss        start:0x00000000 end:0x00000090
+
+REL/m427Dll/map.c:
+	.text       start:0x000032F4 end:0x0000E98C
+	.rodata     start:0x000000D8 end:0x00000388
+	.data       start:0x000000E8 end:0x00000260
+	.bss        start:0x00000090 end:0x00000550
+
+REL/m427Dll/player.c:
+	.text       start:0x0000E98C end:0x000174D4
+	.rodata     start:0x00000388 end:0x000004A0
+	.data       start:0x00000260 end:0x00000654
+	.bss        start:0x00000550 end:0x00000598

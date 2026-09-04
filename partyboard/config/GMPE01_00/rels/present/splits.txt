@@ -1,0 +1,36 @@
+Sections:
+	.text       type:code align:4
+	.ctors      type:rodata align:4
+	.dtors      type:rodata align:4
+	.rodata     type:rodata align:8
+	.data       type:data align:8
+	.bss        type:bss align:8
+
+REL/executor.c:
+	.text       start:0x00000000 end:0x000000A0
+
+REL/present/init.c:
+	.text       start:0x000000A0 end:0x000006B4
+	.rodata     start:0x00000000 end:0x00000020
+	.bss        start:0x00000000 end:0x00000020
+
+REL/present/camera.c:
+	.text       start:0x000006B4 end:0x00001458
+	.rodata     start:0x00000020 end:0x000000A0
+	.data       start:0x00000000 end:0x00000050
+
+REL/present/present.c:
+	.text       start:0x00001458 end:0x000039A8
+	.rodata     start:0x000000A0 end:0x00000BB0
+	.data       start:0x00000050 end:0x000000F0
+
+REL/present/main.c:
+	.text       start:0x000039A8 end:0x000042F4
+	.rodata     start:0x00000BB0 end:0x00000BD8
+	.data       start:0x000000F0 end:0x000001A0
+	.bss        start:0x00000020 end:0x00000024
+
+REL/present/common.c:
+	.text       start:0x000042F4 end:0x00004DF0
+	.rodata     start:0x00000BD8 end:0x00000C50
+	.data       start:0x000001A0 end:0x000001AC

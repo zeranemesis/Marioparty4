@@ -1,0 +1,18 @@
+[
+  {
+    "path": "",
+    "revision": "9f607425e37703adc2650c799faf5175c62a1907"
+  },
+  {
+    "path": "extern/aurora",
+    "revision": "514339438178ef2bed1b14e5149d90ece0c6e0cc"
+  },
+  {
+    "path": "extern/musyx",
+    "revision": "a2b978dd4f38869aaf00d3cc83cf14c2d51a47df"
+  },
+  {
+    "path": "extern/libco",
+    "revision": "e18e09d634d612a01781168ad4d76be10a7e3bad"
+  }
+]
