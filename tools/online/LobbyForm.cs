@@ -43,7 +43,7 @@ sealed class MainForm : Form {
         actions.Controls.Add(Make("Exporter diagnostic",ExportReport));
         update=Make("Vérifier les mises à jour",CheckForUpdates);actions.Controls.Add(update);
         root.Controls.Add(new Label{Text="2 joueurs · Même fichier disque requis · Ping : aller-retour vers l'autre PC",Dock=DockStyle.Fill,Font=new Font("Segoe UI",9),ForeColor=Color.DimGray},0,10);
-        nickname.TextChanged+=(s,e)=>RefreshLobby();RefreshControls();RefreshLobby();
+        nickname.TextChanged+=(s,e)=>RefreshLobby();RefreshControls();RefreshLobby();Task.Run(()=>StartupUpdateCheck());
         FormClosing+=(s,e)=>{closing=true;fileCancel.Cancel();var old=session;session=null;if(old!=null)old.Dispose();if(disc!=null)disc.Dispose();};
     }
     Button Make(string text,Action action){var b=new Button{Text=text,AutoSize=true,Height=38,MinimumSize=new Size(160,38),Margin=new Padding(0,3,12,3),FlatStyle=FlatStyle.Flat,BackColor=Color.White};b.Click+=(s,e)=>{try{action();}catch(Exception ex){SetStatus(Friendly(ex));}};return b;}
@@ -115,6 +115,15 @@ sealed class MainForm : Form {
             closing=true;Application.Exit();
         }catch(Exception e){SetStatus("Impossible de vérifier la mise à jour : "+e.Message);}
         finally{if(!closing && !IsDisposed)update.Enabled=true;}
+    }
+    async Task StartupUpdateCheck(){
+        try{
+            var info=await UpdateService.CheckAsync();
+            if(info.Version<=new Version(UpdateService.CurrentVersion))return;
+            UI(()=>{if(update!=null && !IsDisposed){update.Text="Mise à jour disponible";update.Enabled=true;SetStatus("Une mise à jour est disponible sur GitHub. Cliquez sur le bouton de mise à jour pour l'installer.");}});
+        }catch{
+            // The launcher remains fully usable when GitHub is offline or blocked.
+        }
     }
     static string Friendly(Exception e){if(e is IOException)return e.Message;if(e is System.ComponentModel.Win32Exception)return "Windows n'a pas donné son autorisation. Réessayez et acceptez sa demande.";if(e is OperationCanceledException)return "Vérification annulée.";return "L'opération n'a pas abouti. Vérifiez votre connexion ou recréez le salon.";}
     void Reset(){var old=session;session=null;if(old!=null)Task.Run(()=>old.Dispose());RefreshLobby();SetStatus(disc!=null?"Créez un salon ou rejoignez votre ami.":"Choisissez votre disque pour commencer.");}

@@ -54,9 +54,10 @@ Download the release ZIP, extract the complete folder on both PCs, and launch
 client joins it. In the game, press F1 to reopen the menu. Select **Settings →
 Language → French** or **English**, then restart if Party Board requests it.
 
-Use **Vérifier les mises à jour** in the online launcher to check the GitHub
-manifest. If a newer version is available, the launcher verifies its SHA-256,
-installs it after closing, and starts the updated launcher automatically.
+The online launcher checks the GitHub manifest in the background at startup. Use
+**Vérifier les mises à jour** to check again manually. If a newer version is
+available, the launcher verifies its SHA-256, installs it after closing, and
+starts the updated launcher automatically.
 
 Version Completion:
 
