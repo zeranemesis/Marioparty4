@@ -8,11 +8,11 @@ using System.Windows.Forms;
 namespace PartyBoardOnline {
 sealed class MainForm : Form {
     Label status,discLabel;TextBox invitation,nickname;ListView players;
-    Button host,join,copy,play,cancel,choose,paste;Session session;DiscFile disc;
+    Button host,join,copy,play,cancel,choose,paste,update;Session session;DiscFile disc;
     readonly CancellationTokenSource fileCancel=new CancellationTokenSource();bool closing,hashing;
     Report lastReport;
     public MainForm() {
-        Text="PartyBoard — Salon en ligne v6.3";ClientSize=new Size(840,760);MinimumSize=new Size(800,790);
+        Text="PartyBoard — Salon en ligne v"+UpdateService.CurrentVersion;ClientSize=new Size(840,760);MinimumSize=new Size(800,790);
         StartPosition=FormStartPosition.CenterScreen;Font=new Font("Segoe UI",11);BackColor=Color.FromArgb(245,247,252);
         var root=new TableLayoutPanel{Dock=DockStyle.Fill,Padding=new Padding(24),ColumnCount=1,RowCount=11};
         foreach(int height in new[]{48,35,46,67,47,65,47,145})root.RowStyles.Add(new RowStyle(SizeType.Absolute,height));
@@ -41,6 +41,7 @@ sealed class MainForm : Form {
         play.MinimumSize=new Size(240,38);
         cancel=Make("Quitter le salon",Reset);bottom.Controls.Add(play);bottom.Controls.Add(cancel);root.Controls.Add(bottom,0,9);
         actions.Controls.Add(Make("Exporter diagnostic",ExportReport));
+        update=Make("Vérifier les mises à jour",CheckForUpdates);actions.Controls.Add(update);
         root.Controls.Add(new Label{Text="2 joueurs · Même fichier disque requis · Ping : aller-retour vers l'autre PC",Dock=DockStyle.Fill,Font=new Font("Segoe UI",9),ForeColor=Color.DimGray},0,10);
         nickname.TextChanged+=(s,e)=>RefreshLobby();RefreshControls();RefreshLobby();
         FormClosing+=(s,e)=>{closing=true;fileCancel.Cancel();var old=session;session=null;if(old!=null)old.Dispose();if(disc!=null)disc.Dispose();};
@@ -99,6 +100,21 @@ sealed class MainForm : Form {
             File.WriteAllText(save.FileName,content,System.Text.Encoding.UTF8);
             SetStatus("Diagnostic enregistré. Envoyez ce fichier et celui de l'autre PC dans la conversation.");
         }
+    }
+    async void CheckForUpdates(){
+        if(session!=null){SetStatus("Quittez le salon avant de mettre à jour PartyBoard.");return;}
+        update.Enabled=false;SetStatus("Recherche d'une mise à jour sur GitHub…");
+        try{
+            var info=await UpdateService.CheckAsync();
+            var current=new Version(UpdateService.CurrentVersion);
+            if(info.Version<=current){SetStatus("PartyBoard est déjà à jour (v"+UpdateService.CurrentVersion+").");return;}
+            var notes=String.IsNullOrWhiteSpace(info.Notes)?"Une nouvelle version est disponible.":info.Notes;
+            if(MessageBox.Show(this,"La version v"+info.Version+" est disponible.\n\n"+notes+"\n\nTélécharger et installer maintenant ?","Mise à jour PartyBoard",MessageBoxButtons.YesNo,MessageBoxIcon.Information)!=DialogResult.Yes){SetStatus("Mise à jour reportée.");return;}
+            SetStatus("Téléchargement de la mise à jour…");await UpdateService.InstallAsync(info);
+            MessageBox.Show(this,"La mise à jour a été téléchargée. PartyBoard va redémarrer pour l'installer.","Mise à jour PartyBoard",MessageBoxButtons.OK,MessageBoxIcon.Information);
+            closing=true;Application.Exit();
+        }catch(Exception e){SetStatus("Impossible de vérifier la mise à jour : "+e.Message);}
+        finally{if(!closing && !IsDisposed)update.Enabled=true;}
     }
     static string Friendly(Exception e){if(e is IOException)return e.Message;if(e is System.ComponentModel.Win32Exception)return "Windows n'a pas donné son autorisation. Réessayez et acceptez sa demande.";if(e is OperationCanceledException)return "Vérification annulée.";return "L'opération n'a pas abouti. Vérifiez votre connexion ou recréez le salon.";}
     void Reset(){var old=session;session=null;if(old!=null)Task.Run(()=>old.Dispose());RefreshLobby();SetStatus(disc!=null?"Créez un salon ou rejoignez votre ami.":"Choisissez votre disque pour commencer.");}

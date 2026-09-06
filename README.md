@@ -32,6 +32,8 @@ This branch includes the Windows online build used for two-player testing:
   notifications;
 - automatic online 4:3 viewport, native internal resolution and 60 Hz simulation
   to keep HUD and effects deterministic;
+- GitHub update management in the online launcher: version check, signed SHA-256
+  download and automatic replacement on restart;
 - rollback-safe animation, texture, shadow, audio, wipe and scene state, with
   recovery from temporary packet loss.
 
@@ -51,6 +53,10 @@ Download the release ZIP, extract the complete folder on both PCs, and launch
 `Jouer en ligne.cmd`. The host creates the lobby and shares the short code; the
 client joins it. In the game, press F1 to reopen the menu. Select **Settings →
 Language → French** or **English**, then restart if Party Board requests it.
+
+Use **Vérifier les mises à jour** in the online launcher to check the GitHub
+manifest. If a newer version is available, the launcher verifies its SHA-256,
+installs it after closing, and starts the updated launcher automatically.
 
 Version Completion:
 
