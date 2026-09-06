@@ -2,6 +2,7 @@
 #include "game/armem.h"
 #include "game/process.h"
 #include "dolphin/dvd.h"
+#include "port/rollback_io.h"
 
 #ifdef BYTESWAPPING
 #include "port/byteswap.h"
@@ -217,6 +218,7 @@ void HuDataDirReadAsyncCallBack(s32 result, DVDFileInfo* fileInfo)
     readStat = &ReadDataStat[i];
     readStat->status = 0;
     DVDClose(&readStat->dvdFile);
+    PartyBoard_RollbackIOEnd();
 }
 
 s32 HuDataDirReadAsync(s32 dataNum)
@@ -241,10 +243,15 @@ s32 HuDataDirReadAsync(s32 dataNum)
                 OSReport("data.c: Data Work Max Error\n");
                 return -1;
             }
+            /* Keep both the launch and callback writes outside snapshots,
+             * including callbacks that complete before this function returns. */
+            PartyBoard_RollbackIOBegin();
+            PartyBoard_RollbackIOBegin();
             readstat = &ReadDataStat[statId];
             readstat->status = 1;
             readstat->dirId = dirId;
             readstat->dirP = HuDvdDataFastReadAsync(DataDirStat[dirId].entryNum, readstat);
+            PartyBoard_RollbackIOEnd();
         }
     } else {
         statId = -1;
@@ -267,12 +274,15 @@ s32 HuDataDirReadNumAsync(s32 dataNum, s32 num)
             OSReport("data.c: Data Work Max Error\n");
             return -1;
         }
+        PartyBoard_RollbackIOBegin();
+        PartyBoard_RollbackIOBegin();
         ReadDataStat[statId].status = TRUE;
         ReadDataStat[statId].dirId = dirId;
         readStat = &ReadDataStat[statId];
         readStat->used = TRUE;
         readStat->num = num;
         readStat->dirP = HuDvdDataFastReadAsync(DataDirStat[dirId].entryNum, readStat);
+        PartyBoard_RollbackIOEnd();
     } else {
         statId = -1;
     }

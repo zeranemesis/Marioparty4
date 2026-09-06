@@ -270,17 +270,8 @@ void ObjectSetup(void)
              HuPrcVSleep();
          }
          if (!SystemInitF) {
-#ifdef __MWERKS__
-             // TODO PC
-             void *group_samp;
-#endif
              tick_prev = OSGetTick();
-#ifdef __MWERKS__
-             // TODO PC
-             group_samp = HuMemDirectMalloc(HEAP_DATA, msmSysGetSampSize(0));
-             msmSysLoadGroup(0, group_samp, 0);
-             HuMemDirectFree(group_samp);
-#endif
+             HuAudSndGrpSet(0);
              while (OSTicksToMilliseconds(OSGetTick() - tick_prev) < 3000) {
                 HuPrcVSleep();
              }
@@ -747,11 +738,10 @@ void ObjectSetup(void)
      HuSprAttrReset(bootGrpId, 0, HUSPR_ATTR_DISPOFF);
      HuSprAttrReset(bootGrpId, 1, HUSPR_ATTR_DISPOFF);
 #ifdef __MWERKS__
-     // TODO PC
      OSReport(">>>>>>>>MSM_SE_SEL_01 %d\n", msmSeGetEntryID(2092, seNo));
      OSReport(">>>>>>>>SE Num %d\n", msmSeGetNumPlay(0));
-     HuAudSStreamPlay(20);
 #endif
+     HuAudSStreamPlay(20);
      WipeCreate(WIPE_MODE_IN, WIPE_TYPE_NORMAL, 30);
      while (WipeStatGet()) {
          HuPrcVSleep();

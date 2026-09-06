@@ -9,6 +9,7 @@
 #include "game/ShapeExec.h"
 #include "game/sprite.h"
 #include "game/disp.h"
+#include "port/rollback_animation.h"
 
 #include "dolphin/gx/GXVert.h"
 
@@ -16,6 +17,12 @@
 
 #ifdef TARGET_PC
 #include <assert.h>
+#include "port/frame_interpolation.h"
+#include "port/widescreen.h"
+extern bool PartyBoard_IsSimulationTick;
+#define PARTYBOARD_ADVANCE_FRAME PartyBoard_IsSimulationTick
+#else
+#define PARTYBOARD_ADVANCE_FRAME TRUE
 #endif
 
 #ifndef __MWERKS__
@@ -186,6 +193,10 @@ void Hu3DExec(void) {
     void (* temp)(s16);
     Mtx sp40;
     Mtx sp10;
+    Mtx renderMtx;
+    HuVecF renderPos;
+    HuVecF renderRot;
+    HuVecF renderScale;
     HU3DPROJECTION* var_r26;
 
     HuPerfBegin(3);
@@ -293,14 +304,23 @@ void Hu3DExec(void) {
                                         syncF = FALSE;
                                     }
                                     if ((data->attr & HU3D_ATTR_HOOK) == 0 && (0.0f != data->scale.x || 0.0f != data->scale.y || 0.0f != data->scale.z)) {
-                                        mtxRot(sp40, data->rot.x, data->rot.y, data->rot.z);
-                                        mtxScaleCat(sp40, data->scale.x, data->scale.y, data->scale.z);
-                                        mtxTransCat(sp40, data->pos.x, data->pos.y, data->pos.z);
+                                        renderPos = data->pos;
+                                        renderRot = data->rot;
+                                        renderScale = data->scale;
+                                        MTXCopy(data->mtx, renderMtx);
+#ifdef TARGET_PC
+                                        PartyBoard_FrameInterpolationModel(i, &renderPos, &renderRot, &renderScale, renderMtx);
+#endif
+                                        mtxRot(sp40, renderRot.x, renderRot.y, renderRot.z);
+                                        mtxScaleCat(sp40, renderScale.x, renderScale.y, renderScale.z);
+                                        mtxTransCat(sp40, renderPos.x, renderPos.y, renderPos.z);
                                         MTXConcat(Hu3DCameraMtx, sp40, sp10);
-                                        MTXConcat(sp10, data->mtx, sp10);
-                                        Hu3DDraw(data, sp10, &data->scale);
+                                        MTXConcat(sp10, renderMtx, sp10);
+                                        Hu3DDraw(data, sp10, &renderScale);
                                     }
-                                    data->tick++;
+                                    if (PARTYBOARD_ADVANCE_FRAME) {
+                                        data->tick++;
+                                    }
                                     var_r23++;
                                     if (var_r23 >= layerNum[j]) {
                                         break;
@@ -316,7 +336,16 @@ void Hu3DExec(void) {
     }
     HuSprDispInit();
     HuSprExec(0);
-    data = Hu3DData;
+    if (PARTYBOARD_ADVANCE_FRAME) {
+        PartyBoard_AnimationAdvance();
+    }
+    HuPerfEnd(3);
+}
+
+void PartyBoard_AnimationAdvance(void)
+{
+    HU3DMODEL *data = Hu3DData;
+    s16 i;
     for (i = 0; i < HU3D_MODEL_MAX; i++, data++) {
         if (data->hsf != 0 && (data->motId != -1 || (data->attr & HU3D_ATTR_CLUSTER_ON) != 0 || data->motIdShape != -1) && (Hu3DPauseF == 0 || (data->attr & HU3D_ATTR_NOPAUSE) != 0)) {
             Hu3DMotionNext(i);
@@ -324,7 +353,6 @@ void Hu3DExec(void) {
     }
     HuSprFinish();
     Hu3DAnimExec();
-    HuPerfEnd(3);
 }
 
 void Hu3DAllKill(void) {
@@ -358,6 +386,9 @@ void Hu3DAllKill(void) {
         layerNum[i] = 0;
         layerHook[i] = NULL;
     }
+#ifdef TARGET_PC
+    PartyBoard_FrameInterpolationReset();
+#endif
     for(i=0; i<4; i++) {
         if(Hu3DProjection[i].anim) {
             Hu3DProjectionKill(i);
@@ -457,6 +488,9 @@ s16 Hu3DModelCreate(void *arg0) {
     if ((var_r31->hsf->sceneNum != 0) && ((var_r31->hsf->scene->fogStart) || (var_r31->hsf->scene->fogEnd))) {
         Hu3DFogSet(var_r31->hsf->scene->fogStart, var_r31->hsf->scene->fogEnd, var_r31->hsf->scene->color.r, var_r31->hsf->scene->color.g, var_r31->hsf->scene->color.b);
     }
+#ifdef TARGET_PC
+    PartyBoard_FrameInterpolationInvalidateModel(var_r30);
+#endif
     return var_r30;
 }
 
@@ -522,6 +556,9 @@ s16 Hu3DModelLink(s16 arg0) {
     var_r31->camInfoBit = 0;
     MTXIdentity(var_r31->mtx);
     layerNum[0] += 1;
+#ifdef TARGET_PC
+    PartyBoard_FrameInterpolationInvalidateModel(var_r28);
+#endif
     return var_r28;
 }
 
@@ -570,6 +607,9 @@ s16 Hu3DHookFuncCreate(HU3DMODELHOOK hook) {
     var_r31->camInfoBit = 0;
     MTXIdentity(var_r31->mtx);
     layerNum[0] += 1;
+#ifdef TARGET_PC
+    PartyBoard_FrameInterpolationInvalidateModel(var_r29);
+#endif
     return var_r29;
 }
 
@@ -581,7 +621,13 @@ void Hu3DModelKill(s16 arg0) {
     s16 var_r27;
     s16 i;
 
+    if (arg0 < 0 || arg0 >= HU3D_MODEL_MAX) {
+        return;
+    }
     temp_r31 = &Hu3DData[arg0];
+#ifdef TARGET_PC
+    PartyBoard_FrameInterpolationInvalidateModel(arg0);
+#endif
     var_r28 = temp_r31->hsf;
     if (var_r28 != 0) {
         if ((temp_r31->attr & HU3D_ATTR_SHADOW) != 0) {
@@ -1161,6 +1207,9 @@ void Hu3DCameraCreate(s32 cam) {
         if ((cam & mask) != 0) {
             cam_ptr = &Hu3DCamera[i];
             *cam_ptr = defCamera;
+#ifdef TARGET_PC
+            PartyBoard_FrameInterpolationInvalidateCamera(i);
+#endif
         }
     }
 }
@@ -1260,6 +1309,9 @@ void Hu3DCameraKill(s32 cam) {
         if ((cam & mask) != 0) {
             cam_ptr = &Hu3DCamera[i];
             cam_ptr->fov = -1.0f;
+#ifdef TARGET_PC
+            PartyBoard_FrameInterpolationInvalidateCamera(i);
+#endif
         }
     }
 }
@@ -1279,6 +1331,9 @@ void Hu3DCameraAllKill(void) {
                 if ((mask & mask2) != 0) {
                     cam_ptr2 = &Hu3DCamera[j];
                     cam_ptr2->fov = -1.0f;
+#ifdef TARGET_PC
+                    PartyBoard_FrameInterpolationInvalidateCamera(j);
+#endif
                 }
             }
         }
@@ -1290,8 +1345,19 @@ void Hu3DCameraSet(s32 arg0, Mtx arg1) {
     Mtx44 sp10;
     Mtx44 spC;
     HU3DCAMERA* temp_r31;
+#ifdef TARGET_PC
+    HU3DCAMERA renderCamera;
+#endif
 
     temp_r31 = &Hu3DCamera[arg0];
+#ifdef TARGET_PC
+    if (PartyBoard_FrameInterpolationCamera(arg0, &renderCamera)) {
+        temp_r31 = &renderCamera;
+    }
+    renderCamera = *temp_r31;
+    renderCamera.aspect = PartyBoard_WidescreenPerspectiveAspect(renderCamera.aspect);
+    temp_r31 = &renderCamera;
+#endif
     C_MTXPerspective(sp10, temp_r31->fov, temp_r31->aspect, temp_r31->nnear, temp_r31->ffar);
     GXSetProjection(sp10, GX_PERSPECTIVE);
     if (RenderMode->field_rendering != 0) {
@@ -2203,3 +2269,70 @@ void Hu3DMipMapSet(char* arg0, s16 arg1, char *arg2, f32 arg8) {
     }
     DCFlushRange(temp_r22, var_r24);
 }
+
+#ifdef TARGET_PC
+#include "port/rollback_scene.h"
+bool PartyBoard_RollbackModelRegions(PartyBoardRollbackRegionSink sink, void *context)
+{
+    if (!sink) return false;
+    if (!sink(context, &Hu3DData, sizeof(Hu3DData))) return false;
+    if (!sink(context, &layerNum, sizeof(layerNum))) return false;
+    if (!sink(context, &layerHook, sizeof(layerHook))) return false;
+    if (!sink(context, &reflectAnim, sizeof(reflectAnim))) return false;
+    if (!sink(context, &hiliteAnim, sizeof(hiliteAnim))) return false;
+    if (!sink(context, &Hu3DProjection, sizeof(Hu3DProjection))) return false;
+    if (!sink(context, &Hu3DShadowData, sizeof(Hu3DShadowData))) return false;
+    if (!sink(context, &FogData, sizeof(FogData))) return false;
+    if (!sink(context, &Hu3DGlobalLight, sizeof(Hu3DGlobalLight))) return false;
+    if (!sink(context, &Hu3DLocalLight, sizeof(Hu3DLocalLight))) return false;
+    if (!sink(context, &lbl_8018D39C, sizeof(lbl_8018D39C))) return false;
+    if (!sink(context, &BGColor, sizeof(BGColor))) return false;
+    if (!sink(context, &reflectMapNo, sizeof(reflectMapNo))) return false;
+    if (!sink(context, &toonAnim, sizeof(toonAnim))) return false;
+    if (!sink(context, &Hu3DShadowCamBit, sizeof(Hu3DShadowCamBit))) return false;
+    if (!sink(context, &Hu3DShadowF, sizeof(Hu3DShadowF))) return false;
+    if (!sink(context, &shadowModelDrawF, sizeof(shadowModelDrawF))) return false;
+    if (!sink(context, &Hu3DProjectionNum, sizeof(Hu3DProjectionNum))) return false;
+    if (!sink(context, &Hu3DMallocNo, sizeof(Hu3DMallocNo))) return false;
+    if (!sink(context, &Hu3DPauseF, sizeof(Hu3DPauseF))) return false;
+    if (!sink(context, &NoSyncF, sizeof(NoSyncF))) return false;
+    if (!sink(context, &modelKillAllF, sizeof(modelKillAllF))) return false;
+    return true;
+}
+
+bool PartyBoard_RollbackRenderCanReplayWithoutDraw(void)
+{
+    s16 i;
+    if (!PartyBoard_RollbackWipeCanReplayWithoutDraw()) return false;
+    for (i = 0; i < 8; ++i) if (layerHook[i]) return false;
+    for (i = 0; i < HU3D_MODEL_MAX; ++i)
+        if (Hu3DData[i].hsf && (Hu3DData[i].attr & HU3D_ATTR_HOOKFUNC)) return false;
+    for (i = 0; i < HUSPR_MAX; ++i)
+        if (HuSprData[i].data && (HuSprData[i].attr & HUSPR_ATTR_FUNC)) return false;
+    return true;
+}
+
+bool PartyBoard_RollbackRenderSafetySelfTest(void)
+{
+    HU3DMODEL savedModel = Hu3DData[0];
+    HUSPRITE savedSprite = HuSprData[1];
+    void (*savedHook)(s16) = layerHook[0];
+    bool ok = PartyBoard_RollbackRenderCanReplayWithoutDraw();
+    layerHook[0] = (void (*)(s16))(uintptr_t)1;
+    ok = ok && !PartyBoard_RollbackRenderCanReplayWithoutDraw();
+    layerHook[0] = NULL;
+    Hu3DData[0].hsf = (HSFDATA *)(uintptr_t)1;
+    Hu3DData[0].attr |= HU3D_ATTR_HOOKFUNC;
+    ok = ok && !PartyBoard_RollbackRenderCanReplayWithoutDraw();
+    Hu3DData[0] = savedModel;
+    HuSprData[1].data = (ANIMDATA *)(uintptr_t)1;
+    HuSprData[1].attr |= HUSPR_ATTR_FUNC;
+    ok = ok && !PartyBoard_RollbackRenderCanReplayWithoutDraw();
+    HuSprData[1] = savedSprite;
+    layerHook[0] = savedHook;
+    ok = ok && PartyBoard_RollbackRenderCanReplayWithoutDraw();
+    OSReport("Rollback render safety gate: %s (wipe/layer/model/sprite callbacks rejected; live tables restored).\n",
+        ok ? "PASS" : "FAIL");
+    return ok;
+}
+#endif

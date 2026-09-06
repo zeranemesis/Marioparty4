@@ -21,6 +21,60 @@ omDllData *omDLLinfoTbl[OM_DLL_MAX];
 
 static FileListEntry *omDLLFileList;
 
+#if defined(TARGET_PC) && defined(_WIN32)
+#define OM_DLL_SNAPSHOT_MAGIC 0x4F564C53u /* "OVLS" */
+#define OM_DLL_SNAPSHOT_VERSION 2u
+static u64 omDLLGeneration;
+
+typedef struct omDllSnapshotHeader {
+    u32 magic;
+    u32 version;
+    uintptr_t module;
+    u64 generation;
+    u32 image_size;
+    u32 timestamp;
+    u32 section_count;
+    u32 total_size;
+} omDllSnapshotHeader;
+
+typedef struct omDllSnapshotSection {
+    u32 virtual_address;
+    u32 size;
+} omDllSnapshotSection;
+
+static HMODULE omDLLCurrentModuleGet(void)
+{
+    if (omcurdll < 0 || omcurdll >= OM_DLL_MAX || omDLLinfoTbl[omcurdll] == NULL) {
+        return NULL;
+    }
+    return omDLLinfoTbl[omcurdll]->hModule;
+}
+
+static IMAGE_NT_HEADERS *omDLLNtHeadersGet(HMODULE module)
+{
+    IMAGE_DOS_HEADER *dos;
+    IMAGE_NT_HEADERS *nt;
+    if (module == NULL) {
+        return NULL;
+    }
+    dos = (IMAGE_DOS_HEADER *)module;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0) {
+        return NULL;
+    }
+    nt = (IMAGE_NT_HEADERS *)((u8 *)module + dos->e_lfanew);
+    return nt->Signature == IMAGE_NT_SIGNATURE ? nt : NULL;
+}
+
+static BOOL omDLLSectionIsSnapshotSafe(const IMAGE_SECTION_HEADER *section)
+{
+    static const char dataName[IMAGE_SIZEOF_SHORT_NAME] = ".data";
+    return memcmp(section->Name, dataName, sizeof(dataName)) == 0
+        && section->Misc.VirtualSize != 0
+        && (section->Characteristics & IMAGE_SCN_MEM_WRITE) != 0
+        && (section->Characteristics & IMAGE_SCN_MEM_DISCARDABLE) == 0;
+}
+#endif
+
 void omDLLDBGOut(void)
 {
 	OSReport("DLL DBG OUT\n");
@@ -29,6 +83,9 @@ void omDLLDBGOut(void)
 void omDLLInit(FileListEntry *ovl_list)
 {
 	s32 i;
+#if defined(TARGET_PC) && defined(_WIN32)
+    ++omDLLGeneration;
+#endif
 	OSReport("DLL DBG OUT\n");
 	for(i=0; i<OM_DLL_MAX; i++) {
 		omDLLinfoTbl[i] = NULL;
@@ -114,6 +171,7 @@ omDllData *omDLLLink(omDllData **dll_ptr, s16 overlay, s16 flag)
 	*dll_ptr = dll;
 	dll->name = dllFile->name;
 #ifdef _WIN32
+    ++omDLLGeneration;
     dll->hModule = LoadLibrary(dllFile->name);
 	if (dll->hModule == NULL) {
 		OSReport("objdll>++++++++++++++++ DLL Link Failed\n");
@@ -160,6 +218,7 @@ void omDLLUnlink(omDllData *dll_ptr, s16 flag)
 {
 	OSReport("odjdll>Unlink DLL:%s\n", dll_ptr->name);
 #ifdef _WIN32
+    ++omDLLGeneration;
     FreeLibrary(dll_ptr->hModule);
 #elif defined(__linux__) || defined(__APPLE__)
 	dlclose(dll_ptr->handle);
@@ -193,6 +252,158 @@ s32 omDLLSearch(s16 overlay)
 	return -1;
 }
 
+#ifdef TARGET_PC
+size_t omDLLSnapshotSizeGet(void)
+{
+#ifdef _WIN32
+    HMODULE module = omDLLCurrentModuleGet();
+    IMAGE_NT_HEADERS *nt = omDLLNtHeadersGet(module);
+    IMAGE_SECTION_HEADER *section;
+    size_t size = sizeof(omDllSnapshotHeader);
+    u16 index;
+    if (nt == NULL) {
+        return 0;
+    }
+    section = IMAGE_FIRST_SECTION(nt);
+    for (index = 0; index < nt->FileHeader.NumberOfSections; ++index, ++section) {
+        if (omDLLSectionIsSnapshotSafe(section)) {
+            if (section->VirtualAddress >= nt->OptionalHeader.SizeOfImage
+                || section->Misc.VirtualSize > nt->OptionalHeader.SizeOfImage - section->VirtualAddress
+                || size > UINT32_MAX - sizeof(omDllSnapshotSection)
+                || section->Misc.VirtualSize > UINT32_MAX - size - sizeof(omDllSnapshotSection)) {
+                return 0;
+            }
+            size += sizeof(omDllSnapshotSection) + section->Misc.VirtualSize;
+        }
+    }
+    return size == sizeof(omDllSnapshotHeader) ? 0 : size;
+#else
+    return 0;
+#endif
+}
+
+BOOL omDLLSnapshotSave(void *destination, size_t capacity)
+{
+#ifdef _WIN32
+    HMODULE module = omDLLCurrentModuleGet();
+    IMAGE_NT_HEADERS *nt = omDLLNtHeadersGet(module);
+    omDllSnapshotHeader *header;
+    IMAGE_SECTION_HEADER *section;
+    u8 *cursor;
+    size_t required = omDLLSnapshotSizeGet();
+    u32 count = 0;
+    u16 index;
+    if (destination == NULL || nt == NULL || required == 0 || capacity != required) {
+        return FALSE;
+    }
+    header = (omDllSnapshotHeader *)destination;
+    cursor = (u8 *)destination + sizeof(*header);
+    section = IMAGE_FIRST_SECTION(nt);
+    for (index = 0; index < nt->FileHeader.NumberOfSections; ++index, ++section) {
+        omDllSnapshotSection savedSection;
+        if (!omDLLSectionIsSnapshotSafe(section)) {
+            continue;
+        }
+        savedSection.virtual_address = section->VirtualAddress;
+        savedSection.size = section->Misc.VirtualSize;
+        memcpy(cursor, &savedSection, sizeof(savedSection));
+        cursor += sizeof(savedSection);
+        memcpy(cursor, (u8 *)module + savedSection.virtual_address, savedSection.size);
+        cursor += savedSection.size;
+        ++count;
+    }
+    header->magic = OM_DLL_SNAPSHOT_MAGIC;
+    header->version = OM_DLL_SNAPSHOT_VERSION;
+    header->module = (uintptr_t)module;
+    header->generation = omDLLGeneration;
+    header->image_size = nt->OptionalHeader.SizeOfImage;
+    header->timestamp = nt->FileHeader.TimeDateStamp;
+    header->section_count = count;
+    header->total_size = (u32)required;
+    return TRUE;
+#else
+    (void)destination;
+    (void)capacity;
+    return FALSE;
+#endif
+}
+
+BOOL omDLLSnapshotLoad(const void *source, size_t size)
+{
+#ifdef _WIN32
+    omDllSnapshotHeader savedHeader;
+    const omDllSnapshotHeader *header = &savedHeader;
+    HMODULE module = omDLLCurrentModuleGet();
+    IMAGE_NT_HEADERS *nt = omDLLNtHeadersGet(module);
+    const u8 *cursor;
+    const u8 *end;
+    IMAGE_SECTION_HEADER *section;
+    u32 count = 0;
+    u32 index;
+    if (source == NULL || nt == NULL || size < sizeof(omDllSnapshotHeader)) {
+        return FALSE;
+    }
+    memcpy(&savedHeader, source, sizeof(savedHeader));
+    if (header->magic != OM_DLL_SNAPSHOT_MAGIC
+        || header->version != OM_DLL_SNAPSHOT_VERSION
+        || header->module != (uintptr_t)module
+        || header->generation != omDLLGeneration
+        || header->image_size != nt->OptionalHeader.SizeOfImage
+        || header->timestamp != nt->FileHeader.TimeDateStamp
+        || header->total_size != size
+        || omDLLSnapshotSizeGet() != size) {
+        return FALSE;
+    }
+    // The source must not alias the module being restored.
+    if (((uintptr_t)source >= (uintptr_t)module
+            && (uintptr_t)source - (uintptr_t)module < header->image_size)
+        || ((uintptr_t)module > (uintptr_t)source
+            && (uintptr_t)module - (uintptr_t)source < size)) {
+        return FALSE;
+    }
+    cursor = (const u8 *)source + sizeof(*header);
+    end = (const u8 *)source + size;
+    section = IMAGE_FIRST_SECTION(nt);
+    // Require each eligible section exactly once, in the save order. Validate
+    // the entire stream before any write: a bad final entry cannot partly load.
+    for (index = 0; index < nt->FileHeader.NumberOfSections; ++index, ++section) {
+        omDllSnapshotSection savedSection;
+        if (!omDLLSectionIsSnapshotSafe(section)) {
+            continue;
+        }
+        if ((size_t)(end - cursor) < sizeof(savedSection)) {
+            return FALSE;
+        }
+        memcpy(&savedSection, cursor, sizeof(savedSection));
+        cursor += sizeof(savedSection);
+        if (savedSection.virtual_address != section->VirtualAddress
+            || savedSection.size != section->Misc.VirtualSize
+            || (size_t)(end - cursor) < savedSection.size) {
+            return FALSE;
+        }
+        cursor += savedSection.size;
+        ++count;
+    }
+    if (cursor != end || count != header->section_count) {
+        return FALSE;
+    }
+    cursor = (const u8 *)source + sizeof(*header);
+    for (index = 0; index < count; ++index) {
+        omDllSnapshotSection savedSection;
+        memcpy(&savedSection, cursor, sizeof(savedSection));
+        cursor += sizeof(savedSection);
+        memcpy((u8 *)module + savedSection.virtual_address, cursor, savedSection.size);
+        cursor += savedSection.size;
+    }
+    return TRUE;
+#else
+    (void)source;
+    (void)size;
+    return FALSE;
+#endif
+}
+#endif
+
 void omDLLInfoDump(OSModuleInfo *module)
 {
 	OSReport("===== DLL Module Info dump ====\n");
@@ -221,3 +432,35 @@ void omDLLHeaderDump(OSModuleHeader *module)
 	OSReport("   unresolved func:0x%08x\n", module->unresolved);
 	OSReport("================================\n");
 }
+
+#ifdef TARGET_PC
+uint64_t PartyBoard_RollbackModuleGeneration(void)
+{
+#ifdef _WIN32
+    return omDLLGeneration;
+#else
+    return 0;
+#endif
+}
+#endif
+
+#ifdef TARGET_PC
+#include "port/rollback_scene.h"
+bool PartyBoard_RollbackModuleRegions(PartyBoardRollbackRegionSink sink, void *context)
+{
+#ifdef _WIN32
+    HMODULE module = omDLLCurrentModuleGet();
+    IMAGE_NT_HEADERS *nt = omDLLNtHeadersGet(module);
+    IMAGE_SECTION_HEADER *section;
+    u16 index;
+    if (!sink || !nt || !omDLLSnapshotSizeGet()) return false;
+    section = IMAGE_FIRST_SECTION(nt);
+    for (index = 0; index < nt->FileHeader.NumberOfSections; ++index, ++section)
+        if (omDLLSectionIsSnapshotSafe(section)
+            && !sink(context, (u8 *)module + section->VirtualAddress, section->Misc.VirtualSize)) return false;
+    return true;
+#else
+    return false;
+#endif
+}
+#endif

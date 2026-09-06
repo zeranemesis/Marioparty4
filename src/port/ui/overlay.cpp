@@ -6,6 +6,7 @@
 #include "port/achievements.h"
 #include "magic_enum.hpp"
 #include "window.hpp"
+#include "localization.hpp"
 
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_timer.h>
@@ -49,7 +50,7 @@ namespace {
             }
             else {
                 auto *span = append(heading, "span");
-                span->SetInnerRML(toast.title);
+                span->SetInnerRML(escape(ui_translate(toast.title)));
             }
             if (toast.type == "achievement") {
                 auto *icon = append(heading, "icon");
@@ -68,7 +69,7 @@ namespace {
             }
             else {
                 auto *span = append(message, "span");
-                span->SetInnerRML(toast.content);
+                span->SetInnerRML(escape(ui_translate(toast.content)));
             }
         }
         {
@@ -85,13 +86,13 @@ namespace {
 
         auto *heading = append(elem, "heading");
         auto *title = append(heading, "span");
-        title->SetInnerRML("No controller assigned");
+        title->SetInnerRML(ui_translate("No controller assigned"));
         auto *icon = append(heading, "icon");
         icon->SetClass("warning", true);
 
         auto *message = append(elem, "message");
         auto *content = append(message, "span");
-        content->SetInnerRML("Configure controller port 1 in Settings.");
+        content->SetInnerRML(ui_translate("Configure controller port 1 in Settings."));
 
         return elem;
     }
@@ -145,7 +146,7 @@ namespace {
         auto *icon = append(row, "icon");
         icon->SetClass("controller", true);
         append(row, "span")->SetInnerRML(escape(back_button_name()));
-        append(row, "span")->SetInnerRML("to open menu");
+        append(row, "span")->SetInnerRML(ui_translate("to open menu"));
 
         return elem;
     }

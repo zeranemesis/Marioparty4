@@ -6,6 +6,7 @@
 #include "port/config.hpp"
 #include "port/settings.h"
 #include "ui.hpp"
+#include "localization.hpp"
 
 #include <dolphin/gx/GXAurora.h>
 
@@ -16,6 +17,7 @@ namespace {
     {
         auto &s = getSettings();
         s.video.lockAspectRatio.setValue(true);
+        s.video.enableAdaptiveWidescreen.setValue(false);
         s.game.enableAchievementToasts.setValue(false);
         s.game.enableControllerToasts.setValue(false);
         s.game.internalResolutionScale.setValue(1);
@@ -45,14 +47,14 @@ PresetWindow::PresetWindow()
 
     auto *title = append(header, "div");
     title->SetClass("modal-title", true);
-    title->SetInnerRML("Welcome to Party Board");
+    title->SetInnerRML(ui_translate("Welcome to Party Board"));
 
     auto *headIcon = append(header, "icon");
     headIcon->SetClass("celebration", true);
 
     auto *intro = append(mDialog, "div");
     intro->SetClass("modal-body", true);
-    intro->SetInnerRML("Choose a preset to get started. You can change any setting later from the Settings menu.");
+    intro->SetInnerRML(ui_translate("Choose a preset to get started. You can change any setting later from the Settings menu."));
 
     auto *grid = append(mDialog, "div");
     grid->SetClass("preset-grid", true);
@@ -91,7 +93,7 @@ PresetWindow::PresetWindow()
 
         auto *desc = append(col, "div");
         desc->SetClass("preset-desc", true);
-        desc->SetInnerRML(preset.desc);
+        desc->SetInnerRML(ui_translate(preset.desc));
     }
 }
 

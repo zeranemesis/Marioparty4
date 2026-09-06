@@ -12,6 +12,10 @@
 #include "game/frand.h"
 #endif
 
+#ifdef TARGET_PC
+s16 HuSysVWaitGet(s16 old);
+#endif
+
 typedef struct UnkM417Struct3 {
     /* 0x00 */ s16 unk_00;
     /* 0x02 */ char unk02[4];
@@ -884,6 +888,13 @@ void fn_1_6B04(HU3DMODEL *model, Mtx arg1)
 
 void fn_1_6B60(HU3DMODEL *model, Mtx arg1)
 {
+#ifdef TARGET_PC
+    /* This hook is rendered at the selected display rate, but fn_1_57B0
+     * advances the water simulation. Keep gameplay at the original 60 Hz. */
+    if (HuSysVWaitGet(0) == 0) {
+        return;
+    }
+#endif
     if (!omPauseChk()) {
         fn_1_57B0(NULL);
     }

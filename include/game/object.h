@@ -113,6 +113,14 @@ void omDLLEnd(s16 dllno, s16 flag);
 omDllData *omDLLLink(omDllData **dll_ptr, s16 overlay, s16 flag);
 void omDLLUnlink(omDllData *dll_ptr, s16 flag);
 s32 omDLLSearch(s16 overlay);
+
+#ifdef TARGET_PC
+/* Snapshot of the current overlay's own writable game globals. Platform and
+ * renderer modules are intentionally excluded. */
+size_t omDLLSnapshotSizeGet(void);
+BOOL omDLLSnapshotSave(void *destination, size_t capacity);
+BOOL omDLLSnapshotLoad(const void *source, size_t size);
+#endif
 void omDLLInfoDump(OSModuleInfo *module);
 void omDLLHeaderDump(OSModuleHeader *module);
 

@@ -22,6 +22,10 @@
 void GXSetTevIndWarp(GXTevStageID tev_stage, GXIndTexStageID ind_stage, GXBool signed_offsets, GXBool replace_mode, GXIndTexMtxID matrix_sel);
 #endif
 
+#ifdef TARGET_PC
+s16 HuSysVWaitGet(s16 old);
+#endif
+
 inline double fabs2(double x)
 {
     return (double)fabs(x);
@@ -1613,6 +1617,13 @@ void fn_1_AB98(HU3DMODEL *model, Mtx matrix)
 void fn_1_AC84(HU3DMODEL *model, Mtx matrix)
 {
     s32 var_r31 = 0;
+#ifdef TARGET_PC
+    /* This layer callback builds the next water mesh for both cameras.  It
+     * must advance once per 60 Hz game tick, not once per displayed frame. */
+    if (HuSysVWaitGet(0) == 0) {
+        return;
+    }
+#endif
     if (lbl_1_bss_60[var_r31].unk_18 != 0) {
         var_r31++;
     }

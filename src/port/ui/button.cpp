@@ -3,6 +3,7 @@
 #include "button.hpp"
 
 #include "ui.hpp"
+#include "localization.hpp"
 
 #include <utility>
 
@@ -27,7 +28,7 @@ Button::Button(Rml::Element *parent, Props props, const Rml::String &tagName)
 void Button::set_text(const Rml::String &text)
 {
     if (mProps.text != text) {
-        mRoot->SetInnerRML(escape(text));
+        mRoot->SetInnerRML(escape(ui_translate(text)));
         mProps.text = text;
     }
 }

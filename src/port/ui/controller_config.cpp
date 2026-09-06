@@ -31,14 +31,27 @@ namespace {
     {
         const char *name = PADGetName(port);
         if (name != nullptr) {
+            if (PADIsGCAdapter(static_cast<u32>(port))) {
+                return fmt::format("{} (GameCube adapter)", name);
+            }
             return name;
         }
         return keyboard_active(port) ? "Keyboard" : "None";
     }
 
+    bool is_official_gamecube_adapter(u32 index)
+    {
+        SDL_Gamepad *gamepad = PADGetSDLGamepadForIndex(index);
+        return gamepad != nullptr && SDL_GetGamepadVendor(gamepad) == 0x057E
+            && SDL_GetGamepadProduct(gamepad) == 0x0337;
+    }
+
     Rml::String controller_index_name(u32 index)
     {
         const char *name = PADGetNameForControllerIndex(index);
+        if (is_official_gamecube_adapter(index)) {
+            return fmt::format("{} (GameCube adapter)", name != nullptr ? name : "Nintendo controller");
+        }
         if (name == nullptr) {
             return fmt::format("Controller {}", index + 1);
         }

@@ -11,6 +11,7 @@
 
 #ifdef TARGET_PC
 #include "port/byteswap.h"
+#include "port/frame_interpolation.h"
 #include <string.h>
 #endif
 
@@ -32,6 +33,11 @@ static SpriteOrder HuSprOrder[HUSPR_MAX*2];
 static s16 HuSprOrderNum;
 static s16 HuSprOrderNo;
 static BOOL HuSprPauseF;
+#ifdef TARGET_PC
+/* Presentation-only group matrices must never replace the authoritative
+ * matrices that game code can inspect during the next simulation tick. */
+static Mtx HuSprRenderMtx[HUSPR_GRP_MAX];
+#endif
 
 static void HuSprOrderEntry(s16 group, s16 sprite);
 
@@ -51,6 +57,9 @@ void HuSprInit(void)
     sprite->prio = 0;
     sprite->data = (void *)1;
     HuSprPauseF = FALSE;
+#ifdef TARGET_PC
+    PartyBoard_FrameInterpolationReset();
+#endif
 }
 
 void HuSprClose(void)
@@ -70,6 +79,9 @@ void HuSprClose(void)
         }
     }
     HuSprPauseF = FALSE;
+#ifdef TARGET_PC
+    PartyBoard_FrameInterpolationReset();
+#endif
 }
 
 void HuSprExec(s16 draw_no)
@@ -88,6 +100,9 @@ void HuSprBegin(void)
     s16 i, j;
     Vec axis = {0, 0, 1};
     HUSPRGRP *group;
+#ifdef TARGET_PC
+    HUSPRGRP renderGroup;
+#endif
     group = HuSprGrpData;
     HuSprOrderNum = 1;
     HuSprOrder[0].next = 0;
@@ -100,6 +115,16 @@ void HuSprBegin(void)
             MTXScale(temp, group->scale.x, group->scale.y, 1.0f);
             MTXConcat(group->mtx, temp, group->mtx);
             mtxTransCat(group->mtx, group->pos.x, group->pos.y, 0);
+#ifdef TARGET_PC
+            renderGroup = *group;
+            PartyBoard_FrameInterpolationSpriteGroup(i, &renderGroup);
+            MTXTrans(temp, renderGroup.center.x*renderGroup.scale.x, renderGroup.center.y*renderGroup.scale.y, 0.0f);
+            MTXRotAxisDeg(rot, &axis, renderGroup.zRot);
+            MTXConcat(rot, temp, HuSprRenderMtx[i]);
+            MTXScale(temp, renderGroup.scale.x, renderGroup.scale.y, 1.0f);
+            MTXConcat(HuSprRenderMtx[i], temp, HuSprRenderMtx[i]);
+            mtxTransCat(HuSprRenderMtx[i], renderGroup.pos.x, renderGroup.pos.y, 0);
+#endif
             for(j=0; j<group->capacity; j++) {
                 if(group->members[j] != -1) {
                     HuSprOrderEntry(i, group->members[j]);
@@ -139,7 +164,11 @@ HUSPRITE *HuSprCall(void)
     if(HuSprOrderNo != 0) {
         SpriteOrder *order = &HuSprOrder[HuSprOrderNo];
         HUSPRITE *sprite = &HuSprData[order->sprite];
+#ifdef TARGET_PC
+        sprite->groupMtx = &HuSprRenderMtx[order->group];
+#else
         sprite->groupMtx = &HuSprGrpData[order->group].mtx;
+#endif
         if(sprite->attr & HUSPR_ATTR_FUNC) {
             return sprite;
         }
@@ -333,6 +362,9 @@ s16 HuSprCreate(ANIMDATA *anim, s16 prio, s16 bank)
     if(anim) {
         HuSprAnimLock(anim);
     }
+#ifdef TARGET_PC
+    PartyBoard_FrameInterpolationInvalidateSprite(i);
+#endif
     return i;
 }
 
@@ -368,6 +400,9 @@ s16 HuSprGrpCreate(s16 capacity)
     group->capacity = capacity;
     group->pos.x = group->pos.y = group->zRot = group->center.x = group->center.y = 0.0f;
     group->scale.x = group->scale.y = 1.0f;
+#ifdef TARGET_PC
+    PartyBoard_FrameInterpolationInvalidateSpriteGroup(i);
+#endif
     return i;
 }
 
@@ -430,6 +465,9 @@ void HuSprGrpKill(s16 group)
     }
     group_ptr->capacity = 0;
     HuMemDirectFree(group_ptr->members);
+#ifdef TARGET_PC
+    PartyBoard_FrameInterpolationInvalidateSpriteGroup(group);
+#endif
 }
 
 void HuSprKill(s16 sprite)
@@ -446,6 +484,9 @@ void HuSprKill(s16 sprite)
         }
     }
     sprite_ptr->data = NULL;
+#ifdef TARGET_PC
+    PartyBoard_FrameInterpolationInvalidateSprite(sprite);
+#endif
 }
 
 void HuSprAnimKill(ANIMDATA *anim)
@@ -824,3 +865,18 @@ void AnimDebug(ANIMDATA *anim)
         bmp++;
     }
 }
+
+#ifdef TARGET_PC
+#include "port/rollback_scene.h"
+bool PartyBoard_RollbackSpriteRegions(PartyBoardRollbackRegionSink sink, void *context)
+{
+    if (!sink) return false;
+    if (!sink(context, &HuSprData, sizeof(HuSprData))) return false;
+    if (!sink(context, &HuSprGrpData, sizeof(HuSprGrpData))) return false;
+    if (!sink(context, &HuSprOrder, sizeof(HuSprOrder))) return false;
+    if (!sink(context, &HuSprOrderNum, sizeof(HuSprOrderNum))) return false;
+    if (!sink(context, &HuSprOrderNo, sizeof(HuSprOrderNo))) return false;
+    if (!sink(context, &HuSprPauseF, sizeof(HuSprPauseF))) return false;
+    return true;
+}
+#endif

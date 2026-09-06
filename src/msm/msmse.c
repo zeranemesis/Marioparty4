@@ -2,6 +2,21 @@
 #include "msm/msmfio.h"
 #include "msm/msmmem.h"
 
+#ifdef BYTESWAPPING
+#include "port/byteswap.h"
+
+static void msmSeSwapData(MSM_SE *seData, u32 count)
+{
+    u32 i;
+
+    for (i = 0; i < count; i++) {
+        byteswap_u16(&seData[i].gid);
+        byteswap_u16(&seData[i].fxId);
+        byteswap_s16(&seData[i].pitchBend);
+    }
+}
+#endif
+
 #define SE_PLAYER_EMIT (1 << 0)
 
 typedef struct SePlayer_s {
@@ -561,10 +576,18 @@ int msmSePlay(int seId, MSM_SEPARAM* param) {
         player->vid = sndAddEmitterParaEx(emitter, &player->emiPos, &player->emiDir, se.sndDist, seData->emiComp / 127.0f, emiFlag, seData->fxId, se.groupId++, player->vol * player->baseVol / 127, 0, NULL, &player->paramInfo);
         if (emitter != NULL) {
             if (!sndCheckEmitter(emitter)) {
+#ifdef TARGET_PC
+                OSReport("[AUDIO] SE start failed id=%d fx=%u gid=%u path=emitter emitter=%u vid=%u\n",
+                    seId, seData->fxId, seData->gid, seData->emitterF, player->vid);
+#endif
                 return MSM_ERR_PLAYFAIL;
             }
         } else {
             if (player->vid == -1) {
+#ifdef TARGET_PC
+                OSReport("[AUDIO] SE start failed id=%d fx=%u gid=%u path=positioned emitter=%u vid=%u\n",
+                    seId, seData->fxId, seData->gid, seData->emitterF, player->vid);
+#endif
                 return MSM_ERR_PLAYFAIL;
             }
         }
@@ -596,6 +619,10 @@ int msmSePlay(int seId, MSM_SEPARAM* param) {
         player->paramInfo.numPara = 5;
         player->vid = sndFXStartParaInfo(seData->fxId, 0xFF, 0xFF, 0, &player->paramInfo);
         if (player->vid == -1) {
+#ifdef TARGET_PC
+            OSReport("[AUDIO] SE start failed id=%d fx=%u gid=%u path=direct emitter=%u vid=%u\n",
+                seId, seData->fxId, seData->gid, seData->emitterF, player->vid);
+#endif
             return MSM_ERR_PLAYFAIL;
         }
         sndFXSurroundPanning(player->vid, player->span);
@@ -626,6 +653,9 @@ s32 msmSeInit(MSM_SYS* arg0, DVDFileInfo* arg1) {
     if (msmFioRead(arg1, se.seData, arg0->header->seSize, arg0->header->seOfs) < 0) {
         return MSM_ERR_READFAIL;
     }
+#ifdef BYTESWAPPING
+    msmSeSwapData(se.seData, arg0->header->seSize / sizeof(*se.seData));
+#endif
     playerSize = arg0->info->sfx * sizeof(SE_PLAYER);
     if ((se.player = msmMemAlloc(playerSize)) == NULL) {
         return MSM_ERR_OUTOFMEM;

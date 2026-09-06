@@ -3645,3 +3645,5 @@ void MGSeqPracticeExitCheck(omObjData *object)
         omDelObjEx(HuPrcCurrentGet(), object);
     }
 }
+
+#include "minigame_seq_snapshot.inc"

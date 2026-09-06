@@ -10,6 +10,42 @@
 // Credits: Super Monkey Ball
 
 static VIRetraceCallback sVIRetraceCallback = NULL;
+static u32 sAIStreamPlayState;
+static u8 sAIStreamVolLeft;
+static u8 sAIStreamVolRight;
+
+/*
+ * Party Board's SDL backend owns the actual audio device. These GameCube AI
+ * controls are retained for callers such as the movie player, but they must
+ * not try to control a second hardware audio stream on PC.
+ */
+void AIInit(u8 *stack)
+{
+    (void)stack;
+    sAIStreamPlayState = AI_STREAM_STOP;
+    sAIStreamVolLeft = 0;
+    sAIStreamVolRight = 0;
+}
+
+void AISetStreamPlayState(u32 state)
+{
+    sAIStreamPlayState = state;
+}
+
+void AISetStreamVolLeft(u8 vol)
+{
+    sAIStreamVolLeft = vol;
+}
+
+void AISetStreamVolRight(u8 vol)
+{
+    sAIStreamVolRight = vol;
+}
+
+u32 ARGetBaseAddress(void)
+{
+    return 0x4000;
+}
 
 void OSReport(const char *msg, ...)
 {
@@ -424,65 +460,6 @@ void GXResetWriteGatherPipe(void)
 // Hudson
 void HuDvdErrDispInit(GXRenderModeObj *rmode, void *xfb1, void *xfb2) { }
 
-void msmSysRegularProc(void)
-{
-}
-
-void msmMusFdoutEnd(void)
-{
-}
-
-int msmMusPlay(int musId, MSM_MUSPARAM *musParam)
-{
-    // TODO
-    return 0;
-}
-
-s32 msmMusGetStatus(int musNo)
-{
-    // TODO
-    return 0;
-}
-
-s32 msmStreamGetStatus(int streamNo)
-{
-    // TODO
-    return 0;
-}
-
-s32 msmSeSetParam(int seNo, MSM_SEPARAM* param)
-{
-    return 0;
-}
-
-s32 msmMusSetParam(s32 arg0, MSM_MUSPARAM* arg1)
-{
-    return 0;
-}
-
-void msmMusSetMasterVolume(s32 vol)
-{
-}
-
-s32 msmSysGetOutputMode(void)
-{
-    return 0;
-}
-
-s32 msmSeSetListener(Vec* pos, Vec* heading, float sndDist, float sndSpeed, MSM_SELISTENER* listener)
-{
-    return 0;
-}
-
-void msmSeStopAll(BOOL checkGrp, s32 speed)
-{
-}
-
-BOOL msmSysSetOutputMode(SND_OUTPUTMODE mode)
-{
-    return TRUE;
-}
-
 void OSSetSoundMode(u32 mode)
 {
 }
@@ -491,57 +468,6 @@ s32 HuSoftResetButtonCheck(void)
 {
     //puts("HuSoftResetButtonCheck is a stub");
     return 0;
-}
-
-s16 HuTHPSprCreateVol(char *path, s16 loop, s16 prio, float volume)
-{
-    return 0;
-}
-
-s16 HuTHPSprCreate(char *path, s16 loop, s16 prio)
-{
-    return 0;
-}
-
-s16 HuTHP3DCreateVol(char *path, s16 loop, float volume)
-{
-    return 0;
-}
-
-s16 HuTHP3DCreate(char *path, s16 loop)
-{
-    return 0;
-}
-
-void HuTHPStop(void)
-{
-}
-
-void HuTHPClose(void)
-{
-}
-
-void HuTHPRestart(void)
-{
-}
-
-BOOL HuTHPEndCheck(void)
-{
-    return TRUE;
-}
-
-s32 HuTHPFrameGet(void)
-{
-    return 0;
-}
-
-s32 HuTHPTotalFrameGet(void)
-{
-    return 0;
-}
-
-void HuTHPSetVolume(s32 left, s32 right)
-{
 }
 
 f32 GXGetYScaleFactor(u16 efbHeight, u16 xfbHeight)

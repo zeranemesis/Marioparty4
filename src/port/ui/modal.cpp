@@ -1,6 +1,7 @@
 // Credits: TwilitRealm
 
 #include "modal.hpp"
+#include "localization.hpp"
 
 namespace partyboard::ui {
 
@@ -17,7 +18,7 @@ Modal::Modal(Props props)
 
     auto *title = append(header, "div");
     title->SetClass("modal-title", true);
-    title->SetInnerRML(mProps.title);
+    title->SetInnerRML(ui_translate(mProps.title));
 
     if (!mProps.icon.empty()) {
         auto *icon = append(header, "icon");
@@ -26,7 +27,7 @@ Modal::Modal(Props props)
 
     auto *body = append(mDialog, "div");
     body->SetClass("modal-body", true);
-    body->SetInnerRML(mProps.bodyRml);
+    body->SetInnerRML(ui_translate(mProps.bodyRml));
 
     auto *actions = append(mDialog, "div");
     actions->SetClass("modal-actions", true);

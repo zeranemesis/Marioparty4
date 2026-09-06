@@ -20,6 +20,7 @@
 #ifdef TARGET_PC
 #include <assert.h>
 #include "port/port_version.h"
+#include "port/widescreen.h"
 #endif
 
 typedef struct {
@@ -404,7 +405,16 @@ static void MesDispFunc(HUSPRITE *sprite)
     if (window->num_chars != 0) {
         group = &HuSprGrpData[window->group];
         GXInvalidateTexAll();
+#ifdef TARGET_PC
+        {
+            float left;
+            float right;
+            PartyBoard_WidescreenOrthoBounds(0.0f, HU_DISP_WIDTHF, &left, &right);
+            C_MTXOrtho(proj, 0.0f, HU_DISP_HEIGHTF, left, right, 0.0f, 10.0f);
+        }
+#else
         C_MTXOrtho(proj, 0.0f, HU_DISP_HEIGHTF, 0.0f, HU_DISP_WIDTHF, 0.0f, 10.0f);
+#endif
         GXSetProjection(proj, GX_ORTHOGRAPHIC);
         GXClearVtxDesc();
         GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
@@ -436,6 +446,9 @@ static void MesDispFunc(HUSPRITE *sprite)
         MTXConcat(modelview, scale, modelview);
         mtxTransCat(modelview, sprite->pos.x, sprite->pos.y, 0.0f);
         MTXConcat(*sprite->groupMtx, modelview, modelview);
+#ifdef TARGET_PC
+        PartyBoard_WidescreenAdjustHudMatrix(modelview, HU_DISP_CENTERX);
+#endif
         GXLoadPosMtxImm(modelview, 0);
         GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
         HuSprTexLoad(fontAnim, 0, 0, GX_CLAMP, GX_CLAMP, VERSION_JP ? GX_NEAR : GX_LINEAR);

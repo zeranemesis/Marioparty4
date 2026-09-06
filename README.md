@@ -17,6 +17,41 @@ A work-in-progress Windows/Linux/macOS/Android/iOS port of Mario Party 4.
 
 This repository does **not** contain any game assets or assembly whatsoever. An existing copy of the game is required.
 
+## Online rollback build
+
+This branch includes the Windows online build used for two-player testing:
+
+- rollback netcode with deterministic input and coordinated state checkpoints;
+- host-created lobbies with short join codes, host-only start permission and
+  automatic peer status/ping display;
+- full disc-image hash and game-version verification before joining;
+- F1 opens the Party Board menu at any time, including a **Play Online** entry
+  that starts `PartyBoardOnline.exe`;
+- language selection between **English** and **French**, covering the main menu,
+  settings, pre-launch verification, controller setup, achievements, dialogs and
+  notifications;
+- automatic online 4:3 viewport, native internal resolution and 60 Hz simulation
+  to keep HUD and effects deterministic;
+- rollback-safe animation, texture, shadow, audio, wipe and scene state, with
+  recovery from temporary packet loss.
+
+### Technologies
+
+The port is written in C and C++20 and built with CMake and Ninja/MSBuild. The
+desktop frontend uses SDL3 for windowing, input, processes and networking,
+RmlUi for the navigable interface, Aurora for the platform/rendering layer, and
+Direct3D 12, Vulkan or WebGPU backends where available. The online companion
+uses authenticated TLS control messages and UDP transport for low-latency game
+input. Native self-tests cover rollback snapshots, replay, packet loss,
+authentication and lobby rules.
+
+### Windows quick start
+
+Download the release ZIP, extract the complete folder on both PCs, and launch
+`Jouer en ligne.cmd`. The host creates the lobby and shares the short code; the
+client joins it. In the game, press F1 to reopen the menu. Select **Settings →
+Language → French** or **English**, then restart if Party Board requests it.
+
 Version Completion:
 
 - `GMPE01_00`: Rev 0 (USA)

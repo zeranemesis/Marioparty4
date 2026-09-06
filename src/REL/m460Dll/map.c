@@ -10,6 +10,7 @@
 #include "game/memory.h"
 #include "game/object.h"
 #include "game/sprite.h"
+#include "port/widescreen.h"
 #include "string.h"
 
 #include "REL/m460Dll.h"
@@ -367,7 +368,7 @@ void fn_1_7790(HU3DMODEL *model, Mtx mtx)
     var_r30 = fn_1_3F2C(2);
     lbl_1_data_378.a = 255.0f * var_r30->unk_90;
     DCStoreRange(&lbl_1_data_378, 4);
-    C_MTXPerspective(sp2C, 41.5f, 1.2f, 100.0f, 5500.0f);
+    C_MTXPerspective(sp2C, 41.5f, PARTYBOARD_WIDESCREEN_ASPECT(1.2f), 100.0f, 5500.0f);
     GXSetProjection(sp2C, GX_PERSPECTIVE);
     MTXIdentity(sp5C);
     GXLoadPosMtxImm(sp5C, 0);

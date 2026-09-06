@@ -13,6 +13,7 @@
 #include "game/process.h"
 #include "game/sprite.h"
 #include "game/wipe.h"
+#include "port/widescreen.h"
 
 #include "ext_math.h"
 #include "version.h"
@@ -4997,7 +4998,7 @@ void fn_1_10BC8(void)
     if (var_r31->fov <= 0.0f) {
         return;
     }
-    C_MTXPerspective(sp64, var_r31->fov, var_r31->aspect, var_r31->nnear, var_r31->ffar);
+    C_MTXPerspective(sp64, var_r31->fov, PARTYBOARD_WIDESCREEN_ASPECT(var_r31->aspect), var_r31->nnear, var_r31->ffar);
     GXSetProjection(sp64, GX_PERSPECTIVE);
     GXSetViewport(0.0f, 0.0f, HU_FB_WIDTHF, HU_FB_HEIGHTF, 0.0f, 1.0f);
     GXSetScissor(0, 0, HU_FB_WIDTH, HU_FB_HEIGHT);

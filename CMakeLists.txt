@@ -111,6 +111,7 @@ set(PARTY_BOARD_COPYRIGHT "Copyright (C) Mario Party R&D contributors")
 option(USE_ASAN "Enable address sanitization" OFF)
 option(SKIP_HU_ALLOC "Skip the game's built in allocator" OFF)
 option(RUNTIME_SANITIZE "Runtime (stack) sanitization" OFF)
+option(PARTYBOARD_EXPERIMENTAL_MUSYX_AUDIO "Enable the experimental MusyX audio backend" OFF)
 
 set(USE_ASAN OFF CACHE BOOL "Disable ASan" FORCE)
 set(AURORA_ENABLE_DVD ON)
@@ -133,6 +134,10 @@ endif ()
 add_subdirectory(extern/aurora EXCLUDE_FROM_ALL)
 add_subdirectory(extern/musyx EXCLUDE_FROM_ALL)
 
+# The pinned Tracy dependency already provides stb_image, which is used by the
+# portable THP movie player for the JPEG video component.
+FetchContent_GetProperties(tracy)
+
 include(extern/aurora/cmake/AuroraCopyRuntimeDLLs.cmake)
 
 configure_file(${CMAKE_SOURCE_DIR}/version.h.in ${CMAKE_BINARY_DIR}/partyboard_version.h)
@@ -145,7 +150,13 @@ add_library(dol SHARED ${GAME_FILES} ${PORT_FILES} extern/libco/libco.c)
 set_target_properties(dol PROPERTIES C_VISIBILITY_PRESET default CXX_VISIBILITY_PRESET default)
 target_compile_definitions(dol PRIVATE TARGET_PC NON_MATCHING OPTIMIZED_TEXTURE_LOADING BYTESWAPPING TARGET_DOL VERSION=${VERSION} MUSY_VERSION_MAJOR=1 MUSY_VERSION_MINOR=5 MUSY_VERSION_PATCH=4)
 target_include_directories(dol PRIVATE include extern extern/aurora/include extern/aurora/include/dolphin ${CMAKE_BINARY_DIR})
+if (tracy_SOURCE_DIR)
+    target_include_directories(dol PRIVATE ${tracy_SOURCE_DIR}/profiler/src)
+endif()
 target_link_libraries(dol PUBLIC aurora::core aurora::card aurora::dvd aurora::gx aurora::mtx aurora::os aurora::si aurora::vi aurora::pad musyx absl::flat_hash_map nlohmann_json::nlohmann_json fmt::fmt rmlui_debugger)
+if (WIN32)
+    target_link_libraries(dol PUBLIC ws2_32)
+endif ()
 # TODO it doesn't work on Linux yet
 if (WIN32)
     if(USE_ASAN)

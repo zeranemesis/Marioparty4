@@ -10,6 +10,10 @@
 #include "version.h"
 #include <string.h>
 
+#ifdef TARGET_PC
+s16 HuSysVWaitGet(s16 old);
+#endif
+
 typedef void (*lbl_1_bss_44_type)(u16, u16, u16);
 
 omObjData *lbl_1_bss_5C;
@@ -233,6 +237,15 @@ void fn_1_3BE0(s16 arg0) // what happens with the argument?
     s32 var_r24;
     omObjData *var_r23;
     omObjData **var_r22;
+
+    /* This layer hook performs the complete ball collision/physics pass.  Layer
+     * hooks are also called for interpolated render-only frames on PC, so at
+     * 240 FPS this used to advance Three Throw up to four times per game tick. */
+#ifdef TARGET_PC
+    if (HuSysVWaitGet(0) == 0) {
+        return;
+    }
+#endif
 
     var_r24 = 0;
     if (omPauseChk()) {

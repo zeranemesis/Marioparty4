@@ -364,3 +364,16 @@ static void WireDraw(void)
     GXColor3u8(255, 0, 0);
     GXEnd();
 }
+
+#ifdef TARGET_PC
+#include "port/rollback_scene.h"
+bool PartyBoard_RollbackTextRegions(PartyBoardRollbackRegionSink sink, void *context)
+{
+    if (!sink) return false;
+#define REGION(value) if (!sink(context, &(value), sizeof(value))) return false;
+    REGION(strline) REGION(pfStrBuf) REGION(fontcolor)
+    REGION(empstrline) REGION(strlinecnt) REGION(saftyFrameF)
+#undef REGION
+    return true;
+}
+#endif

@@ -1,5 +1,175 @@
 #include "msm/msmmus.h"
 #include "msm/msmmem.h"
+#include "musyx/seq.h"
+
+#ifdef BYTESWAPPING
+#include "port/byteswap.h"
+
+static void msmMusSwapData(MSM_MUS *musData, u32 count)
+{
+    u32 i;
+
+    for (i = 0; i < count; i++) {
+        byteswap_u16(&musData[i].sgid);
+        byteswap_u16(&musData[i].sid);
+        byteswap_s32(&musData[i].songOfs);
+        byteswap_s32(&musData[i].songSize);
+    }
+}
+
+static BOOL msmMusSongOffsetValid(u32 offset, u32 size, u32 needed)
+{
+    return offset <= size && needed <= size - offset;
+}
+
+static void msmMusSwapSongData(void *songData, u32 songSize)
+{
+    ARR *arr;
+    TENTRY *entry;
+    SEQ_PATTERN *pattern;
+    NOTE_DATA *note;
+    MTRACK_DATA *tempo;
+    u32 *trackTable;
+    u32 *patternTable;
+    u32 maxPattern;
+    u32 patternId;
+    u32 trackId;
+    u32 entryOffset;
+    u32 entryEnd;
+    u32 patternOffset;
+    u32 patternEnd;
+    u32 nextOffset;
+    u8 *base;
+
+    if (songData == NULL || songSize < sizeof(*arr)) {
+        return;
+    }
+    arr = songData;
+    /* A native offset is small; a big-endian on-disk offset is not on x86. */
+    if (arr->tTab != 0 && arr->tTab < songSize) {
+        return;
+    }
+
+    byteswap_u32(&arr->tTab);
+    byteswap_u32(&arr->pTab);
+    byteswap_u32(&arr->tmTab);
+    byteswap_u32(&arr->mTrack);
+    byteswap_u32(&arr->info);
+    if ((arr->info & 0x80000000) != 0) {
+        for (trackId = 0; trackId < 16; trackId++) {
+            byteswap_u32(&arr->loopPoint[trackId]);
+        }
+        byteswap_u32(&arr->tsTab);
+    } else {
+        byteswap_u32(&arr->loopPoint[0]);
+    }
+
+    base = songData;
+    if (!msmMusSongOffsetValid(arr->tTab, songSize, 64 * sizeof(*trackTable)) ||
+        !msmMusSongOffsetValid(arr->pTab, songSize, sizeof(*patternTable))) {
+        return;
+    }
+
+    trackTable = (u32 *)(base + arr->tTab);
+    maxPattern = 0;
+    for (trackId = 0; trackId < 64; trackId++) {
+        byteswap_u32(&trackTable[trackId]);
+    }
+
+    for (trackId = 0; trackId < 64; trackId++) {
+        entryOffset = trackTable[trackId];
+        if (entryOffset == 0 || entryOffset >= arr->pTab ||
+            !msmMusSongOffsetValid(entryOffset, songSize, sizeof(*entry))) {
+            continue;
+        }
+        entryEnd = arr->pTab;
+        for (nextOffset = 0; nextOffset < 64; nextOffset++) {
+            u32 candidate = trackTable[nextOffset];
+            if (candidate > entryOffset && candidate < entryEnd) {
+                entryEnd = candidate;
+            }
+        }
+        entry = (TENTRY *)(base + entryOffset);
+        while ((u8 *)entry + sizeof(*entry) <= base + entryEnd) {
+            byteswap_u32(&entry->time);
+            byteswap_u16(&entry->pattern);
+            if (entry->pattern == 0xfffe) {
+                byteswap_u16((u16 *)&entry->transpose);
+                break;
+            }
+            if (entry->pattern == 0xffff) {
+                break;
+            }
+            if (entry->pattern < 0xfffe && entry->pattern > maxPattern) {
+                maxPattern = entry->pattern;
+            }
+            ++entry;
+        }
+    }
+
+    if (maxPattern > 2048 ||
+        !msmMusSongOffsetValid(arr->pTab, songSize, (maxPattern + 1) * sizeof(*patternTable))) {
+        return;
+    }
+    patternTable = (u32 *)(base + arr->pTab);
+    for (patternId = 0; patternId <= maxPattern; patternId++) {
+        byteswap_u32(&patternTable[patternId]);
+    }
+
+    for (patternId = 0; patternId <= maxPattern; patternId++) {
+        patternOffset = patternTable[patternId];
+        if (patternOffset == 0 || !msmMusSongOffsetValid(patternOffset, songSize, sizeof(*pattern))) {
+            continue;
+        }
+        patternEnd = songSize;
+        for (nextOffset = 0; nextOffset <= maxPattern; nextOffset++) {
+            u32 candidate = patternTable[nextOffset];
+            if (candidate > patternOffset && candidate < patternEnd) {
+                patternEnd = candidate;
+            }
+        }
+        pattern = (SEQ_PATTERN *)(base + patternOffset);
+        byteswap_u32(&pattern->headerLen);
+        byteswap_u32(&pattern->pitchBend);
+        byteswap_u32(&pattern->modulation);
+        if (pattern->pitchBend > patternOffset && pattern->pitchBend < patternEnd) {
+            patternEnd = pattern->pitchBend;
+        }
+        if (pattern->modulation > patternOffset && pattern->modulation < patternEnd) {
+            patternEnd = pattern->modulation;
+        }
+
+        note = (NOTE_DATA *)&pattern->noteData;
+        while ((u8 *)note + 4 <= base + patternEnd) {
+            byteswap_u16(&note->time);
+            if (note->key == 0xff && note->velocity == 0xff) {
+                break;
+            }
+            if ((note->key & 0x80) != 0 || (note->key | note->velocity) == 0) {
+                note = (NOTE_DATA *)((u8 *)note + 4);
+            } else {
+                if ((u8 *)note + sizeof(*note) > base + patternEnd) {
+                    break;
+                }
+                byteswap_u16(&note->length);
+                ++note;
+            }
+        }
+    }
+
+    if (arr->mTrack != 0 && msmMusSongOffsetValid(arr->mTrack, songSize, sizeof(*tempo))) {
+        tempo = (MTRACK_DATA *)(base + arr->mTrack);
+        while ((u8 *)tempo + sizeof(*tempo) <= base + songSize) {
+            byteswap_u32((u32 *)&tempo->time);
+            byteswap_u32(&tempo->bpm);
+            if (tempo->time == -1) {
+                break;
+            }
+            ++tempo;
+        }
+    }
+}
+#endif
 
 typedef struct MusPlayer_s {
     /* 0x00 */ s16 musId;
@@ -326,31 +496,65 @@ int msmMusPlay(int musId, MSM_MUSPARAM* musParam) {
     DVDFileInfo sp10;
 
     if (musId < 0 || musId >= mus.musMax) {
+#ifdef TARGET_PC
+        OSReport("[AUDIO] msmMusPlay id=%d failed=%d (valid range 0..%d)\n",
+            musId, MSM_ERR_INVALIDID, mus.musMax - 1);
+#endif
         return MSM_ERR_INVALIDID;
     }
     temp_r28 = &mus.musData[musId];
     if (temp_r28->sgid == 0xFFFF) {
+#ifdef TARGET_PC
+        OSReport("[AUDIO] msmMusPlay id=%d failed=%d (removed)\n",
+            musId, MSM_ERR_REMOVEDID);
+#endif
         return MSM_ERR_REMOVEDID;
     }
     if (msmSysCheckLoadGroupID(temp_r28->sgid) == 0) {
+#ifdef TARGET_PC
+        OSReport("[AUDIO] msmMusPlay id=%d failed=%d sgid=%u sid=%u (group not loaded)\n",
+            musId, MSM_ERR_GRP_NOTLOADED, temp_r28->sgid, temp_r28->sid);
+#endif
         return MSM_ERR_GRP_NOTLOADED;
     }
     var_r30 = (musParam != NULL) ? musParam->flag : 0;
     var_r29 = (var_r30 & MSM_MUSPARAM_CHAN) ? musParam->chan : 0;
     if (var_r29 < 0 || var_r29 >= mus.musChanMax) {
+#ifdef TARGET_PC
+        OSReport("[AUDIO] msmMusPlay id=%d failed=%d channel=%d max=%d\n",
+            musId, MSM_ERR_OUTOFMUS, var_r29, mus.musChanMax);
+#endif
         return MSM_ERR_OUTOFMUS;
     }
     temp_r27 = &mus.player[var_r29];
+    /* Menu code can request the same background music more than once while
+     * overlays hand control to each other. Reusing the active default play
+     * avoids an audible stop/restart at the beginning of the same sequence. */
+    if (temp_r27->status == MSM_MUS_PLAY && temp_r27->musId == musId && musParam == NULL) {
+#ifdef TARGET_PC
+        OSReport("[AUDIO] msmMusPlay id=%d channel=%d reused seq=%u\n",
+            musId, var_r29, temp_r27->seqId);
+#endif
+        return var_r29;
+    }
     if (temp_r27->status != 0) {
         sndSeqStop(temp_r27->seqId);
     }
     if (temp_r28->songGrp < 0) {
         if (temp_r27->musId != musId) {
             if (msmFioOpen(mus.msmEntryNum, &sp10) != 1) {
+#ifdef TARGET_PC
+                OSReport("[AUDIO] msmMusPlay id=%d failed=%d (song file open)\n",
+                    musId, MSM_ERR_OPENFAIL);
+#endif
                 return MSM_ERR_OPENFAIL;
             }
             if (msmFioRead(&sp10, temp_r27->songBuf, temp_r28->songSize, temp_r28->songOfs + mus.dummyMusOfs) < 0) {
                 msmFioClose(&sp10);
+#ifdef TARGET_PC
+                OSReport("[AUDIO] msmMusPlay id=%d failed=%d (song read)\n",
+                    musId, MSM_ERR_READFAIL);
+#endif
                 return MSM_ERR_READFAIL;
             }
             msmFioClose(&sp10);
@@ -359,10 +563,18 @@ int msmMusPlay(int musId, MSM_MUSPARAM* musParam) {
     } else {
         temp_r3_2 = msmSysGetGroupDataPtr(temp_r28->songGrp);
         if (temp_r3_2 == NULL) {
+#ifdef TARGET_PC
+            OSReport("[AUDIO] msmMusPlay id=%d failed=%d songGrp=%d sgid=%u sid=%u\n",
+                musId, MSM_ERR_MUSGRP_NOTLOADED, temp_r28->songGrp,
+                temp_r28->sgid, temp_r28->sid);
+#endif
             return MSM_ERR_MUSGRP_NOTLOADED;
         }
-        temp_r27->arrfile = (void*) ((u32) temp_r3_2 + temp_r3_2->sngOfs + temp_r28->songOfs);
+        temp_r27->arrfile = (u8 *)temp_r3_2 + temp_r3_2->sngOfs + temp_r28->songOfs;
     }
+#ifdef BYTESWAPPING
+    msmMusSwapSongData(temp_r27->arrfile, temp_r28->songSize);
+#endif
     temp_r27->busyF = 1;
     temp_r27->vol = temp_r28->vol;
     temp_r27->pauseOffMaxTime = 0;
@@ -392,12 +604,22 @@ int msmMusPlay(int musId, MSM_MUSPARAM* musParam) {
     temp_r3_3 = sndSeqPlay(temp_r28->sgid, temp_r28->sid, temp_r27->arrfile, &temp_r27->playPara);
     if (temp_r3_3 == SND_ID_ERROR) {
         temp_r27->busyF = 0;
+#ifdef TARGET_PC
+        OSReport("[AUDIO] msmMusPlay id=%d failed=%d sgid=%u sid=%u songGrp=%d (sndSeqPlay)\n",
+            musId, MSM_ERR_PLAYFAIL, temp_r28->sgid, temp_r28->sid,
+            temp_r28->songGrp);
+#endif
         return MSM_ERR_PLAYFAIL;
     }
     temp_r27->seqId = temp_r3_3;
     temp_r27->musId = musId;
     temp_r27->status = (temp_r27->playPara.flags & 0x10) ? 3 : 2;
     temp_r27->busyF = 0;
+#ifdef TARGET_PC
+    OSReport("[AUDIO] msmMusPlay id=%d channel=%d seq=%u sgid=%u sid=%u songGrp=%d vol=%d\n",
+        musId, var_r29, temp_r27->seqId, temp_r28->sgid, temp_r28->sid,
+        temp_r28->songGrp, temp_r27->playPara.volume.target);
+#endif
     return var_r29;
 }
 
@@ -422,6 +644,9 @@ s32 msmMusInit(MSM_SYS* arg0, DVDFileInfo* arg1) {
     if (msmFioRead(arg1, mus.musData, arg0->header->musSize, arg0->header->musOfs) < 0) {
         return MSM_ERR_READFAIL;
     }
+#ifdef BYTESWAPPING
+    msmMusSwapData(mus.musData, arg0->header->musSize / sizeof(*mus.musData));
+#endif
     temp_r4 = arg0->info->dummyMusSize;
     if (temp_r4 != 0) {
         if ((mus.musBuf = msmMemAlloc(temp_r4 * arg0->info->musChanMax)) == NULL) {
@@ -435,7 +660,7 @@ s32 msmMusInit(MSM_SYS* arg0, DVDFileInfo* arg1) {
     mus.dummyMusOfs = arg0->header->dummyMusOfs;
     mus.msmEntryNum = arg0->msmEntryNum;
     for (var_r8 = 0; var_r8 < mus.musChanMax; var_r8++) {
-        mus.player[var_r8].songBuf = (void*) ((u32) mus.musBuf + arg0->info->dummyMusSize * var_r8);
+        mus.player[var_r8].songBuf = (u8 *)mus.musBuf + arg0->info->dummyMusSize * var_r8;
         mus.player[var_r8].musId = -1;
         mus.player[var_r8].busyF = 0;
     }

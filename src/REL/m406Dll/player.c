@@ -97,7 +97,7 @@ void fn_1_DE60(omObjData *object);
 void fn_1_E214(omObjData *object);
 void fn_1_F194(omObjData *object);
 void fn_1_F694(omObjData *object);
-void fn_1_FA50(HU3DMODEL *model, Mtx mtx);
+void fn_1_FA50(omObjData *object);
 
 Vec lbl_1_data_960[70] = {
     { -495.876f, 50.005f, -0.0f },
@@ -307,6 +307,12 @@ Vec lbl_1_bss_E0[2];
 s32 lbl_1_bss_DC;
 s32 lbl_1_bss_D8;
 
+#ifndef __MWERKS__
+static u32 m406PhysicsDiagnosticTicks;
+static s32 m406PhysicsDiagnosticState = -1;
+static s32 m406PhysicsDiagnosticMainState = -1;
+#endif
+
 void fn_1_D65C(Process *arg0)
 {
     HSFMATERIAL *var_r31;
@@ -315,8 +321,6 @@ void fn_1_D65C(Process *arg0)
     HSFDATA *var_r28;
     omObjData **var_r26;
     HU3DMODEL *var_r25;
-    s16 var_r24;
-
     lbl_1_bss_1CC = -1;
     lbl_1_bss_1F6 = lbl_1_bss_1F4 = 0;
     lbl_1_bss_1C8 = arg0;
@@ -324,8 +328,11 @@ void fn_1_D65C(Process *arg0)
     for (var_r30 = 0; var_r30 < 4; var_r30++) {
         omAddObjEx(arg0, 0x40, 0xA, 0x32, 0, fn_1_D90C);
     }
-    var_r24 = Hu3DHookFuncCreate(fn_1_FA50);
-    Hu3DModelLayerSet(var_r24, 7);
+    /* The original executes Avalanche physics from a 60 Hz render hook after
+     * every object callback, including the priority-255 game controller.  Run
+     * it once per fixed simulation tick, but preserve that ordering so it sees
+     * the controller's current state rather than the previous tick's state. */
+    omAddObjEx(arg0, 0x100, 0, 0, -1, fn_1_FA50);
     lbl_1_bss_1F8 = omAddObjEx(arg0, 0x45, 0, 0, -1, fn_1_12B00);
     var_r26 = omGetGroupMemberListEx(HuPrcCurrentGet(), 2);
     for (var_r30 = 0; var_r30 < 6; var_r30++) {
@@ -462,7 +469,8 @@ void fn_1_DD7C(omObjData *object, s32 arg1, float arg8, u32 arg2)
         var_r31->unk_3C = arg2;
     }
     if (arg8 != var_r31->unk_40) {
-        CharMotionSpeedSet(var_r31->unk_0C, 1.0f);
+        CharMotionSpeedSet(var_r31->unk_0C, arg8);
+        var_r31->unk_40 = arg8;
     }
 }
 
@@ -902,7 +910,7 @@ void fn_1_F694(omObjData *object)
     }
 }
 
-void fn_1_FA50(HU3DMODEL *model, Mtx mtx)
+void fn_1_FA50(omObjData *object)
 {
     omObjData *sp2C[4];
     Vec sp20;
@@ -929,8 +937,32 @@ void fn_1_FA50(HU3DMODEL *model, Mtx mtx)
     M406PlayerWork *var_r22;
     M406PlayerWork *var_r21;
 
+#ifndef __MWERKS__
+    ++m406PhysicsDiagnosticTicks;
+    if (m406PhysicsDiagnosticState != lbl_1_bss_D8 ||
+        m406PhysicsDiagnosticMainState != fn_1_122C()) {
+        m406PhysicsDiagnosticState = lbl_1_bss_D8;
+        m406PhysicsDiagnosticMainState = fn_1_122C();
+        OSReport("[M406] physics tick=%u state=%d main=%d\n",
+            m406PhysicsDiagnosticTicks, lbl_1_bss_D8, fn_1_122C());
+    }
+#endif
+
     if (omPauseChk() == 0) {
         var_r28 = omGetGroupMemberListEx(lbl_1_bss_1C8, 0);
+#ifndef __MWERKS__
+        if (fn_1_122C() == 4 && (m406PhysicsDiagnosticTicks % 120) == 0 &&
+            var_r28 != NULL && var_r28[0] != NULL && var_r28[0]->data != NULL) {
+            M406PlayerWork *diagnosticPlayer = var_r28[0]->data;
+            OSReport("[M406] gameplay tick=%u pad=%d stick=%d,%d button=%04x pos=%.2f,%.2f,%.2f vel=%.2f,%.2f,%.2f\n",
+                m406PhysicsDiagnosticTicks, diagnosticPlayer->unk_04,
+                diagnosticPlayer->unk_06, diagnosticPlayer->unk_07,
+                diagnosticPlayer->unk_08, var_r28[0]->trans.x,
+                var_r28[0]->trans.y, var_r28[0]->trans.z,
+                diagnosticPlayer->unk_2C.x, diagnosticPlayer->unk_2C.y,
+                diagnosticPlayer->unk_2C.z);
+        }
+#endif
         switch (lbl_1_bss_D8) {
             case 0:
                 if (--lbl_1_data_11F4 == 0) {
@@ -1712,6 +1744,11 @@ void fn_1_12B00(omObjData *object)
 
 void fn_1_12B38(Vec *arg0)
 {
+    /* The original buffer is sized for one simulation pass.  Keep a defensive
+     * bound as render hooks may still be invoked unexpectedly during teardown. */
+    if (lbl_1_bss_1C4 >= 16) {
+        return;
+    }
     lbl_1_bss_104[lbl_1_bss_1C4].x = arg0->x;
     lbl_1_bss_104[lbl_1_bss_1C4].y = arg0->y;
     lbl_1_bss_104[lbl_1_bss_1C4].z = arg0->z;

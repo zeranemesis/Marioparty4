@@ -1560,6 +1560,22 @@ static s32 TicketUpdate(ANIMBMP *arg0, Vec *arg1, s32 arg2)
         }
     }
     DCFlushRange(arg0->data, (u32)(arg0->sizeX * arg0->sizeY * 2) >> 3);
+#ifdef TARGET_PC
+    /* Aurora keeps persistent GX texture objects for sprites.  The GameCube
+     * cache flush above made these CPU-side pixel edits visible to GX, but a
+     * coherent PC cache flush is otherwise a no-op.  Bump every initialized
+     * sprite texture revision so the scratched mask is uploaded again. */
+    {
+        s32 tex_slot;
+
+        for (tex_slot = 0; tex_slot < 8; tex_slot++) {
+            AnimTexData *tex_data = &arg0->texData[tex_slot];
+            if (tex_data->tex_initialized) {
+                GXInitTexObjData(&tex_data->tex_obj, arg0->data);
+            }
+        }
+    }
+#endif
     handLastPos = *arg1;
     return 0;
 }

@@ -1,12 +1,17 @@
 #include "game/gamework.h"
 #include "game/flag.h"
 #include "game/gamework_data.h"
+#include "port/rollback_game.h"
 #include <string.h>
 #include "version.h"
 
 #ifndef __MWERKS__
 #include "game/pad.h"
 #include "port/settings.h"
+#endif
+
+#ifdef TARGET_PC
+#include <stdlib.h>
 #endif
 
 SHARED_SYM s16 GwLanguage = 1;
@@ -17,6 +22,184 @@ SHARED_SYM GameStat GWGameStat;
 SHARED_SYM SystemState GWSystem;
 SHARED_SYM PlayerState GWPlayer[4];
 SHARED_SYM PlayerConfig GWPlayerCfg[4];
+
+#ifdef TARGET_PC
+#define ROLLBACK_GAME_MAGIC 0x47575331u /* "GWS1" */
+#define ROLLBACK_GAME_VERSION 1u
+
+typedef struct RollbackGameHeader {
+    u32 magic;
+    u32 version;
+    u32 total_size;
+    u32 game_stat_size;
+    u32 system_state_size;
+    u32 player_state_size;
+    u32 player_config_size;
+    u32 player_count;
+    u32 system_flags_size;
+    u32 reserved;
+} RollbackGameHeader;
+
+extern size_t PartyBoard_RollbackSysFlagsSizeGet(void);
+extern void PartyBoard_RollbackSysFlagsSave(void *destination);
+extern void PartyBoard_RollbackSysFlagsLoad(const void *source);
+
+size_t PartyBoard_RollbackGameSize(void)
+{
+    return sizeof(RollbackGameHeader)
+        + sizeof(GWGameStatDefault) + sizeof(GWGameStat) + sizeof(GWSystem)
+        + sizeof(GWPlayer) + sizeof(GWPlayerCfg)
+        + sizeof(GwLanguage) + sizeof(GwLanguageSave)
+        + PartyBoard_RollbackSysFlagsSizeGet();
+}
+
+BOOL PartyBoard_RollbackGameSave(void *destination, size_t capacity)
+{
+    const size_t required = PartyBoard_RollbackGameSize();
+    RollbackGameHeader header = {
+        ROLLBACK_GAME_MAGIC, ROLLBACK_GAME_VERSION, (u32)required,
+        sizeof(GameStat), sizeof(SystemState), sizeof(PlayerState),
+        sizeof(PlayerConfig), 4, (u32)PartyBoard_RollbackSysFlagsSizeGet(), 0
+    };
+    u8 *cursor = (u8 *)destination;
+    if (destination == NULL || required > UINT32_MAX || capacity != required) {
+        return FALSE;
+    }
+#define ROLLBACK_GAME_WRITE(value) do { \
+    memcpy(cursor, &(value), sizeof(value)); cursor += sizeof(value); \
+} while (0)
+    ROLLBACK_GAME_WRITE(header);
+    ROLLBACK_GAME_WRITE(GWGameStatDefault);
+    ROLLBACK_GAME_WRITE(GWGameStat);
+    ROLLBACK_GAME_WRITE(GWSystem);
+    ROLLBACK_GAME_WRITE(GWPlayer);
+    ROLLBACK_GAME_WRITE(GWPlayerCfg);
+    ROLLBACK_GAME_WRITE(GwLanguage);
+    ROLLBACK_GAME_WRITE(GwLanguageSave);
+#undef ROLLBACK_GAME_WRITE
+    PartyBoard_RollbackSysFlagsSave(cursor);
+    return TRUE;
+}
+
+BOOL PartyBoard_RollbackGameLoad(const void *source, size_t size)
+{
+    RollbackGameHeader header;
+    GameStat gameStatDefault, gameStat;
+    SystemState system;
+    PlayerState players[4];
+    PlayerConfig playerConfigs[4];
+    s16 language, languageSave;
+    u8 systemFlags[16];
+    const u8 *cursor = (const u8 *)source;
+    const u8 *end;
+    const size_t required = PartyBoard_RollbackGameSize();
+
+    if (source == NULL || size != required || size < sizeof(header)) {
+        return FALSE;
+    }
+    memcpy(&header, cursor, sizeof(header));
+    if (header.magic != ROLLBACK_GAME_MAGIC
+        || header.version != ROLLBACK_GAME_VERSION
+        || header.total_size != required
+        || header.game_stat_size != sizeof(GameStat)
+        || header.system_state_size != sizeof(SystemState)
+        || header.player_state_size != sizeof(PlayerState)
+        || header.player_config_size != sizeof(PlayerConfig)
+        || header.player_count != 4
+        || header.system_flags_size != sizeof(systemFlags)
+        || header.system_flags_size != PartyBoard_RollbackSysFlagsSizeGet()
+        || header.reserved != 0) {
+        return FALSE;
+    }
+    cursor += sizeof(header);
+    end = (const u8 *)source + size;
+#define ROLLBACK_GAME_READ(value) do { \
+    if ((size_t)(end - cursor) < sizeof(value)) return FALSE; \
+    memcpy(&(value), cursor, sizeof(value)); cursor += sizeof(value); \
+} while (0)
+    ROLLBACK_GAME_READ(gameStatDefault);
+    ROLLBACK_GAME_READ(gameStat);
+    ROLLBACK_GAME_READ(system);
+    ROLLBACK_GAME_READ(players);
+    ROLLBACK_GAME_READ(playerConfigs);
+    ROLLBACK_GAME_READ(language);
+    ROLLBACK_GAME_READ(languageSave);
+    ROLLBACK_GAME_READ(systemFlags);
+#undef ROLLBACK_GAME_READ
+    if (cursor != end) {
+        return FALSE;
+    }
+
+    /* All bytes have been validated and copied away from the caller's buffer.
+     * From this point the commit cannot fail or partially reject a snapshot. */
+    GWGameStatDefault = gameStatDefault;
+    GWGameStat = gameStat;
+    GWSystem = system;
+    memcpy(GWPlayer, players, sizeof(GWPlayer));
+    memcpy(GWPlayerCfg, playerConfigs, sizeof(GWPlayerCfg));
+    GwLanguage = language;
+    GwLanguageSave = languageSave;
+    PartyBoard_RollbackSysFlagsLoad(systemFlags);
+    return TRUE;
+}
+
+BOOL PartyBoard_RollbackGameSelfTest(void)
+{
+    const size_t size = PartyBoard_RollbackGameSize();
+    u8 *original = (u8 *)malloc(size);
+    u8 *changed = (u8 *)malloc(size);
+    u8 *observed = (u8 *)malloc(size);
+    u8 *cursor;
+    BOOL ok = original != NULL && changed != NULL && observed != NULL;
+    BOOL originalSaved = FALSE;
+    BOOL restored = FALSE;
+
+    if (ok) {
+        originalSaved = PartyBoard_RollbackGameSave(original, size);
+        ok = originalSaved;
+    }
+    if (ok) {
+        memcpy(changed, original, size);
+        cursor = changed + sizeof(RollbackGameHeader);
+#define ROLLBACK_GAME_MUTATE(type) do { *cursor ^= 0x5Au; cursor += sizeof(type); } while (0)
+        ROLLBACK_GAME_MUTATE(GameStat); /* GWGameStatDefault */
+        ROLLBACK_GAME_MUTATE(GameStat); /* GWGameStat */
+        ROLLBACK_GAME_MUTATE(SystemState);
+        *cursor ^= 0x5Au; cursor += sizeof(GWPlayer);
+        *cursor ^= 0x5Au; cursor += sizeof(GWPlayerCfg);
+        ROLLBACK_GAME_MUTATE(s16); /* GwLanguage */
+        ROLLBACK_GAME_MUTATE(s16); /* GwLanguageSave */
+#undef ROLLBACK_GAME_MUTATE
+        *cursor ^= 0x5Au; /* _Sys_Flag */
+        ok = PartyBoard_RollbackGameLoad(changed, size)
+            && PartyBoard_RollbackGameSave(observed, size)
+            && memcmp(observed, changed, size) == 0;
+    }
+    if (ok) {
+        original[0] ^= 1;
+        ok = !PartyBoard_RollbackGameLoad(original, size)
+            && PartyBoard_RollbackGameSave(observed, size)
+            && memcmp(observed, changed, size) == 0;
+        original[0] ^= 1;
+    }
+    if (ok) {
+        ok = !PartyBoard_RollbackGameLoad(original, size - 1)
+            && PartyBoard_RollbackGameSave(observed, size)
+            && memcmp(observed, changed, size) == 0;
+    }
+    if (originalSaved) {
+        restored = PartyBoard_RollbackGameLoad(original, size);
+        if (restored && observed != NULL) {
+            restored = PartyBoard_RollbackGameSave(observed, size)
+                && memcmp(observed, original, size) == 0;
+        }
+    }
+    free(original);
+    free(changed);
+    free(observed);
+    return ok && restored;
+}
+#endif
 
 static inline void GWErase(void)
 {
@@ -399,3 +582,16 @@ u16 GWTotalStarsGet(void)
 {
     return GWGameStat.total_stars;
 }
+
+#ifdef TARGET_PC
+#include "port/rollback_scene.h"
+bool PartyBoard_RollbackGameRegions(PartyBoardRollbackRegionSink sink, void *context)
+{
+    if (!sink) return false;
+#define REGION(value) if (!sink(context, &(value), sizeof(value))) return false;
+    REGION(GWGameStatDefault) REGION(GWGameStat) REGION(GWSystem)
+    REGION(GWPlayer) REGION(GWPlayerCfg) REGION(GwLanguage) REGION(GwLanguageSave)
+#undef REGION
+    return PartyBoard_RollbackFlagRegions(sink, context);
+}
+#endif

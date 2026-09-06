@@ -1,4 +1,10 @@
 // Credits: TwilitRealm
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 #include "imgui/ImGuiEngine.hpp"
 #include "iso_validate.hpp"
@@ -22,6 +28,7 @@
 #include <port/dolassets.h>
 #include <port/main.h>
 #include <port/settings.h>
+#include <port/netplay_runtime.h>
 #include <port/port_version.h>
 
 #include <aurora/dvd.h>
@@ -372,6 +379,50 @@ static constexpr PADDefaultMapping defaultPadMapping = {
     },
 };
 
+static bool online_wait_for_start(bool pumpEvents) {
+#ifdef _WIN32
+    const auto *disc = _wgetenv(L"PARTYBOARD_ONLINE_DISC");
+    if (!PartyBoard_NetplayEnabled() || !disc || !*disc) return true;
+    const auto validName = [](const wchar_t *name) {
+        return name && std::wstring_view(name).starts_with(L"Local\\PartyBoardOnlineStart-")
+            && std::wcslen(name) < 180;
+    };
+    const auto *readyName = _wgetenv(L"PARTYBOARD_ONLINE_READY");
+    const auto *goName = _wgetenv(L"PARTYBOARD_ONLINE_GO");
+    const auto *cancelName = _wgetenv(L"PARTYBOARD_ONLINE_CANCEL");
+    if (!validName(readyName) || !validName(goName) || !validName(cancelName)) return false;
+    HANDLE ready = OpenEventW(EVENT_MODIFY_STATE, FALSE, readyName);
+    HANDLE go = OpenEventW(SYNCHRONIZE, FALSE, goName);
+    HANDLE cancel = OpenEventW(SYNCHRONIZE, FALSE, cancelName);
+    bool started = false;
+    if (ready && go && cancel && SetEvent(ready)) {
+        HANDLE handles[] = {cancel, go};
+        const ULONGLONG deadline = GetTickCount64() + 120000;
+        while (GetTickCount64() < deadline && PartyBoard_IsRunning) {
+            const DWORD result = WaitForMultipleObjects(2, handles, FALSE, 10);
+            if (result == WAIT_OBJECT_0 + 1) { started = true; break; }
+            if (result != WAIT_TIMEOUT) break;
+            if (pumpEvents) {
+                const AuroraEvent *event = aurora_update();
+                while (event && event->type != AURORA_NONE) {
+                    if (event->type == AURORA_EXIT) PartyBoard_IsRunning = false;
+                    ++event;
+                }
+            }
+        }
+    }
+    if (ready) CloseHandle(ready);
+    if (go) CloseHandle(go);
+    if (cancel) CloseHandle(cancel);
+    return started;
+#else
+    return true;
+#endif
+}
+
+extern "C" bool PartyBoard_OnlineWaitForStart(void) { return online_wait_for_start(true); }
+extern "C" bool PartyBoard_OnlineBarrierProbe(void) { return online_wait_for_start(false); }
+
 extern "C" int port_main(int argc, char* argv[]) {
     // On iOS, when connected to an external monitor, SDLUIKitSceneDelegate scene:willConnectToSession:
     // can call our main function again. Explicitly guard against this reinitialization.
@@ -386,6 +437,15 @@ extern "C" int port_main(int argc, char* argv[]) {
     PartyBoard_ConfigPath = calculate_config_path();
 
     partyboard::config::LoadFromUserPreferences();
+    std::string onlineDisc;
+#ifdef _WIN32
+    if (PartyBoard_NetplayEnabled()) {
+        if (const auto *path = _wgetenv(L"PARTYBOARD_ONLINE_DISC"); path && *path) {
+            const auto utf8 = std::filesystem::path(path).u8string();
+            onlineDisc.assign(reinterpret_cast<const char *>(utf8.c_str()));
+        }
+    }
+#endif
     EnsureInitialPipelineCache(PartyBoard_ConfigPath);
     // TODO: How to handle this?
     //PADSetDefaultMapping(&defaultPadMapping, PAD_TYPE_STANDARD);
@@ -405,8 +465,8 @@ extern "C" int port_main(int argc, char* argv[]) {
         config.logCallback = &aurora_log_callback;
         config.mem1Size = 64 * 1024 * 1024;
         config.mem2Size = 24 * 1024 * 1024;
-        config.allowJoystickBackgroundEvents = partyboard::getSettings().game.allowBackgroundInput;
-        config.pauseOnFocusLost = partyboard::getSettings().game.pauseOnFocusLost;
+        config.allowJoystickBackgroundEvents = PartyBoard_NetplayEnabled() || partyboard::getSettings().game.allowBackgroundInput;
+        config.pauseOnFocusLost = !PartyBoard_NetplayEnabled() && partyboard::getSettings().game.pauseOnFocusLost;
         // config.imGuiInitCallback = &aurora_imgui_init_callback;
         config.allowTextureDumps = false;
         auroraInfo = aurora_initialize(argc, argv, &config);
@@ -420,12 +480,16 @@ extern "C" int port_main(int argc, char* argv[]) {
     snprintf(windowTitle, sizeof(windowTitle), "PartyBoard %s", PARTY_BOARD_WC_DESCRIBE);
     VISetWindowTitle(windowTitle);
 
-    if (partyboard::getSettings().video.lockAspectRatio) {
+    if (PartyBoard_NetplayEnabled()
+        || (!partyboard::getSettings().video.enableAdaptiveWidescreen
+            && partyboard::getSettings().video.lockAspectRatio)) {
         AuroraSetViewportPolicy(AURORA_VIEWPORT_FIT);
     } else {
         AuroraSetViewportPolicy(AURORA_VIEWPORT_STRETCH);
     }
-    VISetFrameBufferScale(partyboard::getSettings().game.internalResolutionScale.getValue());
+    VISetFrameBufferScale(PartyBoard_NetplayEnabled()
+        ? 1
+        : partyboard::getSettings().game.internalResolutionScale.getValue());
 
     // TODO PC
     // partyboard::audio::SetMasterVolume(partyboard::getSettings().audio.masterVolume / 100.0f);
@@ -482,7 +546,7 @@ extern "C" int port_main(int argc, char* argv[]) {
         partyboard::config::Save();
     }
 
-    if (!partyboard::getSettings().backend.skipPreLaunchUI) {
+    if (onlineDisc.empty() && !partyboard::getSettings().backend.skipPreLaunchUI) {
         partyboard::ui::push_document(std::make_unique<partyboard::ui::Prelaunch>(), true);
 
         // pre game launch ui main loop
@@ -498,7 +562,7 @@ extern "C" int port_main(int argc, char* argv[]) {
         }
     }
 
-     std::string dvd_path = partyboard::getSettings().backend.isoPath;
+     std::string dvd_path = onlineDisc.empty() ? partyboard::getSettings().backend.isoPath.getValue() : onlineDisc;
 
     if (dvd_path.empty()) {
         PartyBoardMainLog.error("No DVD image specified, unable to boot!");
@@ -511,11 +575,12 @@ extern "C" int port_main(int argc, char* argv[]) {
     PartyBoardMainLog.info("Loading DVD image: {}", dvd_path);
     if (!aurora_dvd_open(dvd_path.c_str())) {
         PartyBoardMainLog.error("Failed to open DVD image: {}", dvd_path);
+        if (!onlineDisc.empty()) { partyboard::ui::shutdown(); aurora_shutdown(); return 3; }
     }
 
     PartyBoard_IsGameLaunched = true;
 
-    if (!partyboard::getSettings().backend.wasPresetChosen) {
+    if (onlineDisc.empty() && !partyboard::getSettings().backend.wasPresetChosen) {
         partyboard::ui::push_document(std::make_unique<partyboard::ui::PresetWindow>());
     }
 

@@ -12,6 +12,10 @@
 #include "game/frand.h"
 #endif
 
+#ifdef TARGET_PC
+s16 HuSysVWaitGet(s16 old);
+#endif
+
 typedef struct bss_7480_struct {
     s32 unk0;
     s32 unk4;
@@ -148,6 +152,13 @@ void fn_1_6DBC(omObjData *object);
 
 void fn_1_6D7C(HU3DMODEL *model, Mtx mtx)
 {
+#ifdef TARGET_PC
+    /* Fish AI/physics used to run once per rendered frame.  At 240 FPS that
+     * made the school four times too fast and destabilised its state. */
+    if (HuSysVWaitGet(0) == 0) {
+        return;
+    }
+#endif
     if (!omPauseChk()) {
         fn_1_6DBC(lbl_1_bss_7880);
     }

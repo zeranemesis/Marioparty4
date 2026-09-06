@@ -13,6 +13,10 @@
 #include "string.h"
 #include "version.h"
 
+#ifdef TARGET_PC
+s16 HuSysVWaitGet(s16 old);
+#endif
+
 // STRUCT
 typedef struct _M424DllBallStruct {
     u8 unk0;
@@ -724,6 +728,15 @@ void fn_1_4A90(s16 arg0)
     M424DllBallStruct2 *var_r31;
     M424DllBallStruct *temp_r30;
     s32 var_r29;
+
+    /* This render-layer callback also integrates the crane/ball state.  Keep
+     * that integration on the original 60 Hz clock while allowing the scene
+     * itself to be presented at a higher frame rate. */
+#ifdef TARGET_PC
+    if (HuSysVWaitGet(0) == 0) {
+        return;
+    }
+#endif
 
     if (omPauseChk() == 0) {
         var_r31 = lbl_1_bss_60;

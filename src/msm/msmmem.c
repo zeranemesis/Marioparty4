@@ -30,7 +30,7 @@ void msmMemFree(void* ptr) {
     block = &base[-1];
     blockPrev = block->prev;
     blockNext = block->next;
-    if (mem.ptr > block || ((u32)mem.ptr + (u32)mem.size) <= (u32)block) {
+    if (mem.ptr > (void *)block || (uintptr_t)mem.ptr + mem.size <= (uintptr_t)block) {
         return;
     }
 
@@ -83,9 +83,9 @@ void* msmMemAlloc(u32 size) {
     if (freeSize != 0) {
         freeSize -= 0x20;
     }
-    block = (void*)((u32)blockPrev->ptr + (freeSize));
+    block = (MSMBLOCK *)((u8 *)blockPrev->ptr + freeSize);
     blockNext = blockPrev->next;
-    if ((mem.ptr > block) || ((void*)((u32)mem.ptr + (u32)mem.size) <= block)) {
+    if (mem.ptr > (void *)block || (uintptr_t)mem.ptr + mem.size <= (uintptr_t)block) {
         return NULL;
     }
     block->freeSize = allocSize;
@@ -107,21 +107,12 @@ void* msmMemAlloc(u32 size) {
 
 void msmMemInit(void* ptr, u32 size) {
     MSMBLOCK* block;
-    s32 ofs;
+    uintptr_t start = (uintptr_t)ptr;
+    uintptr_t alignedStart = (start + 0x1F) & ~(uintptr_t)0x1F;
+    uintptr_t end = start + size;
 
-    ofs = (s32)ptr & 0x1F;
-    switch (ofs) {
-        default:
-            ofs = 0x20 - ofs;
-            break;
-        case 0:
-            ofs = 0;
-            break;
-    }
-    
-    mem.ptr = (void*)((s32)ptr + ofs);
-    ofs = (s32)ptr + size;
-    mem.size = ((ofs - (s32)mem.ptr) & ~0x1F);
+    mem.ptr = (void *)alignedStart;
+    mem.size = (u32)((end - alignedStart) & ~(uintptr_t)0x1F);
     block = &mem.first;
     block->freeSize = 0;
     block->size = mem.size;

@@ -12,6 +12,8 @@
 #include <stdexcept>
 #include <string_view>
 #include <vector>
+#include <filesystem>
+#include <cstdlib>
 
 namespace {
 
@@ -274,3 +276,22 @@ void log_verification_state(std::string_view path, DiscVerificationState state) 
     //     "Disc verification status: {} (path: {})", verification_state_name(state), pathText);
 }
 }  // namespace partyboard::iso
+
+extern "C" bool PartyBoard_OnlineCheckDisc(void) {
+#ifdef _WIN32
+    const auto *path = _wgetenv(L"PARTYBOARD_ONLINE_DISC");
+    if (!path || !*path) return false;
+    const auto utf8 = std::filesystem::path(path).u8string();
+    const auto stream = SDL_IOFromFile(reinterpret_cast<const char *>(utf8.c_str()), "rb");
+    if (!stream) return false;
+    partyboard::iso::NodHandleWrapper disc;
+    const NodDiscStream input { .user_data = stream, .read_at = partyboard::iso::StreamReadAt,
+        .stream_len = partyboard::iso::StreamLength, .close = partyboard::iso::StreamClose };
+    if (nod_disc_open_stream(&input, nullptr, &disc.handle) != NOD_RESULT_OK || !disc.handle) return false;
+    NodDiscHeader header {};
+    return nod_disc_header(disc.handle, &header) == NOD_RESULT_OK
+        && std::string_view(header.game_id, 6) == "GMPE01" && header.disc_version == 1;
+#else
+    return false;
+#endif
+}

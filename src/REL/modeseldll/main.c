@@ -10,6 +10,7 @@
 #include "game/objsub.h"
 #include "game/pad.h"
 #include "game/process.h"
+#include "game/thpmain.h"
 #include "game/window.h"
 #include "game/wipe.h"
 
@@ -134,7 +135,7 @@ void fn_1_414(void)
             HuWinInit(1);
             #endif
 #endif
-#ifdef __MWERKS__
+#if defined(__MWERKS__) || defined(TARGET_PC)
             grpId = HuSprGrpCreate(1);
             sprId = HuTHPSprCreateVol("movie/opmov_s00.thp", 0, 3000, 70.0);
             HuSprGrpMemberSet(grpId, 0, sprId);
@@ -148,6 +149,13 @@ void fn_1_414(void)
             }
             HuTHPClose();
             HuSprGrpKill(grpId);
+#endif
+#if !defined(__MWERKS__) && !defined(TARGET_PC)
+            /* The GameCube movie path stops the save-screen ambience above.
+             * That movie is skipped on PC, so stop the same looping effect
+             * before the mode-selection ambience is started. */
+            HuAudFXStop(lbl_1_data_100);
+            lbl_1_data_100 = -1;
 #endif
         }
     }

@@ -1,4 +1,15 @@
 EXPORTS
+    PartyBoard_SimulationTicksThisFrame DATA
+    PartyBoard_RollbackRunSelfTest
+    PartyBoard_RollbackIsResimulating
+    PartyBoard_NetTransportRunSelfTest
+    PartyBoard_NetplayConfigureFromArgs
+    PartyBoard_OnlineCheckDisc
+    PartyBoard_OnlineBarrierProbe
+    PartyBoard_NetplayAllowsMultipleInstances
+    PartyBoard_NetplayShutdown
+    PartyBoard_NetplayRuntimeRunSelfTest
+    PartyBoard_NetplayPadRunProbe
     BoardArcCos
     BoardArcSin
     BoardAudFXPlay
@@ -895,6 +906,7 @@ EXPORTS
     HuSprTexLoad
     HuSubVecF
     HuSysVWaitSet
+    HuSysVWaitGet
     HuTHP3DCreate
     HuTHP3DCreateVol
     HuTHPClose
@@ -1102,6 +1114,12 @@ EXPORTS
     OSGetLanguage
     partyboard_settings_skipBootSequence
     partyboard_settings_unlock_bowsers_gnarly_party
+    partyboard_settings_adaptive_widescreen
+    PartyBoard_WidescreenEnabled
+    PartyBoard_WidescreenAspectScale
+    PartyBoard_WidescreenPerspectiveAspect
+    PartyBoard_WidescreenOrthoBounds
+    PartyBoard_WidescreenAdjustHudMatrix
     partyboard_version_is_pal
     partyboard_version_is_ntsc
     partyboard_version_is_usa

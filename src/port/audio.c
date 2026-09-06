@@ -18,6 +18,7 @@ static s32 auxANoBak;
 static s32 auxBNoBak;
 static s8 HuAuxAVol;
 static s8 HuAuxBVol;
+static s32 sPortOutputMode = SND_OUTPUTMODE_STEREO;
 float Snd3DBackSurDisOffset;
 float Snd3DFrontSurDisOffset;
 float Snd3DStartDisOffset;
@@ -674,4 +675,65 @@ static int HuSePlay(int seId, MSM_SEPARAM *param)
     // }
     return 12;
     // return result;
+}
+
+/*
+ * PartyBoard's REL modules import these symbols directly from dol.dll.  Keep
+ * the silent PC backend self-contained until the MusyX data path is ready.
+ */
+s32 msmMusGetStatus(int musNo)
+{
+    return 0;
+}
+
+int msmMusPlay(int musId, MSM_MUSPARAM *musParam)
+{
+    return 0;
+}
+
+void msmMusSetMasterVolume(s32 vol)
+{
+}
+
+s32 msmSeSetListener(Vec *pos, Vec *heading, float sndDist, float sndSpeed, MSM_SELISTENER *listener)
+{
+    return 0;
+}
+
+s32 msmSeSetParam(int seNo, MSM_SEPARAM *param)
+{
+    return 0;
+}
+
+void msmSeStopAll(BOOL checkGrp, s32 speed)
+{
+}
+
+s32 msmSysGetOutputMode(void)
+{
+    return sPortOutputMode;
+}
+
+BOOL msmSysSetOutputMode(SND_OUTPUTMODE mode)
+{
+    sPortOutputMode = mode;
+    return TRUE;
+}
+
+void msmSysRegularProc(void)
+{
+}
+
+s32 msmMusSetParam(s32 musNo, MSM_MUSPARAM *param)
+{
+    return 0;
+}
+
+void msmMusFdoutEnd(void)
+{
+}
+
+s32 msmStreamGetStatus(int streamNo)
+{
+    return 0;
 }

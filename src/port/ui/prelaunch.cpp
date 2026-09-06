@@ -7,14 +7,18 @@
 #include "../iso_validate.hpp"
 #include "port/main.h"
 #include "port/settings.h"
+#include "port/netplay_runtime.h"
 #include "modal.hpp"
 #include "preset.hpp"
 #include "settings.hpp"
 #include "partyboard_version.h"
+#include "localization.hpp"
 
 #include <SDL3/SDL_dialog.h>
 #include <SDL3/SDL_error.h>
 #include <SDL3/SDL_misc.h>
+#include <SDL3/SDL_process.h>
+#include <SDL3/SDL_filesystem.h>
 #include <aurora/lib/logging.hpp>
 #include <aurora/lib/window.hpp>
 #include <fmt/format.h>
@@ -293,7 +297,7 @@ namespace {
 
             auto *title = append(header, "div");
             title->SetClass("modal-title", true);
-            title->SetInnerRML("Verifying disc image");
+            title->SetInnerRML(ui_translate("Verifying disc image"));
 
             auto *icon = append(header, "icon");
             icon->SetClass("verifying", true);
@@ -403,7 +407,7 @@ namespace {
                     mProgress->SetAttribute("value", 0.f);
                 }
                 if (mDetail != nullptr) {
-                    mDetail->SetInnerRML("Opening disc image...");
+                    mDetail->SetInnerRML(ui_translate("Opening disc image..."));
                 }
                 return;
             }
@@ -654,6 +658,23 @@ Prelaunch::Prelaunch()
         });
         apply_intro_animation(mMenuButtons.back()->root(), "delay-2");
 
+#if defined(_WIN32)
+        if (!PartyBoard_NetplayEnabled()) {
+            mMenuButtons.push_back(std::make_unique<Button>(menuList, "Play Online"));
+            mMenuButtons.back()->on_pressed([] {
+                const std::string companion = std::string(SDL_GetBasePath()) + "PartyBoardOnline.exe";
+                const char *args[] = { companion.c_str(), nullptr };
+                if (SDL_Process *process = SDL_CreateProcess(args, false)) {
+                    SDL_DestroyProcess(process);
+                    PartyBoard_IsRunning = false;
+                } else {
+                    prelaunch_state().errorString = "Impossible d'ouvrir le mode en ligne. Vérifiez que PartyBoardOnline.exe est présent dans le dossier du jeu.";
+                }
+            });
+            apply_intro_animation(mMenuButtons.back()->root(), "delay-2");
+        }
+#endif
+
         mMenuButtons.push_back(std::make_unique<Button>(menuList, "Quit"));
         mMenuButtons.back()->on_pressed([] { PartyBoard_IsRunning = false; });
         apply_intro_animation(mMenuButtons.back()->root(), "delay-3");
@@ -766,27 +787,27 @@ void Prelaunch::update()
     if (mDiscStatus != nullptr && discStatusLabel != nullptr) {
         if (!activeDiscLoaded) {
             mDiscStatus->RemoveAttribute("status");
-            discStatusLabel->SetInnerRML("No disc image found.");
+            discStatusLabel->SetInnerRML(ui_translate("No disc image found."));
         }
         else if (discRestartPending) {
             mDiscStatus->SetAttribute("status", "pending");
-            discStatusLabel->SetInnerRML("Pending restart.");
+            discStatusLabel->SetInnerRML(ui_translate("Pending restart."));
         }
         else if (state.configuredDiscValidation == iso::ValidationError::Success) {
             mDiscStatus->SetAttribute("status", "good");
-            discStatusLabel->SetInnerRML("Disc ready.");
+            discStatusLabel->SetInnerRML(ui_translate("Disc ready."));
         }
         else if (state.configuredDiscValidation == iso::ValidationError::HashMismatch) {
             mDiscStatus->SetAttribute("status", "mismatch");
-            discStatusLabel->SetInnerRML("Disc hash mismatch.");
+            discStatusLabel->SetInnerRML(ui_translate("Disc hash mismatch."));
         }
         else if (canLaunchConfiguredDisc) {
             mDiscStatus->SetAttribute("status", "unknown");
-            discStatusLabel->SetInnerRML("Disc not verified.");
+            discStatusLabel->SetInnerRML(ui_translate("Disc not verified."));
         }
         else {
             mDiscStatus->SetAttribute("status", "bad");
-            discStatusLabel->SetInnerRML("Disc unavailable.");
+            discStatusLabel->SetInnerRML(ui_translate("Disc unavailable."));
         }
     }
     if (mDiscDetail != nullptr) {

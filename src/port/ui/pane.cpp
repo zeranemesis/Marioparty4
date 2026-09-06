@@ -3,6 +3,7 @@
 #include "pane.hpp"
 
 #include "ui.hpp"
+#include "localization.hpp"
 
 namespace partyboard::ui {
 namespace {
@@ -172,14 +173,14 @@ Rml::Element *Pane::add_section(const Rml::String &text)
 {
     auto *elem = append(mRoot, "div");
     elem->SetClass("section-heading", true);
-    elem->SetInnerRML(escape(text));
+    elem->SetInnerRML(escape(ui_translate(text)));
     return elem;
 }
 
 Rml::Element *Pane::add_text(const Rml::String &text)
 {
     auto *elem = append(mRoot, "div");
-    elem->SetInnerRML(escape(text));
+    elem->SetInnerRML(escape(ui_translate(text)));
     return elem;
 }
 

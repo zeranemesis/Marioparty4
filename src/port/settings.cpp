@@ -1,5 +1,12 @@
 #include "port/settings.h"
 #include "port/config.hpp"
+#include "port/widescreen.h"
+#include "port/netplay_runtime.h"
+
+#include "dolphin/gx/GXAurora.h"
+
+#include <algorithm>
+#include <cmath>
 
 namespace partyboard {
 
@@ -7,7 +14,9 @@ UserSettings g_userSettings = {
     .video = {
         .enableFullscreen {"video.enableFullscreen", false},
         .enableVsync {"video.enableVsync", true},
+        .targetFrameRate {"video.targetFrameRate", 60},
         .lockAspectRatio {"video.lockAspectRatio", false},
+        .enableAdaptiveWidescreen {"video.enableAdaptiveWidescreen", false},
         .enableFpsOverlay {"game.enableFpsOverlay", false},
         .fpsOverlayCorner {"game.fpsOverlayCorner", 0},
     },
@@ -81,7 +90,9 @@ void registerSettings() {
     // Video
     Register(g_userSettings.video.enableFullscreen);
     Register(g_userSettings.video.enableVsync);
+    Register(g_userSettings.video.targetFrameRate);
     Register(g_userSettings.video.lockAspectRatio);
+    Register(g_userSettings.video.enableAdaptiveWidescreen);
     Register(g_userSettings.video.enableFpsOverlay);
     Register(g_userSettings.video.fpsOverlayCorner);
 
@@ -126,6 +137,8 @@ void registerSettings() {
 
 }
 
+static constexpr float kOriginalFramebufferAspect = 4.0f / 3.0f;
+
 extern "C" {
 
 CARDFileType partyboard_settings_card_file_type(void)
@@ -145,11 +158,72 @@ bool partyboard_settings_skipBootSequence(void)
 
 bool partyboard_settings_unlock_all_minigames(void)
 {
-    return partyboard::getSettings().game.unlockAllMinigames.getValue();
+    // Availability is a gameplay rule: the same A press must not launch a
+    // minigame for one peer and hit a locked entry for the other. Online
+    // sessions expose the same catalogue, regardless of local cheats/saves.
+    // This is an effective value only; offline preferences are not written.
+    return PartyBoard_NetplayEnabled()
+        || partyboard::getSettings().game.unlockAllMinigames.getValue();
 }
 
 bool partyboard_settings_unlock_bowsers_gnarly_party(void)
 {
     return partyboard::getSettings().game.unlockBowsersGnarlyParty.getValue();
+}
+
+bool partyboard_settings_adaptive_widescreen(void)
+{
+    return !PartyBoard_NetplayEnabled()
+        && partyboard::getSettings().video.enableAdaptiveWidescreen.getValue();
+}
+
+bool PartyBoard_WidescreenEnabled(void)
+{
+    return partyboard_settings_adaptive_widescreen();
+}
+
+float PartyBoard_WidescreenAspectScale(void)
+{
+    u32 width;
+    u32 height;
+
+    if (!PartyBoard_WidescreenEnabled()) {
+        return 1.0f;
+    }
+
+    AuroraGetRenderSize(&width, &height);
+    if (width == 0 || height == 0) {
+        return 1.0f;
+    }
+
+    const float scale = (static_cast<float>(width) / static_cast<float>(height)) /
+                        kOriginalFramebufferAspect;
+    if (!std::isfinite(scale)) {
+        return 1.0f;
+    }
+    return std::clamp(scale, 0.5f, 3.0f);
+}
+
+float PartyBoard_WidescreenPerspectiveAspect(float originalAspect)
+{
+    return originalAspect * PartyBoard_WidescreenAspectScale();
+}
+
+void PartyBoard_WidescreenOrthoBounds(float originalLeft, float originalRight,
+                                      float *renderLeft, float *renderRight)
+{
+    const float center = (originalLeft + originalRight) * 0.5f;
+    const float halfWidth = (originalRight - originalLeft) * 0.5f *
+                            PartyBoard_WidescreenAspectScale();
+    *renderLeft = center - halfWidth;
+    *renderRight = center + halfWidth;
+}
+
+void PartyBoard_WidescreenAdjustHudMatrix(Mtx matrix, float originalCenterX)
+{
+    const float scale = PartyBoard_WidescreenAspectScale();
+    if (scale != 1.0f) {
+        matrix[0][3] = originalCenterX + (matrix[0][3] - originalCenterX) * scale;
+    }
 }
 }

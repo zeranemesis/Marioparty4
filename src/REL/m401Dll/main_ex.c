@@ -4,6 +4,7 @@
 #include "game/object.h"
 #include "game/objsub.h"
 #include "game/sprite.h"
+#include "port/widescreen.h"
 
 #include "ext_math.h"
 
@@ -45,7 +46,7 @@ void fn_2_10240(Vec *arg0, Vec *arg1)
     camera = &Hu3DCamera[0];
     MTXLookAt(lookat, &camera->pos, &camera->up, &camera->target);
     MTXMultVec(lookat, arg0, arg0);
-    MTXPerspective(proj, camera->fov, camera->aspect, camera->nnear, camera->ffar);
+    MTXPerspective(proj, camera->fov, PARTYBOARD_WIDESCREEN_ASPECT(camera->aspect), camera->nnear, camera->ffar);
     coord[0] = (arg0->x * proj[0][0]) + (arg0->y * proj[0][1]) + (arg0->z * proj[0][2]) + proj[0][3];
     coord[1] = (arg0->x * proj[1][0]) + (arg0->y * proj[1][1]) + (arg0->z * proj[1][2]) + proj[1][3];
     coord[2] = (arg0->x * proj[2][0]) + (arg0->y * proj[2][1]) + (arg0->z * proj[2][2]) + proj[2][3];

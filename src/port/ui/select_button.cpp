@@ -3,6 +3,7 @@
 #include "select_button.hpp"
 
 #include "ui.hpp"
+#include "localization.hpp"
 
 #include <fmt/format.h>
 #include <utility>
@@ -39,10 +40,10 @@ void SelectButton::set_modified(bool value)
     if (mProps.modified != value) {
         mValueElem->SetClass("modified", value);
         if (value) {
-            mValueElem->SetInnerRML(fmt::format("•&nbsp;{}", escape(mProps.value)));
+            mValueElem->SetInnerRML(fmt::format("•&nbsp;{}", escape(ui_translate(mProps.value))));
         }
         else {
-            mValueElem->SetInnerRML(escape(mProps.value));
+            mValueElem->SetInnerRML(escape(ui_translate(mProps.value)));
         }
         mProps.modified = value;
     }
@@ -52,10 +53,10 @@ void SelectButton::set_value_label(const Rml::String &value)
 {
     if (mProps.value != value) {
         if (mProps.modified) {
-            mValueElem->SetInnerRML(fmt::format("•&nbsp;{}", escape(value)));
+            mValueElem->SetInnerRML(fmt::format("•&nbsp;{}", escape(ui_translate(value))));
         }
         else {
-            mValueElem->SetInnerRML(escape(value));
+            mValueElem->SetInnerRML(escape(ui_translate(value)));
         }
         mProps.value = value;
     }
@@ -78,7 +79,7 @@ SelectButton &SelectButton::on_pressed(SelectButtonCallback callback)
 void SelectButton::update_props(Props props)
 {
     if (mProps.key != props.key) {
-        mKeyElem->SetInnerRML(escape(props.key));
+        mKeyElem->SetInnerRML(escape(ui_translate(props.key)));
     }
     if (mProps.icon != props.icon) {
         Rml::StringList iconClasses;

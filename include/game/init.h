@@ -14,6 +14,11 @@ extern u32 minimumVcount;
 extern float minimumVcountf;
 SHARED_SYM extern u32 worstVcount;
 
+#ifdef TARGET_PC
+s32 rand8_state_get(void);
+void rand8_state_set(s32 state);
+#endif
+
 void HuSysInit(GXRenderModeObj *mode);
 void HuSysBeforeRender();
 void HuSysDoneRender(s32 retrace_count);

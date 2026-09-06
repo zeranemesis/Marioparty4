@@ -10,6 +10,23 @@
 // access to the memory card.
 static u8 _Sys_Flag[16];
 
+#ifdef TARGET_PC
+size_t PartyBoard_RollbackSysFlagsSizeGet(void)
+{
+	return sizeof(_Sys_Flag);
+}
+
+void PartyBoard_RollbackSysFlagsSave(void *destination)
+{
+	memcpy(destination, _Sys_Flag, sizeof(_Sys_Flag));
+}
+
+void PartyBoard_RollbackSysFlagsLoad(const void *source)
+{
+	memcpy(_Sys_Flag, source, sizeof(_Sys_Flag));
+}
+#endif
+
 /**
  * @brief Gets the pointer to the flag array.
  * 
@@ -85,3 +102,9 @@ void _InitFlag(void)
 {
 	memset(_Sys_Flag, 0, sizeof(_Sys_Flag));
 }
+
+#ifdef TARGET_PC
+#include "port/rollback_scene.h"
+bool PartyBoard_RollbackFlagRegions(PartyBoardRollbackRegionSink sink, void *context)
+{ return sink && sink(context, _Sys_Flag, sizeof(_Sys_Flag)); }
+#endif

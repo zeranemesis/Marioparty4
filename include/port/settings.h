@@ -55,7 +55,9 @@ struct UserSettings {
         // Video
         ConfigVar<bool> enableFullscreen;
         ConfigVar<bool> enableVsync;
+        ConfigVar<int> targetFrameRate;
         ConfigVar<bool> lockAspectRatio;
+        ConfigVar<bool> enableAdaptiveWidescreen;
         ConfigVar<bool> enableFpsOverlay;
         ConfigVar<int> fpsOverlayCorner;
     } video;
@@ -140,6 +142,7 @@ bool partyboard_settings_enableTurboKeybind(void);
 bool partyboard_settings_skipBootSequence(void);
 bool partyboard_settings_unlock_all_minigames(void);
 bool partyboard_settings_unlock_bowsers_gnarly_party(void);
+bool partyboard_settings_adaptive_widescreen(void);
 
 #ifdef __cplusplus
 }

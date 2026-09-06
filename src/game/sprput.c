@@ -8,6 +8,8 @@
 
 #ifdef TARGET_PC
 #include <assert.h>
+#include "port/frame_interpolation.h"
+#include "port/widescreen.h"
 #endif
 
 static void *bmpNoCC[8];
@@ -28,7 +30,16 @@ void HuSprDispInit(void)
     }
     bmpCCIdx = 0;
     GXInvalidateTexAll();
+#ifdef TARGET_PC
+    {
+        float left;
+        float right;
+        PartyBoard_WidescreenOrthoBounds(0.0f, HU_DISP_WIDTHF, &left, &right);
+        MTXOrtho(proj, 0, HU_DISP_HEIGHT, left, right, 0, 10);
+    }
+#else
     MTXOrtho(proj, 0, HU_DISP_HEIGHT, 0, HU_DISP_WIDTH, 0, 10);
+#endif
     GXSetProjection(proj, GX_ORTHOGRAPHIC);
     if(RenderMode->field_rendering) {
         GXSetViewportJitter(0, 0, HU_FB_WIDTH, HU_FB_HEIGHT, 0, 1, VIGetNextField());
@@ -48,6 +59,13 @@ void HuSprDispInit(void)
 void HuSprDisp(HUSPRITE *sprite)
 {
     short i;
+#ifdef TARGET_PC
+    HUSPRITE renderSprite;
+    s16 spriteId = (s16)(sprite - HuSprData);
+    renderSprite = *sprite;
+    PartyBoard_FrameInterpolationSprite(spriteId, &renderSprite);
+    sprite = &renderSprite;
+#endif
     ANIMDATA *anim = sprite->data;
     ANIMPAT *pat = sprite->patP;
     Vec axis = {0, 0, 1};
@@ -117,6 +135,9 @@ void HuSprDisp(HUSPRITE *sprite)
         }
         mtxTransCat(modelview, sprite->pos.x, sprite->pos.y, 0);
         MTXConcat(*sprite->groupMtx, modelview, modelview);
+#ifdef TARGET_PC
+        PartyBoard_WidescreenAdjustHudMatrix(modelview, HU_DISP_CENTERX);
+#endif
         GXLoadPosMtxImm(modelview, GX_PNMTX0);
         for(i=pat->layerNum-1; i>=0; i--) {
             float pos[4][2];

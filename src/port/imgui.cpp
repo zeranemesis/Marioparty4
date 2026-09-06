@@ -1,5 +1,9 @@
 #include "port/imgui.h"
+#include "port/frame_interpolation.h"
+#include "port/settings.h"
+#include "port/netplay_runtime.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <filesystem>
@@ -160,7 +164,7 @@ void imgui_main(const AuroraInfo *info)
 
 class Limiter
 {
-    using delta_clock = std::chrono::high_resolution_clock;
+    using delta_clock = std::chrono::steady_clock;
     using duration_t = std::chrono::nanoseconds;
 
   public:
@@ -215,15 +219,19 @@ class Limiter
     }
 
 #if _WIN32
-    bool m_initialized;
-    double m_countPerNs;
+    bool m_initialized = false;
+    double m_countPerNs = 0.0;
+    size_t m_sleepCount = 0;
 
     void NanoSleep(const duration_t duration)
     {
-        if (!m_initialized)
+        if (!m_initialized || (++m_sleepCount % 1000) == 0)
         {
             LARGE_INTEGER freq;
-            QueryPerformanceFrequency(&freq);
+            if (QueryPerformanceFrequency(&freq) == 0)
+            {
+                return;
+            }
             m_countPerNs = static_cast<double>(freq.QuadPart) / 1000000000.0;
             m_initialized = true;
         }
@@ -233,14 +241,16 @@ class Limiter
             static_cast<LONGLONG>(static_cast<double>(duration.count()) * m_countPerNs);
         LARGE_INTEGER count;
         QueryPerformanceCounter(&count);
-        if (ms > 10)
+        if (ms > 1)
         {
-            // Adjust for Sleep overhead
-            ::Sleep(ms - 10);
+            /* Keep the render and audio workers schedulable, then busy-wait
+             * only for the final millisecond. */
+            ::Sleep(ms - 1);
         }
         auto end = count.QuadPart + tickCount;
         do
         {
+            YieldProcessor();
             QueryPerformanceCounter(&count);
         } while (count.QuadPart < end);
     }
@@ -253,8 +263,126 @@ class Limiter
 };
 
 static Limiter g_frameLimiter;
+
+namespace {
+constexpr int kOriginalSimulationRate = 60;
+constexpr int kMaxSimulationTicksPerFrame = 16;
+using FramePacerClock = std::chrono::steady_clock;
+
+FramePacerClock::time_point g_previousFrameSample;
+FramePacerClock::time_point g_currentSnapshotTime;
+bool g_framePacerInitialized = false;
+int g_lastTargetFrameRate = kOriginalSimulationRate;
+bool g_interpolationActive = false;
+
+constexpr auto kSimulationPeriod = std::chrono::duration_cast<FramePacerClock::duration>(
+    std::chrono::duration<double>(1.0 / static_cast<double>(kOriginalSimulationRate)));
+constexpr auto kAbnormalGapResetThreshold = std::chrono::milliseconds(250);
+
+int target_frame_rate()
+{
+    if (PartyBoard_NetplayEnabled()) return kOriginalSimulationRate;
+    return std::clamp(partyboard::getSettings().video.targetFrameRate.getValue(),
+                      kOriginalSimulationRate, 240);
+}
+}
+
+void frame_pacer_reset()
+{
+    const auto now = FramePacerClock::now();
+    g_previousFrameSample = now;
+    /* Present one fixed step behind real time so previous and current are
+     * both known. This is the stable interpolation model used by Dusklight. */
+    g_currentSnapshotTime = now - kSimulationPeriod;
+    g_framePacerInitialized = true;
+    PartyBoard_FrameInterpolationReset();
+}
+
+int frame_pacer_simulation_tick()
+{
+    const int targetFrameRate = target_frame_rate();
+    const auto now = FramePacerClock::now();
+    if (targetFrameRate <= kOriginalSimulationRate)
+    {
+        g_previousFrameSample = now;
+        g_currentSnapshotTime = now;
+        g_framePacerInitialized = true;
+        g_lastTargetFrameRate = targetFrameRate;
+        g_interpolationActive = false;
+        return 1;
+    }
+
+    if (!g_framePacerInitialized)
+    {
+        g_framePacerInitialized = true;
+        g_previousFrameSample = now;
+        g_currentSnapshotTime = now;
+    }
+    if (targetFrameRate != g_lastTargetFrameRate)
+    {
+        frame_pacer_reset();
+        g_lastTargetFrameRate = targetFrameRate;
+        g_interpolationActive = true;
+        return 0;
+    }
+    g_lastTargetFrameRate = targetFrameRate;
+    g_interpolationActive = true;
+
+    const auto frameGap = now - g_previousFrameSample;
+    g_previousFrameSample = now;
+    if (frameGap > kAbnormalGapResetThreshold)
+    {
+        // Do not fast-forward after a breakpoint, blocked window, or asset
+        // load. Re-seed both transform snapshots before presenting again.
+        g_currentSnapshotTime = now - kSimulationPeriod;
+        PartyBoard_FrameInterpolationReset();
+        return 0;
+    }
+
+    int simulationTicks = 0;
+    auto projectedSnapshotTime = g_currentSnapshotTime;
+    const auto renderTime = now - kSimulationPeriod;
+    while (simulationTicks < kMaxSimulationTicksPerFrame &&
+           projectedSnapshotTime < renderTime)
+    {
+        projectedSnapshotTime += kSimulationPeriod;
+        ++simulationTicks;
+    }
+    return simulationTicks;
+}
+
+void frame_pacer_commit_simulation_tick()
+{
+    if (g_interpolationActive)
+    {
+        g_currentSnapshotTime += kSimulationPeriod;
+    }
+}
+
+float frame_pacer_interpolation_step()
+{
+    if (!g_interpolationActive)
+    {
+        return 1.0f;
+    }
+    /* Sample immediately before presentation. At 240 FPS, measuring before
+     * simulation can make a few milliseconds of CPU work equal most of a
+     * display frame and produces visible phase jitter. Dusklight likewise
+     * samples the presentation clock after fixed-step simulation. */
+    const auto elapsed = FramePacerClock::now() - g_currentSnapshotTime;
+    const float interpolationPhase = std::chrono::duration<float>(elapsed).count() /
+        std::chrono::duration<float>(kSimulationPeriod).count();
+    return std::clamp(interpolationPhase, 0.0f, 1.0f);
+}
+
+bool frame_pacer_interpolation_enabled()
+{
+    return target_frame_rate() > kOriginalSimulationRate;
+}
+
 void frame_limiter()
 {
     g_frameLimiter.Sleep(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::seconds{1}) / 60);
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::seconds{1}) /
+        target_frame_rate());
 }

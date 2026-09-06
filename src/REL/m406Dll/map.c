@@ -470,6 +470,15 @@ s32 lbl_1_bss_30[3];
 
 SHARED_SYM extern HU3DLIGHT Hu3DLocalLight[0x20];
 
+#ifdef TARGET_PC
+/* Rendering can run at up to 240 Hz while Mario Party 4 simulation remains
+ * fixed at 60 Hz.  Avalanche historically advanced its snow and slope
+ * effects from a draw hook, so use the number of simulation ticks represented
+ * by this presentation instead of advancing once per rendered frame. */
+SHARED_SYM extern int PartyBoard_SimulationTicksThisFrame;
+static u32 m406LastEffectSimulationCounter = (u32)-1;
+#endif
+
 omObjData *fn_1_2308(Process *arg0)
 {
     s32 var_r31;
@@ -480,6 +489,9 @@ omObjData *fn_1_2308(Process *arg0)
     lbl_1_bss_C0 = 0;
     lbl_1_bss_BC = 1;
     lbl_1_bss_98 = -1;
+#ifdef TARGET_PC
+    m406LastEffectSimulationCounter = (u32)-1;
+#endif
     omMakeGroupEx(arg0, 1, 1);
     omMakeGroupEx(arg0, 2, 1);
     omMakeGroupEx(arg0, 3, 1);
@@ -1451,19 +1463,38 @@ void fn_1_6304(HU3DMODEL *arg0, Mtx arg1)
 {
     UnkM406Unk120Struct *var_r28;
     HU3DMODEL *var_r27;
+    s32 simulationTicks;
+    s32 tick;
 
     var_r28 = arg0->hookData;
     var_r27 = &Hu3DData[var_r28->unk_04];
-    if (!omPauseChk() && lbl_1_bss_30[0]) {
-        fn_1_4084();
-        fn_1_6FFC();
-        fn_1_77F0();
-        fn_1_7C4C();
-        fn_1_7F80();
-        fn_1_91E0();
+#ifdef TARGET_PC
+    simulationTicks = PartyBoard_SimulationTicksThisFrame;
+    /* The hook can be reached once by the terrain draw and again by its own
+     * layer model in the same presentation.  GlobalCounter identifies that
+     * presentation's simulation state and prevents a double advance. */
+    if (m406LastEffectSimulationCounter == GlobalCounter) {
+        simulationTicks = 0;
+    } else if (simulationTicks > 0) {
+        m406LastEffectSimulationCounter = GlobalCounter;
     }
-    fn_1_4964(var_r27);
-    fn_1_6174(var_r27);
+#else
+    simulationTicks = 1;
+#endif
+    for (tick = 0; tick < simulationTicks; ++tick) {
+        if (!omPauseChk() && lbl_1_bss_30[0]) {
+            fn_1_4084();
+            fn_1_6FFC();
+            fn_1_77F0();
+            fn_1_7C4C();
+            fn_1_7F80();
+            fn_1_91E0();
+        }
+        fn_1_4964(var_r27);
+    }
+    if (simulationTicks > 0) {
+        fn_1_6174(var_r27);
+    }
     var_r28->unk_08 = 1;
 }
 

@@ -605,3 +605,5 @@ OMOVL omCurrentOvlGet(void)
 {
     return omcurovl;
 }
+
+#include "object_snapshot.inc"

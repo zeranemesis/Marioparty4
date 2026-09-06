@@ -1,6 +1,17 @@
 #include "dolphin.h"
 #include "game/msm.h"
+#include "game/object.h"
+#include "game/objsub.h"
 #include "game/pad.h"
+#include "port/rollback.h"
+#include <stdint.h>
+#include <string.h>
+#ifdef TARGET_PC
+#include "port/netplay_runtime.h"
+#define PadGameControlMotor PartyBoard_NetplayControlMotor
+#else
+#define PadGameControlMotor PADControlMotor
+#endif
 
 #ifndef __MWERKS__
 #include <stdlib.h>
@@ -48,9 +59,129 @@ static s8 _PadErr[4];
 static u32 RumbleBit;
 s32 VCounter;
 
+#ifdef TARGET_PC
+/* The PC renderer may present more often than the original 60 Hz simulation.
+ * Keep PAD edge/repeat bookkeeping and the retrace-driven audio service on the
+ * simulation clock, while allowing the simulation to poll SDL immediately
+ * before it consumes input. */
+static BOOL directSimulationPollingActive;
+#endif
+
 static u32 chanTbl[4] = { PAD_CHAN0_BIT, PAD_CHAN1_BIT, PAD_CHAN2_BIT, PAD_CHAN3_BIT };
+// Explicit simulation-side PAD state only: SDL devices and callbacks are not
+// rewound. Restore at a quiescent tick boundary; no rumble command is emitted.
+#ifdef TARGET_PC
+typedef struct PadSnapshotRegion { void *address; size_t size; } PadSnapshotRegion;
+static const PadSnapshotRegion padSnapshotRegions[] = {
+    { &padStatErrOld, sizeof(padStatErrOld) },
+    { &rumbleData, sizeof(rumbleData) },
+    { &HuPadBtn, sizeof(HuPadBtn) },
+    { &HuPadBtnDown, sizeof(HuPadBtnDown) },
+    { &HuPadBtnRep, sizeof(HuPadBtnRep) },
+    { &HuPadStkX, sizeof(HuPadStkX) },
+    { &HuPadStkY, sizeof(HuPadStkY) },
+    { &HuPadSubStkX, sizeof(HuPadSubStkX) },
+    { &HuPadSubStkY, sizeof(HuPadSubStkY) },
+    { &HuPadTrigL, sizeof(HuPadTrigL) },
+    { &HuPadTrigR, sizeof(HuPadTrigR) },
+    { &HuPadDStk, sizeof(HuPadDStk) },
+    { &HuPadDStkRep, sizeof(HuPadDStkRep) },
+    { &HuPadErr, sizeof(HuPadErr) },
+    { &_PadBtn, sizeof(_PadBtn) },
+    { &_PadBtnDown, sizeof(_PadBtnDown) },
+    { &_PadRepCnt, sizeof(_PadRepCnt) },
+    { &_PadStkX, sizeof(_PadStkX) },
+    { &_PadStkY, sizeof(_PadStkY) },
+    { &_PadSubStkX, sizeof(_PadSubStkX) },
+    { &_PadSubStkY, sizeof(_PadSubStkY) },
+    { &_PadTrigL, sizeof(_PadTrigL) },
+    { &_PadTrigR, sizeof(_PadTrigR) },
+    { &_PadDStk, sizeof(_PadDStk) },
+    { &_PadDStkRep, sizeof(_PadDStkRep) },
+    { &_PadDStkRepCnt, sizeof(_PadDStkRepCnt) },
+    { &_PadDStkRepOld, sizeof(_PadDStkRepOld) },
+    { &_PadErr, sizeof(_PadErr) },
+    { &RumbleBit, sizeof(RumbleBit) },
+    { &VCounter, sizeof(VCounter) },
+};
+size_t HuPadSnapshotSizeGet(void) {
+    size_t size = sizeof(u32) * 2;
+    for (size_t i = 0; i < sizeof(padSnapshotRegions)/sizeof(padSnapshotRegions[0]); ++i)
+        size += padSnapshotRegions[i].size;
+    return size;
+}
+BOOL HuPadSnapshotSave(void *destination, size_t capacity) {
+    const size_t required = HuPadSnapshotSizeGet();
+    u32 header[2] = { 0x50414431u, (u32)required };
+    u8 *cursor = (u8 *)destination;
+    if (!destination || capacity != required) return FALSE;
+    memcpy(cursor, header, sizeof(header)); cursor += sizeof(header);
+    for (size_t i = 0; i < sizeof(padSnapshotRegions)/sizeof(padSnapshotRegions[0]); ++i) {
+        memcpy(cursor, padSnapshotRegions[i].address, padSnapshotRegions[i].size);
+        cursor += padSnapshotRegions[i].size;
+    }
+    return TRUE;
+}
+BOOL HuPadSnapshotLoad(const void *source, size_t size) {
+    u32 header[2];
+    const u8 *cursor = (const u8 *)source;
+    if (!source || size != HuPadSnapshotSizeGet()) return FALSE;
+    memcpy(header, cursor, sizeof(header));
+    if (header[0] != 0x50414431u || header[1] != size) return FALSE;
+    // Refuse buffers aliasing live state before the first write.
+    for (size_t i = 0; i < sizeof(padSnapshotRegions)/sizeof(padSnapshotRegions[0]); ++i) {
+        uintptr_t src = (uintptr_t)source, dst = (uintptr_t)padSnapshotRegions[i].address;
+        if (src <= dst ? dst - src < size : src - dst < padSnapshotRegions[i].size) return FALSE;
+    }
+    cursor += sizeof(header);
+    for (size_t i = 0; i < sizeof(padSnapshotRegions)/sizeof(padSnapshotRegions[0]); ++i) {
+        memcpy(padSnapshotRegions[i].address, cursor, padSnapshotRegions[i].size);
+        cursor += padSnapshotRegions[i].size;
+    }
+    return TRUE;
+}
+BOOL HuPadSnapshotSelfTest(void) {
+    const size_t size = HuPadSnapshotSizeGet();
+    u8 *saved = (u8 *)malloc(size), *changed = (u8 *)malloc(size), *check = (u8 *)malloc(size);
+    BOOL ok = saved && changed && check;
+    if (!ok) { free(saved); free(changed); free(check); return FALSE; }
+    ok = HuPadSnapshotSave(saved, size);
+    for (size_t i = 0; i < sizeof(padSnapshotRegions)/sizeof(padSnapshotRegions[0]); ++i)
+        memset(padSnapshotRegions[i].address, (int)(i + 1), padSnapshotRegions[i].size);
+    ok = ok && HuPadSnapshotSave(changed, size);
+    saved[0] ^= 1;
+    ok = ok && !HuPadSnapshotLoad(saved, size) && HuPadSnapshotSave(check, size)
+        && memcmp(check, changed, size) == 0;
+    saved[0] ^= 1;
+    ok = ok && !HuPadSnapshotLoad(saved, size - 1) && HuPadSnapshotSave(check, size)
+        && memcmp(check, changed, size) == 0;
+    // Always restore live state, including when an assertion above fails.
+    const BOOL restored = HuPadSnapshotLoad(saved, size);
+    ok = ok && restored && HuPadSnapshotSave(check, size) && memcmp(check, saved, size) == 0;
+    free(saved); free(changed); free(check);
+    return ok;
+}
+#endif
 
 extern int HuDvdErrWait;
+
+#ifdef TARGET_PC
+bool PartyBoard_NetplayIsMinigame(void)
+{
+    return omMgIndexGet(omcurovl) != -1;
+}
+
+s32 PartyBoard_NetplayMinigameId(void)
+{
+    return omMgIndexGet(omcurovl);
+}
+
+s32 PartyBoard_NetplayContextId(void)
+{
+    return (s32)omcurovl;
+}
+
+#endif
 
 void HuPadInit(void)
 {
@@ -72,7 +203,7 @@ void HuPadInit(void)
     HuPadRead();
     for(i=0; i<4; i++) {
         if(_PadErr[i] == PAD_ERR_NONE) {
-            PADControlMotor(i, PAD_MOTOR_STOP_HARD);
+            PadGameControlMotor(i, PAD_MOTOR_STOP_HARD);
         }
         rumbleData[i].duration = 0;
         _PadRepCnt[i] = 0;
@@ -151,81 +282,151 @@ void HuPadRead(void)
     }
 }
 
-static void PadReadVSync(u32 retraceCount)
+static void PadRecordedControlMotor(BOOL hardware, u32 port, u32 command)
+{
+    if (hardware) PadGameControlMotor(port, command);
+}
+
+/* Shared normal-play/replay input processing. Device interaction is optional;
+ * all edge, repeat, clamp and virtual rumble bookkeeping stays identical. */
+static void PadApplySimulationStatus(PADStatus status[4], u32 rumble, BOOL hardware)
 {
     u32 chan;
     s16 i;
-    PADStatus status[4];
-    if(!HuDvdErrWait) {
-        RumbleBit = PADRead(status);
-        PADClamp(status);
-        chan = 0;
-        for(i=0; i<4; i++) {
-            PADStatus *curr_status = &status[i];
-            PadRumble *rumble = &rumbleData[i];
-            if(padStatErrOld[i] && curr_status->err == PAD_ERR_NONE) {
-                PADControlMotor(i, PAD_MOTOR_STOP_HARD);
-                rumble->duration = 0;
+    RumbleBit = rumble;
+    PADClamp(status);
+    chan = 0;
+    for(i=0; i<4; i++) {
+        PADStatus *curr_status = &status[i];
+        PadRumble *rumble = &rumbleData[i];
+        if(padStatErrOld[i] && curr_status->err == PAD_ERR_NONE) {
+            PadRecordedControlMotor(hardware, i, PAD_MOTOR_STOP_HARD);
+            rumble->duration = 0;
+        }
+        padStatErrOld[i] = curr_status->err;
+        if(curr_status->err != PAD_ERR_NONE) {
+            _PadErr[i] = curr_status->err;
+            if(curr_status->err != PAD_ERR_TRANSFER && curr_status->err != PAD_ERR_NOT_READY) {
+                chan |= chanTbl[i];
             }
-            padStatErrOld[i] = curr_status->err;
-            if(curr_status->err != PAD_ERR_NONE) {
-                _PadErr[i] = curr_status->err;
-                if(curr_status->err != PAD_ERR_TRANSFER && curr_status->err != PAD_ERR_NOT_READY) {
-                    chan |= chanTbl[i];
-                }
-                _PadBtnDown[i] = _PadBtn[i] = _PadStkX[i] = _PadStkY[i] = _PadSubStkX[i] = _PadSubStkY[i] = _PadTrigL[i] = _PadTrigR[i] =  _PadDStkRep[i] = _PadDStk[i] =  HuPadBtnRep[i] = 0;
-            } else {
-                u16 button = curr_status->button;
-                if(curr_status->triggerLeft & 0xC0) {
-                    button |= PAD_BUTTON_TRIGGER_L;
-                }
-                if(curr_status->triggerRight & 0xC0) {
-                    button |= PAD_BUTTON_TRIGGER_R;
-                }
-                if(button && _PadBtn[i] == button) {
-                    if(_PadRepCnt[i] > 20) {
-                        HuPadBtnRep[i] = button;
-                    } else {
-                        HuPadBtnRep[i] = 0;
-                        _PadRepCnt[i]++;
-                    }
-                } else {
-                    _PadRepCnt[i] = 0;
+            _PadBtnDown[i] = _PadBtn[i] = _PadStkX[i] = _PadStkY[i] = _PadSubStkX[i] = _PadSubStkY[i] = _PadTrigL[i] = _PadTrigR[i] =  _PadDStkRep[i] = _PadDStk[i] =  HuPadBtnRep[i] = 0;
+        } else {
+            u16 button = curr_status->button;
+            if(curr_status->triggerLeft & 0xC0) {
+                button |= PAD_BUTTON_TRIGGER_L;
+            }
+            if(curr_status->triggerRight & 0xC0) {
+                button |= PAD_BUTTON_TRIGGER_R;
+            }
+            if(button && _PadBtn[i] == button) {
+                if(_PadRepCnt[i] > 20) {
                     HuPadBtnRep[i] = button;
+                } else {
+                    HuPadBtnRep[i] = 0;
+                    _PadRepCnt[i]++;
                 }
-                PadADConv(i, curr_status);
-                _PadBtnDown[i] |= PADButtonDown(_PadBtn[i], button);
-                _PadBtn[i] = button;
-                _PadStkX[i] = curr_status->stickX;
-                _PadStkY[i] = curr_status->stickY;
-                _PadSubStkX[i] = curr_status->substickX;
-                _PadSubStkY[i] = curr_status->substickY;
-                _PadTrigL[i] = curr_status->triggerLeft;
-                _PadTrigR[i] = curr_status->triggerRight;
-                _PadErr[i] = curr_status->err;
-                if(rumble->duration) {
-                    s16 time = rumble->time%(rumble->off+rumble->on);
-                    if(time == 0) {
-                        PADControlMotor(i, PAD_MOTOR_RUMBLE);
-                    } else {
-                        if(time == rumble->off) {
-                            PADControlMotor(i, PAD_MOTOR_STOP);
-                        }
+            } else {
+                _PadRepCnt[i] = 0;
+                HuPadBtnRep[i] = button;
+            }
+            PadADConv(i, curr_status);
+            _PadBtnDown[i] |= PADButtonDown(_PadBtn[i], button);
+            _PadBtn[i] = button;
+            _PadStkX[i] = curr_status->stickX;
+            _PadStkY[i] = curr_status->stickY;
+            _PadSubStkX[i] = curr_status->substickX;
+            _PadSubStkY[i] = curr_status->substickY;
+            _PadTrigL[i] = curr_status->triggerLeft;
+            _PadTrigR[i] = curr_status->triggerRight;
+            _PadErr[i] = curr_status->err;
+            if(rumble->duration) {
+                s16 time = rumble->time%(rumble->off+rumble->on);
+                if(time == 0) {
+                    PadRecordedControlMotor(hardware, i, PAD_MOTOR_RUMBLE);
+                } else {
+                    if(time == rumble->off) {
+                        PadRecordedControlMotor(hardware, i, PAD_MOTOR_STOP);
                     }
-                    rumble->time++;
-                    if(rumble->time > rumble->duration) {
-                        PADControlMotor(i, PAD_MOTOR_STOP_HARD);
-                        rumble->duration = 0;
-                    }
+                }
+                rumble->time++;
+                if(rumble->time > rumble->duration) {
+                    PadRecordedControlMotor(hardware, i, PAD_MOTOR_STOP_HARD);
+                    rumble->duration = 0;
                 }
             }
         }
-        if(chan) {
-            PADReset(chan);
+    }
+    if(chan && hardware) {
+        PADReset(chan);
+    }
+}
+
+static BOOL PadReadSimulationTick(u32 retraceCount)
+{
+    PADStatus status[4];
+    if (!HuDvdErrWait) {
+        u32 rumble = PADRead(status);
+#ifdef TARGET_PC
+        if (!PartyBoard_NetplayPreparePads(status, &rumble, !directSimulationPollingActive)) {
+            return FALSE;
         }
+#endif
+        PadApplySimulationStatus(status, rumble, TRUE);
     }
     msmSysRegularProc();
     VCounter++;
+    return TRUE;
+}
+
+#ifdef TARGET_PC
+bool PartyBoard_RollbackApplyPads(const PartyBoardRollbackInput inputs[4], u8 connectedMask)
+{
+    PADStatus status[4];
+    u32 rumble = 0;
+    if (!inputs || (connectedMask & 0xf0)) return false;
+    memset(status, 0, sizeof(status));
+    for (int i = 0; i < 4; ++i) {
+        if (!(connectedMask & (1u << i))) {
+            status[i].err = PAD_ERR_NO_CONTROLLER;
+            continue;
+        }
+        status[i].button = inputs[i].buttons;
+        status[i].stickX = inputs[i].stickX;
+        status[i].stickY = inputs[i].stickY;
+        status[i].substickX = inputs[i].substickX;
+        status[i].substickY = inputs[i].substickY;
+        status[i].triggerLeft = inputs[i].triggerLeft;
+        status[i].triggerRight = inputs[i].triggerRight;
+        status[i].err = PAD_ERR_NONE;
+        rumble |= chanTbl[i];
+    }
+    PadApplySimulationStatus(status, rumble, FALSE);
+    VCounter++;
+    HuPadRead();
+    return true;
+}
+#endif
+
+#ifdef TARGET_PC
+BOOL HuPadPollSimulationTick(void)
+{
+    /* From this point on the fixed-step main loop owns PAD polling. The PC VI
+     * callback is only retained for startup, before the first simulation tick.
+     * This also prevents movie/reset VIWaitForRetrace calls from inserting
+     * extra PAD/audio ticks between two 60 Hz game ticks. */
+    directSimulationPollingActive = TRUE;
+    return PadReadSimulationTick(0);
+}
+#endif
+
+static void PadReadVSync(u32 retraceCount)
+{
+#ifdef TARGET_PC
+    if (directSimulationPollingActive) {
+        return;
+    }
+#endif
+    PadReadSimulationTick(retraceCount);
 }
 
 static void PadADConv(s16 pad, PADStatus *status)
@@ -289,7 +490,7 @@ void HuPadRumbleStop(s16 pad)
     PadRumble *rumble = &rumbleData[pad];
     if(_PadErr[pad] == PAD_ERR_NONE) {
         rumble->duration = 0;
-        PADControlMotor(pad, PAD_MOTOR_STOP_HARD);
+        PadGameControlMotor(pad, PAD_MOTOR_STOP_HARD);
     }
 }
 
@@ -299,7 +500,7 @@ void HuPadRumbleAllStop(void)
     for(i=0; i<4; i++) {
         rumbleData[i].duration = 0;
         if(_PadErr[i] == PAD_ERR_NONE) {
-            PADControlMotor(i, PAD_MOTOR_STOP_HARD);
+            PadGameControlMotor(i, PAD_MOTOR_STOP_HARD);
         }
     }
 }
@@ -313,3 +514,14 @@ u32 HuPadRumbleGet(void)
 {
     return RumbleBit;
 }
+
+#ifdef TARGET_PC
+#include "port/rollback_scene.h"
+bool PartyBoard_RollbackPadRegions(PartyBoardRollbackRegionSink sink, void *context)
+{
+    if (!sink) return false;
+    for (size_t i = 0; i < sizeof(padSnapshotRegions) / sizeof(padSnapshotRegions[0]); ++i)
+        if (!sink(context, padSnapshotRegions[i].address, padSnapshotRegions[i].size)) return false;
+    return true;
+}
+#endif

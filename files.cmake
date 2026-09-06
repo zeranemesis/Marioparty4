@@ -73,6 +73,7 @@ set(GAME_FILES
         src/game/window.c
         src/game/wipe.c
 
+
         src/libhu/setvf.c
         src/libhu/subvf.c
 )
@@ -86,13 +87,22 @@ set(PORT_FILES
         #        src/port/dvd.c
         src/port/file_select.cpp
         src/port/file_select.hpp
+        src/port/frame_interpolation.c
         src/port/imgui.cpp
         src/port/io.cpp
         src/port/iso_validate.cpp
+        src/port/netplay_transport.cpp
+        src/port/netplay_runtime.cpp
         src/port/OS.c
         src/port/portmain.cpp
+        src/port/rollback.cpp
+        src/port/rollback_audio.cpp
+        src/port/rollback_animation_test.cpp
+        src/port/rollback_io.cpp
+        src/port/rollback_scene.cpp
         src/port/settings.cpp
         src/port/stubs.c
+        src/port/thp_player.cpp
         src/port/version.cpp
 
         src/port/ui/achievements.cpp
@@ -142,6 +152,19 @@ set(PORT_FILES
         src/port/ui/window.cpp
         src/port/ui/window.hpp
 )
+
+if (PARTYBOARD_EXPERIMENTAL_MUSYX_AUDIO)
+    list(REMOVE_ITEM PORT_FILES src/port/audio.c)
+    list(APPEND GAME_FILES
+        src/game/audio.c
+        src/msm/msmfio.c
+        src/msm/msmmem.c
+        src/msm/msmmus.c
+        src/msm/msmse.c
+        src/msm/msmstream.c
+        src/msm/msmsys.c
+    )
+endif ()
 
 set(REL_FILES
         src/REL/_minigameDLL/_minigameDLL.c

@@ -19,12 +19,17 @@ SHARED_SYM HU3DMOTION Hu3DMotion[HU3D_MOTION_MAX];
 
 static HSFBITMAP *bitMapPtr;
 
+static BOOL MotionIdIsLive(s16 motionId)
+{
+    return motionId >= 0 && motionId < HU3D_MOTION_MAX && Hu3DMotion[motionId].hsf != NULL;
+}
+
 void Hu3DMotionInit(void)
 {
     HU3DMOTION *var_r31;
     s16 i;
 
-    var_r31 = (HU3DMOTION *)Hu3DData;
+    var_r31 = Hu3DMotion;
     for (i = 0; i < HU3D_MOTION_MAX; i++, var_r31++) {
         var_r31->hsf = 0;
     }
@@ -80,6 +85,9 @@ s32 Hu3DMotionKill(s16 arg0)
     HU3DMOTION *temp_r31;
     s16 i;
 
+    if (arg0 < 0 || arg0 >= HU3D_MOTION_MAX) {
+        return 0;
+    }
     temp_r31 = &Hu3DMotion[arg0];
     if (temp_r31->hsf == 0) {
         return 0;
@@ -514,15 +522,23 @@ void Hu3DMotionForceSet(s16 arg0, char *arg1, u32 arg2, float arg3)
 
 void Hu3DMotionNext(s16 arg0)
 {
-    HU3DMODEL *temp_r31 = &Hu3DData[arg0];
+    HU3DMODEL *temp_r31;
     HSFMOTION *temp_r29;
     HU3DMOTION *temp_r27;
     u32 temp_r28;
     s16 i;
 
-    temp_r27 = &Hu3DMotion[temp_r31->motId];
-    temp_r29 = temp_r27->hsf->motion;
+    if (arg0 < 0 || arg0 >= HU3D_MODEL_MAX) {
+        return;
+    }
+    temp_r31 = &Hu3DData[arg0];
+    if (temp_r31->hsf == NULL) {
+        return;
+    }
     temp_r28 = temp_r31->motAttr;
+    if (temp_r31->motId != -1 && !MotionIdIsLive(temp_r31->motId)) {
+        temp_r31->motId = -1;
+    }
     if (temp_r31->motId != -1) {
         temp_r27 = &Hu3DMotion[temp_r31->motId];
         if (!(temp_r28 & HU3D_MOTATTR_PAUSE)) {
@@ -548,6 +564,9 @@ void Hu3DMotionNext(s16 arg0)
             }
         }
     }
+    if (temp_r31->motIdOvl != -1 && !MotionIdIsLive(temp_r31->motIdOvl)) {
+        temp_r31->motIdOvl = -1;
+    }
     if (temp_r31->motIdOvl != -1) {
         temp_r27 = &Hu3DMotion[temp_r31->motIdOvl];
         temp_r29 = temp_r27->hsf->motion;
@@ -571,6 +590,10 @@ void Hu3DMotionNext(s16 arg0)
                 temp_r31->motOvlWork.time = temp_r29->maxTime;
             }
         }
+    }
+    if (temp_r31->motIdShift != -1 && !MotionIdIsLive(temp_r31->motIdShift)) {
+        temp_r31->motIdShift = -1;
+        temp_r31->motAttr &= ~HU3D_MOTATTR_SHIFT_ALL;
     }
     if (temp_r31->motIdShift != -1) {
         temp_r31->motOvlWork.start += minimumVcountf;
@@ -620,6 +643,9 @@ void Hu3DMotionNext(s16 arg0)
             }
         }
     }
+    if (temp_r31->motIdShape != -1 && !MotionIdIsLive(temp_r31->motIdShape)) {
+        temp_r31->motIdShape = -1;
+    }
     if (temp_r31->motIdShape != -1 && !(temp_r28 & HU3D_MOTATTR_SHAPE_PAUSE)) {
         temp_r27 = &Hu3DMotion[temp_r31->motIdShape];
         temp_r29 = temp_r27->hsf->motion;
@@ -646,6 +672,9 @@ void Hu3DMotionNext(s16 arg0)
     }
     if (temp_r31->attr & HU3D_ATTR_CLUSTER_ON) {
         for (i = 0; i < 4; i++) {
+            if (temp_r31->motIdCluster[i] != -1 && !MotionIdIsLive(temp_r31->motIdCluster[i])) {
+                temp_r31->motIdCluster[i] = -1;
+            }
             if (temp_r31->motIdCluster[i] != -1 && !(temp_r31->clusterAttr[i] & HU3D_CLUSTER_ATTR_PAUSE)) {
                 temp_r27 = &Hu3DMotion[temp_r31->motIdCluster[i]];
                 temp_r29 = temp_r27->hsf->motion;
@@ -1529,3 +1558,14 @@ static s32 SearchAttributeIndex(HSFDATA *arg0, u32 arg1)
     }
     return -1;
 }
+
+#ifdef TARGET_PC
+#include "port/rollback_scene.h"
+bool PartyBoard_RollbackMotionRegions(PartyBoardRollbackRegionSink sink, void *context)
+{
+    if (!sink) return false;
+    if (!sink(context, &Hu3DMotion, sizeof(Hu3DMotion))) return false;
+    if (!sink(context, &bitMapPtr, sizeof(bitMapPtr))) return false;
+    return true;
+}
+#endif

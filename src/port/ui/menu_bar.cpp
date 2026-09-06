@@ -3,9 +3,12 @@
 #include "menu_bar.hpp"
 
 #include <RmlUi/Core.h>
+#include <SDL3/SDL_filesystem.h>
+#include <SDL3/SDL_process.h>
 
 #include "achievements.hpp"
 #include "aurora/rmlui.hpp"
+#include "port/main.h"
 #include "port/settings.h"
 #include "imgui.h"
 #include "modal.hpp"
@@ -47,6 +50,24 @@ MenuBar::MenuBar()
             .autoSelect = false,
         });
     mTabBar->add_tab("Settings", [this] { push(std::make_unique<SettingsWindow>()); });
+
+#if defined(_WIN32)
+    mTabBar->add_tab("Play Online", [this] {
+        const std::string companion = std::string(SDL_GetBasePath()) + "PartyBoardOnline.exe";
+        const char *args[] = { companion.c_str(), nullptr };
+        if (SDL_Process *process = SDL_CreateProcess(args, false)) {
+            SDL_DestroyProcess(process);
+            PartyBoard_IsRunning = false;
+            return;
+        }
+        push_toast({
+            .type = "error",
+            .title = "Online mode",
+            .content = "PartyBoardOnline.exe is missing or could not be started.",
+            .duration = std::chrono::seconds(5),
+        });
+    });
+#endif
     // mTabBar->add_tab("Warp", [] {
     //     // TODO
     // });

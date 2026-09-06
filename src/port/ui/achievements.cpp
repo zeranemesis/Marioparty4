@@ -6,6 +6,7 @@
 #include "fmt/format.h"
 #include "nav_types.hpp"
 #include "pane.hpp"
+#include "localization.hpp"
 
 namespace partyboard::ui {
 namespace {
@@ -30,7 +31,7 @@ namespace {
                                     R"(<span class="achievement-badge{}">{}</span>)"
                                     R"(</div>)"
                                     R"(<p class="achievement-desc">{}</p>)",
-            a.unlocked ? " unlocked" : "", a.name, a.unlocked ? " unlocked" : " locked", a.unlocked ? "Unlocked" : "Locked", a.description);
+            a.unlocked ? " unlocked" : "", a.name, a.unlocked ? " unlocked" : " locked", ui_translate(a.unlocked ? "Unlocked" : "Locked"), a.description);
 
         if (a.isCounter) {
             float fraction = a.goal > 0 ? float(a.progress) / float(a.goal) : 1.0f;
@@ -141,7 +142,7 @@ AchievementsWindow::AchievementsWindow()
 
             auto &pane = add_child<Pane>(content, Pane::Type::Controlled);
 
-            pane.add_section(fmt::format("{} / {} unlocked", unlocked, total));
+            pane.add_section(fmt::format("{} / {} {}", unlocked, total, ui_translate("unlocked")));
 
             for (const auto &a : achievements) {
                 if (a.category != cat) {

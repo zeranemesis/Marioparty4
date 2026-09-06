@@ -89,6 +89,9 @@ s16 lbl_1_bss_12E;
 s16 lbl_1_bss_12C;
 Process *lbl_1_bss_128;
 void *lbl_1_bss_11C[3];
+#ifdef TARGET_PC
+static void *sPrimaryShadowBuffer;
+#endif
 Vec lbl_1_bss_F8[3];
 Vec lbl_1_bss_D4[3];
 Mtx lbl_1_bss_44[3];
@@ -291,6 +294,9 @@ void fn_1_9BC(omObjData *object)
         fn_1_5CAC();
         MGSeqKillAll();
         HuAudFadeOut(1);
+#ifdef TARGET_PC
+        Hu3DShadowData.buf = sPrimaryShadowBuffer;
+#endif
         omOvlReturnEx(1, 1);
         OSReport("******* M439Exit *********\n");
     }
@@ -1726,11 +1732,23 @@ void fn_1_71EC(Vec *arg0, Vec *arg1, float arg2)
 
 void fn_1_7578(s16 layer);
 
+#ifdef TARGET_PC
+static void RestorePrimaryShadowBuffer(s16 layer)
+{
+    if (Hu3DCameraNo == 3) {
+        Hu3DShadowData.buf = sPrimaryShadowBuffer;
+    }
+}
+#endif
+
 void fn_1_73F4(Process *objman)
 {
     s32 i;
     s32 dataSize = Hu3DShadowData.size * Hu3DShadowData.size;
     lbl_1_bss_128 = objman;
+#ifdef TARGET_PC
+    sPrimaryShadowBuffer = Hu3DShadowData.buf;
+#endif
     for (i = 0; i < 3; i++) {
         lbl_1_bss_11C[i] = HuMemDirectMallocNum(HEAP_SYSTEM, dataSize, MEMORY_DEFAULT_NUM);
         memset(lbl_1_bss_11C[i], 0, dataSize);
@@ -1742,6 +1760,9 @@ void fn_1_73F4(Process *objman)
         lbl_1_bss_F8[i].z = Hu3DShadowData.camPos.z;
     }
     Hu3DLayerHookSet(0, fn_1_7578);
+#ifdef TARGET_PC
+    Hu3DLayerHookSet(7, RestorePrimaryShadowBuffer);
+#endif
 }
 
 void fn_1_77E4(s32 shadowNo);
@@ -1756,6 +1777,9 @@ void fn_1_7578(s16 layer)
     }
     if (Hu3DCameraNo == 0) {
         WorkD0C *playerWork;
+#ifdef TARGET_PC
+        Hu3DShadowData.buf = sPrimaryShadowBuffer;
+#endif
         GXDrawDone();
         playerList = omGetGroupMemberListEx(lbl_1_bss_128, 0);
         if (Hu3DData[playerList[0]->model[0]].attr & 0x4) {

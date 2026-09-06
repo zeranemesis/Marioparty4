@@ -1,6 +1,7 @@
 // Credits: TwilitRealm
 
 #include "graphics_tuner.hpp"
+#include "localization.hpp"
 
 #include <dolphin/gx/GXAurora.h>
 #include <dolphin/vi.h>
@@ -191,10 +192,10 @@ GraphicsTuner::GraphicsTuner(GraphicsTunerProps props, bool prelaunch)
     }
 
     if (auto *title = mDocument->GetElementById("title")) {
-        title->SetInnerRML(escape(props.title));
+        title->SetInnerRML(escape(ui_translate(props.title)));
     }
     if (auto *description = mDocument->GetElementById("description")) {
-        description->SetInnerRML(escape(props.helpText));
+        description->SetInnerRML(escape(ui_translate(props.helpText)));
     }
     if (auto *carouselParent = mDocument->GetElementById("carousel-container")) {
         mCarousel = &add_component<SteppedCarousel>(carouselParent,

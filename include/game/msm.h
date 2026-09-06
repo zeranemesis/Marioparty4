@@ -164,6 +164,9 @@ BOOL msmSysSetOutputMode(SND_OUTPUTMODE mode);
 s32 msmSysDelGroupAll(void);
 s32 msmSysGetSampSize(BOOL baseGrp);
 s32 msmSysDelGroupBase(s32 grpNum);
+s32 msmSysLoadGroupBase(s32 grpId, void *buf);
+s32 msmSysLoadGroupSet(s32 grpSet, void *buf);
+s32 msmSysLoadGroup(s32 grpId, void *buf);
 s32 msmSysSetAux(s32 auxA, s32 auxB);
 void msmSysRegularProc(void);
 

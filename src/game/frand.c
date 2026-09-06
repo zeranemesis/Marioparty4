@@ -45,3 +45,19 @@ u32 frandmod(u32 arg0) {
     ret = (frand_seed & 0x7FFFFFFF)%arg0;
     return ret;
 }
+
+#ifdef TARGET_PC
+u32 frand_state_get(void) {
+    return frand_seed;
+}
+
+void frand_state_set(u32 state) {
+    frand_seed = state;
+}
+#endif
+
+#ifdef TARGET_PC
+#include "port/rollback_scene.h"
+bool PartyBoard_RollbackRandomRegions(PartyBoardRollbackRegionSink sink, void *context)
+{ return sink && sink(context, &frand_seed, sizeof(frand_seed)); }
+#endif

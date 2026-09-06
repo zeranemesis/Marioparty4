@@ -13,6 +13,7 @@
 #include "game/pad.h"
 #include "game/sprite.h"
 #include "game/wipe.h"
+#include "port/widescreen.h"
 
 #include "REL/m442Dll.h"
 #include <string.h>
@@ -1531,7 +1532,7 @@ void fn_1_485C(HU3DMODEL *model, Mtx mtx)
     GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
     GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
     GXSetVtxDesc(GX_VA_TEX0, GX_DIRECT);
-    C_MTXPerspective(sp40, var_r29->fov, var_r29->aspect, var_r29->nnear, var_r29->ffar);
+    C_MTXPerspective(sp40, var_r29->fov, PARTYBOARD_WIDESCREEN_ASPECT(var_r29->aspect), var_r29->nnear, var_r29->ffar);
     GXSetProjection(sp40, GX_PERSPECTIVE);
     MTXInverse(mtx, spA0);
     spA0[0][3] = spA0[1][3] = spA0[2][3] = 0.0f;

@@ -8,6 +8,11 @@
 #include "game/wipe.h"
 #include "game/gamework_data.h"
 
+#ifdef TARGET_PC
+#include <stdio.h>
+#include "port/rollback_audio_bridge.h"
+#endif
+
 #define HUMSMHEAP_SIZE 0x13FC00
 
 #define MSM_FILE_PATH "/sound/mpgcsnd.msm"
@@ -57,6 +62,13 @@ void HuAudInit(void)
     result = msmSysInit(&msmInit, &msmAram);
 
     if (result < 0) {
+#ifdef TARGET_PC
+        FILE *log = fopen("msm_init_error.txt", "w");
+        if (log != NULL) {
+            fprintf(log, "msmSysInit failed with error %d\\n", result);
+            fclose(log);
+        }
+#endif
         OSReport("MSM(Sound Manager) Error:Error Code %d\n", result);
         while (1);
     }
@@ -134,6 +146,11 @@ int HuAudFXPlayVolPan(int seId, s16 vol, s16 pan)
     if (omSysExitReq) {
         return 0;
     }
+#ifdef TARGET_PC
+    if (PartyBoard_RollbackAudioBridgeActive()) {
+        return PartyBoard_RollbackAudioBridgePlay2D(seId, vol, pan);
+    }
+#endif
     seParam.flag = MSM_SEPARAM_VOL|MSM_SEPARAM_PAN;
     seParam.vol = vol;
     seParam.pan = pan;
@@ -141,6 +158,12 @@ int HuAudFXPlayVolPan(int seId, s16 vol, s16 pan)
 }
 
 void HuAudFXStop(int seNo) {
+#ifdef TARGET_PC
+    if (PartyBoard_RollbackAudioBridgeIsVirtual(seNo)) {
+        PartyBoard_RollbackAudioBridgeStopFX(seNo, 0);
+        return;
+    }
+#endif
     msmSeStop(seNo, 0);
 }
 
@@ -149,6 +172,12 @@ void HuAudFXAllStop(void) {
 }
 
 void HuAudFXFadeOut(int seNo, s32 speed) {
+#ifdef TARGET_PC
+    if (PartyBoard_RollbackAudioBridgeIsVirtual(seNo)) {
+        PartyBoard_RollbackAudioBridgeStopFX(seNo, speed);
+        return;
+    }
+#endif
     msmSeStop(seNo, speed);
 }
 
@@ -156,6 +185,12 @@ void HuAudFXPanning(int seNo, s16 pan) {
     MSM_SEPARAM param;
 
     if (omSysExitReq == 0) {
+#ifdef TARGET_PC
+        if (PartyBoard_RollbackAudioBridgeIsVirtual(seNo)) {
+            PartyBoard_RollbackAudioBridgeParameter(seNo, PARTYBOARD_ROLLBACK_FX_PAN, pan);
+            return;
+        }
+#endif
         param.flag = MSM_SEPARAM_PAN;
         param.pan = pan;
         msmSeSetParam(seNo, &param);
@@ -238,6 +273,11 @@ void HuAudFXPauseAll(BOOL pauseF) {
 }
 
 s32 HuAudFXStatusGet(int seNo) {
+#ifdef TARGET_PC
+    if (PartyBoard_RollbackAudioBridgeIsVirtual(seNo)) {
+        return PartyBoard_RollbackAudioBridgeStatus(seNo);
+    }
+#endif
     return msmSeGetStatus(seNo);
 }
 
@@ -247,6 +287,11 @@ s32 HuAudFXPitchSet(int seNo, s16 pitch)
     if(omSysExitReq) {
         return 0;
     }
+#ifdef TARGET_PC
+    if (PartyBoard_RollbackAudioBridgeIsVirtual(seNo)) {
+        return PartyBoard_RollbackAudioBridgeParameter(seNo, PARTYBOARD_ROLLBACK_FX_PITCH, pitch) ? 0 : MSM_ERR_INVALIDSE;
+    }
+#endif
     param.flag = MSM_SEPARAM_PITCH;
     param.pitch = pitch;
     return msmSeSetParam(seNo, &param);
@@ -259,6 +304,11 @@ s32 HuAudFXVolSet(int seNo, s16 vol)
     if(omSysExitReq) {
         return 0;
     }
+#ifdef TARGET_PC
+    if (PartyBoard_RollbackAudioBridgeIsVirtual(seNo)) {
+        return PartyBoard_RollbackAudioBridgeParameter(seNo, PARTYBOARD_ROLLBACK_FX_VOLUME, vol) ? 0 : MSM_ERR_INVALIDSE;
+    }
+#endif
     param.flag = MSM_SEPARAM_VOL;
     param.vol = vol;
     return msmSeSetParam(seNo, &param);
@@ -266,11 +316,32 @@ s32 HuAudFXVolSet(int seNo, s16 vol)
 
 s32 HuAudSeqPlay(s16 musId) {
     s32 channel;
+#ifdef TARGET_PC
+    s16 grpSet;
+#endif
 
     if (musicOffF || omSysExitReq) {
         return 0;
     }
     channel = msmMusPlay(musId, NULL);
+#ifdef TARGET_PC
+    /*
+     * A failed group-set load used to leave sndGroupBak looking valid.  The
+     * following screens would then skip the load and every attempt to start
+     * their music failed until another overlay selected a different set.
+     * Retry the active set once when MusyX reports that a required group is
+     * absent.  This notably covers the instruction song (59) and minigames.
+     */
+    if ((channel == MSM_ERR_GRP_NOTLOADED || channel == MSM_ERR_MUSGRP_NOTLOADED)
+        && sndGroupBak != MSM_GRPSET_NONE) {
+        grpSet = sndGroupBak;
+        OSReport("Music %d missing audio group (%d); reloading group set %d\n",
+            musId, channel, grpSet);
+        sndGroupBak = MSM_GRPSET_NONE;
+        HuAudSndGrpSetSet(grpSet);
+        channel = msmMusPlay(musId, NULL);
+    }
+#endif
     return channel;
 }
 
@@ -358,7 +429,7 @@ s32 HuAudSStreamStatGet(s32 seNo) {
     return msmStreamGetStatus(seNo);
 }
 
-SNDGRPTBL sndGrpTable[] = {
+SHARED_SYM SNDGRPTBL sndGrpTable[] = {
     { DLL_bootdll, MSM_GRPSET_NONE, MSM_AUXA_DEFAULT, MSM_AUXB_DEFAULT, -1, -1 },
     { DLL_instdll, MSM_GRPSET_NONE, MSM_AUXA_DEFAULT, MSM_AUXB_DEFAULT, -1, -1 },
     { DLL_m401dll, MSM_GRPSET_MG401, MSM_AUXA_DEFAULT, 2, 64, 64 },
@@ -485,33 +556,77 @@ void HuAudDllSndGrpSet(u16 ovl) {
 
 #define SNDGRP_TIMEOUT 500
 
-#define SNDGRP_WAIT(tickStart) \
-    while((msmMusGetNumPlay(TRUE) != 0 || msmSeGetNumPlay(TRUE) != 0) && OSTicksToMilliseconds(OSGetTick()-(tickStart)) < SNDGRP_TIMEOUT)
+static void HuAudSndGrpWait(OSTick tickStart)
+{
+    while ((msmMusGetNumPlay(TRUE) != 0 || msmSeGetNumPlay(TRUE) != 0)
+        && OSTicksToMilliseconds(OSGetTick() - tickStart) < SNDGRP_TIMEOUT) {
+#ifdef TARGET_PC
+        /* The GameCube audio callback advances this state asynchronously.
+         * The PC backend needs to drain it explicitly before replacing banks. */
+        msmSysRegularProc();
+#endif
+    }
+}
+
+static s32 HuAudSndGrpSetLoad(s16 grpSet)
+{
+    void *buf;
+    s32 sampSize;
+    s32 result;
+
+    sampSize = msmSysGetSampSize(TRUE);
+    if (sampSize <= 0) {
+        return MSM_ERR_OUTOFMEM;
+    }
+    buf = HuMemDirectMalloc(HEAP_DATA, sampSize);
+    if (buf == NULL) {
+        return MSM_ERR_OUTOFMEM;
+    }
+    result = msmSysLoadGroupSet(grpSet, buf);
+    HuMemDirectFree(buf);
+    return result;
+}
 
 
 void HuAudSndGrpSetSet(s16 grpSet) {
-    void *buf;
     OSTick tickStart;
     s32 numPlay;
     s32 result;
+#ifdef TARGET_PC
+    s32 attempt;
+#endif
 
     if (sndGroupBak != grpSet) {
         msmMusStopAll(1, 0);
         msmSeStopAll(1, 0);
         tickStart = OSGetTick();
-        SNDGRP_WAIT(tickStart);
+        HuAudSndGrpWait(tickStart);
         OSReport("%d\n", OSTicksToMilliseconds(OSGetTick() - tickStart));
         if (OSTicksToMilliseconds(OSGetTick() - tickStart) >= 500) {
             numPlay = msmSeGetNumPlay(1);
             OSReport("Timed Out! Mus %d:SE %d\n", msmMusGetNumPlay(TRUE), numPlay);
         }
         OSReport("GroupSet %d\n", grpSet);
-        sndGroupBak = grpSet;
-        result = msmSysDelGroupAll();
-        buf = HuMemDirectMalloc(HEAP_DATA, msmSysGetSampSize(1));
-        result = msmSysLoadGroupSet(grpSet, buf);\
-        OSReport("***********GroupSet Error %d\n", result);
-        HuMemDirectFree(buf);
+#ifdef TARGET_PC
+        result = MSM_ERR_PLAYFAIL;
+        for (attempt = 0; attempt < 2 && result < 0; attempt++) {
+            result = HuAudSndGrpSetLoad(grpSet);
+            if (result < 0) {
+                OSReport("GroupSet %d load attempt %d failed: %d\n",
+                    grpSet, attempt + 1, result);
+                msmSysRegularProc();
+            }
+        }
+#else
+        result = HuAudSndGrpSetLoad(grpSet);
+#endif
+        if (result < 0) {
+            OSReport("***********GroupSet %d Error %d\n", grpSet, result);
+        } else {
+            OSReport("GroupSet %d loaded\n", grpSet);
+        }
+        /* Cache only a fully loaded set.  A failure must remain retryable. */
+        sndGroupBak = result >= 0 ? grpSet : MSM_GRPSET_NONE;
     }
 }
 
@@ -519,7 +634,7 @@ void HuAudSndGrpSet(s16 grpId) {
     void *buf;
 
     buf = HuMemDirectMalloc(HEAP_DATA, msmSysGetSampSize(grpId));
-    msmSysLoadGroup(grpId, buf, FALSE);
+    msmSysLoadGroup(grpId, buf);
     HuMemDirectFree(buf);
 }
 
@@ -535,7 +650,7 @@ void HuAudSndCommonGrpSet(s16 grp, BOOL delGrpF) {
     msmMusStopAll(TRUE, 0);
     msmSeStopAll(TRUE, 0);
     tickStart = OSGetTick();
-    SNDGRP_WAIT(tickStart);
+    HuAudSndGrpWait(tickStart);
     OSReport("CommonGrpSet %d\n", grp);
     if (delGrpF != 0) {
         result = msmSysDelGroupBase(0);
@@ -599,7 +714,7 @@ void HuAudSndCharGrpSet(s16 ovl) {
         msmMusStopAll(TRUE, 0);
         msmSeStopAll(TRUE, 0);
         tickStart = OSGetTick();
-        SNDGRP_WAIT(tickStart);
+        HuAudSndGrpWait(tickStart);
         OSReport("############CharGrpSet\n");
         result = msmSysDelGroupBase(0);
         if (result < 0) {

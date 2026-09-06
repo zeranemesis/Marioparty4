@@ -24,12 +24,14 @@
 namespace partyboard::ui {
 namespace {
 
-    constexpr std::array kLanguageNames = {
-        "English",
-        "German",
-        "French",
-        "Spanish",
-        "Italian",
+    struct LanguageChoice {
+        const char *name;
+        GameLanguage value;
+    };
+
+    constexpr std::array kLanguageChoices = {
+        LanguageChoice { "English", GameLanguage::English },
+        LanguageChoice { "French", GameLanguage::French },
     };
 
     constexpr std::array kCardFileTypes = {
@@ -42,6 +44,15 @@ namespace {
         "Top Right",
         "Bottom Left",
         "Bottom Right",
+    };
+
+    constexpr std::array kTargetFrameRates = {
+        60,
+        90,
+        120,
+        144,
+        165,
+        240,
     };
 
     constexpr std::array kGyroInputModeLabels = {
@@ -324,11 +335,10 @@ SettingsWindow::SettingsWindow(bool prelaunch)
                                           .getValue =
                                               [] {
                                                   const auto &state = prelaunch_state();
-                                                  if (!state.configuredDiscCanLaunch || !state.configuredDiscInfo.isPal) {
-                                                      return kLanguageNames[0];
+                                                  if (getSettings().game.language.getValue() == GameLanguage::French) {
+                                                      return kLanguageChoices[1].name;
                                                   }
-                                                  const u8 idx = static_cast<u8>(getSettings().game.language.getValue());
-                                                  return kLanguageNames[idx];
+                                                  return kLanguageChoices[0].name;
                                               },
                                           .isDisabled =
                                               [] {
@@ -338,14 +348,14 @@ SettingsWindow::SettingsWindow(bool prelaunch)
                                           .isModified = [] { return getSettings().game.language.getValue() != prelaunch_state().initialLanguage; },
                                       }),
                 rightPane, [](Pane &pane) {
-                    for (int i = 0; i < kLanguageNames.size(); i++) {
+                    for (const auto &choice : kLanguageChoices) {
                         pane.add_button({
-                                            .text = kLanguageNames[i],
-                                            .isSelected = [i] { return getSettings().game.language.getValue() == static_cast<GameLanguage>(i); },
+                                            .text = choice.name,
+                                            .isSelected = [value = choice.value] { return getSettings().game.language.getValue() == value; },
                                         })
-                            .on_pressed([i] {
+                            .on_pressed([value = choice.value] {
                                 // mDoAud_seStartMenu(kSoundItemChange); // TODO PC
-                                getSettings().game.language.setValue(static_cast<GameLanguage>(i));
+                                getSettings().game.language.setValue(value);
                                 config::Save();
                             });
                     }
@@ -421,11 +431,58 @@ SettingsWindow::SettingsWindow(bool prelaunch)
                 .helpText = "Synchronizes the frame rate to your monitor's refresh rate.",
                 .onChange = [](bool value) { aurora_enable_vsync(value); },
             });
+        leftPane.register_control(leftPane.add_select_button({
+                                      .key = "Frame Rate",
+                                      .getValue = [] {
+                                          return Rml::String { std::to_string(getSettings().video.targetFrameRate.getValue()) + " FPS" };
+                                      },
+                                      .isModified = [] {
+                                          return getSettings().video.targetFrameRate.getValue()
+                                              != getSettings().video.targetFrameRate.getDefaultValue();
+                                      },
+                                  }),
+            rightPane, [](Pane &pane) {
+                for (const int frameRate : kTargetFrameRates) {
+                    pane.add_button({
+                                        .text = Rml::String { std::to_string(frameRate) + " FPS" },
+                                        .isSelected = [frameRate] {
+                                            return getSettings().video.targetFrameRate.getValue() == frameRate;
+                                        },
+                                    })
+                        .on_pressed([frameRate] {
+                            getSettings().video.targetFrameRate.setValue(frameRate);
+                            config::Save();
+                        });
+                }
+                pane.add_rml("<br/>The original game simulation and audio remain fixed at 60 Hz. Higher settings use latency-compensated 3D and 2D motion, "
+                             "colour, opacity, cameras, and transition fades for smoother presentation without delaying input or speeding up gameplay. "
+                             "Source sprite animation frames retain their original timing.");
+            });
         config_bool_select(leftPane, rightPane, getSettings().video.lockAspectRatio,
             {
                 .key = "Lock 4:3 Aspect Ratio",
                 .helpText = "Lock the game's aspect ratio to the original.",
-                .onChange = [](bool value) { AuroraSetViewportPolicy(value ? AURORA_VIEWPORT_FIT : AURORA_VIEWPORT_STRETCH); },
+                .onChange = [](bool value) {
+                    if (value) {
+                        getSettings().video.enableAdaptiveWidescreen.setValue(false);
+                    }
+                    AuroraSetViewportPolicy(value ? AURORA_VIEWPORT_FIT : AURORA_VIEWPORT_STRETCH);
+                    config::Save();
+                },
+            });
+        config_bool_select(leftPane, rightPane, getSettings().video.enableAdaptiveWidescreen,
+            {
+                .key = "Adaptive Widescreen HUD",
+                .helpText = "Uses the window's aspect ratio without stretching the 3D scene. HUD elements keep their proportions and reposition towards the screen edges. Disable this to retain the original presentation.",
+                .onChange = [](bool value) {
+                    if (value) {
+                        getSettings().video.lockAspectRatio.setValue(false);
+                    }
+                    AuroraSetViewportPolicy(value || !getSettings().video.lockAspectRatio.getValue()
+                            ? AURORA_VIEWPORT_STRETCH
+                            : AURORA_VIEWPORT_FIT);
+                    config::Save();
+                },
             });
         config_bool_select(leftPane, rightPane, getSettings().game.pauseOnFocusLost,
             {

@@ -27,6 +27,15 @@ extern s32 VCounter;
 
 void HuPadInit(void);
 void HuPadRead(void);
+#ifdef TARGET_PC
+BOOL HuPadPollSimulationTick(void);
+/* Simulation bookkeeping only. Restore at a quiescent tick boundary; device
+ * handles/callbacks are excluded and hardware rumble is not replayed. */
+size_t HuPadSnapshotSizeGet(void);
+BOOL HuPadSnapshotSave(void *destination, size_t capacity);
+BOOL HuPadSnapshotLoad(const void *source, size_t size);
+BOOL HuPadSnapshotSelfTest(void);
+#endif
 void HuPadRumbleSet(s16 pad, s16 duration, s16 off, s16 on);
 void HuPadRumbleStop(s16 pad);
 void HuPadRumbleAllStop(void);

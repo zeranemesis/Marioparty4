@@ -3,6 +3,8 @@
 
 #include "dolphin/types.h"
 
+#include <stddef.h>
+
 #ifdef TARGET_PC
 #include "libco/libco.h"
 #else
@@ -32,6 +34,7 @@ typedef struct process {
     s32 sleep_time;
 #ifdef TARGET_PC
     cothread_t thread;
+    u32 thread_size;
 #else
     uintptr_t base_sp;
     jmp_buf jump;
@@ -65,5 +68,15 @@ void HuPrcSetStat(Process *process, u16 value);
 void HuPrcResetStat(Process *process, u16 value);
 void HuPrcAllPause(s32 flag);
 void HuPrcAllUPause(s32 flag);
+
+#ifdef TARGET_PC
+/* Serializes the scheduler metadata and every suspended libco stack. The
+ * caller must snapshot HEAP_SYSTEM separately before restoring this block. */
+size_t HuPrcSnapshotSizeGet(void);
+BOOL HuPrcSnapshotSave(void *destination, size_t capacity);
+BOOL HuPrcSnapshotLoad(const void *source, size_t size);
+u64 HuPrcTopologyGenerationGet(void);
+BOOL HuPrcSnapshotTopologySelfTest(void);
+#endif
 
 #endif

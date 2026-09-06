@@ -697,9 +697,13 @@ static void particleFunc(HU3DMODEL *arg0, Mtx arg1)
         MTXIdentity(mtxInv);
     }
     MTXReorder(mtxInv, basePosMtx);
-    if ((Hu3DPauseF == 0 || (arg0->attr & HU3D_ATTR_NOPAUSE)) && particleP->hook && particleP->prevCounter != GlobalCounter) {
+    if ((Hu3DPauseF == 0 || (arg0->attr & HU3D_ATTR_NOPAUSE)) && particleP->hook &&
+        minimumVcount != 0 && particleP->prevCounter != GlobalCounter) {
         HU3DPARTICLEHOOK hook = particleP->hook;
-        hook(arg0, particleP, arg1);
+        u32 tick;
+        for (tick = 0; tick < (u32)minimumVcount; ++tick) {
+            hook(arg0, particleP, arg1);
+        }
     }
     particleDataP = particleP->data;
     vtxBuf = particleP->vtxBuf;
@@ -848,7 +852,7 @@ static void particleFunc(HU3DMODEL *arg0, Mtx arg1)
     }
     if (shadowModelDrawF == FALSE) {
         if (!(particleP->attr & HU3D_PARTICLE_ATTR_STOPCNT) && Hu3DPauseF == FALSE) {
-            particleP->count++;
+            particleP->count += minimumVcount;
         }
         if (particleP->prevCount != 0 && particleP->prevCount <= particleP->count) {
             if (particleP->attr & HU3D_PARTICLE_ATTR_RESETCNT) {
@@ -856,7 +860,9 @@ static void particleFunc(HU3DMODEL *arg0, Mtx arg1)
             }
             particleP->count = particleP->prevCount;
         }
-        particleP->prevCounter = GlobalCounter;
+        if (minimumVcount != 0) {
+            particleP->prevCounter = GlobalCounter;
+        }
     }
 }
 
@@ -1324,3 +1330,15 @@ static void ParManHook(HU3DMODEL *model, HU3DPARTICLE *particle, Mtx mtx)
         DCStoreRangeNoSync(particle->data, particle->maxCnt * sizeof(HU3DPARTICLEDATA));
     }
 }
+
+#ifdef TARGET_PC
+#include "port/rollback_scene.h"
+bool PartyBoard_RollbackTextureRegions(PartyBoardRollbackRegionSink sink, void *context)
+{
+    if (!sink) return false;
+    if (!sink(context, &Hu3DTexAnimData, sizeof(Hu3DTexAnimData))) return false;
+    if (!sink(context, &Hu3DTexScrData, sizeof(Hu3DTexScrData))) return false;
+    if (!sink(context, &parManProc, sizeof(parManProc))) return false;
+    return true;
+}
+#endif

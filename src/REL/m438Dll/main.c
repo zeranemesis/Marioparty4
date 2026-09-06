@@ -1582,6 +1582,9 @@ void fn_1_4984(omObjData *object)
             break;
         case 5:
             Hu3DModelAttrReset(object->model[0], HU3D_MOTATTR_LOOP);
+#ifdef TARGET_PC
+            Hu3DMotionSpeedSet(object->model[0], 1.0f);
+#endif
             Hu3DModelAttrSet(object->model[0], HU3D_MOTATTR_REV);
             object->func = fn_1_4F50;
             object->work[0] = 10;

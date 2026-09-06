@@ -2,6 +2,10 @@
 #include "dolphin/os.h"
 #include "game/memory.h"
 
+#ifdef TARGET_PC
+#include <string.h>
+#endif
+
 #ifdef __MWERKS__
 #include "game/jmp.h"
 #endif
@@ -16,6 +20,30 @@
 #ifdef TARGET_PC
 static cothread_t processthread;
 static u8 thread_arg;
+static u64 processTopologyGeneration;
+
+#define HU_PRC_SNAPSHOT_MAGIC 0x50524353u /* "PRCS" */
+#define HU_PRC_SNAPSHOT_VERSION 2u
+
+typedef struct HuPrcSnapshotHeader {
+    u32 magic;
+    u32 version;
+    u32 process_count;
+    u32 total_size;
+    u64 topology_generation;
+    uintptr_t process_top;
+    uintptr_t process_current;
+    u16 scheduler_process_count;
+    u8 scheduler_thread_arg;
+    u8 reserved;
+} HuPrcSnapshotHeader;
+
+typedef struct HuPrcSnapshotEntry {
+    uintptr_t process;
+    uintptr_t thread;
+    u32 thread_size;
+    u32 reserved;
+} HuPrcSnapshotEntry;
 #else
 static jmp_buf processjmpbuf;
 #endif
@@ -28,6 +56,9 @@ void HuPrcInit(void)
 {
     processcnt = 0;
     processtop = NULL;
+#ifdef TARGET_PC
+    ++processTopologyGeneration;
+#endif
 }
 
 static void LinkProcess(Process **root, Process *process)
@@ -95,6 +126,7 @@ Process *HuPrcCreate(void (*func)(void), u16 prio, u32 stack_size, s32 extra_siz
     process->sleep_time = 0;
 #ifdef TARGET_PC
     process->thread = co_create(stack_size, func);
+    process->thread_size = stack_size;
 #else
     process->base_sp = ((uintptr_t)HuMemMemoryAlloc(heap, stack_size, FAKE_RETADDR)) + stack_size - 8;
     gcsetjmp(&process->jump);
@@ -107,6 +139,9 @@ Process *HuPrcCreate(void (*func)(void), u16 prio, u32 stack_size, s32 extra_siz
     process->child = NULL;
     process->parent = NULL;
     processcnt++;
+#ifdef TARGET_PC
+    ++processTopologyGeneration;
+#endif
     return process;
 }
 
@@ -211,6 +246,7 @@ static void gcTerminateProcess(Process *process)
     UnlinkProcess(&processtop, process);
     processcnt--;
 #ifdef TARGET_PC
+    ++processTopologyGeneration;
     thread_arg = 2;
     co_switch(processthread);
 #else
@@ -374,6 +410,184 @@ void HuPrcCall(s32 tick)
     }
 }
 
+#ifdef TARGET_PC
+size_t HuPrcSnapshotSizeGet(void)
+{
+    size_t size = sizeof(HuPrcSnapshotHeader);
+    Process *process = processtop;
+    Process *previous = NULL;
+    u32 count = 0;
+
+    if (!co_serializable()) {
+        return 0;
+    }
+    while (process != NULL) {
+        if (++count > processcnt || process->prev != previous
+            || process->thread == NULL || process->thread_size == 0
+            || size > UINT32_MAX - sizeof(HuPrcSnapshotEntry)
+            || process->thread_size > UINT32_MAX - size - sizeof(HuPrcSnapshotEntry)) {
+            return 0;
+        }
+        size += sizeof(HuPrcSnapshotEntry) + process->thread_size;
+        previous = process;
+        process = process->next;
+    }
+    return count == processcnt ? size : 0;
+}
+
+BOOL HuPrcSnapshotSave(void *destination, size_t capacity)
+{
+    HuPrcSnapshotHeader *header;
+    u8 *cursor;
+    Process *process;
+    size_t required = HuPrcSnapshotSizeGet();
+    u32 count = 0;
+
+    if (destination == NULL || required == 0 || capacity < required) {
+        return FALSE;
+    }
+    header = (HuPrcSnapshotHeader *)destination;
+    cursor = (u8 *)destination + sizeof(*header);
+    process = processtop;
+    while (process != NULL) {
+        HuPrcSnapshotEntry entry;
+        entry.process = (uintptr_t)process;
+        entry.thread = (uintptr_t)process->thread;
+        entry.thread_size = process->thread_size;
+        entry.reserved = 0;
+        memcpy(cursor, &entry, sizeof(entry));
+        cursor += sizeof(entry);
+        memcpy(cursor, process->thread, process->thread_size);
+        cursor += process->thread_size;
+        ++count;
+        process = process->next;
+    }
+    header->magic = HU_PRC_SNAPSHOT_MAGIC;
+    header->version = HU_PRC_SNAPSHOT_VERSION;
+    header->process_count = count;
+    header->total_size = (u32)required;
+    header->topology_generation = processTopologyGeneration;
+    header->process_top = (uintptr_t)processtop;
+    header->process_current = (uintptr_t)processcur;
+    header->scheduler_process_count = processcnt;
+    header->scheduler_thread_arg = thread_arg;
+    header->reserved = 0;
+    return TRUE;
+}
+
+BOOL HuPrcSnapshotLoad(const void *source, size_t size)
+{
+    HuPrcSnapshotHeader savedHeader;
+    const HuPrcSnapshotHeader *header = &savedHeader;
+    const u8 *cursor;
+    const u8 *end;
+    Process *process;
+    BOOL currentFound;
+    u32 index;
+
+    if (source == NULL || size < sizeof(HuPrcSnapshotHeader) || !co_serializable()) {
+        return FALSE;
+    }
+    memcpy(&savedHeader, source, sizeof(savedHeader));
+    if (header->magic != HU_PRC_SNAPSHOT_MAGIC
+        || header->version != HU_PRC_SNAPSHOT_VERSION
+        || header->total_size != size || header->reserved != 0
+        || header->topology_generation != processTopologyGeneration
+        || header->scheduler_thread_arg > 2
+        || header->process_count != processcnt
+        || header->scheduler_process_count != processcnt
+        || header->process_top != (uintptr_t)processtop
+        || HuPrcSnapshotSizeGet() != size) {
+        return FALSE;
+    }
+    // Validate every entry against the live list before writing any stack.
+    // Snapshot pointers are identifiers, never addresses to dereference.
+    process = processtop;
+    currentFound = header->process_current == 0;
+    cursor = (const u8 *)source + sizeof(*header);
+    end = (const u8 *)source + size;
+    for (index = 0; index < header->process_count; ++index) {
+        HuPrcSnapshotEntry entry;
+        if ((size_t)(end - cursor) < sizeof(entry)) {
+            return FALSE;
+        }
+        memcpy(&entry, cursor, sizeof(entry));
+        cursor += sizeof(entry);
+        if (process == NULL || entry.process != (uintptr_t)process || entry.reserved != 0
+            || entry.thread == 0 || entry.thread_size == 0
+            || (size_t)(end - cursor) < entry.thread_size) {
+            return FALSE;
+        }
+        if ((uintptr_t)process->thread != entry.thread
+            || process->thread_size != entry.thread_size
+            || process->thread == co_active()) {
+            // Prediction must stop BEFORE a coroutine lifetime change. Merely
+            // switching to lockstep after an invalidated prediction cannot
+            // reconstruct its lost stack or repair the simulated game state.
+            return FALSE;
+        }
+        // The source must remain immutable throughout the second pass.
+        if ((entry.thread >= (uintptr_t)source
+                && entry.thread - (uintptr_t)source < size)
+            || ((uintptr_t)source > entry.thread
+                && (uintptr_t)source - entry.thread < entry.thread_size)) {
+            return FALSE;
+        }
+        if (header->process_current == entry.process) {
+            currentFound = TRUE;
+        }
+        cursor += entry.thread_size;
+        process = process->next;
+    }
+    if (cursor != end || process != NULL || !currentFound) {
+        return FALSE;
+    }
+    cursor = (const u8 *)source + sizeof(*header);
+    for (index = 0; index < header->process_count; ++index) {
+        HuPrcSnapshotEntry entry;
+        memcpy(&entry, cursor, sizeof(entry));
+        cursor += sizeof(entry);
+        memcpy((void *)entry.thread, cursor, entry.thread_size);
+        cursor += entry.thread_size;
+    }
+    processtop = (Process *)header->process_top;
+    processcur = (Process *)header->process_current;
+    processcnt = header->scheduler_process_count;
+    thread_arg = header->scheduler_thread_arg;
+    processthread = co_active();
+    return TRUE;
+}
+
+u64 HuPrcTopologyGenerationGet(void)
+{
+    return processTopologyGeneration;
+}
+
+BOOL HuPrcSnapshotTopologySelfTest(void)
+{
+    HuPrcSnapshotHeader oldSnapshot;
+    HuPrcSnapshotHeader newSnapshot;
+    const u64 oldGeneration = processTopologyGeneration;
+
+    /* This test deliberately advances the generation. Never reset or disturb
+     * a live scheduler merely to exercise stale-snapshot rejection. */
+    if (processtop != NULL || processcur != NULL || processcnt != 0
+        || HuPrcSnapshotSizeGet() != sizeof(HuPrcSnapshotHeader)
+        || !HuPrcSnapshotSave(&oldSnapshot, sizeof(oldSnapshot))) {
+        return FALSE;
+    }
+    HuPrcInit();
+    if (processTopologyGeneration != oldGeneration + 1
+        || HuPrcSnapshotLoad(&oldSnapshot, sizeof(oldSnapshot))
+        || processtop != NULL || processcur != NULL || processcnt != 0
+        || processTopologyGeneration != oldGeneration + 1) {
+        return FALSE;
+    }
+    return HuPrcSnapshotSave(&newSnapshot, sizeof(newSnapshot))
+        && HuPrcSnapshotLoad(&newSnapshot, sizeof(newSnapshot));
+}
+#endif
+
 void *HuPrcMemAlloc(s32 size)
 {
     Process *process = HuPrcCurrentGet();
@@ -440,3 +654,25 @@ void HuPrcAllUPause(s32 flag)
         }
     }
 }
+
+#include "process_snapshot_test.inc"
+
+#ifdef TARGET_PC
+#include "port/rollback_scene.h"
+bool PartyBoard_RollbackProcessRegions(PartyBoardRollbackRegionSink sink, void *context)
+{
+    Process *process;
+    if (!sink || processcur || !HuPrcSnapshotSizeGet()
+        || (processthread && processthread != co_active())) return false;
+    for (process = processtop; process; process = process->next) {
+        if (process->thread == co_active()
+            || !sink(context, process->thread, process->thread_size)) return false;
+    }
+    /* Descriptors and their subheaps are already inside the SYSTEM arena.
+     * Never rewind the monotonic lifetime counter or the active scheduler stack. */
+#define REGION(value) if (!sink(context, &(value), sizeof(value))) return false;
+    REGION(processtop) REGION(processcur) REGION(processcnt) REGION(thread_arg)
+#undef REGION
+    return true;
+}
+#endif

@@ -5,6 +5,15 @@
 #include "game/board/tutorial.h"
 #include "version.h"
 
+#ifdef TARGET_PC
+#include "port/frame_interpolation.h"
+extern bool PartyBoard_IsSimulationTick;
+extern int PartyBoard_SimulationTicksThisFrame;
+#define PARTYBOARD_ADVANCE_WIPE PartyBoard_IsSimulationTick
+#else
+#define PARTYBOARD_ADVANCE_WIPE TRUE
+#endif
+
 s16 HuSysVWaitGet(s16 old);
 
 typedef s32 (*fadeFunc)(void);
@@ -19,6 +28,26 @@ static void WipeFrameStill(GXColor color);
 static s32 WipeNormalFade(void);
 static s32 WipeCrossFade(void);
 static s32 WipeDummyFade(void);
+
+#ifdef TARGET_PC
+static float WipeRenderTime(const WipeState *wipe)
+{
+	float time = wipe->time;
+	if(PartyBoard_FrameInterpolationEnabled()) {
+		/* wipe->time is the state before this presentation frame's ticks are
+		 * applied. Present the interval between the final two logical ticks,
+		 * including the uncommon two-tick catch-up case. */
+		time += (float)PartyBoard_SimulationTicksThisFrame - 1.0f;
+		time += PartyBoard_FrameInterpolationStep();
+		if(time < 0.0f) {
+			time = 0.0f;
+		}
+	}
+	return time;
+}
+#else
+#define WipeRenderTime(wipe) ((wipe)->time)
+#endif
 
 static fadeFunc fadeInFunc[3] = { WipeNormalFade, WipeCrossFade, WipeDummyFade };
 static fadeFunc fadeOutFunc[3] = { WipeNormalFade, WipeCrossFade, WipeDummyFade };
@@ -63,8 +92,15 @@ void WipeExecAlways(void)
 			
 		case WIPE_MODE_IN:
 			if(wipe->type < WIPE_TYPE_DUMMY) {
-				wipe->stat = fadeInFunc[wipe->type]();
+				s32 nextStat = fadeInFunc[wipe->type]();
+				if(!PARTYBOARD_ADVANCE_WIPE) {
+					return;
+				}
+				wipe->stat = nextStat;
 			} else {
+				if(!PARTYBOARD_ADVANCE_WIPE) {
+					return;
+				}
 				wipe->stat = 0;
 			}
 			wipe->time += HuSysVWaitGet(0);
@@ -91,8 +127,15 @@ void WipeExecAlways(void)
 			
 		case WIPE_MODE_OUT:
 			if(wipe->type < WIPE_TYPE_DUMMY) {
-				wipe->stat = fadeOutFunc[wipe->type]();
+				s32 nextStat = fadeOutFunc[wipe->type]();
+				if(!PARTYBOARD_ADVANCE_WIPE) {
+					return;
+				}
+				wipe->stat = nextStat;
 			} else {
+				if(!PARTYBOARD_ADVANCE_WIPE) {
+					return;
+				}
 				wipe->stat = 0;
 			}
 			wipe->time += HuSysVWaitGet(0);
@@ -169,7 +212,11 @@ static s32 WipeNormalFade(void)
 	if(wipe->duration == 0) {
 		return 0;
 	}
+#ifdef TARGET_PC
+	alpha = (u8)(fminf(WipeRenderTime(wipe)/wipe->duration, 1.0f)*255.0f);
+#else
 	alpha = (wipe->time/wipe->duration)*255.0f;
+#endif
 	switch(wipe->mode) {
 		case WIPE_MODE_IN:
 			wipe->color.a = 255-alpha;
@@ -249,7 +296,11 @@ static s32 WipeCrossFade(void)
 		GXCopyTex(wipe->copy_data, GX_FALSE);
 		DCStoreRangeNoSync(wipe->copy_data, size);
 	}
+#ifdef TARGET_PC
+	alpha = (u8)(fminf(WipeRenderTime(wipe)/wipe->duration, 1.0f)*255.0f);
+#else
 	alpha = (wipe->time/wipe->duration)*255.0f;
+#endif
 	switch(wipe->mode) {
 		case WIPE_MODE_IN:
 			wipe->color.a = 255-alpha;
@@ -334,3 +385,35 @@ static void WipeFrameStill(GXColor color)
   	GXDestroyTexObj(&tex);
 #endif
 }
+
+#ifdef TARGET_PC
+#include "port/rollback_scene.h"
+bool PartyBoard_RollbackWipeRegions(PartyBoardRollbackRegionSink sink, void *context)
+{
+    return sink && sink(context, &wipeData, sizeof(wipeData))
+        && sink(context, &wipeFadeInF, sizeof(wipeFadeInF));
+}
+
+bool PartyBoard_RollbackWipeCanReplayWithoutDraw(void)
+{
+    return wipeData.mode != WIPE_MODE_IN && wipeData.mode != WIPE_MODE_OUT;
+}
+
+bool PartyBoard_RollbackWipeSafetySelfTest(void)
+{
+    const u8 savedMode = wipeData.mode;
+    bool ok;
+    wipeData.mode = 0;
+    ok = PartyBoard_RollbackWipeCanReplayWithoutDraw();
+    wipeData.mode = WIPE_MODE_IN;
+    ok = ok && !PartyBoard_RollbackWipeCanReplayWithoutDraw();
+    wipeData.mode = WIPE_MODE_OUT;
+    ok = ok && !PartyBoard_RollbackWipeCanReplayWithoutDraw();
+    wipeData.mode = savedMode;
+    ok = ok && (PartyBoard_RollbackWipeCanReplayWithoutDraw()
+        == (savedMode != WIPE_MODE_IN && savedMode != WIPE_MODE_OUT));
+    OSReport("Rollback wipe safety gate: %s (active in/out transitions rejected; state restored).\n",
+        ok ? "PASS" : "FAIL");
+    return ok;
+}
+#endif
