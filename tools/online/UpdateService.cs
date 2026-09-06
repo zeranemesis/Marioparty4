@@ -27,7 +27,7 @@ static class UpdateService {
         return Task.Run(()=> {
             using(var client=new WebClient()) {
                 client.Headers[HttpRequestHeader.UserAgent]="PartyBoard-Updater/1.0";
-                var raw=client.DownloadString(ManifestUrl);
+                var raw=client.DownloadString(ManifestUrl+"?t="+DateTime.UtcNow.Ticks);
                 Version remote;
                 if(!Version.TryParse(Json(raw,"version"),out remote)) throw new InvalidDataException("Le manifeste GitHub contient une version invalide.");
                 var url=Json(raw,"downloadUrl");var hash=Json(raw,"sha256");
@@ -41,7 +41,7 @@ static class UpdateService {
         var zip=Path.Combine(Path.GetTempPath(),"PartyBoard-update-"+Guid.NewGuid().ToString("N")+".zip");
         using(var client=new WebClient()) {
             client.Headers[HttpRequestHeader.UserAgent]="PartyBoard-Updater/1.0";
-            await client.DownloadFileTaskAsync(new Uri(info.DownloadUrl),zip);
+            await client.DownloadFileTaskAsync(new Uri(info.DownloadUrl+"?t="+DateTime.UtcNow.Ticks),zip);
         }
         using(var sha=SHA256.Create()) using(var stream=File.OpenRead(zip)) {
             var actual=BitConverter.ToString(sha.ComputeHash(stream)).Replace("-","");
