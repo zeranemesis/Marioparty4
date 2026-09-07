@@ -1,6 +1,6 @@
 {
-  "version": "0.15.1",
+  "version": "0.15.2",
   "downloadUrl": "https://github.com/zeranemesis/Marioparty4/raw/refs/heads/audio-local/dist/PartyBoard-rollback-etape15-correctifs.zip",
-  "sha256": "192B8940903A045F3117FFC7182FD3DF27D70F9DA824A851E1DE3BB66A76A71F",
-  "notes": "Mode en ligne rollback, accès F1, menus English/French et correctifs graphiques."
+  "sha256": "4D58A516AD5B88BF32B7BB96B853C84D3AA29171C3501691A5381E542C852E54",
+  "notes": "Interpolation haute fréquence améliorée : ombres alignées, transitions de visibilité sécurisées et brouillard synchronisé avec la caméra."
 }
