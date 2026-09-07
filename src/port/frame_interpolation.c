@@ -10,6 +10,7 @@ typedef struct ModelSnapshot {
     const void *identity;
     uintptr_t allocation;
     u32 generation;
+    u32 attr;
     HuVecF pos;
     HuVecF rot;
     HuVecF scale;
@@ -249,6 +250,7 @@ static void snapshot_models(ModelSnapshot *destination)
         snapshot->identity = model->hsf;
         snapshot->allocation = model->mallocNo;
         snapshot->generation = s_modelGenerations[i];
+        snapshot->attr = model->attr;
         snapshot->pos = model->pos;
         snapshot->rot = model->rot;
         snapshot->scale = model->scale;
@@ -411,7 +413,10 @@ bool PartyBoard_FrameInterpolationModel(s16 modelId, HuVecF *pos, HuVecF *rot, H
         current->identity != model->hsf || previous->allocation != current->allocation ||
         current->allocation != model->mallocNo ||
         previous->generation != current->generation ||
-        current->generation != s_modelGenerations[modelId]) {
+        current->generation != s_modelGenerations[modelId] ||
+        ((previous->attr ^ current->attr) &
+         (HU3D_ATTR_DISPOFF | HU3D_ATTR_MOTION_OFF | HU3D_ATTR_HOOKFUNC |
+          HU3D_ATTR_HOOK | HU3D_ATTR_CAMERA)) != 0) {
         return false;
     }
 
@@ -493,7 +498,8 @@ bool PartyBoard_FrameInterpolationSprite(s16 spriteId, HUSPRITE *sprite)
         current->identity != liveSprite->data ||
         previous->generation != current->generation ||
         current->generation != s_spriteGenerations[spriteId] ||
-        ((previous->attr ^ current->attr) & HUSPR_ATTR_FUNC) != 0) {
+        ((previous->attr ^ current->attr) &
+         (HUSPR_ATTR_DISPOFF | HUSPR_ATTR_FUNC)) != 0) {
         return false;
     }
 

@@ -198,6 +198,9 @@ void Hu3DExec(void) {
     HuVecF renderRot;
     HuVecF renderScale;
     HU3DPROJECTION* var_r26;
+#ifdef TARGET_PC
+    HU3DCAMERA renderCamera;
+#endif
 
     HuPerfBegin(3);
     GXSetCurrentMtx(0U);
@@ -233,7 +236,13 @@ void Hu3DExec(void) {
                 HuSprExec(0x7F);
             }
             if (FogData.fogType != GX_FOG_NONE) {
+#ifdef TARGET_PC
+                renderCamera = *camera;
+                PartyBoard_FrameInterpolationCamera(Hu3DCameraNo, &renderCamera);
+                GXSetFog(FogData.fogType, FogData.fogStart, FogData.fogEnd, renderCamera.nnear, renderCamera.ffar, FogData.color);
+#else
                 GXSetFog(FogData.fogType, FogData.fogStart, FogData.fogEnd, camera->nnear, camera->ffar, FogData.color);
+#endif
             }
             for (j = 0; j < 8; j++) {
                 if (layerHook[j] != 0) {
@@ -2050,6 +2059,12 @@ void Hu3DShadowExec(void) {
     GXColor sp14 = {0, 0, 0, 0};
     s32 test;
     s32 test2;
+#ifdef TARGET_PC
+    HuVecF renderPos;
+    HuVecF renderRot;
+    HuVecF renderScale;
+    Mtx renderMtx;
+#endif
 
     Hu3DDrawPreInit();
     GXSetCopyClear(sp14, 0xFFFFFF);
@@ -2111,13 +2126,30 @@ void Hu3DShadowExec(void) {
                 }
                 var_r31->attr |= HU3D_ATTR_MOT_EXEC;
             }
+#ifdef TARGET_PC
+            renderPos = var_r31->pos;
+            renderRot = var_r31->rot;
+            renderScale = var_r31->scale;
+            MTXCopy(var_r31->mtx, renderMtx);
+            PartyBoard_FrameInterpolationModel(var_r30, &renderPos, &renderRot, &renderScale, renderMtx);
+            mtxRot(sp58, renderRot.x, renderRot.y, renderRot.z);
+            MTXScale(spB8, renderScale.x, renderScale.y, renderScale.z);
+#else
             mtxRot(sp58, var_r31->rot.x, var_r31->rot.y, var_r31->rot.z);
             MTXScale(spB8, var_r31->scale.x, var_r31->scale.y, var_r31->scale.z);
+#endif
             MTXConcat(sp58, spB8, spB8);
+#ifdef TARGET_PC
+            mtxTransCat(spB8, renderPos.x, renderPos.y, renderPos.z);
+            MTXConcat(Hu3DCameraMtx, spB8, sp88);
+            MTXConcat(sp88, renderMtx, sp88);
+            Hu3DDraw(var_r31, sp88, &renderScale);
+#else
             mtxTransCat(spB8, var_r31->pos.x, var_r31->pos.y, var_r31->pos.z);
             MTXConcat(Hu3DCameraMtx, spB8, sp88);
             MTXConcat(sp88, var_r31->mtx, sp88);
             Hu3DDraw(var_r31, sp88, &var_r31->scale);
+#endif
         }
     }
     Hu3DDrawPost();
