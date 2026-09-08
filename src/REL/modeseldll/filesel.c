@@ -22,6 +22,7 @@ s32 msmSysGetOutputMode(void);
 
 #ifdef TARGET_PC
 #include "port/port_version.h"
+#include "port/netplay_runtime.h"
 #endif
 
 s16 lbl_1_data_100 = -1;
@@ -107,6 +108,15 @@ s32 FileSelectAutoLoadDefault(void)
     const s16 boxNo = 0;
     s32 result;
     BOOL mounted = FALSE;
+
+    // Card previews restore local board state as well as menu preferences.
+    // A network session needs the same fresh profile on both peers, and must
+    // never read or overwrite either player's personal offline save.
+    if (PartyBoard_NetplayEnabled()) {
+        FileSelectUseDefaultGameStat();
+        OSReport("Online mode select: fresh session profile; local card untouched.\n");
+        return 1;
+    }
 
     SLCurSlotNoSet(0);
     SLCurBoxNoSet(boxNo);

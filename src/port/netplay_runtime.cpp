@@ -963,8 +963,11 @@ extern "C" bool PartyBoard_NetplayTick(void)
         }
         const auto confirmedWireFrame = runtime.rollbackBaseFrame
             + runtime.rollbackSession->confirmedFrame();
-        if (!PartyBoard_RollbackAudioBridgeConfirm(confirmedWireFrame)
-            || !PartyBoard_RollbackAudioBridgeStop()) {
+        if (!PartyBoard_RollbackAudioBridgeConfirm(confirmedWireFrame)) {
+            failSession("Rollback transition audio confirmation failed");
+            return false;
+        }
+        if (!PartyBoard_RollbackAudioBridgeStop()) {
             failSession("Rollback transition audio teardown failed");
             return false;
         }

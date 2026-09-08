@@ -17,7 +17,13 @@ FxBackend makeNativeFxBackend() {
             parameters.vol = static_cast<s8>(volume); parameters.pan = static_cast<s8>(pan);
             return msmSePlay(sound, &parameters);
         },
-        [](int handle, int fade) { return msmSeStop(handle, fade); },
+        [](int handle, int fade) {
+            const auto result = msmSeStop(handle, fade);
+            // MusyX removes finished voices. Stopping one again is already
+            // satisfied, including after a group unload or an explicit stop.
+            // No device status is fed back into predicted game logic.
+            return result == MSM_ERR_INVALIDSE ? 0 : result;
+        },
         [](int handle, FxParameter parameter, int value) {
             MSM_SEPARAM parameters {};
             switch (parameter) {
@@ -116,6 +122,19 @@ extern "C" bool PartyBoard_RollbackAudioSelfTest(void) {
     using namespace partyboard::rollback;
     unsigned checks = 0;
     bool ok = runAudioAdapterTests(checks);
+    // Reproduce teardown after a sound has left MusyX's voice table. The
+    // injected play returns an absent handle, then the real native stop path
+    // must accept it without a device or a real sound bank.
+    auto expiredBackend = makeNativeFxBackend();
+    ok &= msmSeStop(INT32_MAX, 0) == MSM_ERR_INVALIDSE;
+    expiredBackend.play = [](int, int, int) { return INT32_MAX; };
+    ConfirmedAudioFx expired(std::move(expiredBackend), 512, 1331);
+    ok &= expired.beginFrame(1331);
+    ok &= static_cast<bool>(expired.play(0));
+    ok &= expired.endFrame();
+    ok &= expired.confirmThrough(1332);
+    ok &= expired.close();
+    ok &= expired.close();
     // Exercise the actual HuAud wrapper and bridge. INT32_MAX reaches MusyX's
     // invalid-ID path without initializing sound or starting a real voice.
     ok &= !PartyBoard_RollbackAudioBridgeActive();
