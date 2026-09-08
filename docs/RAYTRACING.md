@@ -661,3 +661,58 @@ ReShade en espace écran actuellement installés.
 
 Ça ne transformera pas le rendu en path tracing moderne : l'éclairage du jeu
 reste vertex-lit et ses textures sont en 2002.
+
+## Débruitage et normales (8 septembre 2026)
+
+Deux défauts distincts se cachaient l'un derrière l'autre.
+
+### Le grain
+
+48 rayons par pixel laissent du bruit de Monte Carlo : l'estimateur converge en
+1/racine(N), donc le nettoyer par le nombre de rayons coûterait des centaines de
+rayons. Un filtre à-trous à évitement d'arêtes (Dammertz et al., 2010) le fait
+pour 0,07 ms : quatre passes d'un noyau 3x3 espacé de 1, 2, 4 puis 8 pixels,
+chaque voisin pondéré par son accord en normale et en profondeur avec le pixel
+central. `rt_ao.hlsl` écrit ces deux grandeurs dans un tampon guide (`u1`) ; la
+profondeur vient du rayon primaire lui-même, pas d'un tampon rastérisé.
+
+Réglage contre-intuitif : durcir le test d'arête à chaque passe
+(`pow(dot, 32..256)`) ne filtrait que 25 % du bruit, parce que les normales
+étaient géométriques et que deux pixels d'une même surface courbe diffèrent déjà
+de l'angle de facette. Un exposant constant de 12 en filtre 36 %.
+
+### Les facettes
+
+Le vrai coupable de l'aspect « sale » n'était pas le bruit mais l'ombrage par
+polygone : une normale géométrique est constante sur un triangle, donc le test
+`dot(n, versLumière) > 0` fait basculer le triangle entier d'un coup. Aucun
+filtre ne répare ça — la donnée d'entrée est en marches d'escalier.
+
+`GX_VA_NRM` est maintenant décodé comme les positions (mêmes types en virgule
+fixe ; les variantes NBT rangent la normale en premier), pivoté par la matrice
+de normales `pnMtx[].nrm`, et interpolé par les barycentriques que `RayQuery`
+fournit déjà. Repli sur la normale géométrique quand le draw n'en portait pas.
+Le décalage anti-auto-intersection reste appliqué le long de la normale
+géométrique : une normale interpolée fortement inclinée ramènerait l'origine
+sous la surface.
+
+### La taille angulaire de la lumière
+
+Les ombres douces ne l'étaient pas. Mario Party 4 construit une lumière infinie
+en poussant sa position à un million d'unités (`VECScale(dir, pos, -1000000)`
+dans `hsfman.c`) : un disque placé là ne sous-tend plus aucun angle, et les huit
+échantillons de pénombre traçaient le même rayon. Les rayons d'ombre échantillonnent
+désormais un cône autour de la direction (demi-angle ~2,3°), et leur portée est
+bornée par la taille de la scène au lieu d'aller jusqu'à cette position.
+
+### Métrique, et sa limite
+
+Le laplacien sur le tampon AO mesure le grain, mais aussi les vraies arêtes.
+Il montre 5,156 → 3,314 (36 %) pour le filtre seul. Avec les normales
+interpolées il remonte à 4,268, alors que l'image est nettement meilleure : les
+dégradés lisses produisent plus de variation à petite échelle que les facettes
+plates. Le chiffre cesse d'être comparable dès que le signal change de nature ;
+au-delà de ce point, il faut regarder les images.
+
+Mesurer sur l'image composite finale ne vaut rien : les textures du jeu écrasent
+le signal, et un filtrage qui retire 36 % du bruit AO n'y déplace que 1 %.
