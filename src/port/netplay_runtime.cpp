@@ -538,7 +538,15 @@ bool ensureRollbackSession()
     gRuntime.rollbackBaseFrame = gRuntime.frame;
     rollback::Callbacks callbacks;
     callbacks.saveState = [](void *destination, std::size_t capacity) {
-        return PartyBoard_RollbackCheckpointSave(destination, capacity);
+        const bool saved = PartyBoard_RollbackCheckpointSave(destination, capacity);
+        if (!saved) {
+            char reason[160];
+            std::snprintf(reason, sizeof(reason),
+                "rollback-capture-failed expected_bytes=%zu available_bytes=%zu",
+                capacity, PartyBoard_RollbackCheckpointSize());
+            writeDiagnostic(reason, true);
+        }
+        return saved;
     };
     callbacks.loadState = [](const void *source, std::size_t size) {
         return PartyBoard_RollbackCheckpointLoad(source, size);
@@ -615,6 +623,22 @@ bool prepareRollbackTick()
     std::array<PartyBoardRollbackInput, rollback::kMaxPlayers> inputs {};
     if (!session.prepare(inputs)) {
         if (!session.healthy()) {
+            // CheckpointSave only reads live state. At a fully reconciled
+            // boundary its failure needs no restore and no speculative input
+            // is discarded. Keep the current wire frame for lockstep retry.
+            if (session.failedAtConfirmedCapture()) {
+                if (!PartyBoard_RollbackAudioBridgeConfirm(runtime.frame)
+                    || !PartyBoard_RollbackAudioBridgeStop()) {
+                    failSession("Rollback capture fallback audio failed");
+                    return false;
+                }
+                writeDiagnostic("rollback-capture-lockstep-fallback", true);
+                runtime.rollbackSession.reset();
+                runtime.rollbackPrepared = false;
+                runtime.rollbackSessionContext = -1;
+                runtime.rollbackUnavailable = true;
+                return false;
+            }
             failSession("Rollback checkpoint or replay failed");
             return false;
         }

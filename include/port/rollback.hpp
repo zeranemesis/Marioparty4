@@ -76,6 +76,10 @@ public:
     std::uint32_t confirmedFrame() const { return mConfirmedFrame; }
     const PartyBoardRollbackStats &stats() const { return mStats; }
     bool healthy() const { return mHealthy; }
+    // Only a read-only capture failed at the fully reconciled current boundary.
+    // An owner with a non-mutating save callback can retain live state and
+    // leave rollback. Never authorizes recovery from restore/replay failures.
+    bool failedAtConfirmedCapture() const { return mConfirmedCaptureFailure; }
     std::size_t snapshotStorageBytes() const { return mSnapshots.size() * mConfig.snapshotBytes; }
 
 private:
@@ -121,6 +125,7 @@ private:
     PartyBoardRollbackStats mStats {};
     bool mPrepared = false;
     bool mHealthy = true;
+    bool mConfirmedCaptureFailure = false;
 };
 
 bool inputsEqual(const PartyBoardRollbackInput &lhs, const PartyBoardRollbackInput &rhs);

@@ -133,6 +133,7 @@ void Session::reset()
     mEarliestMismatch = UINT32_MAX;
     mStats = {};
     mPrepared = false;
+    mConfirmedCaptureFailure = false;
     mHealthy = mConfig.snapshotBytes != 0 && static_cast<bool>(mCallbacks.saveState)
         && static_cast<bool>(mCallbacks.loadState) && static_cast<bool>(mCallbacks.simulateFrame);
 }
@@ -344,6 +345,7 @@ bool Session::prepare(std::array<PartyBoardRollbackInput, kMaxPlayers> &inputs)
         }
     }
     if (!captureSnapshot(mCurrentFrame)) {
+        mConfirmedCaptureFailure = mConfirmedFrame == mCurrentFrame;
         mHealthy = false;
         return false;
     }
@@ -481,7 +483,35 @@ bool runSelfTest()
     if (!failed.submitInput(0, 0, {}) || !failed.advance()) return false;
     failReplay = true;
     if (!failed.submitInput(1, 0, testInput(0, 1)) || failed.reconcile()
-        || failed.healthy() || failed.confirmedFrame() != 0) return false;
+        || failed.healthy() || failed.confirmedFrame() != 0
+        || failed.failedAtConfirmedCapture()) return false;
+
+    // A checkpoint failure at a confirmed boundary leaves the live state
+    // usable. The same failure with outstanding predictions must stay fatal.
+    failReplay = false;
+    bool failCapture = false;
+    auto captureCallbacks = failureCallbacks;
+    captureCallbacks.saveState = [&](void *p, std::size_t n) {
+        if (failCapture || n != sizeof(dummy)) return false;
+        std::memcpy(p, &dummy, n); return true;
+    };
+    Session confirmedCapture({2, 6, sizeof(dummy)}, captureCallbacks);
+    if (!confirmedCapture.submitInput(0, 0, {})
+        || !confirmedCapture.submitInput(1, 0, {}) || !confirmedCapture.advance()) return false;
+    const auto retainedState = dummy;
+    failCapture = true;
+    if (confirmedCapture.advance() || confirmedCapture.healthy()
+        || !confirmedCapture.failedAtConfirmedCapture()
+        || confirmedCapture.currentFrame() != 1 || confirmedCapture.confirmedFrame() != 1
+        || dummy != retainedState) return false;
+    confirmedCapture.reset();
+    if (confirmedCapture.failedAtConfirmedCapture()) return false;
+    failCapture = false;
+    Session predictedCapture({2, 6, sizeof(dummy)}, captureCallbacks);
+    if (!predictedCapture.submitInput(0, 0, {}) || !predictedCapture.advance()) return false;
+    failCapture = true;
+    if (predictedCapture.advance() || predictedCapture.healthy()
+        || predictedCapture.failedAtConfirmedCapture()) return false;
 
     constexpr std::uint32_t kFrames = 180;
     constexpr std::uint32_t kRemoteDelay = 5;

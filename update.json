@@ -1,6 +1,6 @@
 {
-  "version": "0.15.3",
+  "version": "0.15.4",
   "downloadUrl": "https://github.com/zeranemesis/Marioparty4/raw/refs/heads/audio-local/dist/PartyBoard-rollback-etape15-correctifs.zip",
-  "sha256": "866BEE208AC5DA9ECE995C5AED7F946BBADE8F187A4749E5F0F08697B0AB1AAE",
-  "notes": "Correction du blocage au démarrage du rollback : le système audio utilise désormais la bonne image réseau, y compris après une transition."
+  "sha256": "AC9A294786FBDE245F40BC1A82A7E89ABD8BF3C0B2E051CAA2112C360AAE87C7",
+  "notes": "Rollback : poursuite en mode synchronisé si une sauvegarde échoue sur un état entièrement confirmé. Diagnostic détaillé des échecs de capture."
 }

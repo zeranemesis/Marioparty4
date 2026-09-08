@@ -15,7 +15,7 @@ sealed class UpdateInfo {
 }
 
 static class UpdateService {
-    public const string CurrentVersion = "0.15.3";
+    public const string CurrentVersion = "0.15.4";
     const string ManifestUrl = "https://raw.githubusercontent.com/zeranemesis/Marioparty4/audio-local/update.json";
 
     static string Json(string text, string key) {
