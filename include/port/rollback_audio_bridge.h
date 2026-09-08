@@ -15,6 +15,8 @@ extern "C" {
  * bridge per rollback session, opens/closes every simulated tick (including
  * replay), then confirms only Session::confirmedFrame(). */
 bool PartyBoard_RollbackAudioBridgeStart(void);
+/* Keep absolute network frames for tickets across successive rollback windows. */
+bool PartyBoard_RollbackAudioBridgeStartAtFrame(u32 firstFrame);
 bool PartyBoard_RollbackAudioBridgeFrameBegin(u32 frame);
 bool PartyBoard_RollbackAudioBridgeFrameEnd(void);
 bool PartyBoard_RollbackAudioBridgeConfirm(u32 exclusiveFrame);

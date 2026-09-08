@@ -21,8 +21,10 @@ struct ConfirmedEffect {
 // might already have happened and retrying could duplicate external effects.
 class ConfirmedEffects {
 public:
-    explicit ConfirmedEffects(std::size_t maximumFrames = 13, std::size_t maximumEvents = 1024)
-        : mMaximumFrames(maximumFrames), mMaximumEvents(maximumEvents) {}
+    explicit ConfirmedEffects(std::size_t maximumFrames = 13, std::size_t maximumEvents = 1024,
+        std::uint32_t firstFrame = 0)
+        : mMaximumFrames(maximumFrames), mMaximumEvents(maximumEvents),
+          mCommitted(firstFrame), mNextFrame(firstFrame) {}
     ConfirmedEffects(const ConfirmedEffects &) = delete;
     ConfirmedEffects &operator=(const ConfirmedEffects &) = delete;
 

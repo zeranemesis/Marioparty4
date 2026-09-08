@@ -27,8 +27,9 @@ struct FxObservation { FxObservationState state; std::int32_t status = 0, error 
 // No group loads, music, streams, listeners or existing native voices adopted.
 class ConfirmedAudioFx {
 public:
-    explicit ConfirmedAudioFx(FxBackend backend, std::size_t maxVoices = 512)
-        : mBackend(std::move(backend)), mMaxVoices(maxVoices) {}
+    explicit ConfirmedAudioFx(FxBackend backend, std::size_t maxVoices = 512,
+        std::uint32_t firstFrame = 0)
+        : mBackend(std::move(backend)), mQueue(13, 1024, firstFrame), mMaxVoices(maxVoices) {}
     bool beginFrame(std::uint32_t frame) {
         if (!healthy() || mBusy || mOpen || frame > 0x3ffffeu || !mQueue.beginFrame(frame)) return fail();
         for (auto it = mVoices.begin(); it != mVoices.end();) {

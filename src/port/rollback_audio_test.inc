@@ -131,6 +131,36 @@ static bool runAudioAdapterTests(unsigned &checks) {
         FX_CHECK(longRun.endFrame()); FX_CHECK(longRun.confirmThrough(frame + 1));
         FX_CHECK(longRun.retire(ticket)); FX_CHECK(longRun.voiceCount() == 0);
     }
+    // A live rollback window starts after lockstep, including after transitions.
+    // Replaying its first frame must replace predictions and emit only once.
+    for (const unsigned base : {2u, 12000u}) {
+        const auto beforeWindow = calls.size();
+        ConfirmedAudioFx window(backend, 512, base);
+        FX_CHECK(window.confirmThrough(base));
+        FX_CHECK(window.beginFrame(base));
+        const auto predicted = window.play(10); FX_CHECK(predicted);
+        FX_CHECK(window.endFrame());
+        FX_CHECK(window.beginFrame(base));
+        const auto correctedWindow = window.play(20); FX_CHECK(correctedWindow);
+        FX_CHECK(correctedWindow.value == predicted.value);
+        FX_CHECK(correctedWindow.value == ((base + 1) << 8));
+        FX_CHECK(window.endFrame());
+        FX_CHECK(calls.size() == beforeWindow);
+        FX_CHECK(window.confirmThrough(base + 1));
+        FX_CHECK(calls.size() == beforeWindow + 1 && calls.back()[1] == 20);
+        FX_CHECK(window.confirmThrough(base + 1));
+        FX_CHECK(calls.size() == beforeWindow + 1);
+        FX_CHECK(window.beginFrame(base + 1));
+        FX_CHECK(window.stop(correctedWindow)); FX_CHECK(window.endFrame());
+        FX_CHECK(window.confirmThrough(base + 2)); FX_CHECK(window.close());
+
+        ConfirmedAudioFx past(backend, 512, base);
+        FX_CHECK(!past.beginFrame(base - 1));
+        ConfirmedAudioFx gap(backend, 512, base);
+        FX_CHECK(!gap.beginFrame(base + 1));
+        ConfirmedAudioFx premature(backend, 512, base);
+        FX_CHECK(!premature.confirmThrough(base + 1));
+    }
 #undef FX_CHECK
     return ok;
 }

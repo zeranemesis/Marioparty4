@@ -558,7 +558,9 @@ bool ensureRollbackSession()
             throw std::runtime_error("rollback audio end failed");
     };
     try {
-        if (!PartyBoard_RollbackAudioBridgeStart()) return false;
+        // Rollback can arm after lockstep has already advanced the wire clock.
+        // Audio confirmation and tickets use that same absolute frame domain.
+        if (!PartyBoard_RollbackAudioBridgeStartAtFrame(gRuntime.rollbackBaseFrame)) return false;
         auto session = std::make_unique<rollback::Session>(
             rollback::Config {2, 6, snapshotBytes}, std::move(callbacks));
         if (!session->healthy()) {

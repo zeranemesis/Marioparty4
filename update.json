@@ -1,6 +1,6 @@
 {
-  "version": "0.15.2",
+  "version": "0.15.3",
   "downloadUrl": "https://github.com/zeranemesis/Marioparty4/raw/refs/heads/audio-local/dist/PartyBoard-rollback-etape15-correctifs.zip",
-  "sha256": "4D58A516AD5B88BF32B7BB96B853C84D3AA29171C3501691A5381E542C852E54",
-  "notes": "Interpolation haute fréquence améliorée : ombres alignées, transitions de visibilité sécurisées et brouillard synchronisé avec la caméra."
+  "sha256": "866BEE208AC5DA9ECE995C5AED7F946BBADE8F187A4749E5F0F08697B0AB1AAE",
+  "notes": "Correction du blocage au démarrage du rollback : le système audio utilise désormais la bonne image réseau, y compris après une transition."
 }

@@ -58,9 +58,12 @@ FxParameter decodeParameter(s32 parameter)
 }
 
 extern "C" bool PartyBoard_RollbackAudioBridgeStart(void)
+{ return PartyBoard_RollbackAudioBridgeStartAtFrame(0); }
+
+extern "C" bool PartyBoard_RollbackAudioBridgeStartAtFrame(u32 firstFrame)
 {
-    if (gAudioBridge) return false;
-    try { gAudioBridge = std::make_unique<ConfirmedAudioFx>(makeNativeFxBackend()); }
+    if (gAudioBridge || firstFrame > 0x3ffffeu) return false;
+    try { gAudioBridge = std::make_unique<ConfirmedAudioFx>(makeNativeFxBackend(), 512, firstFrame); }
     catch (...) { return false; }
     return true;
 }
@@ -135,6 +138,24 @@ extern "C" bool PartyBoard_RollbackAudioSelfTest(void) {
     /* A stale ticket after teardown must never reach msmSeStop/status. */
     HuAudFXStop(handle);
     ok &= HuAudFXStatusGet(handle) == MSM_SE_DONE;
+    // Regression: the reported live session armed audio at wire frame 2.
+    for (const u32 base : {2u, 12000u}) {
+        ok &= PartyBoard_RollbackAudioBridgeStartAtFrame(base);
+        ok &= PartyBoard_RollbackAudioBridgeConfirm(base);
+        ok &= PartyBoard_RollbackAudioBridgeFrameBegin(base);
+        const s32 predicted = HuAudFXPlayVolPan(INT32_MAX, 100, 40);
+        ok &= PartyBoard_RollbackAudioBridgeIsVirtual(predicted);
+        ok &= PartyBoard_RollbackAudioBridgeFrameEnd();
+        ok &= PartyBoard_RollbackAudioBridgeFrameBegin(base);
+        ok &= HuAudFXPlayVolPan(INT32_MAX, 100, 40) == predicted;
+        ok &= PartyBoard_RollbackAudioBridgeFrameEnd();
+        ok &= PartyBoard_RollbackAudioBridgeConfirm(base + 1);
+        ok &= PartyBoard_RollbackAudioBridgeFrameBegin(base + 1);
+        HuAudFXStop(predicted);
+        ok &= PartyBoard_RollbackAudioBridgeFrameEnd();
+        ok &= PartyBoard_RollbackAudioBridgeConfirm(base + 2);
+        ok &= PartyBoard_RollbackAudioBridgeStop();
+    }
     OSReport("Rollback audio adapter: %s (%u mock-backend checks; real HuAud bridge and MusyX invalid-ID path). Confirmed 2D FX, virtual/native handle mapping, deterministic status during simulation; not full audio integration.\n",
         ok ? "PASS" : "FAIL", checks);
     return ok;
