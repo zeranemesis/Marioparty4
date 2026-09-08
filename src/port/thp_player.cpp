@@ -6,6 +6,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <chrono>
 #include <vector>
 
 extern "C" {
@@ -138,6 +139,8 @@ public:
         gain.store(gain_from_volume(volume));
         targetGain.store(gain_from_volume(volume));
         cursor.store(0);
+        audioDriven.store(false);
+        startTime = std::chrono::steady_clock::now();
         stopped.store(false);
         return true;
     }
@@ -164,6 +167,8 @@ public:
         if (stopped.load(std::memory_order_relaxed) || audio.empty()) {
             return;
         }
+        // From here on the mixer owns the playback clock; see elapsed_frames().
+        audioDriven.store(true, std::memory_order_relaxed);
         const uint32_t available = static_cast<uint32_t>(audio.size() / 2);
         uint64_t position = cursor.load(std::memory_order_relaxed);
         int current = gain.load(std::memory_order_relaxed);
@@ -193,21 +198,40 @@ public:
         rampRemaining.store(remaining, std::memory_order_relaxed);
     }
 
+    /* Playback position, in video frames.  The audio mixer is the reference
+     * clock whenever it is actually running, because that keeps picture and
+     * sound locked together.  It is not always running: a movie with no audio
+     * track, or one started while the mixer is idle, would never advance, and
+     * the caller's `while (!HuTHPEndCheck())` loop would hang the game for
+     * good.  Fall back to the monotonic clock in that case. */
+    uint64_t elapsed_frames() const {
+        if (audioDriven.load(std::memory_order_relaxed)) {
+            const uint64_t sample = cursor.load(std::memory_order_relaxed);
+            return sample * static_cast<uint64_t>(fps * 100000.0f) / (uint64_t(rate) * 100000);
+        }
+        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - startTime).count();
+        if (elapsed <= 0) {
+            return 0;
+        }
+        return static_cast<uint64_t>(static_cast<double>(elapsed) * fps / 1000000.0);
+    }
+
     bool ended() const {
         if (looped) {
             return false;
         }
-        const uint64_t sample = cursor.load(std::memory_order_relaxed);
-        const uint64_t frame = sample * static_cast<uint64_t>(fps * 1000.0f) / (uint64_t(rate) * 1000);
-        return stopped.load(std::memory_order_relaxed) || frame >= frames.size();
+        return stopped.load(std::memory_order_relaxed) || elapsed_frames() >= frames.size();
     }
 
     int current_frame() const {
-        const uint64_t sample = cursor.load(std::memory_order_relaxed);
         if (frames.empty()) {
             return 0;
         }
-        const uint64_t frame = sample * static_cast<uint64_t>(fps * 100000.0f) / (uint64_t(rate) * 100000);
+        const uint64_t frame = elapsed_frames();
+        if (looped) {
+            return static_cast<int>(frame % frames.size());
+        }
         return static_cast<int>(std::min<uint64_t>(frame, frames.size() - 1));
     }
 
@@ -217,6 +241,8 @@ public:
 
     void restart() {
         cursor.store(0, std::memory_order_relaxed);
+        audioDriven.store(false, std::memory_order_relaxed);
+        startTime = std::chrono::steady_clock::now();
         stopped.store(false, std::memory_order_relaxed);
     }
 
@@ -499,6 +525,8 @@ private:
     float fps = 0.0f;
     int textureSlot = 0;
     int uploadedFrame = -1;
+    std::atomic<bool> audioDriven{false};
+    std::chrono::steady_clock::time_point startTime{};
 };
 
 std::mutex g_movieMutex;

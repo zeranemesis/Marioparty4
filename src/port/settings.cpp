@@ -1,4 +1,4 @@
-#include "port/settings.h"
+﻿#include "port/settings.h"
 #include "port/config.hpp"
 #include "port/widescreen.h"
 #include "port/netplay_runtime.h"
@@ -19,6 +19,8 @@ UserSettings g_userSettings = {
         .enableAdaptiveWidescreen {"video.enableAdaptiveWidescreen", false},
         .enableFpsOverlay {"game.enableFpsOverlay", false},
         .fpsOverlayCorner {"game.fpsOverlayCorner", 0},
+        // Off by default: it costs GPU time and needs an RTX card.
+        .enableRayTracedAo {"video.enableRayTracedAo", false},
     },
 
     .audio = {
@@ -95,6 +97,7 @@ void registerSettings() {
     Register(g_userSettings.video.enableAdaptiveWidescreen);
     Register(g_userSettings.video.enableFpsOverlay);
     Register(g_userSettings.video.fpsOverlayCorner);
+    Register(g_userSettings.video.enableRayTracedAo);
 
     // Audio
     Register(g_userSettings.audio.masterVolume);

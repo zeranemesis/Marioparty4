@@ -431,6 +431,13 @@ SettingsWindow::SettingsWindow(bool prelaunch)
                 .helpText = "Synchronizes the frame rate to your monitor's refresh rate.",
                 .onChange = [](bool value) { aurora_enable_vsync(value); },
             });
+        config_bool_select(leftPane, rightPane, getSettings().video.enableRayTracedAo,
+            {
+                .key = "Ray Traced AO",
+                .helpText = "Hardware ray traced ambient occlusion. Requires a Windows PC with an "
+                            "NVIDIA RTX card; has no effect otherwise.",
+                .onChange = [](bool value) { aurora_set_ray_traced_ao(value); },
+            });
         leftPane.register_control(leftPane.add_select_button({
                                       .key = "Frame Rate",
                                       .getValue = [] {

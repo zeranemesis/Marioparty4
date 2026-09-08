@@ -19,6 +19,7 @@
 #include <SDL3/SDL_filesystem.h>
 #include <aurora/aurora.h>
 #include <aurora/event.h>
+#include <aurora/gfx.h>
 #include <dolphin/gx/GXAurora.h>
 #include <dolphin/os.h>
 #include <dolphin/pad.h>
@@ -471,6 +472,9 @@ extern "C" int port_main(int argc, char* argv[]) {
         config.allowTextureDumps = false;
         auroraInfo = aurora_initialize(argc, argv, &config);
     }
+
+    // Apply the saved ray tracing preference; a no-op without DXR support.
+    aurora_set_ray_traced_ao(partyboard::getSettings().video.enableRayTracedAo);
 
 #ifdef PARTY_BOARD_DISCORD
     partyboard::discord::initialize();

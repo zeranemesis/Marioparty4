@@ -60,6 +60,9 @@ struct UserSettings {
         ConfigVar<bool> enableAdaptiveWidescreen;
         ConfigVar<bool> enableFpsOverlay;
         ConfigVar<int> fpsOverlayCorner;
+        // Hardware ray traced ambient occlusion (DXR). Windows + RTX only;
+        // silently inert elsewhere. See docs/RAYTRACING.md.
+        ConfigVar<bool> enableRayTracedAo;
     } video;
 
     struct {
