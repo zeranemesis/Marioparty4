@@ -1265,6 +1265,17 @@ extern "C" bool PartyBoard_NetplayRuntimeRunSelfTest(void)
     const auto savedUnlock = unlock;
     const auto savedStat = GWGameStat;
     bool availabilityPassed = true;
+    auto &skipBoot = partyboard::getSettings().backend.skipBootSequence;
+    const auto savedSkipBoot = skipBoot;
+    for (const bool online : {false, true}) {
+        gRuntime.enabled = online;
+        for (const bool skip : {false, true}) {
+            skipBoot.setValue(skip);
+            availabilityPassed &= partyboard_settings_skipBootSequence() == (!online && skip)
+                && skipBoot.getValue() == skip;
+        }
+    }
+    skipBoot = savedSkipBoot;
     for (const bool online : {false, true}) {
         gRuntime.enabled = online;
         for (const bool cheat : {false, true}) {

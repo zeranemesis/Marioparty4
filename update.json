@@ -1,6 +1,6 @@
 {
-  "version": "0.15.5",
+  "version": "0.15.6",
   "downloadUrl": "https://github.com/zeranemesis/Marioparty4/raw/refs/heads/audio-local/dist/PartyBoard-rollback-etape15-correctifs.zip",
-  "sha256": "E091F67670E129B3ACBD03596055AD690864889C27C0920F93E5A96D322596BF",
-  "notes": "Correction de la fermeture audio du rollback pour les sons déjà terminés. Les parties en ligne utilisent un profil neuf commun, sans charger les sauvegardes locales."
+  "sha256": "C9D37CEEE2DB09997724B1D26BB911EED6D33811EB438C47B4332FAFCBB6C310",
+  "notes": "Le lanceur utilise la synchronisation sans prediction avec un delai de trois images. Le rollback experimental ne s'active plus automatiquement. Les deux PC suivent la meme sequence de demarrage."
 }

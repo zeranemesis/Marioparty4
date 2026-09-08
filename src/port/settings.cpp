@@ -153,7 +153,9 @@ bool partyboard_settings_enableTurboKeybind(void)
 
 bool partyboard_settings_skipBootSequence(void)
 {
-    return partyboard::getSettings().backend.skipBootSequence;
+    // Both peers must run the same startup ticks regardless of offline options.
+    return !PartyBoard_NetplayEnabled()
+        && partyboard::getSettings().backend.skipBootSequence.getValue();
 }
 
 bool partyboard_settings_unlock_all_minigames(void)

@@ -107,8 +107,8 @@ static class Tests {
                         impairment.ResetControl=resetTls;
                         using(var hr=new ManualResetEventSlim())using(var cr=new ManualResetEventSlim()) {
                         var profile=new PlayerInfo("Test",Wire.Hash(new byte[]{1,2,3}),3);
-                        var hl=new Lobby(true,profile,a.SendControl,id=>{hi=id;hg=new GameStart(id);hg.Launch("--netplay-host "+gamePort+" --netplay-loopback --netplay-full --netplay-rollback --netplay-pad 1 --netplay-delay 3 --netplay-probe-realtime","barrier-test-only",true,diagHost.NativePath);hr.Set();},id=>{a.CommitGame();hg.Commit(id);},()=>{});
-                        var cl=new Lobby(false,profile,b.SendControl,id=>{ci=id;cg=new GameStart(id);cg.Launch("--netplay-join 127.0.0.1:"+b.LocalPort+" --netplay-loopback --netplay-full --netplay-rollback --netplay-pad 1 --netplay-delay 3 --netplay-probe-realtime","barrier-test-only",true,diagGuest.NativePath);cr.Set();},id=>{b.CommitGame();cg.Commit(id);},()=>{});
+                        var hl=new Lobby(true,profile,a.SendControl,id=>{hi=id;hg=new GameStart(id);hg.Launch(GameStart.OnlineArguments("--netplay-host "+gamePort)+" --netplay-probe-realtime","barrier-test-only",true,diagHost.NativePath);hr.Set();},id=>{a.CommitGame();hg.Commit(id);},()=>{});
+                        var cl=new Lobby(false,profile,b.SendControl,id=>{ci=id;cg=new GameStart(id);cg.Launch(GameStart.OnlineArguments("--netplay-join 127.0.0.1:"+b.LocalPort)+" --netplay-probe-realtime","barrier-test-only",true,diagGuest.NativePath);cr.Set();},id=>{b.CommitGame();cg.Commit(id);},()=>{});
                         a.Control=hl.Receive;b.Control=cl.Receive;a.Ping=value=>{Interlocked.Exchange(ref ping,value);Interlocked.Increment(ref pingCount);};
                         var at=a.Run();var bt=b.Run();hl.Announce();cl.Announce();
                         Check(SpinWait.SpinUntil(()=>hl.CanStart,5000),"encrypted lobby metadata exchange");
@@ -139,6 +139,8 @@ static class Tests {
                                 Check(impairment.ResetInjected && !a.ControlConnected && !b.ControlConnected,"both TLS connections deliberately reset during committed game");
                                 Check(!at.IsCompleted && !bt.IsCompleted && Volatile.Read(ref pingCount)>pingsAtReset+5,"UDP game and fresh ping continue after TLS reset");
                                 Check(diagHost.Read().Contains("event=control_lost") && diagGuest.Read().Contains("event=control_lost"),"TLS loss diagnosed separately on both peers");
+                                Check(diagHost.Read().Contains("rollback_active=0") && diagGuest.Read().Contains("rollback_active=0")
+                                    && !diagHost.Read().Contains("rollback_active=1") && !diagGuest.Read().Contains("rollback_active=1"),"production launch remains in lockstep throughout impaired transport test");
                                 Console.WriteLine("Impaired UDP: dropped="+impairment.Dropped+", reordered="+impairment.Reordered+", 6.5-second outage recovered at frame 2364.");
                                 Console.WriteLine("TLS reset at frame 1200: both games completed frame 2400 and UDP ping continued.");
                             }finally {if(!h.HasExited)h.Kill();if(!c.HasExited)c.Kill();hg.Dispose();cg.Dispose();h.Dispose();c.Dispose();}
@@ -173,8 +175,11 @@ static class Tests {
         })) Reject(()=>gateway.Pcp(120),"excessive lease refused");
         Check(cleanup==1,"excessive lease cleaned up");
     }
-    static Process Probe(string root,string args) {return Process.Start(new ProcessStartInfo(Path.Combine(root,"partyboard.exe"),args+" --netplay-loopback --netplay-full --netplay-rollback --netplay-pad 1 --netplay-delay 3 --netplay-pad-probe"){WorkingDirectory=root,UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true});}
+    static Process Probe(string root,string args) {return Process.Start(new ProcessStartInfo(Path.Combine(root,"partyboard.exe"),GameStart.OnlineArguments(args)+" --netplay-pad-probe"){WorkingDirectory=root,UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true});}
     static void LobbyRules() {
+        var launch=GameStart.OnlineArguments("--netplay-host 32100");
+        Check(launch.Contains("--netplay-full") && launch.Contains("--netplay-delay 3")
+            && !launch.Contains("--netplay-rollback"),"normal lobby uses lockstep without automatic rollback");
         var same=Wire.Hash(new byte[]{1,2,3});var profile=new PlayerInfo("Camille",same,3);
         var hq=new Queue<byte[]>();var cq=new Queue<byte[]>();Guid hId=Guid.Empty,cId=Guid.Empty;int starts=0,loads=0;
         var h=new Lobby(true,profile,b=>hq.Enqueue(b),id=>{hId=id;loads++;},id=>starts++,()=>{});
@@ -233,5 +238,3 @@ static class Tests {
     public static int Run() {try{Reports();Codecs();Leases();LobbyRules();Discs();CancelLoading();Tls(0,true,true);for(int mode=0;mode<4;mode++)Tls(mode,mode==0);Console.WriteLine("PASS: "+checks+" checks; host-only lobby start, full disk hash and locks, UDP ping, native loading barrier/cancel, TLS loss before/after commit and authenticated UDP for 4800 native ticks. No real router/firewall changes.");return 0;}catch(Exception e){Console.Error.WriteLine("FAIL: "+e.ToString());return 1;}}
 }
 }
-
-

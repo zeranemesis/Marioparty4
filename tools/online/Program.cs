@@ -154,7 +154,8 @@ sealed class Session : IDisposable {
         gameStart=new GameStart(attempt);
         cancel.Token.ThrowIfCancellationRequested();
         string args=Host ? "--netplay-host "+HostGamePort : "--netplay-join 127.0.0.1:"+Bridge.LocalPort;
-        args+=" --netplay-loopback --netplay-full --netplay-rollback --netplay-pad 1 --netplay-delay 3";
+        args=GameStart.OnlineArguments(args);
+        Report.Write("netplay_mode=lockstep input_delay_frames=3");
         gameStart.Launch(args,disc.Path,false,Report.NativePath);Game=gameStart.Process;
         gameStart.WaitReady(cancel.Token);Report.Write("native_ready="+attempt);Lobby.Loaded(attempt);
         Game.WaitForExit();Report.Write("native_exit="+Game.ExitCode);if(!disposed){failed("La partie est terminée. Recréez un salon pour rejouer.");Dispose();}
