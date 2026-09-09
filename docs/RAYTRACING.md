@@ -887,51 +887,65 @@ d'une fois par image, et les deux appels ne voient pas la même géométrie, don
 ils se contredisent. C'est antérieur à ce travail — l'ancien code reconstruisait
 à chaque appel aussi — mais c'est la prochaine chose à regarder.
 
-## L'instancing par draw bloque le GPU — désactivé par défaut
+## Le blocage GPU de l'instancing, et sa cause
 
-Le gain mesuré au chapitre précédent est réel, mais le chemin qui le produit
-plante : `DXGI_ERROR_DEVICE_HUNG` après quelques milliers de frames, de façon
-reproductible, au moment où le joueur valide sa sauvegarde.
+Signalé comme un plantage à la validation de la sauvegarde. Reproduit, puis
+réduit par bissection — **avec le ray tracing réellement actif à chaque étape** —
+au commit des structures par groupe. Puis, à ce commit, par une série de
+commutateurs qui isolent chaque moitié du changement :
 
-### Comment il a été isolé
-
-Bissection sur les commits d'aurora, **avec le ray tracing réellement actif** à
-chaque étape :
-
-| commit | résultat |
+| configuration | résultat |
 |---|---|
-| `3e7b4f1` matériaux/normales | 26 étapes |
-| `c28acef` espace de référence | 26 étapes |
-| `a757ea8` structures par groupe | **mort à l'étape 5-11** |
+| tout cuit, un groupe (comportement d'avant) | 26 étapes |
+| instancing, mais **sans aucun tracé** | **mort** |
+| instancing, avec une barrière entre chaque build | **mort** |
+| 32 BLAS construits, mais TLAS à **une seule instance** | 26 étapes |
 
-Puis, au même commit, en forçant tous les draws à être cuits — ce qui fusionne
-la scène en un seul groupe à transformation identité, soit le comportement
-d'avant, atteint par le même code : **26 étapes**.
+Le premier test écarte le reste du commit, le deuxième écarte la traversée, le
+troisième écarte la concurrence des builds. Le quatrième désigne le coupable :
+le TLAS multi-instances.
 
-Le défaut est donc dans le chemin multi-BLAS / multi-instances, pas dans
-l'émission en espace modèle ni dans le reste du commit.
+### La cause
 
-### Ce qui a été écarté
+Le test de réutilisation comparait le hash des positions. Or ces positions sont
+désormais en espace **modèle**, donc indépendantes de la caméra — c'est tout
+l'intérêt. Mais le **découpage en groupes**, lui, dépend des transformations :
+deux draws adjacents ne fusionnent que tant que leurs matrices coïncident.
 
-- **Charge de rendu.** Le blocage persiste à `internalResolutionScale = 2` avec
-  des ombres à 1×.
-- **Plages de triangles hors limites.** Chaque groupe est validé avant
-  construction ; aucune violation.
-- **Transformations dégénérées.** Une instance TLAS singulière est un
-  comportement indéfini, et le jeu laisse des slots `pnMtx` à zéro entre deux
-  scènes. Un garde a été ajouté — il ne change rien au blocage, mais il est
-  correct et reste en place.
+Quand la caméra bouge, le découpage change alors que le hash ne bouge pas. Les
+BLAS ne sont donc pas reconstruits, mais leurs offsets sont recalculés pour le
+nouveau découpage : chaque instance pointe alors sur une adresse où rien n'a été
+construit. Ce n'est pas une image fausse, c'est un GPU bloqué.
+
+Le correctif est un second hash, sur les bornes des groupes
+(`firstTriangle`, `triangleCount`), exigé identique lui aussi pour réutiliser.
+Les transformations en sont volontairement exclues : elles changent à chaque
+frame et les inclure supprimerait toute réutilisation.
+
+### Ce qui a été écarté en chemin
+
+- **Charge de rendu** : bloque aussi à `internalResolutionScale = 2`, ombres 1×.
+- **Plages hors limites, transformations non finies** : validées avant chaque
+  construction, aucune violation.
+- **Sous-allocation** : 32 groupes, 3323 Ko, 3584 à 307712 octets par BLAS,
+  scratch 779 Ko — rien d'anormal.
+- **Convention de matrice** : `flatten()` écrit `m0` en première ligne, et
+  `transform()` — connue correcte — fait bien le produit scalaire de `m0` avec
+  `(p,1)`. Cohérent avec le format ligne-majeur attendu par D3D12.
+- **Matrices singulières** : un garde a été ajouté, correct mais sans effet sur
+  le blocage. Le jeu laisse des slots `pnMtx` à zéro entre deux scènes et une
+  instance TLAS singulière est un comportement indéfini, donc il reste.
+
+### Deux bugs trouvés au passage
+
+Le rebond indirect et la réflexion indexaient les couleurs avec
+`CommittedPrimitiveIndex()` seul. Un index de primitive est **local à sa
+géométrie** : sans l'offset d'instance, les deux lisaient la couleur d'une autre
+surface. Correct tant qu'il n'y avait qu'une instance, faux depuis.
 
 ### Un piège de protocole
 
-Mes premiers tests « ray tracing désactivé » avaient en réalité le ray tracing
-**actif** : le maître est l'OR des trois réglages, et `enableRayTracedReflections`
-était absent de la config, donc à `true` par défaut. Trois runs ont été
-interprétés à l'envers avant que ça se voie.
-
-### État
-
-L'instancing est conservé mais **opt-in** via `AURORA_RT_INSTANCES=1`, avec un
-avertissement au démarrage. Le défaut est le chemin stable : un groupe, une
-transformation identité, reconstruction quand la géométrie change. Le gain de
-réutilisation attendra une explication du blocage.
+Mes trois premiers tests « ray tracing désactivé » avaient en réalité le ray
+tracing **actif** : le maître est l'OR des trois réglages, et
+`enableRayTracedReflections` était absent de la config, donc à `true` par défaut.
+Trois runs interprétés à l'envers avant que ça se voie.
