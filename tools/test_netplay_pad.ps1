@@ -41,7 +41,10 @@ $cases = @(
     @{ Delay = 8; Extra = '' },
     @{ Delay = 0; Extra = '--netplay-probe-context-mismatch' },
     @{ Delay = 3; Extra = '--netplay-probe-context-mismatch' },
-    @{ Delay = 3; Extra = '--netplay-probe-disconnect' }
+    @{ Delay = 3; Extra = '--netplay-probe-disconnect' },
+    @{ Delay = 0; Extra = '--netplay-probe-desync' },
+    @{ Delay = 3; Extra = '--netplay-probe-desync' },
+    @{ Delay = 8; Extra = '--netplay-probe-desync' }
 )
 foreach ($case in $cases) {
     $delay = $case.Delay
@@ -55,7 +58,8 @@ foreach ($case in $cases) {
         $peers += Start-Probe "--netplay-host $port --netplay-delay $delay --netplay-pad 1 $extra"
         $peers += Start-Probe "--netplay-join 127.0.0.1:$port --netplay-delay $delay --netplay-pad 4 $extra"
         foreach ($peer in $peers) {
-            if (-not $peer.Process.WaitForExit(30000)) { throw 'Netplay PAD probe timed out.' }
+            $deadlineMs = if ($extra -eq '--netplay-probe-disconnect') { 145000 } else { 30000 }
+            if (-not $peer.Process.WaitForExit($deadlineMs)) { throw 'Netplay PAD probe timed out.' }
             Write-Output $peer.Out.Result
             if ($peer.Err.Result) { Write-Output $peer.Err.Result }
             if ($peer.Process.ExitCode -ne 0) { throw "Netplay PAD probe failed (delay $delay): $($peer.Process.ExitCode)" }

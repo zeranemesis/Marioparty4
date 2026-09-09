@@ -5,6 +5,7 @@
 #include "port/netplay_transport.hpp"
 #include "port/netplay_pad.hpp"
 #include "port/netplay_progress.hpp"
+#include "port/netplay_canonical.hpp"
 #include "port/rollback.hpp"
 #include "port/rollback_audio.hpp"
 #include "port/rollback_audio_bridge.h"
@@ -23,6 +24,7 @@ extern "C" {
 #include "game/pad.h"
 }
 
+#include <SDL3/SDL_timer.h>
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -46,6 +48,10 @@ extern "C" void frand_state_set(u32 state);
 extern "C" s32 rand8_state_get(void);
 extern "C" void rand8_state_set(s32 state);
 extern "C" u32 GlobalCounter;
+extern "C" u32 frand(void);
+extern "C" s32 rand8(void);
+extern "C" void BoardRandInit(void);
+extern "C" u32 BoardRand(void);
 extern "C" void *HuMemHeapPtrGet(int heap);
 extern "C" std::size_t HuMemHeapSizeGet(int heap);
 extern "C" std::size_t HuPrcSnapshotSizeGet(void);
@@ -67,7 +73,6 @@ constexpr std::uint32_t kRuntimeConfigMagic = 0x4e500000u; // "NP" + delay
 constexpr std::uint32_t kRuntimeFullGameFlag = 0x00010000u;
 constexpr std::uint32_t kRuntimeRollbackFlag = 0x00020000u;
 constexpr std::uint32_t kRuntimeConfigMagicMask = 0xfffc0000u;
-constexpr std::uint32_t kRetransmitRequest = 0x52545831u; // RTX1
 constexpr std::size_t kHistorySize = 256;
 constexpr std::uint8_t kDefaultInputDelay = 3;
 constexpr std::uint8_t kMaximumInputDelay = 8;
@@ -83,6 +88,12 @@ struct InputSlot {
 struct Runtime {
     UdpTransport transport;
     SessionProgress progress;
+    StateHistory states;
+    std::array<CanonicalState, kStateHistorySize> canonicalHistory {};
+    bool lockstepPrepared = false;
+    bool desyncProbe = false;
+    std::uint64_t lastStateRepairMs = 0;
+    std::uint32_t stateRepairCursor = 0;
     std::string error;
     bool disconnectProbe = false;
     bool contextMismatchProbe = false;
@@ -187,7 +198,9 @@ void writeDiagnostic(const char *event, bool force = false)
 #endif
 }
 
-void failSession(const char *reason)
+void serviceStateRepair(bool force = false);
+
+void failSession(const char *reason, bool retainTransport = false)
 {
     if (!gRuntime.error.empty()) return;
     gRuntime.error = reason;
@@ -195,7 +208,7 @@ void failSession(const char *reason)
     std::fprintf(stderr, "[NET] ERROR frame=%u: %s. Simulation stopped; close the game to restart the session.\n",
         gRuntime.frame, reason);
     PADControlMotor(gRuntime.localPad, PAD_MOTOR_STOP_HARD);
-    gRuntime.transport.close();
+    if (!retainTransport) gRuntime.transport.close();
     // Keep enabled: loss of a peer must never silently resume offline play.
 }
 std::array<PADStatus, 4> gPhysicalPads {};
@@ -268,6 +281,10 @@ void resetOverlayTimeline(std::uint8_t contextId)
     gRuntime.rollbackContextReady = false;
     gRuntime.rollbackBaseFrame = 0;
     gRuntime.rollbackSessionContext = -1;
+    gRuntime.states = {};
+    for (auto &state : gRuntime.canonicalHistory) state.fields.clear();
+    gRuntime.lockstepPrepared = false;
+    gRuntime.lastStateRepairMs = 0;
     gRuntime.localHistory = {};
     gRuntime.remoteHistory = {};
     gRuntime.lastRemote = {};
@@ -388,11 +405,12 @@ std::uint32_t runtimeConfigSignature(std::uint8_t inputDelay, std::uint8_t conte
         | (static_cast<std::uint32_t>(contextId) << 8) | inputDelay;
 }
 
-bool sendInput(std::uint32_t frame, const PartyBoardRollbackInput &input, bool requestRetransmit = false)
+bool sendInput(std::uint32_t frame, const PartyBoardRollbackInput &input, bool requestRetransmit = false,
+    const StateDigest *standalone = nullptr)
 {
     // Headless regression: drop this sample until the sender has advanced.
     // Only the retained-history repair can then release the waiting peer.
-    if (gRuntime.probeContext >= 0 && gRuntime.localPlayer == 0
+    if (!standalone && gRuntime.probeContext >= 0 && gRuntime.localPlayer == 0
         && frame == 200 && gRuntime.frame <= 200) return true;
     InputPacket outgoing {};
     outgoing.sessionId = kSessionId;
@@ -400,7 +418,13 @@ bool sendInput(std::uint32_t frame, const PartyBoardRollbackInput &input, bool r
     outgoing.frame = frame;
     outgoing.player = gRuntime.localPlayer;
     outgoing.input = input;
-    outgoing.stateChecksum = requestRetransmit ? kRetransmitRequest : 0;
+    outgoing.type = standalone ? PacketType::State
+        : requestRetransmit ? PacketType::Retransmit : PacketType::Input;
+    if (!gRuntime.rollbackRequested) {
+        outgoing.hashAckNext = gRuntime.states.equalThrough();
+        const auto *state = standalone ? standalone : gRuntime.states.pending();
+        if (state) outgoing.state = *state;
+    }
     const InputSlot *slot = findInput(gRuntime.localHistory, frame);
     outgoing.captureContext = slot ? slot->captureContext : static_cast<std::uint32_t>(gRuntime.observedContext);
     outgoing.configSignature = runtimeConfigSignature(gRuntime.inputDelay, gRuntime.contextId,
@@ -410,6 +434,89 @@ bool sendInput(std::uint32_t frame, const PartyBoardRollbackInput &input, bool r
     const bool sent = !gRuntime.transport.hasPeer() || gRuntime.transport.sendInput(outgoing);
     if (!sent) ++gRuntime.sendFailures;
     return sent;
+}
+
+void serviceStateRepair(bool force)
+{
+    if (gRuntime.rollbackRequested) return;
+    const auto now = monotonicMs();
+    if (!force && now - gRuntime.lastStateRepairMs < 100) return;
+    const auto *state = gRuntime.states.error() != StateFailure::None
+        ? gRuntime.states.getLocal(gRuntime.states.errorFrame()) : gRuntime.states.pending();
+    if (!state && gRuntime.states.captured())
+        state = gRuntime.states.getLocal(gRuntime.states.captured() - 1);
+    if (state) {
+        sendInput(state->frame, {}, false, state);
+        if (gRuntime.states.error() == StateFailure::Desync) {
+            // The peer may still lack an earlier local hash. Cycle the retained
+            // prefix so even loss before the mismatch cannot hide it forever.
+            auto &cursor = gRuntime.stateRepairCursor;
+            if (cursor < gRuntime.states.peerEqualThrough() || cursor > state->frame)
+                cursor = gRuntime.states.peerEqualThrough();
+            if (const auto *old = gRuntime.states.getLocal(cursor++))
+                if (old->frame != state->frame) sendInput(old->frame, {}, false, old);
+        }
+        gRuntime.lastStateRepairMs = now;
+    }
+}
+
+bool checkStateFailure()
+{
+    if (gRuntime.states.error() == StateFailure::None) return true;
+    if (!gRuntime.error.empty()) return false;
+    const auto frame = gRuntime.states.errorFrame();
+    const auto *a = gRuntime.states.getLocal(frame), *b = gRuntime.states.getRemote(frame);
+    char message[1024];
+    std::snprintf(message, sizeof(message),
+        "%s frame=%u context=%u/%u localHash=%016llx remoteHash=%016llx RNG=%08x/%08x:%08x/%08x counter=%u/%u hash_version=%u confirmed_input=%u last_equal_next=%u last_checkpoint=none state_error=%u session=%08x player=%u",
+        gRuntime.states.error() == StateFailure::Desync ? "DESYNC" : "PROTOCOL_STATE",
+        frame, a ? a->context : UINT32_MAX, b ? b->context : UINT32_MAX,
+        static_cast<unsigned long long>(a ? a->hash : 0), static_cast<unsigned long long>(b ? b->hash : 0),
+        a ? a->frand : 0, a ? a->rand8 : 0, b ? b->frand : 0, b ? b->rand8 : 0,
+        a ? a->counter : 0, b ? b->counter : 0, kStateHashVersion,
+        gRuntime.frame ? gRuntime.frame - 1 : UINT32_MAX, gRuntime.states.equalThrough(),
+        static_cast<unsigned>(gRuntime.states.error()), kSessionId, gRuntime.localPlayer);
+    FILE *file = nullptr;
+#ifdef _WIN32
+    const auto *path = _wgetenv(L"PARTYBOARD_NET_DIAGNOSTIC");
+    if (path && *path) file = _wfopen((std::wstring(path) + L".desync").c_str(), L"ab");
+#endif
+    if (file) std::fprintf(file, "%s\n", message);
+    if (a) {
+        const auto &state = gRuntime.canonicalHistory[frame % kStateHistorySize];
+        for (std::size_t i = 0; i < state.fields.size(); ++i) {
+            const auto &field = state.fields[i];
+            std::fprintf(stderr, "[STATE] frame=%u field=%zu name=%s value=%08x\n", frame, i, field.name, field.value);
+            if (file) std::fprintf(file, "STATE frame=%u field=%zu name=%s value=%08x\n", frame, i, field.name, field.value);
+        }
+    }
+    if (file) std::fclose(file);
+    serviceStateRepair(true);
+    failSession(message, gRuntime.states.error() == StateFailure::Desync); // Retry failed digest while stopped.
+    return false;
+}
+
+bool captureCommittedState()
+{
+    const auto frame = gRuntime.frame - 1; // AFTER logic F, BEFORE render/counter publication.
+    StateDigest stamp {frame,
+        static_cast<std::uint32_t>(gRuntime.probeContext >= 0 ? gRuntime.probeContext : PartyBoard_NetplayContextId()),
+        frand_state_get(), static_cast<std::uint32_t>(rand8_state_get()), GlobalCounter};
+    auto state = captureCanonical(stamp);
+    stamp.hash = state.hash;
+    gRuntime.canonicalHistory[frame % kStateHistorySize] = std::move(state);
+    gRuntime.states.capture(stamp);
+    // New frames stream immediately; input traffic repairs the oldest missing
+    // state in parallel. No extra round-trip barrier for each gameplay frame.
+    sendInput(frame, {}, false, &stamp);
+    if (frame % 120 == 0) {
+        char event[160];
+        std::snprintf(event, sizeof(event),
+            "checkpoint hash_frame=%u state_hash=%016llx hash_version=%u equal_next=%u",
+            frame, static_cast<unsigned long long>(stamp.hash), kStateHashVersion, gRuntime.states.equalThrough());
+        writeDiagnostic(event, true);
+    }
+    return checkStateFailure();
 }
 
 bool contextCatchupRequired(bool sawMatchingContext, bool sawDifferentContext)
@@ -479,11 +586,29 @@ void receivePendingPackets()
             std::fputs("Netplay: host random seed changed during the session.\n", stderr);
             continue;
         }
+        if (!gRuntime.rollbackRequested) {
+            gRuntime.states.acknowledge(packet.hashAckNext);
+            gRuntime.states.receive(packet.state);
+            if (!checkStateFailure()) return;
+        }
+        if (packet.type == PacketType::State) continue;
         // A repair can concern an old, current or already captured future tick.
         // Always answer from immutable history, even while we are also waiting.
-        if (packet.stateChecksum == kRetransmitRequest) {
+        if (packet.type == PacketType::Retransmit) {
             if (const auto *old = findInput(gRuntime.localHistory, packet.frame)) {
                 sendInput(packet.frame, old->input);++gRuntime.repairPackets;
+            }
+        }
+        // Validate retained duplicates even after their input frame committed.
+        if (const auto *accepted = findInput(gRuntime.remoteHistory, packet.frame)) {
+            if (!rollback::inputsEqual(accepted->input, packet.input)
+                || accepted->captureContext != packet.captureContext) {
+                char reason[192];
+                std::snprintf(reason, sizeof(reason),
+                    "PROTOCOL input contradiction input_frame=%u player=%u sequence=%u context=%u/%u",
+                    packet.frame, packet.player, packet.sequence, accepted->captureContext, packet.captureContext);
+                failSession(reason);
+                return;
             }
         }
         const bool retainedLateFrame = packet.frame < gRuntime.frame
@@ -766,6 +891,8 @@ extern "C" bool PartyBoard_NetplayConfigureFromArgs(int argc, char **argv)
             gRuntime.disconnectProbe = true;
         } else if (argument == "--netplay-probe-context-mismatch") {
             gRuntime.contextMismatchProbe = true;
+        } else if (argument == "--netplay-probe-desync") {
+            gRuntime.desyncProbe = true;
         } else if (argument == "--netplay-probe-realtime") {
             gRuntime.realtimeProbe = true;
         } else if (argument == "--netplay-host" || argument == "--netplay-join"
@@ -834,7 +961,7 @@ extern "C" bool PartyBoard_NetplayAllowsMultipleInstances(void)
 extern "C" bool PartyBoard_NetplayPreparePads(PADStatus status[4], u32 *rumble, bool startup)
 {
     using namespace partyboard::netplay;
-    if (!gRuntime.error.empty()) return false;
+    if (!gRuntime.error.empty()) { serviceStateRepair(); return false; }
     if (!gRuntime.enabled || (!startup && !gRuntime.fullGame && !PartyBoard_NetplayIsMinigame())) {
         // Mark minigame-only sessions inactive and suspend their watchdog
         // while the local player is navigating unsynchronized menus.
@@ -936,6 +1063,8 @@ extern "C" bool PartyBoard_NetplayTick(void)
         return false;
     }
     receivePendingPackets();
+    serviceStateRepair();
+    if (!runtime.error.empty()) return false;
 
     if (runtime.configMismatch) {
         failSession("Incompatible netplay configuration or random seeds");
@@ -1000,6 +1129,11 @@ extern "C" bool PartyBoard_NetplayTick(void)
         return true;
     }
 
+    // Bound unvalidated progress without overwriting canonical evidence.
+    if (!runtime.rollbackRequested && !runtime.states.canCapture()) {
+        ++runtime.stalledTicks;
+        return false;
+    }
     if (!runtime.localCaptured) {
         runtime.pendingLocal = capturePad(runtime.localPad);
         storeInput(runtime.localHistory, runtime.frame + runtime.inputDelay, runtime.pendingLocal);
@@ -1090,11 +1224,9 @@ extern "C" bool PartyBoard_NetplayTick(void)
     }
     runtime.lastLocal = local;
     runtime.localCaptured = false;
+    runtime.lockstepPrepared = !runtime.rollbackRequested;
     ++runtime.frame;
     runtime.progress.commit(monotonicMs());
-    // Frame-aligned samples permit comparing live RNG/counters across PCs.
-    // Initial handshake seeds alone cannot establish simulation determinism.
-    if (runtime.frame % 120 == 0) writeDiagnostic("checkpoint", true);
     return true;
 }
 
@@ -1102,6 +1234,11 @@ extern "C" bool PartyBoard_NetplayCommitTick(void)
 {
     using namespace partyboard::netplay;
     Runtime &runtime = gRuntime;
+    if (!runtime.enabled) return true;
+    if (runtime.lockstepPrepared) {
+        runtime.lockstepPrepared = false;
+        return captureCommittedState();
+    }
     if (!runtime.rollbackPrepared) return true;
     if (!runtime.rollbackSession
         || !PartyBoard_RollbackAudioBridgeFrameEnd()
@@ -1253,6 +1390,8 @@ static bool runNativePadRollbackSelfTest()
     return passed;
 }
 
+#include "netplay_state_test.inc"
+
 extern "C" bool PartyBoard_NetplayRuntimeRunSelfTest(void)
 {
     // Exercise the actual availability check used by free_play.c, with both
@@ -1302,7 +1441,7 @@ extern "C" bool PartyBoard_NetplayRuntimeRunSelfTest(void)
     const bool gamePassed = PartyBoard_RollbackGameSelfTest();
     OSReport("Rollback process generation: %s\n", topologyPassed ? "PASS" : "FAIL");
     OSReport("Rollback central game state: %s\n", gamePassed ? "PASS" : "FAIL");
-    const bool passed = partyboard::netplay::timelineSelfTest()
+    const bool passed = runCanonicalStateSelfTest() && partyboard::netplay::timelineSelfTest()
         && partyboard::netplay::progressSelfTest() && HuPadSnapshotSelfTest()
         && PartyBoard_RollbackClockSelfTest() && availabilityPassed
         && runNativePadRollbackSelfTest() && topologyPassed && gamePassed
@@ -1368,15 +1507,34 @@ extern "C" bool PartyBoard_NetplayPadRunProbe(void)
                 }
             }
             if (pads[2].err != PAD_ERR_NO_CONTROLLER || pads[3].err != PAD_ERR_NO_CONTROLLER) return false;
+            // Real gameplay globals and RNGs, driven by verified logical inputs.
+            // This remains a subsystem probe, not a board/minigame replay.
+            for (unsigned player = 0; player < 2; ++player) {
+                GWPlayer[player].coins = static_cast<s16>((GWPlayer[player].coins
+                    + pads[player].triggerLeft + (pads[player].button & PAD_BUTTON_A ? 3 : 0)) % 999);
+                GWPlayer[player].roll = static_cast<s8>(pads[player].stickX % 10);
+            }
+            if (frame == 0 || frame == 400) BoardRandInit();
+            frand(); rand8(); BoardRand();
+            if (gRuntime.desyncProbe && gRuntime.localPlayer == 1 && frame == 87)
+                ++GWPlayer[0].coins;
+            PartyBoard_NetplayCommitTick();
+            ++GlobalCounter; // The real rendered path publishes this after commit.
             ++frame;
         }
         if (PartyBoard_NetplayHasError()) {
-            if (gRuntime.contextMismatchProbe) {
-                const auto expected = 100u + gRuntime.inputDelay
-                    + kContextMismatchGraceFrames - 1u;
-                const bool passed = frame >= expected && frame <= expected + 2u
-                    && gRuntime.error == "Les contextes du jeu sont restes differents pendant 2 secondes";
-                std::printf("[NET TEST] %s: context divergence stopped at frame %u\n", passed ? "PASS" : "FAIL", frame);
+            if (gRuntime.contextMismatchProbe || gRuntime.desyncProbe) {
+                const auto expected = gRuntime.desyncProbe ? 87u : 100u;
+                const bool passed = gRuntime.states.error() == StateFailure::Desync
+                    && gRuntime.states.errorFrame() == expected
+                    && gRuntime.states.equalThrough() == expected;
+                // Give the peer time to receive the retained failed digest.
+                for (unsigned i = 0; i < 30; ++i) {
+                    serviceStateRepair(true);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+                std::printf("[NET TEST] %s: first divergence hash_frame=%u stopped_frame=%u\n",
+                    passed ? "PASS" : "FAIL", gRuntime.states.errorFrame(), frame);
                 return passed;
             }
             if (!gRuntime.disconnectProbe || gRuntime.localPlayer != 0 || frame < 60
@@ -1390,8 +1548,28 @@ extern "C" bool PartyBoard_NetplayPadRunProbe(void)
             std::printf("[NET TEST] PASS: peer loss detected, terminal stop at frame %u, no offline fallback\n", frame);
             return true;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(gRuntime.realtimeProbe ? 16 : 1));
+        // Windows coarse Sleep(1) can take 15.6 ms and invalidate the probe's
+        // wall-time budget at delay zero. Precise waiting only affects this test.
+        SDL_DelayPrecise(gRuntime.realtimeProbe ? 16000000ull : 1000000ull);
     }
+    // Drain final hashes/ACKs without simulating extra input. Keep responding
+    // after local equality so the peer can also confirm the terminal frame.
+    const auto drainEnd = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    auto settled = drainEnd;
+    while (frame == frames && std::chrono::steady_clock::now() < drainEnd) {
+        receivePendingPackets();
+        serviceStateRepair();
+        if (!gRuntime.error.empty()) return false;
+        if (gRuntime.states.equalThrough() == frames && gRuntime.states.peerEqualThrough() == frames) {
+            if (settled == drainEnd) settled = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+            if (std::chrono::steady_clock::now() >= settled) break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (frame == frames && (gRuntime.states.equalThrough() != frames || gRuntime.states.peerEqualThrough() != frames))
+        return false;
+    std::printf("[NET TEST] equal_states=%u peer_equal_states=%u\n",
+        gRuntime.states.equalThrough(), gRuntime.states.peerEqualThrough());
     std::fprintf(stdout, "[NET TEST] %s: %u/%u frames, local physical PAD=%u, game port=%u\n",
         frame == frames ? "PASS" : "FAIL", frame, frames, gRuntime.localPad + 1, gRuntime.localPlayer + 1);
     return frame == frames;

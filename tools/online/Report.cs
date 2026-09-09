@@ -19,7 +19,7 @@ sealed class Report {
     }
     public string Read() {
         var result=new StringBuilder("PartyBoard diagnostic v1\r\n");
-        foreach(var name in new[]{"session.txt","native.txt"}){
+        foreach(var name in new[]{"session.txt","native.txt","native.txt.desync"}){
             result.AppendLine("--- "+name+" ---");
             try{using(var f=new FileStream(Path.Combine(DirectoryPath,name),FileMode.Open,FileAccess.Read,FileShare.ReadWrite))using(var reader=new StreamReader(f)){
                 var buffer=new char[1024*1024];int n=reader.ReadBlock(buffer,0,buffer.Length);result.Append(buffer,0,n);

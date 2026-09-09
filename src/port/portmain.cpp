@@ -275,6 +275,14 @@ static void migrate_directory(const std::filesystem::path& from, const std::file
 }
 
 static std::filesystem::path calculate_config_path() {
+#ifdef _WIN32
+    // Explicit online test isolation: normal online/offline preference paths
+    // are unchanged unless the test runner supplies a temporary profile.
+    if (PartyBoard_NetplayEnabled()) {
+        if (const auto *path = _wgetenv(L"PARTYBOARD_NETPLAY_TEST_PROFILE"); path && *path)
+            return std::filesystem::path(path);
+    }
+#endif
 #ifdef __APPLE__
 #if TARGET_OS_IOS && !TARGET_OS_TV
     const char* documentsPath = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);

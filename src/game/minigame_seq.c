@@ -3647,3 +3647,31 @@ void MGSeqPracticeExitCheck(omObjData *object)
 }
 
 #include "minigame_seq_snapshot.inc"
+
+#ifdef TARGET_PC
+#include "port/netplay_state.h"
+void PartyBoard_NetplaySequenceState(PartyBoardNetplayStateSink sink, void *context)
+{
+    int i;
+#define WORD(value) sink(context, #value, (uint32_t)(value))
+    WORD(mgSeqOvlPrev); WORD(seqTimer); WORD(seqDoneF); WORD(lbl_801D3D94);
+    WORD(seqSpeed); WORD(seqPauseF); WORD(seqRecordVal); WORD(pauseWaitF);
+    WORD(pauseExitF); WORD(pauseActiveF); WORD(seqLanguage);
+    for (i = 0; i < 8; ++i) {
+        const SeqWork *work = &seqWorkData[i];
+        WORD(i); WORD(work->stat);
+        /* Inactive slots contain stale presentation data. */
+        if (!work->stat) continue;
+        WORD(work->seq_no); WORD(work->time); WORD(work->time_max);
+        WORD(work->timer_val); WORD(work->state); WORD(work->type);
+        WORD(work->param[0]); WORD(work->param[1]);
+        WORD(work->word_len); WORD(work->alt_word_len);
+        /* These numeric animation clocks gate state/status transitions. */
+        sink(context, "work->angle", PartyBoard_NetplayFloatWord(work->angle));
+        sink(context, "work->win_scale", PartyBoard_NetplayFloatWord(work->win_scale));
+        sink(context, "work->unk_18", PartyBoard_NetplayFloatWord(work->unk_18));
+        sink(context, "work->unk_24", PartyBoard_NetplayFloatWord(work->unk_24));
+    }
+#undef WORD
+}
+#endif

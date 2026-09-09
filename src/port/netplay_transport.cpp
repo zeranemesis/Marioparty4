@@ -26,9 +26,9 @@
 namespace partyboard::netplay {
 namespace {
 
-constexpr std::size_t kPacketSize = 52;
+constexpr std::size_t kPacketSize = kNetplayPacketSize;
 constexpr std::array<std::uint8_t, 4> kMagic { 'P', 'B', 'R', 'B' };
-constexpr std::uint8_t kInputPacketType = 1;
+
 
 void put16(std::uint8_t *destination, std::uint16_t value)
 {
@@ -71,7 +71,7 @@ std::array<std::uint8_t, kPacketSize> encode(const InputPacket &packet)
     std::array<std::uint8_t, kPacketSize> bytes {};
     std::copy(kMagic.begin(), kMagic.end(), bytes.begin());
     put16(bytes.data() + 4, kProtocolVersion);
-    bytes[6] = kInputPacketType;
+    bytes[6] = static_cast<std::uint8_t>(packet.type);
     bytes[7] = packet.player;
     put32(bytes.data() + 8, packet.sessionId);
     put32(bytes.data() + 12, packet.sequence);
@@ -86,17 +86,27 @@ std::array<std::uint8_t, kPacketSize> encode(const InputPacket &packet)
     put32(bytes.data() + 28, packet.configSignature);
     put32(bytes.data() + 32, packet.frandSeed);
     put32(bytes.data() + 36, packet.rand8Seed);
-    put32(bytes.data() + 40, packet.stateChecksum);
+    put32(bytes.data() + 40, packet.hashAckNext);
     put32(bytes.data() + 44, packet.captureContext);
-    put32(bytes.data() + 48, packetHash(bytes.data(), 48));
+    put32(bytes.data() + 48, packet.state.version);
+    put32(bytes.data() + 52, packet.state.frame);
+    put32(bytes.data() + 56, packet.state.context);
+    put32(bytes.data() + 60, packet.state.frand);
+    put32(bytes.data() + 64, packet.state.rand8);
+    put32(bytes.data() + 68, packet.state.counter);
+    put32(bytes.data() + 72, static_cast<std::uint32_t>(packet.state.hash >> 32));
+    put32(bytes.data() + 76, static_cast<std::uint32_t>(packet.state.hash));
+    // 80..83 reserved, must be zero.
+    put32(bytes.data() + 84, packetHash(bytes.data(), 84));
     return bytes;
 }
 
 bool decode(const std::uint8_t *bytes, std::size_t size, InputPacket &packet)
 {
     if (size != kPacketSize || !std::equal(kMagic.begin(), kMagic.end(), bytes)
-        || get16(bytes + 4) != kProtocolVersion || bytes[6] != kInputPacketType
-        || get32(bytes + 48) != packetHash(bytes, 48)) {
+        || get16(bytes + 4) != kProtocolVersion || bytes[6] < 1 || bytes[6] > 3
+        || get32(bytes + 80) != 0 || get32(bytes + 48) != kStateHashVersion
+        || get32(bytes + 84) != packetHash(bytes, 84)) {
         return false;
     }
     packet.player = bytes[7];
@@ -113,9 +123,18 @@ bool decode(const std::uint8_t *bytes, std::size_t size, InputPacket &packet)
     packet.configSignature = get32(bytes + 28);
     packet.frandSeed = get32(bytes + 32);
     packet.rand8Seed = get32(bytes + 36);
-    packet.stateChecksum = get32(bytes + 40);
+    packet.type = static_cast<PacketType>(bytes[6]);
+    packet.hashAckNext = get32(bytes + 40);
+    packet.state.version = get32(bytes + 48);
+    packet.state.frame = get32(bytes + 52);
+    packet.state.context = get32(bytes + 56);
+    packet.state.frand = get32(bytes + 60);
+    packet.state.rand8 = get32(bytes + 64);
+    packet.state.counter = get32(bytes + 68);
+    packet.state.hash = (static_cast<std::uint64_t>(get32(bytes + 72)) << 32) | get32(bytes + 76);
     packet.captureContext = get32(bytes + 44);
-    return packet.player < 4;
+    return packet.player < 2
+        && (packet.type != PacketType::State || packet.state.frame != kNoHashFrame);
 }
 
 #if defined(_WIN32)
@@ -320,7 +339,27 @@ bool runTransportSelfTest()
     if (decode(bytes.data(), bytes.size(), decoded)) return false;
     bytes = encode(codecSample);
     put16(bytes.data() + 4, 3); // Old timeline protocol, otherwise valid checksum.
-    put32(bytes.data() + 48, packetHash(bytes.data(), 48));
+    put32(bytes.data() + 84, packetHash(bytes.data(), 84));
+    if (decode(bytes.data(), bytes.size(), decoded)) return false;
+
+    for (const auto type : {PacketType::Input, PacketType::Retransmit, PacketType::State}) {
+        codecSample.type = type;
+        codecSample.hashAckNext = 8;
+        codecSample.state = {7, 3, 0x11223344, 0x55667788, 6, kStateHashVersion, 0x0123456789abcdefull};
+        bytes = encode(codecSample);
+        if (!decode(bytes.data(), bytes.size(), decoded) || decoded.type != type
+            || decoded.state != codecSample.state || decoded.hashAckNext != 8) return false;
+    }
+    for (const unsigned offset : {5u, 6u, 7u, 48u, 80u}) {
+        bytes = encode(codecSample);
+        bytes[offset] = 99; // Valid checksum must not authorize an unknown schema/type/player.
+        put32(bytes.data() + 84, packetHash(bytes.data(), 84));
+        if (decode(bytes.data(), bytes.size(), decoded)) return false;
+    }
+    bytes = encode(codecSample);
+    if (decode(bytes.data(), bytes.size() - 1, decoded)) return false;
+    codecSample.state.frame = kNoHashFrame;
+    bytes = encode(codecSample);
     if (decode(bytes.data(), bytes.size(), decoded)) return false;
 
     UdpTransport host;
@@ -340,7 +379,9 @@ bool runTransportSelfTest()
     expected.configSignature = 0x4E500002u;
     expected.frandSeed = 0x13579BDFu;
     expected.rand8Seed = 0x2468ACE0u;
-    expected.stateChecksum = 0x89ABCDEFu;
+    expected.type = PacketType::Retransmit;
+    expected.hashAckNext = 97;
+    expected.state = {96, 7, 0x10203040u, 0x50607080u, 95, kStateHashVersion, 0x89abcdef01234567ull};
     expected.captureContext = 0x12345678u;
     if (!client.sendInput(expected)) {
         return false;
@@ -356,7 +397,8 @@ bool runTransportSelfTest()
                 && actual.configSignature == expected.configSignature
                 && actual.frandSeed == expected.frandSeed
                 && actual.rand8Seed == expected.rand8Seed
-                && actual.stateChecksum == expected.stateChecksum
+                && actual.type == expected.type && actual.state == expected.state
+                && actual.hashAckNext == expected.hashAckNext
                 && actual.captureContext == expected.captureContext
                 && rollback::inputsEqual(actual.input, expected.input);
             if (!requestMatches) {

@@ -102,7 +102,8 @@ sealed class Invitation {
 }
 
 static class GameDatagram {
-    const int Header=14,Payload=52,Tag=16,Size=Header+Payload+Tag;
+    public const int Payload=88,Size=14+Payload+16;
+    const int Header=14,Tag=16;
     public static byte[] Key(byte[] token) {return Wire.Hash(token.Concat(Encoding.ASCII.GetBytes("PartyBoard UDP v1")).ToArray());}
     public static byte[] Seal(byte[] key,int player,ulong sequence,byte[] payload) {
         if(key==null || key.Length!=32 || payload==null || payload.Length!=Payload || player<0 || player>1)throw new IOException("Paquet de jeu invalide.");
@@ -145,6 +146,7 @@ sealed class Bridge : IDisposable {
     // small input frames into fewer TLS records.
     readonly BlockingCollection<byte[]> toPeer=new BlockingCollection<byte[]>(new ConcurrentQueue<byte[]>(),4096);
     long gamePackets;public long GamePackets {get{return Interlocked.Read(ref gamePackets);}}
+    long statePackets;public long StatePackets {get{return Interlocked.Read(ref statePackets);}}
     long peerPackets;public long PeerPackets {get{return Interlocked.Read(ref peerPackets);}}
     public bool UdpReady {get{long stamp=Interlocked.Read(ref lastUdpPongStamp);return stamp!=0 && Age(stamp)<5000;}}
     public int LocalPort { get {return ((IPEndPoint)udp.Client.LocalEndPoint).Port;} }
@@ -152,7 +154,7 @@ sealed class Bridge : IDisposable {
         readTcp=reader;readSsl=readStream;writeTcp=writer;writeSsl=writeStream;localPlayer=player;network=internet;networkPeer=internetPeer;learnNetworkPeer=internetPeer==null;datagramKey=GameDatagram.Key(token);udp=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));
         if(hostGamePort!=0) {game=new IPEndPoint(IPAddress.Loopback,hostGamePort); udp.Connect(game);}
     }
-    static bool Packet(byte[] b,int player) {return b.Length==52 && b[0]==80 && b[1]==66 && b[2]==82 && b[3]==66 && b[4]==0 && b[5]==5 && b[6]==1 && b[7]==player;}
+    internal static bool Packet(byte[] b,int player) {return b.Length==GameDatagram.Payload && b[0]==80 && b[1]==66 && b[2]==82 && b[3]==66 && b[4]==0 && b[5]==6 && b[6]>=1 && b[6]<=3 && b[7]==player;}
     void Write(byte[] payload) {
         if(payload.Length<1 || payload.Length>256)throw new IOException("Message de salon trop long.");
         var frame=new byte[payload.Length+2];frame[0]=(byte)(payload.Length>>8);frame[1]=(byte)payload.Length;
@@ -201,8 +203,8 @@ sealed class Bridge : IDisposable {
         if(e is ControlChannelException && KeepCommittedGame())return;
         Dispose();throw;
     }},CancellationToken.None,TaskCreationOptions.LongRunning,TaskScheduler.Default);}
-    static byte[] Heartbeat(int player,long stamp) {var b=new byte[52];b[0]=(byte)'P';b[1]=(byte)'B';b[2]=(byte)'H';b[3]=(byte)'B';b[4]=1;b[5]=(byte)player;b[6]=1;Buffer.BlockCopy(BitConverter.GetBytes(stamp),0,b,8,8);return b;}
-    static bool IsHeartbeat(byte[] b,int player) {return b.Length==52 && b[0]=='P' && b[1]=='B' && b[2]=='H' && b[3]=='B' && b[4]==1 && b[5]==player && (b[6]==1 || b[6]==2);}
+    static byte[] Heartbeat(int player,long stamp) {var b=new byte[GameDatagram.Payload];b[0]=(byte)'P';b[1]=(byte)'B';b[2]=(byte)'H';b[3]=(byte)'B';b[4]=1;b[5]=(byte)player;b[6]=1;Buffer.BlockCopy(BitConverter.GetBytes(stamp),0,b,8,8);return b;}
+    static bool IsHeartbeat(byte[] b,int player) {return b.Length==GameDatagram.Payload && b[0]=='P' && b[1]=='B' && b[2]=='H' && b[3]=='B' && b[4]==1 && b[5]==player && (b[6]==1 || b[6]==2);}
     public Task Run() { return Task.Run(async ()=> {
         heartbeat=new Timer(_=>{if(closed || !ControlConnected)return;try{long stamp=Stopwatch.GetTimestamp();Interlocked.Exchange(ref pingStamp,stamp);Write(new byte[]{6}.Concat(BitConverter.GetBytes(stamp)).ToArray());}catch(ControlChannelException){if(!KeepCommittedGame())Dispose();}},null,250,2000);
         var send=Worker("udp_pump",()=> {
@@ -217,7 +219,7 @@ sealed class Bridge : IDisposable {
                     IPEndPoint from=null;var data=udp.Receive(ref from);
                     if(!IPAddress.IsLoopback(from.Address) || !Packet(data,localPlayer))continue;
                     if(game==null){game=from;udp.Connect(game);}else if(!game.Equals(from))continue;
-                    Interlocked.Increment(ref gamePackets);SendGame(data);
+                    Interlocked.Increment(ref gamePackets);if(data[6]==3)Interlocked.Increment(ref statePackets);SendGame(data);
                 }catch(SocketException e){if(!Recoverable(e,"local_receive"))throw;break;}
                 for(int i=0;i<64 && !closed;i++)try {
                     IPEndPoint from=null;var data=network.Receive(ref from);ulong sequence;byte[] payload;

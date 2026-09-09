@@ -1426,8 +1426,20 @@ float BoardArcCos(float value)
     return (float)(M_PI/2)-BoardArcSin(value);
 }
 
+#ifdef TARGET_PC
+#include "port/netplay_runtime.h"
+extern u32 frand_state_get(void);
+#endif
+
 void BoardRandInit(void)
 {
+#ifdef TARGET_PC
+    if (PartyBoard_NetplayEnabled()) {
+        /* Derive from synchronized state without consuming another RNG sample. */
+        boardRandSeed = frand_state_get() ^ 0x424f4152u;
+        return;
+    }
+#endif
     boardRandSeed = OSGetTime();
 }
 
