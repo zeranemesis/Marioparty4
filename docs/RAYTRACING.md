@@ -886,3 +886,52 @@ est appelé environ 1,4 fois par frame. Quelque chose invoque `end_frame` plus
 d'une fois par image, et les deux appels ne voient pas la même géométrie, donc
 ils se contredisent. C'est antérieur à ce travail — l'ancien code reconstruisait
 à chaque appel aussi — mais c'est la prochaine chose à regarder.
+
+## L'instancing par draw bloque le GPU — désactivé par défaut
+
+Le gain mesuré au chapitre précédent est réel, mais le chemin qui le produit
+plante : `DXGI_ERROR_DEVICE_HUNG` après quelques milliers de frames, de façon
+reproductible, au moment où le joueur valide sa sauvegarde.
+
+### Comment il a été isolé
+
+Bissection sur les commits d'aurora, **avec le ray tracing réellement actif** à
+chaque étape :
+
+| commit | résultat |
+|---|---|
+| `3e7b4f1` matériaux/normales | 26 étapes |
+| `c28acef` espace de référence | 26 étapes |
+| `a757ea8` structures par groupe | **mort à l'étape 5-11** |
+
+Puis, au même commit, en forçant tous les draws à être cuits — ce qui fusionne
+la scène en un seul groupe à transformation identité, soit le comportement
+d'avant, atteint par le même code : **26 étapes**.
+
+Le défaut est donc dans le chemin multi-BLAS / multi-instances, pas dans
+l'émission en espace modèle ni dans le reste du commit.
+
+### Ce qui a été écarté
+
+- **Charge de rendu.** Le blocage persiste à `internalResolutionScale = 2` avec
+  des ombres à 1×.
+- **Plages de triangles hors limites.** Chaque groupe est validé avant
+  construction ; aucune violation.
+- **Transformations dégénérées.** Une instance TLAS singulière est un
+  comportement indéfini, et le jeu laisse des slots `pnMtx` à zéro entre deux
+  scènes. Un garde a été ajouté — il ne change rien au blocage, mais il est
+  correct et reste en place.
+
+### Un piège de protocole
+
+Mes premiers tests « ray tracing désactivé » avaient en réalité le ray tracing
+**actif** : le maître est l'OR des trois réglages, et `enableRayTracedReflections`
+était absent de la config, donc à `true` par défaut. Trois runs ont été
+interprétés à l'envers avant que ça se voie.
+
+### État
+
+L'instancing est conservé mais **opt-in** via `AURORA_RT_INSTANCES=1`, avec un
+avertissement au démarrage. Le défaut est le chemin stable : un groupe, une
+transformation identité, reconstruction quand la géométrie change. Le gain de
+réutilisation attendra une explication du blocage.
