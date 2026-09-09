@@ -1,0 +1,152 @@
+name: CubeShelf Windows Release
+
+on:
+  push:
+    branches:
+      - audio-local
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cubeshelf-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Build and publish PartyBoard Windows
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Enable Visual Studio environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Override VCPKG_ROOT
+        shell: pwsh
+        run: |
+          "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          choco install ninja -y
+          vcpkg install freetype:x64-windows-static zstd:x64-windows-static
+
+      - name: Configure CMake
+        shell: pwsh
+        run: cmake --preset x-windows-ci-msvc
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build --preset x-windows-ci-msvc
+
+      - name: Validate runtime
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path "build/install" -Filter "partyboard.exe" -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+
+          if (-not $exe) {
+            throw "partyboard.exe was not produced under build/install."
+          }
+
+          Write-Host "PartyBoard executable: $($exe.FullName)"
+
+      - name: Create CubeShelf package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $zip = "PartyBoard-win-x64.zip"
+          if (Test-Path $zip) {
+            Remove-Item $zip -Force
+          }
+
+          Compress-Archive -Path "build/install/*" -DestinationPath $zip -Force
+
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $zip" | Set-Content "checksums.txt" -Encoding ascii
+
+          $shortSha = "${{ github.sha }}".Substring(0, 12)
+          $changes = (git log -5 --pretty=format:"%h %s") -join "`n"
+
+          $manifest = [ordered]@{
+            schema = 1
+            game = "Mario Party 4"
+            gameId = "GMPE01_00"
+            version = "nightly-$shortSha"
+            commit = "${{ github.sha }}"
+            branch = "${{ github.ref_name }}"
+            platform = "win-x64"
+            executable = "partyboard.exe"
+            supportedDiscs = @(
+              "GMPE01_00",
+              "GMPE01_01"
+            )
+            changes = $changes
+          } | ConvertTo-Json -Depth 6
+
+          Set-Content "manifest.json" -Value $manifest -Encoding utf8
+
+          @"
+          CubeShelf automatic Windows build
+
+          Commit: ${{ github.sha }}
+          Branch: ${{ github.ref_name }}
+
+          Recent changes:
+          $changes
+          "@ | Set-Content "release-notes.txt" -Encoding utf8
+
+      - name: Upload Actions artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: PartyBoard-win-x64-${{ github.sha }}
+          path: |
+            PartyBoard-win-x64.zip
+            manifest.json
+            checksums.txt
+            release-notes.txt
+          retention-days: 14
+
+      - name: Publish CubeShelf nightly release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          gh release view cubeshelf-nightly *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release delete cubeshelf-nightly --yes --cleanup-tag
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to replace existing cubeshelf-nightly release."
+            }
+          }
+
+          $ErrorActionPreference = "Stop"
+
+          gh release create cubeshelf-nightly `
+            "PartyBoard-win-x64.zip" `
+            "manifest.json" `
+            "checksums.txt" `
+            "release-notes.txt" `
+            --target "${{ github.sha }}" `
+            --title "CubeShelf Nightly - PartyBoard Windows" `
+            --notes-file "release-notes.txt" `
+            --prerelease
