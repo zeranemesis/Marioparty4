@@ -716,3 +716,44 @@ au-delà de ce point, il faut regarder les images.
 
 Mesurer sur l'image composite finale ne vaut rien : les textures du jeu écrasent
 le signal, et un filtrage qui retire 36 % du bruit AO n'y déplace que 1 %.
+
+## Matériaux, mesurés plutôt que supposés (9 septembre 2026)
+
+L'étape « matériaux » ne consiste pas à inventer une rugosité que GX n'a pas.
+Tout est dérivé de ce que le jeu déclare déjà :
+
+- **Réfléchissant** : `tcg.src == GX_TG_NRM`, coordonnées de texture générées
+  depuis la normale. C'est l'environment mapping du GameCube, donc c'est le jeu
+  lui-même qui désigne la surface comme brillante.
+- **Découpé / translucide** : l'alpha de la texture liée, moyenné à
+  l'upload en même temps que la couleur (`averageAlpha`, `cutoutFraction`).
+
+Deux pièges rencontrés, tous deux du même genre : **les tableaux d'état GX
+gardent des entrées périmées**.
+
+- Tester `blendMode`/`alphaCompare` classait 1296 draws sur 1296 comme
+  translucides. Le jeu laisse ces états actifs pour la géométrie opaque aussi ;
+  ils ne disent rien. Seul l'alpha des texels le dit.
+- Balayer les huit entrées `tcgs` classait 1296 sur 1296 comme réfléchissants.
+  Il faut s'arrêter à `numTexGens`.
+
+### Ce que la mesure donne, sur l'écran-titre
+
+| | draws | pixels |
+|---|---|---|
+| découpés | 14 / 1296 | 0,31 % |
+| uniformément translucides | 0 | 0 % |
+| environment mappés | 30 / 1296 | 12,82 % |
+
+Le compte de draws est trompeur et il fallait la vue de diagnostic pour le voir :
+30 draws sur 1296 semble négligeable, mais ces surfaces couvrent **un quart de
+la surface visible** — c'est le Party Cube, le gros cube blanc central.
+
+Conséquences directes :
+
+- Tracer les découpes comme opaques est une approximation à 0,31 % des pixels.
+  Construire un chemin de hits non opaques pour ça ne vaut pas son coût ; la
+  limitation est mesurée et assumée, plus seulement documentée.
+- Les réflexions, elles, porteraient sur 12,8 % de l'image. C'est ce qui les
+  justifie, et le matériau par triangle est maintenant en place pour les
+  alimenter.
