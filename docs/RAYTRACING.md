@@ -902,14 +902,6 @@ la construction.
 Les deux compteurs sont conservés dans le code : raisonner sur le compteur de
 frames pour en déduire la fréquence des constructions s'est trompé deux fois.
 
-## Une observation non résolue
-
-3296 réutilisations et 3443 reconstructions pour 4801 frames : `accel::build`
-est appelé environ 1,4 fois par frame. Quelque chose invoque `end_frame` plus
-d'une fois par image, et les deux appels ne voient pas la même géométrie, donc
-ils se contredisent. C'est antérieur à ce travail — l'ancien code reconstruisait
-à chaque appel aussi — mais c'est la prochaine chose à regarder.
-
 ## Le blocage GPU de l'instancing, et sa cause
 
 Signalé comme un plantage à la validation de la sauvegarde. Reproduit, puis
@@ -972,3 +964,121 @@ Mes trois premiers tests « ray tracing désactivé » avaient en réalité le r
 tracing **actif** : le maître est l'OR des trois réglages, et
 `enableRayTracedReflections` était absent de la config, donc à `true` par défaut.
 Trois runs interprétés à l'envers avant que ça se voie.
+
+## Le plateau : un plantage et un variateur de lumière (9 septembre 2026)
+
+Deux signalements le même jour : « les mini-jeux ont beaucoup de bugs graphiques
+liés au ray tracing » et « le jeu plante lors de la sélection du plateau ». Ils
+n'avaient rien en commun, et aucun des deux ne venait de là où je regardais.
+
+### Ce que la trace ne rendait jamais
+
+`trace::run()` soumettait sa passe de calcul et rendait la main sans attendre le
+GPU. Le commentaire qui justifiait ce choix disait :
+
+> Sans lecture retour, l'attente de Dawn sur la barrière partagée est la seule
+> synchronisation nécessaire ; bloquer le CPU ici sérialiserait pour rien.
+
+C'est faux deux fois. La barrière partagée ordonne le GPU, elle ne dit rien au
+thread CPU. Donc au retour de `run()`, la passe tourne encore, et :
+
+* `g_allocator->Reset()` à la frame suivante réinitialise un allocateur dont le
+  GPU exécute encore les commandes. D3D12 l'interdit explicitement.
+* `accel::build()` agrandit les tampons de positions, couleurs, normales et
+  matériaux dès que la scène dépasse ce qui est alloué — et agrandir, c'est
+  libérer l'ancien. Ces quatre tampons sont exactement ce que la passe en vol
+  lit par ses SRV racine. D3D12 ne garde pas une ressource en vie parce qu'un
+  travail déjà soumis s'y réfère.
+
+Le second point explique pourquoi le plantage arrivait à un écran précis : les
+menus ne faisaient jamais grandir les tampons, donc rien n'était jamais libéré
+sous la passe. Le premier écran plus gros que les menus déclenche la
+réallocation, et la réallocation tombe sur un usage après libération.
+
+`trace::wait_idle()` attend la dernière soumission. Il est appelé avant
+`accel::build()`, en tête de `run()` avant tout ce qui peut libérer une texture,
+et dans `shutdown()`.
+
+La fenêtre de risque a été comptée plutôt que supposée, parce qu'une attente qui
+n'attend jamais signalerait un danger théorique :
+
+```
+Trace still running when the next build wanted its buffers: 2 times, 6.1 ms
+```
+
+Une à deux fois par plusieurs milliers de frames dans les menus, deux fois sur
+un plateau. Rare — ce qui correspond à un plantage sur une transition d'écran
+plutôt qu'à un plantage permanent. Le coût de l'attente est celui-là et pas
+davantage.
+
+### L'ombre qui éteignait le jeu
+
+Le second signalement n'était pas un bug de mini-jeu : c'est toute la scène 3D
+qui était concernée, plateaux compris. Écran identique, mesure de la luminosité
+moyenne de l'image, terme par terme :
+
+| réglage | luminosité | écart |
+|---|---|---|
+| ray tracing éteint | 151,3 | — |
+| réflexions seules | 151,7 | 0 % |
+| occlusion ambiante seule | 140,5 | −7 % |
+| **ombres seules** | **84,6** | **−44 %** |
+| les trois | 78,3 | −48 % |
+
+La saturation, elle, est identique partout (0,348). L'image n'était pas délavée
+comme je l'avais d'abord lu à l'œil : elle était seulement sombre. `SHADOW_DARKNESS`
+vaut 0,55, donc −44 % veut dire que *chaque* pixel était entièrement à l'ombre.
+
+La cause est un décalage entre le modèle et le contenu. La lumière de Mario
+Party 4 est une lumière infinie stylisée, posée par les graphistes pour ombrer
+les modèles ; sur ce plateau elle est en (−341440, 255362, 902161), soit à 1e6
+unités. Les plateaux, eux, sont des pièces fermées. `shadowRange` valait 1,5 fois
+la diagonale de la scène, soit 33940 unités ici : de n'importe quel pixel, le
+rayon traverse la pièce et touche le plafond. Géométriquement c'est correct pour
+une vraie lumière extérieure ; ce n'est pas ce que la lumière du jeu représente.
+
+Balayage de la portée, même instant de la même scène :
+
+| facteur | portée | luminosité | écart |
+|---|---|---|---|
+| 1,50 | 33940 | 84,4 | −44,2 % |
+| 0,10 | 2263 | 145,7 | −3,7 % |
+| 0,02 | 453 | 147,2 | −2,7 % |
+
+La falaise est entre 0,10 et 1,50, pas entre 0,02 et 0,10 : les occulteurs
+responsables sont la coque de la pièce, pas ce qu'il y a dedans. 0,10 garde tout
+ce qu'un personnage, un décor ou le plateau lui-même peut projeter, et laisse
+tomber le plafond. C'est le nouveau défaut ; `AURORA_RT_SHADOW_RANGE` l'écrase.
+
+Avec les trois termes actifs, le plateau passe de −48 % à **−10,6 %**, saturation
+inchangée : une contribution visible, plus un variateur.
+
+Ce réglage a été mesuré sur un seul plateau. La portée reste une fraction de la
+diagonale, donc elle varie avec la scène ; un menu, plus petit, aura des ombres
+plus courtes qu'avant.
+
+### Deux constats au passage
+
+**Une frame peut utiliser deux projections.** Le tracé reconstruit un rayon
+primaire par pixel à partir d'une seule, et c'était celle du dernier draw
+perspectif de la frame — un choix arbitraire. Les menus en utilisent deux
+(14253 et 32066 triangles), les plateaux une seule. C'est maintenant celle qui
+couvre le plus de triangles. Là où il n'y en a qu'une, cela ne change rien.
+
+**Les réflexions ne se voient pas.** Sur le plateau, 63 des 438 draws sont
+marqués « environment mapped », donc le terme s'applique bien à 14 % de la
+scène — et l'écart de luminosité mesuré est de 0,0 %. Avec `refl.a = fresnel ×
+0,35` et une vue majoritairement frontale, le mélange tourne autour de 3 % :
+présent, mais sous le seuil du visible. La fonctionnalité coûte un rayon par
+pixel réfléchissant pour un résultat que la mesure ne distingue pas de son
+absence.
+
+### Atteindre un plateau
+
+Rien de tout cela n'était mesurable depuis les menus. Le canal d'automatisation
+ne transportait que des boutons, et les menus de mise en place de la partie
+déplacent leur curseur au stick analogique en ignorant la croix : A appuyait,
+mais ne choisissait rien. Deux champs optionnels de plus dans
+`audio_diagnostics.enable` (`compteur port boutons frames stickX stickY`) et la
+séquence va jusqu'au plateau. Les anciens écrivains, qui n'écrivent que quatre
+champs, continuent de fonctionner.
