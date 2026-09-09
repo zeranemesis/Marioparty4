@@ -840,3 +840,49 @@ Il est conservé parce qu'il est gratuit (coût mesuré dans le bruit) et parce 
 c'est le cas d'un plateau de jeu — décor fixe, caméra qui se déplace — qu'il
 adresse. Mais ce cas n'a pas pu être atteint, donc le gain reste **non
 démontré**, pas démontré nul.
+
+## Un BLAS par groupe, l'animation dans le TLAS
+
+La mesure précédente ayant établi que **les maillages sont rigides** (100 % des
+sommets sources inchangés), la géométrie est désormais émise en espace **modèle**
+et chaque draw reçoit une instance TLAS portant sa matrice `pnMtx`. L'animation
+ne touche donc plus que des transformations, jamais des sommets.
+
+### Deux erreurs en chemin
+
+**Un seul BLAS multi-géométries instancié plusieurs fois.** Faux : une instance
+pointe un BLAS entier, donc chaque transformation aurait dupliqué la scène
+complète. Il faut un BLAS *par groupe*, sous-alloués dans un tampon commun.
+
+**Scratch partagé entre les builds.** Ça impose une barrière UAV entre chacun,
+ce qui sérialise le GPU : **304,9 ms** de reconstruction. En donnant à chaque
+build sa propre région de scratch, ils deviennent indépendants — 185,7 ms.
+
+### Fusion des draws consécutifs
+
+Les draws successifs d'un même modèle partagent sa matrice et leurs triangles
+sont déjà contigus : ils peuvent partager une structure. 1296 groupes → **32**,
+et la mémoire redescend de 6356 Ko à 3323 Ko, soit le niveau du BLAS unique
+d'origine.
+
+### Résultat
+
+| | avant | après |
+|---|---|---|
+| structures | 1 | 32 |
+| coût d'une reconstruction | 1,7 ms | **0,5 ms** |
+| frames réutilisées (écran-titre animé) | 0 / 4501 | **3296 / 4801** |
+| dont « caméra seule » | 0 | 3296 |
+| mémoire BLAS | 3235 Ko | 3323 Ko |
+
+Sur une scène qui bouge en permanence, la structure survit maintenant à
+l'animation. Le coût total de construction passe d'environ 8,2 s à 1,7 s sur
+80 secondes de jeu.
+
+### Une observation non résolue
+
+3296 réutilisations et 3443 reconstructions pour 4801 frames : `accel::build`
+est appelé environ 1,4 fois par frame. Quelque chose invoque `end_frame` plus
+d'une fois par image, et les deux appels ne voient pas la même géométrie, donc
+ils se contredisent. C'est antérieur à ce travail — l'ancien code reconstruisait
+à chaque appel aussi — mais c'est la prochaine chose à regarder.
