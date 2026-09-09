@@ -879,7 +879,30 @@ Sur une scène qui bouge en permanence, la structure survit maintenant à
 l'animation. Le coût total de construction passe d'environ 8,2 s à 1,7 s sur
 80 secondes de jeu.
 
-### Une observation non résolue
+### L'« observation non résolue » n'existait pas
+
+J'avais noté que `accel::build` semblait tourner 1,4 fois par frame, et j'y
+voyais deux boucles de rendu qui se contredisent. Il y a bien deux boucles —
+`src/game/main.c:209` et `src/port/portmain.cpp:90` appellent toutes deux
+`aurora_begin_frame`/`aurora_end_frame` — mais ce n'était pas ça.
+
+Le chiffre venait de comparer `reusedFrames`, imprimé toutes les 300 frames,
+avec un compteur de reconstructions cumulé sur **tout** le run. Deux instants
+différents. Comptés directement, au même endroit :
+
+```
+end_frame calls 3901, acceleration builds 2409
+reused 2402 ... 7 with geometry that actually moved
+```
+
+Sept reconstructions réelles en 3901 frames. Les 1492 frames restantes sont des
+menus et des écrans de chargement, sans géométrie perspective, qui sortent avant
+la construction.
+
+Les deux compteurs sont conservés dans le code : raisonner sur le compteur de
+frames pour en déduire la fréquence des constructions s'est trompé deux fois.
+
+## Une observation non résolue
 
 3296 réutilisations et 3443 reconstructions pour 4801 frames : `accel::build`
 est appelé environ 1,4 fois par frame. Quelque chose invoque `end_frame` plus
