@@ -800,3 +800,43 @@ effectivement un reflet, d'intensité maximale 21/255. L'écart vient de deux
 choses, toutes deux correctes : les rayons qui partent vers le ciel ne touchent
 rien (le fond n'est pas dans la structure d'accélération), et Fresnel annule
 presque le terme sur les surfaces vues de face.
+
+## Structures d'accélération : ne reconstruire que si nécessaire
+
+Le BLAS était reconstruit inconditionnellement chaque frame — le poste le plus
+lourd de la passe (1,7 ms sur l'écran-titre).
+
+**Détection.** Un FNV-1a accumulé pendant l'émission des triangles, donc sans
+passe supplémentaire sur les sommets. Hash identique ⇒ le BLAS décrit encore la
+scène. Le TLAS, lui, est toujours reconstruit : son instance porte la caméra,
+qui change même quand la scène ne bouge pas.
+
+**Espace de référence.** GX ne donne que `pnMtx`, déjà combinée modèle-vue :
+cuire en espace vue rend donc chaque sommet dépendant de la caméra. En cuisant
+relativement à la première matrice de la frame, la vue s'annule :
+
+```
+inverse(V·M₀) · (V·Mᵢ)  =  M₀⁻¹ · Mᵢ
+```
+
+La matrice de référence devient la transformation de l'instance TLAS, et le
+shader ramène les sommets en espace vue avec `CommittedObjectToWorld3x4()` —
+DXR la fournit, rien à suivre soi-même.
+
+### Ce que ça donne, et ce que ça ne donne pas
+
+| scène | réutilisations | frames caméra seule |
+|---|---|---|
+| sélection de mode (statique) | 3085 / 3301 | 0 |
+| écran-titre (animé) | 0 / 4501 | 0 |
+
+**Zéro frame « caméra seule » sur les deux scènes.** L'espace de référence est
+correct — la vue des normales est identique au pixel près avant/après, ce qui
+valide l'aller-retour — mais il ne rapporte rien ici : l'écran-titre anime sa
+géométrie (3008 frames sur 4501), et la sélection de mode ne bouge pas du tout,
+donc le hash simple suffisait déjà.
+
+Il est conservé parce qu'il est gratuit (coût mesuré dans le bruit) et parce que
+c'est le cas d'un plateau de jeu — décor fixe, caméra qui se déplace — qu'il
+adresse. Mais ce cas n'a pas pu être atteint, donc le gain reste **non
+démontré**, pas démontré nul.
