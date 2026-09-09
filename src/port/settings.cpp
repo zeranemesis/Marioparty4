@@ -21,6 +21,7 @@ UserSettings g_userSettings = {
         .fpsOverlayCorner {"game.fpsOverlayCorner", 0},
         // Off by default: it costs GPU time and needs an RTX card.
         .enableRayTracedAo {"video.enableRayTracedAo", false},
+        .enableRayTracedShadows {"video.enableRayTracedShadows", true},
     },
 
     .audio = {
@@ -98,6 +99,7 @@ void registerSettings() {
     Register(g_userSettings.video.enableFpsOverlay);
     Register(g_userSettings.video.fpsOverlayCorner);
     Register(g_userSettings.video.enableRayTracedAo);
+    Register(g_userSettings.video.enableRayTracedShadows);
 
     // Audio
     Register(g_userSettings.audio.masterVolume);

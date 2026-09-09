@@ -431,12 +431,27 @@ SettingsWindow::SettingsWindow(bool prelaunch)
                 .helpText = "Synchronizes the frame rate to your monitor's refresh rate.",
                 .onChange = [](bool value) { aurora_enable_vsync(value); },
             });
+        // Both terms share one pass, so each change re-sends the pair and the
+        // master toggle their OR: turning the last one off stops the pass.
+        const auto applyRayTracingTerms = [] {
+            const bool ao = getSettings().video.enableRayTracedAo;
+            const bool shadows = getSettings().video.enableRayTracedShadows;
+            aurora_set_ray_tracing_terms(ao, shadows);
+            aurora_set_ray_traced_ao(ao || shadows);
+        };
         config_bool_select(leftPane, rightPane, getSettings().video.enableRayTracedAo,
             {
                 .key = "Ray Traced AO",
                 .helpText = "Hardware ray traced ambient occlusion. Requires a Windows PC with an "
                             "NVIDIA RTX card; has no effect otherwise.",
-                .onChange = [](bool value) { aurora_set_ray_traced_ao(value); },
+                .onChange = [applyRayTracingTerms](bool) { applyRayTracingTerms(); },
+            });
+        config_bool_select(leftPane, rightPane, getSettings().video.enableRayTracedShadows,
+            {
+                .key = "Ray Traced Shadows",
+                .helpText = "Hardware ray traced soft shadows. Requires a Windows PC with an "
+                            "NVIDIA RTX card; has no effect otherwise.",
+                .onChange = [applyRayTracingTerms](bool) { applyRayTracingTerms(); },
             });
         leftPane.register_control(leftPane.add_select_button({
                                       .key = "Frame Rate",

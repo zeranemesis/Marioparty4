@@ -473,8 +473,14 @@ extern "C" int port_main(int argc, char* argv[]) {
         auroraInfo = aurora_initialize(argc, argv, &config);
     }
 
-    // Apply the saved ray tracing preference; a no-op without DXR support.
-    aurora_set_ray_traced_ao(partyboard::getSettings().video.enableRayTracedAo);
+    // Apply the saved ray tracing preferences; a no-op without DXR support.
+    // The pass runs when either term is wanted, so the master toggle is their OR.
+    {
+        const bool ao = partyboard::getSettings().video.enableRayTracedAo;
+        const bool shadows = partyboard::getSettings().video.enableRayTracedShadows;
+        aurora_set_ray_tracing_terms(ao, shadows);
+        aurora_set_ray_traced_ao(ao || shadows);
+    }
 
 #ifdef PARTY_BOARD_DISCORD
     partyboard::discord::initialize();
