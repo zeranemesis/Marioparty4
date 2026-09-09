@@ -478,8 +478,9 @@ extern "C" int port_main(int argc, char* argv[]) {
     {
         const bool ao = partyboard::getSettings().video.enableRayTracedAo;
         const bool shadows = partyboard::getSettings().video.enableRayTracedShadows;
-        aurora_set_ray_tracing_terms(ao, shadows);
-        aurora_set_ray_traced_ao(ao || shadows);
+        const bool reflections = partyboard::getSettings().video.enableRayTracedReflections;
+        aurora_set_ray_tracing_terms(ao, shadows, reflections);
+        aurora_set_ray_traced_ao(ao || shadows || reflections);
     }
 
 #ifdef PARTY_BOARD_DISCORD

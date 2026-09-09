@@ -65,6 +65,7 @@ struct UserSettings {
         // runs when either is on. See docs/RAYTRACING.md.
         ConfigVar<bool> enableRayTracedAo;
         ConfigVar<bool> enableRayTracedShadows;
+        ConfigVar<bool> enableRayTracedReflections;
     } video;
 
     struct {

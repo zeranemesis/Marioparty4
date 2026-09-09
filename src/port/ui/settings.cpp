@@ -436,8 +436,9 @@ SettingsWindow::SettingsWindow(bool prelaunch)
         const auto applyRayTracingTerms = [] {
             const bool ao = getSettings().video.enableRayTracedAo;
             const bool shadows = getSettings().video.enableRayTracedShadows;
-            aurora_set_ray_tracing_terms(ao, shadows);
-            aurora_set_ray_traced_ao(ao || shadows);
+            const bool reflections = getSettings().video.enableRayTracedReflections;
+            aurora_set_ray_tracing_terms(ao, shadows, reflections);
+            aurora_set_ray_traced_ao(ao || shadows || reflections);
         };
         config_bool_select(leftPane, rightPane, getSettings().video.enableRayTracedAo,
             {
@@ -451,6 +452,13 @@ SettingsWindow::SettingsWindow(bool prelaunch)
                 .key = "Ray Traced Shadows",
                 .helpText = "Hardware ray traced soft shadows. Requires a Windows PC with an "
                             "NVIDIA RTX card; has no effect otherwise.",
+                .onChange = [applyRayTracingTerms](bool) { applyRayTracingTerms(); },
+            });
+        config_bool_select(leftPane, rightPane, getSettings().video.enableRayTracedReflections,
+            {
+                .key = "Ray Traced Reflections",
+                .helpText = "Hardware ray traced reflections, on the surfaces the game already "
+                            "environment maps. Requires a Windows PC with an NVIDIA RTX card.",
                 .onChange = [applyRayTracingTerms](bool) { applyRayTracingTerms(); },
             });
         leftPane.register_control(leftPane.add_select_button({

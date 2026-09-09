@@ -757,3 +757,46 @@ Conséquences directes :
 - Les réflexions, elles, porteraient sur 12,8 % de l'image. C'est ce qui les
   justifie, et le matériau par triangle est maintenant en place pour les
   alimenter.
+
+## Réflexions (9 septembre 2026)
+
+Un rayon par pixel réfléchissant, miroir autour de la normale d'ombrage,
+coloré par les couleurs de sommets déjà présentes — les mêmes données que le
+rebond indirect, donc un rayon de plus et aucune plomberie nouvelle côté tracé.
+Seules les surfaces que le jeu environment-mappe lui-même sont tracées.
+
+### Pourquoi une seconde texture
+
+La composition faisait `couleur × ao`. Une réflexion ne s'y exprime pas :
+
+- **additive** — invisible. Les surfaces environment-mappées de ce jeu sont
+  déjà claires (le Party Cube est blanc) ; y ajouter de la lumière ne change
+  rien.
+- **remplaçante** — c'est ce qu'il faut, mais il faut alors la couleur du reflet
+  *et* un poids, à côté du terme multiplicatif. Six canaux : plus qu'une seule
+  cible RGBA.
+
+D'où `mix(couleur × ao, reflet.rgb, reflet.a)`, avec une seconde texture
+partagée. Elle voyage sur la **même barrière de synchronisation** : les deux
+cibles sont écrites par le même dispatch, donc un seul signal les couvre et Dawn
+n'attend qu'une fois. Son import est facultatif — sans lui, la composition n'a
+simplement rien à mélanger.
+
+### Fresnel
+
+`0.08 + 0.92 · (1 − cosθ)^5`, approximation de Schlick. Sans elle toute la
+surface paraît uniformément brillante ; avec elle le reflet se concentre sur les
+angles rasants, ce que la vue de diagnostic 7 montre directement : une traînée
+vive le long de l'arête haute du cube, presque rien sur la face de front.
+
+La force est plafonnée à 0,35. Le jeu dessine déjà son propre environment map ;
+il s'agit d'ancrer la surface dans son entourage réel, pas de discuter avec la
+direction artistique.
+
+### Mesure
+
+12,8 % des pixels sont classés réfléchissants, mais seuls **4,70 %** portent
+effectivement un reflet, d'intensité maximale 21/255. L'écart vient de deux
+choses, toutes deux correctes : les rayons qui partent vers le ciel ne touchent
+rien (le fond n'est pas dans la structure d'accélération), et Fresnel annule
+presque le terme sur les surfaces vues de face.
