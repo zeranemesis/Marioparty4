@@ -204,6 +204,15 @@ s32 msmStreamPause(int streamNo, BOOL pause, s32 speed);
 
 void msmStreamStopAll(s32 speed);
 s32 msmStreamGetStatus(int streamNo);
+#ifdef TARGET_PC
+/* Advances the deterministic playback clock of every live stream by one
+ * simulation tick. Must be called exactly once per accepted game tick. */
+void msmStreamLogicalTick(void);
+s32 msmStreamLogicalTicksFor(s32 samples, s32 frequency);
+BOOL msmStreamLogicalProbeInstall(void);
+void msmStreamLogicalProbeStart(s32 channel, s32 samples, s32 frequency);
+void msmStreamLogicalProbeFinishPhysical(s32 channel);
+#endif
 void msmStreamSetMasterVolume(s32 arg0);
 void msmStreamSetOutputMode(s32 outputMode);
 

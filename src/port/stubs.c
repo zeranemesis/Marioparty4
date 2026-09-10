@@ -10,6 +10,7 @@
 // Credits: Super Monkey Ball
 
 static VIRetraceCallback sVIRetraceCallback = NULL;
+static u32 sVIRetraceCount;
 static u32 sAIStreamPlayState;
 static u8 sAIStreamVolLeft;
 static u8 sAIStreamVolRight;
@@ -309,10 +310,17 @@ void SoundRevID(int a, int b)
     puts("SoundRevID is a stub");
 }
 
+/*
+ * A retrace on PC is one completed VIWaitForRetrace, i.e. one presented field.
+ * HuSysDoneRender waits for `minimumVcount - 1` retraces to elapse since the
+ * frame started; with a constant counter that loop can never terminate, so any
+ * minimumVcount above one would hang the game. No gameplay code reads this
+ * value, and it must never enter a canonical state hash: it advances once per
+ * presented image, not once per simulated tick.
+ */
 u32 VIGetRetraceCount()
 {
-    // puts("VIGetRetraceCount is a stub");
-    return 0; // TODO this might be important
+    return sVIRetraceCount;
 }
 
 u32 VIGetNextField()
@@ -333,10 +341,11 @@ void VISetNextFrameBuffer(void *fb)
 
 void VIWaitForRetrace()
 {
-if (sVIRetraceCallback)
-{
-    sVIRetraceCallback(0);
-}
+    ++sVIRetraceCount;
+    if (sVIRetraceCallback)
+    {
+        sVIRetraceCallback(sVIRetraceCount);
+    }
 }
 
 void __GXSetSUTexSize()
@@ -473,4 +482,41 @@ s32 HuSoftResetButtonCheck(void)
 f32 GXGetYScaleFactor(u16 efbHeight, u16 xfbHeight)
 {
     return 1.0f;
+}
+
+/*
+ * Reproduces the wait loop of HuSysDoneRender (src/game/init.c) without going
+ * through GX, which is not initialised in a headless self-test. That loop is
+ *     while (VIGetRetraceCount() - start < minimumVcount - 1) VIWaitForRetrace();
+ * so it terminates only if every wait advances the counter. With the counter
+ * pinned to zero it hung forever for any minimumVcount above one.
+ */
+BOOL PartyBoard_RetraceCounterSelfTest(void)
+{
+    const u32 before = sVIRetraceCount;
+    const u32 minimumVcountUnderTest = 4;
+    u32 start;
+    u32 waits;
+    u32 guard;
+    BOOL ok;
+
+    for (waits = 0; waits < 3; waits++) {
+        VIWaitForRetrace();
+    }
+    ok = VIGetRetraceCount() - before == 3;
+
+    start = VIGetRetraceCount();
+    guard = 0;
+    while (VIGetRetraceCount() - start < minimumVcountUnderTest - 1) {
+        VIWaitForRetrace();
+        if (++guard > 1000) {
+            break; /* Would have been an infinite loop. */
+        }
+    }
+    ok = ok && guard == minimumVcountUnderTest - 1;
+
+    OSReport("VI retrace counter: %s (counter advances per wait; the HuSysDoneRender"
+        " loop shape terminates in %u waits at minimumVcount %u). Loop shape only,\n",
+        ok ? "PASS" : "FAIL", guard, minimumVcountUnderTest);
+    return ok;
 }

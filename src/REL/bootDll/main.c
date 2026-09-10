@@ -28,6 +28,7 @@
 #include "port/byteswap.h"
 #include "port/port_version.h"
 #include "port/settings.h"
+#include "port/netplay_runtime.h"
 #endif
 
 #define HU_PAD_BTN_ALL (HuPadBtn[0] | HuPadBtn[1] | HuPadBtn[2] | HuPadBtn[3])
@@ -97,6 +98,29 @@ void ObjectSetup(void)
  s32 LanguageBootGet(void);
  BOOL LanguageMenuExec(void);
  #endif
+
+ /*
+  * Online, a boot wait must cost both peers the same number of simulation
+  * ticks. Real elapsed time differs between two machines, and every iteration
+  * here yields one lockstep tick, so a wall-clock bound makes the very first
+  * screen diverge. 180 ticks is the same three seconds the sibling branches
+  * below already count out by hand. Offline keeps the original behaviour.
+  */
+ static void BootWaitMs(OSTick start, u32 milliseconds)
+ {
+#ifdef TARGET_PC
+     if (PartyBoard_NetplayEnabled()) {
+         u32 ticks = milliseconds * 60 / 1000;
+         while (ticks-- != 0) {
+             HuPrcVSleep();
+         }
+         return;
+     }
+#endif
+     while (OSTicksToMilliseconds(OSGetTick() - start) < milliseconds) {
+         HuPrcVSleep();
+     }
+ }
 
 #ifdef TARGET_PC
  static void BootInitForSkippedSequence(void)
@@ -228,9 +252,7 @@ void ObjectSetup(void)
              HuSprGrpMemberSet(group, 1, sprite_hudson);
              HuSprPosSet(group, 1, 288, 240);
              HuSprAttrSet(group, 1, HUSPR_ATTR_DISPOFF);
-             while (OSTicksToMilliseconds(OSGetTick() - tick_prev) < 3000) {
-                HuPrcVSleep();
-             }
+             BootWaitMs(tick_prev, 3000);
          }
          else {
              for (i = 0; i < 180; i++) {
@@ -272,9 +294,7 @@ void ObjectSetup(void)
          if (!SystemInitF) {
              tick_prev = OSGetTick();
              HuAudSndGrpSet(0);
-             while (OSTicksToMilliseconds(OSGetTick() - tick_prev) < 3000) {
-                HuPrcVSleep();
-             }
+             BootWaitMs(tick_prev, 3000);
          }
          else {
              for (i = 0; i < 180; i++) {
@@ -314,9 +334,7 @@ void ObjectSetup(void)
              HuAudSndGrpSetSet(0);
              SystemInitF = 1;
          }
-         while (OSTicksToMilliseconds(OSGetTick() - tick_prev) < 1000) {
-            HuPrcVSleep();
-         }
+         BootWaitMs(tick_prev, 1000);
          HuSprAttrSet(group, 0, HUSPR_ATTR_DISPOFF);
          HuSprAttrSet(group, 1, HUSPR_ATTR_DISPOFF);
          group_thp = HuSprGrpCreate(1);

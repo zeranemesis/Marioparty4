@@ -9,7 +9,7 @@ OMOVL omcurovl;
 static PADStatus physical[4];
 static PADStatus remote;
 static bool networkActive, ready = true;
-static unsigned audioTicks, clampCalls, checks;
+static unsigned audioTicks, logicalAudioTicks, logicalMovieTicks, clampCalls, checks;
 #define CHECK(x) do { ++checks; if (!(x)) { printf("FAIL line %d: %s\n", __LINE__, #x); return 1; } } while (0)
 
 s32 omMgIndexGet(s16 overlay) { (void)overlay; return 1; }
@@ -23,6 +23,13 @@ BOOL PADReset(u32 mask) { (void)mask; return TRUE; }
 u32 PADRead(PADStatus* status) { memcpy(status, physical, sizeof(physical)); return PAD_CHAN0_BIT; }
 void PADClamp(PADStatus* status) { (void)status; ++clampCalls; }
 void msmSysRegularProc(void) { ++audioTicks; }
+/* The deterministic audio clock must advance exactly once per accepted tick,
+ * and never on a tick the network refused. */
+void msmStreamLogicalTick(void) { ++logicalAudioTicks; }
+/* The movie clock shares the same invariant: gameplay blocks on a movie
+ * ending, so its position must advance per accepted tick and never on a
+ * tick the network refused. */
+void PartyBoard_ThpLogicalTick(void) { ++logicalMovieTicks; }
 void PartyBoard_NetplayControlMotor(u32 port, u32 command) { (void)port; (void)command; }
 bool PartyBoard_NetplayPreparePads(PADStatus status[4], u32* rumble, bool startup)
 {
@@ -47,17 +54,23 @@ int main(void)
         // Insert arbitrary network stalls: repeat timers and audio must freeze.
         const s32 counter = VCounter;
         const unsigned audio = audioTicks, clamp = clampCalls;
+        const unsigned logicalAudio = logicalAudioTicks;
+        const unsigned logicalMovie = logicalMovieTicks;
         const u16 repeats = _PadRepCnt[1];
         ready = false;
         for (unsigned stall = 0; stall < frame % 7; ++stall) {
             CHECK(!HuPadPollSimulationTick());
-            CHECK(VCounter == counter && audioTicks == audio && clampCalls == clamp);
+            CHECK(VCounter == counter && audioTicks == audio && clampCalls == clamp
+                && logicalAudioTicks == logicalAudio
+                && logicalMovieTicks == logicalMovie);
             CHECK(_PadRepCnt[1] == repeats);
         }
         ready = true;
         CHECK(HuPadPollSimulationTick());
         HuPadRead();
-        CHECK(VCounter == counter + 1 && audioTicks == audio + 1 && clampCalls == clamp + 1);
+        CHECK(VCounter == counter + 1 && audioTicks == audio + 1 && clampCalls == clamp + 1
+            && logicalAudioTicks == logicalAudio + 1
+            && logicalMovieTicks == logicalMovie + 1);
         CHECK(HuPadBtn[0] == HuPadBtn[1]);
         CHECK(HuPadBtnDown[0] == HuPadBtnDown[1]);
         CHECK(HuPadBtnRep[0] == HuPadBtnRep[1]);

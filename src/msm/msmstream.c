@@ -1,6 +1,9 @@
 #include "msm/msmstream.h"
 #include "msm/msmmem.h"
 #include "msm/msmsys.h"
+#ifdef TARGET_PC
+#include "port/netplay_runtime.h"
+#endif
 
 #ifdef BYTESWAPPING
 #include "port/byteswap.h"
@@ -125,6 +128,12 @@ typedef struct {
     /* 0x68 */ s32 unk68;
     /* 0x6C */ s32 unk6C;
     /* 0x70 */ DVDFileInfo file;
+#ifdef TARGET_PC
+    /* Deterministic playback clock in 60 Hz simulation ticks, derived from
+     * the stream length on the disc. Written and decremented by the game
+     * thread only; the audio thread never touches it. */
+    s32 logicalTicks;
+#endif
 } MSM_STREAM_SLOT; // Size 0xAC
 
 static struct {
@@ -172,6 +181,69 @@ static inline void msmStreamClose(s32 streamNo) {
     slot->status = 0;
 }
 
+#ifdef TARGET_PC
+/*
+ * The MusyX mixer runs on its own SDL thread, clocked by how fast the audio
+ * device drains its queue, and it is that thread which marks a stream finished.
+ * Gameplay blocks on that flag (board/star.c, board/lottery.c, mg_item.c, ...)
+ * yielding one simulation tick per poll, so two machines leave the wait on
+ * different frames and desync. These helpers give the game thread its own
+ * playback clock, computed from data on the disc, so the logical end of a
+ * stream is identical on every machine. Physical mixing is left untouched.
+ */
+s32 msmStreamLogicalTicksFor(s32 samples, s32 frequency)
+{
+    s64 ticks;
+
+    if (samples <= 0 || frequency <= 0) {
+        return 0;
+    }
+    /* Round up: a stream must never be reported finished before its last
+     * sample would have been played at the nominal rate. */
+    ticks = ((s64)samples * 60 + frequency - 1) / frequency;
+    if (ticks > 0x7FFFFFFF) {
+        ticks = 0x7FFFFFFF;
+    }
+    return (s32)ticks;
+}
+
+s32 msmStreamLogicalStatus(const MSM_STREAM_SLOT* slot, s32 status)
+{
+    /* Pause is requested by the game, so it is already the same on both peers
+     * and is reported unchanged. */
+    if (status == MSM_STREAM_PAUSEIN) {
+        return status;
+    }
+    /* For everything else the logical clock is the only authority. Correcting
+     * just the "finished" transition was not enough: msmStreamShutdown, called
+     * from msmStreamData and msmStreamUpdateFunc on the audio thread, also
+     * drives a slot to the stopping state at the device's own rate, which
+     * showed up as PLAY on one peer and STOP on the other at frame 6294 of a
+     * real two-instance run. A stop the game itself asked for already zeroed
+     * the clock in msmStreamStopSub, so it still ends the wait immediately.
+     * Every caller only tests this against zero, so collapsing the non-zero
+     * states onto PLAY changes no game logic. */
+    return slot->logicalTicks > 0 ? MSM_STREAM_PLAY : MSM_STREAM_DONE;
+}
+
+/* Exactly once per accepted simulation tick. Deliberately separate from
+ * msmSysRegularProc, which HuAudSndGrpSetSet also calls in a drain loop. */
+void msmStreamLogicalTick(void)
+{
+    s32 i;
+
+    if (StreamInfo.slot == NULL) {
+        return;
+    }
+    for (i = 0; i < StreamInfo.header.chanMax; i++) {
+        MSM_STREAM_SLOT* slot = &StreamInfo.slot[i];
+        if (slot->logicalTicks > 0 && slot->pauseF != TRUE) {
+            slot->logicalTicks--;
+        }
+    }
+}
+#endif
+
 s32 msmStreamGetStatus(int streamNo) {
     MSM_STREAM_SLOT* slot;
     s32 status;
@@ -198,6 +270,11 @@ s32 msmStreamGetStatus(int streamNo) {
     if (slot->pauseF == TRUE) {
         status = MSM_STREAM_PAUSEIN;
     }
+#ifdef TARGET_PC
+    if (PartyBoard_NetplayEnabled()) {
+        status = msmStreamLogicalStatus(slot, status);
+    }
+#endif
     if (status == MSM_STREAM_DONE && slot->slotL != -1) {
         status = msmStreamGetStatus(slot->slotL);
     }
@@ -620,6 +697,11 @@ static void msmStreamStopSub(s32 streamNo, s32 speed) {
 
     time = speed;
     slot = &StreamInfo.slot[streamNo];
+#ifdef TARGET_PC
+    /* Game-thread teardown: the wait must end deterministically even though
+     * the audible fade-out is finished by the audio thread. */
+    slot->logicalTicks = 0;
+#endif
     if (slot->pauseF != 0) {
         slot->pauseF = 0;
         time = 0;
@@ -1118,6 +1200,14 @@ static s32 msmStreamSlotInit(MSM_STREAM_SLOT *slot, MSM_STREAM_PACK* pack, STREA
     slot->slotL = -1;
     slot->slotR = -1;
     slot->streamPos = param->sampleOfs;
+#ifdef TARGET_PC
+    /* loopEndOfs is the total sample count and frq the playback rate, both
+     * already read from the .pdt. Neither depends on this machine. */
+    slot->logicalTicks = msmStreamLogicalTicksFor(
+        slot->loopEndOfs
+            - (s32)((slot->streamPos / SND_STREAM_ADPCM_BLKBYTES) * SND_STREAM_ADPCM_BLKSIZE),
+        slot->frq);
+#endif
     ret = slot->streamBufSize / 2;
     if ((temp_r3 = slot->loopLen - slot->streamPos) < slot->streamBufSize / 2) {
         ret = temp_r3;
@@ -1128,3 +1218,161 @@ static s32 msmStreamSlotInit(MSM_STREAM_SLOT *slot, MSM_STREAM_PACK* pack, STREA
     slot->status = 2;
     return ret;
 }
+
+#ifdef TARGET_PC
+/*
+ * Regression for the audio wait that gameplay blocks on.
+ *
+ * Two simulated peers play the same stream. Their audio threads finish it at
+ * different real times, which is exactly what happens on two machines with
+ * different audio buffering. The corrected status must reach DONE on the same
+ * tick for both; the uncorrected one must not, otherwise this test would pass
+ * even if the correction were removed.
+ */
+BOOL msmStreamLogicalSelfTest(void)
+{
+    static const s32 kSampleRate = 32000;
+    MSM_STREAM_SLOT fixture[2];
+    MSM_STREAM_SLOT* savedSlot;
+    s32 savedChanMax;
+    s32 correctedDone[2];
+    s32 rawDone[2];
+    s32 physicalEnd[2];
+    s32 peer;
+    s32 tick;
+    BOOL ok = TRUE;
+
+    /* Duration arithmetic, including rounding up and rejected inputs. */
+    ok = ok && msmStreamLogicalTicksFor(kSampleRate, kSampleRate) == 60;
+    ok = ok && msmStreamLogicalTicksFor(kSampleRate / 2, kSampleRate) == 30;
+    ok = ok && msmStreamLogicalTicksFor(1, kSampleRate) == 1;
+    ok = ok && msmStreamLogicalTicksFor(kSampleRate + 1, kSampleRate) == 61;
+    ok = ok && msmStreamLogicalTicksFor(0, kSampleRate) == 0;
+    ok = ok && msmStreamLogicalTicksFor(-5, kSampleRate) == 0;
+    ok = ok && msmStreamLogicalTicksFor(kSampleRate, 0) == 0;
+    ok = ok && msmStreamLogicalTicksFor(0x7FFFFFFF, 1) == 0x7FFFFFFF;
+
+    /* One second of audio; peer 0 drains it early, peer 1 late. */
+    physicalEnd[0] = 30;
+    physicalEnd[1] = 90;
+    for (peer = 0; peer < 2; peer++) {
+        correctedDone[peer] = -1;
+        rawDone[peer] = -1;
+        memset(&fixture[peer], 0, sizeof(fixture[peer]));
+        fixture[peer].status = 4;
+        fixture[peer].slotL = -1;
+        fixture[peer].slotR = -1;
+        fixture[peer].logicalTicks = msmStreamLogicalTicksFor(kSampleRate, kSampleRate);
+    }
+    ok = ok && fixture[0].logicalTicks == 60;
+
+    /* The audio thread can also drive a slot to the stopping state on its own,
+     * which a real two-instance run showed as PLAY on one peer and STOP on the
+     * other. While the clock runs, no audio-thread state may shorten the wait;
+     * pause, which the game requests, is reported unchanged. */
+    fixture[0].logicalTicks = 10;
+    ok = ok && msmStreamLogicalStatus(&fixture[0], MSM_STREAM_STOP) == MSM_STREAM_PLAY;
+    ok = ok && msmStreamLogicalStatus(&fixture[0], MSM_STREAM_DONE) == MSM_STREAM_PLAY;
+    ok = ok && msmStreamLogicalStatus(&fixture[0], MSM_STREAM_PAUSEOUT) == MSM_STREAM_PLAY;
+    ok = ok && msmStreamLogicalStatus(&fixture[0], MSM_STREAM_PAUSEIN) == MSM_STREAM_PAUSEIN;
+    fixture[0].logicalTicks = 0;
+    ok = ok && msmStreamLogicalStatus(&fixture[0], MSM_STREAM_STOP) == MSM_STREAM_DONE;
+    ok = ok && msmStreamLogicalStatus(&fixture[0], MSM_STREAM_PLAY) == MSM_STREAM_DONE;
+    ok = ok && msmStreamLogicalStatus(&fixture[0], MSM_STREAM_PAUSEIN) == MSM_STREAM_PAUSEIN;
+    fixture[0].status = 4;
+    fixture[0].logicalTicks = msmStreamLogicalTicksFor(kSampleRate, kSampleRate);
+
+    savedSlot = StreamInfo.slot;
+    savedChanMax = StreamInfo.header.chanMax;
+    StreamInfo.slot = fixture;
+    StreamInfo.header.chanMax = 2;
+    for (tick = 0; tick < 120; tick++) {
+        for (peer = 0; peer < 2; peer++) {
+            s32 raw;
+            s32 corrected;
+            if (tick == physicalEnd[peer]) {
+                /* The audio thread marks the slot finished. */
+                fixture[peer].status = 0;
+            }
+            raw = fixture[peer].status == 4 ? MSM_STREAM_PLAY : MSM_STREAM_DONE;
+            corrected = msmStreamLogicalStatus(&fixture[peer], raw);
+            if (raw == MSM_STREAM_DONE && rawDone[peer] < 0) {
+                rawDone[peer] = tick;
+            }
+            if (corrected == MSM_STREAM_DONE && correctedDone[peer] < 0) {
+                correctedDone[peer] = tick;
+            }
+        }
+        /* The real per-tick hook, driven exactly once per simulation tick. */
+        msmStreamLogicalTick();
+    }
+    /* A paused stream must not consume its clock. */
+    fixture[0].logicalTicks = 5;
+    fixture[0].pauseF = TRUE;
+    msmStreamLogicalTick();
+    msmStreamLogicalTick();
+    ok = ok && fixture[0].logicalTicks == 5;
+    fixture[0].pauseF = FALSE;
+    msmStreamLogicalTick();
+    ok = ok && fixture[0].logicalTicks == 4;
+    StreamInfo.slot = savedSlot;
+    StreamInfo.header.chanMax = savedChanMax;
+
+    /* The correction makes both peers agree ... */
+    ok = ok && correctedDone[0] == 60 && correctedDone[1] == 60;
+    /* ... and without it they would not, so this test cannot pass vacuously. */
+    ok = ok && rawDone[0] == 30 && rawDone[1] == 90 && rawDone[0] != rawDone[1];
+
+    OSReport("Logical audio stream clock: %s (duration arithmetic, paused clock held,"
+        " two peers draining at ticks %d and %d both finish at %d; uncorrected %d vs %d).\n",
+        ok ? "PASS" : "FAIL", physicalEnd[0], physicalEnd[1], correctedDone[0],
+        rawDone[0], rawDone[1]);
+    return ok;
+}
+#endif
+
+#ifdef TARGET_PC
+static MSM_STREAM_SLOT sProbeSlots[2];
+
+/*
+ * Headless regression support. The two-process netplay probe runs before the
+ * game boots, so there is no disc, no audio device and no real stream table.
+ * These entry points install a fixture table so the probe can drive the real
+ * logical clock and the real status path. They refuse to act whenever a real
+ * stream table exists, so a running game can never reach them.
+ */
+BOOL msmStreamLogicalProbeInstall(void)
+{
+    if (StreamInfo.slot != NULL) {
+        return FALSE;
+    }
+    memset(sProbeSlots, 0, sizeof(sProbeSlots));
+    sProbeSlots[0].slotL = sProbeSlots[0].slotR = -1;
+    sProbeSlots[1].slotL = sProbeSlots[1].slotR = -1;
+    StreamInfo.slot = sProbeSlots;
+    StreamInfo.header.chanMax = 2;
+    return TRUE;
+}
+
+void msmStreamLogicalProbeStart(s32 channel, s32 samples, s32 frequency)
+{
+    if (StreamInfo.slot != sProbeSlots || channel < 0 || channel >= 2) {
+        return;
+    }
+    sProbeSlots[channel].status = 4;
+    sProbeSlots[channel].logicalTicks = msmStreamLogicalTicksFor(samples, frequency);
+}
+#endif
+
+#ifdef TARGET_PC
+/* Reproduces the one transition the MusyX audio thread owns: marking a slot
+ * finished. The probe calls it on a different frame on each peer, which is what
+ * two machines with different audio buffering really do. */
+void msmStreamLogicalProbeFinishPhysical(s32 channel)
+{
+    if (StreamInfo.slot != sProbeSlots || channel < 0 || channel >= 2) {
+        return;
+    }
+    sProbeSlots[channel].status = 0;
+}
+#endif

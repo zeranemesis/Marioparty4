@@ -852,3 +852,29 @@ s32 msmStreamGetStatus(int streamNo)
 {
     return 0;
 }
+
+#ifdef TARGET_PC
+#include "port/netplay_state.h"
+
+/* Stub backend: the same canonical surface as the MusyX build, so a session
+ * started with one backend cannot silently compare against the other. */
+void PartyBoard_NetplayAudioState(PartyBoardNetplayStateSink sink, void *context)
+{
+    int i;
+#define WORD(value) sink(context, #value, (uint32_t)(value))
+    WORD(sndGroupBak); WORD(auxANoBak); WORD(auxBNoBak);
+    WORD(HuAuxAVol); WORD(HuAuxBVol); WORD(Hu3DAudVol);
+    WORD(fadeStat); WORD(musicOffF);
+    /* msmMusGetNumPlay/msmSeGetNumPlay are advanced by the MusyX audio
+     * thread at the device rate; hashing them would report a desync on
+     * every machine pair. Only game-thread state belongs here. */
+    /* Out-of-range channels report a stable zero on both backends. */
+    for (i = 0; i < 8; i++) {
+        WORD(i); WORD(msmStreamGetStatus(i));
+    }
+    for (i = 0; i < 8; i++) {
+        WORD(i); WORD(charVoiceGroupStat[i]);
+    }
+#undef WORD
+}
+#endif

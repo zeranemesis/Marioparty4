@@ -4,6 +4,10 @@
 #include "game/msm.h"
 
 s32 msmStreamGetStatus(int streamNo);
+#ifdef TARGET_PC
+void msmStreamLogicalTick(void);
+s32 msmStreamLogicalTicksFor(s32 samples, s32 frequency);
+#endif
 void msmStreamSetMasterVolume(s32 arg0);
 void msmStreamStopAll(s32 speed);
 s32 msmStreamStop(int streamNo, s32 speed);

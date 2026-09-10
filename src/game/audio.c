@@ -11,6 +11,7 @@
 #ifdef TARGET_PC
 #include <stdio.h>
 #include "port/rollback_audio_bridge.h"
+#include "port/netplay_runtime.h"
 #endif
 
 #define HUMSMHEAP_SIZE 0x13FC00
@@ -555,9 +556,27 @@ void HuAudDllSndGrpSet(u16 ovl) {
 }
 
 #define SNDGRP_TIMEOUT 500
+#ifdef TARGET_PC
+/* Online this drain runs a fixed number of times instead of for a fixed
+ * amount of real time. Both bounds are arbitrary, but only the fixed count
+ * advances the audio state identically on two machines, and this runs at
+ * the exact moment an overlay is replaced (HuAudSndCharGrpSet). */
+#define SNDGRP_DRAIN_STEPS 30
+#endif
 
 static void HuAudSndGrpWait(OSTick tickStart)
 {
+#ifdef TARGET_PC
+    if (PartyBoard_NetplayEnabled()) {
+        s32 step;
+        /* No early exit on the play counters: the audio thread influences
+         * them, so testing them would put real time back into the loop. */
+        for (step = 0; step < SNDGRP_DRAIN_STEPS; step++) {
+            msmSysRegularProc();
+        }
+        return;
+    }
+#endif
     while ((msmMusGetNumPlay(TRUE) != 0 || msmSeGetNumPlay(TRUE) != 0)
         && OSTicksToMilliseconds(OSGetTick() - tickStart) < SNDGRP_TIMEOUT) {
 #ifdef TARGET_PC
@@ -821,3 +840,30 @@ static int HuSePlay(int seId, MSM_SEPARAM *param)
     }
     return result;
 }
+
+#ifdef TARGET_PC
+#include "port/netplay_state.h"
+
+/* Logical audio state, i.e. everything the game itself can observe and block
+ * on. Physical mixing, device queues, voice DSP registers and sample positions
+ * are owned by the audio backend and never exported here. */
+void PartyBoard_NetplayAudioState(PartyBoardNetplayStateSink sink, void *context)
+{
+    int i;
+#define WORD(value) sink(context, #value, (uint32_t)(value))
+    WORD(sndGroupBak); WORD(auxANoBak); WORD(auxBNoBak);
+    WORD(HuAuxAVol); WORD(HuAuxBVol); WORD(Hu3DAudVol);
+    WORD(fadeStat); WORD(musicOffF);
+    /* msmMusGetNumPlay/msmSeGetNumPlay are advanced by the MusyX audio
+     * thread at the device rate; hashing them would report a desync on
+     * every machine pair. Only game-thread state belongs here. */
+    /* Out-of-range channels report a stable zero on both backends. */
+    for (i = 0; i < 8; i++) {
+        WORD(i); WORD(msmStreamGetStatus(i));
+    }
+    for (i = 0; i < 8; i++) {
+        WORD(i); WORD(charVoiceGroupStat[i]);
+    }
+#undef WORD
+}
+#endif

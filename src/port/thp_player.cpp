@@ -13,6 +13,7 @@ extern "C" {
 #include "dolphin/gx.h"
 #include "game/hu3d.h"
 #include "game/sprite.h"
+#include "port/netplay_runtime.h"
 }
 
 #define STBI_ONLY_JPEG
@@ -193,22 +194,102 @@ public:
         rampRemaining.store(remaining, std::memory_order_relaxed);
     }
 
+    /*
+     * Playback position, in video frames, derived from the simulation clock
+     * instead of the audio device.
+     *
+     * `cursor` is advanced by the mixer on the audio thread, at whatever rate
+     * the device drains its queue. Gameplay blocks on the movie ending
+     * (bootDll, modeseldll, mstory2Dll, staffDll all spin on HuTHPEndCheck or
+     * HuTHPFrameGet, yielding one simulation tick per poll), so two machines
+     * left a movie on different frames and then asked for different screen
+     * wipes. `fps` and the frame count both come from the THP header on the
+     * disc, so a count of accepted ticks gives the same position everywhere.
+     */
+    uint64_t logical_frame() const {
+        return static_cast<uint64_t>(logicalTicks) * static_cast<uint64_t>(fps * 100000.0f)
+            / (60ull * 100000ull);
+    }
+
+    uint64_t playback_frame() const {
+        if (PartyBoard_NetplayEnabled()) {
+            return logical_frame();
+        }
+        const uint64_t sample = cursor.load(std::memory_order_relaxed);
+        return sample * static_cast<uint64_t>(fps * 100000.0f) / (uint64_t(rate) * 100000);
+    }
+
     bool ended() const {
         if (looped) {
             return false;
         }
-        const uint64_t sample = cursor.load(std::memory_order_relaxed);
-        const uint64_t frame = sample * static_cast<uint64_t>(fps * 1000.0f) / (uint64_t(rate) * 1000);
-        return stopped.load(std::memory_order_relaxed) || frame >= frames.size();
+        // stopped is set by HuTHPStop from game logic, so it is already the
+        // same on both peers.
+        return stopped.load(std::memory_order_relaxed) || playback_frame() >= frames.size();
     }
 
     int current_frame() const {
-        const uint64_t sample = cursor.load(std::memory_order_relaxed);
         if (frames.empty()) {
             return 0;
         }
-        const uint64_t frame = sample * static_cast<uint64_t>(fps * 100000.0f) / (uint64_t(rate) * 100000);
-        return static_cast<int>(std::min<uint64_t>(frame, frames.size() - 1));
+        return static_cast<int>(std::min<uint64_t>(playback_frame(), frames.size() - 1));
+    }
+
+    void logical_tick() { ++logicalTicks; }
+
+    /*
+     * Regression for the movie position gameplay blocks on. A member so it can
+     * reach the fixture fields; it touches no graphics and no device.
+     *
+     * Two simulated peers have consumed very different numbers of audio samples,
+     * which is what two machines with different audio buffering really do. The
+     * simulation-derived position must be identical for both; the sample-derived
+     * one must not, otherwise this test would pass even with the fix removed.
+     */
+    static bool self_test() {
+        ThpMovie movie;
+        bool ok = true;
+        movie.fps = 30.0f;
+        movie.rate = kOutputRate;
+        movie.frames.resize(90); // Three seconds of video at 30 fps.
+
+        // Ticks to video frames: 60 accepted ticks is one second of simulation.
+        movie.logicalTicks = 0;
+        ok = ok && movie.logical_frame() == 0;
+        movie.logicalTicks = 60;
+        ok = ok && movie.logical_frame() == 30;
+        movie.logicalTicks = 120;
+        ok = ok && movie.logical_frame() == 60;
+        movie.logicalTicks = 2;
+        ok = ok && movie.logical_frame() == 1;
+
+        // The same tick count must give the same position whatever the device did.
+        movie.logicalTicks = 90;
+        const uint64_t expected = movie.logical_frame();
+        uint64_t sampleDerived[2];
+        for (int peer = 0; peer < 2; ++peer) {
+            // Peer 1's device is a long way behind peer 0's.
+            movie.cursor.store(peer == 0 ? 66150u : 22050u, std::memory_order_relaxed);
+            ok = ok && movie.logical_frame() == expected;
+            sampleDerived[peer] = movie.cursor.load(std::memory_order_relaxed)
+                * static_cast<uint64_t>(movie.fps * 100000.0f)
+                / (uint64_t(movie.rate) * 100000);
+        }
+        // ... and the sample-derived position would not have.
+        ok = ok && sampleDerived[0] != sampleDerived[1];
+
+        // A restart puts the logical clock back to the first frame.
+        movie.restart();
+        ok = ok && movie.logicalTicks == 0 && movie.logical_frame() == 0;
+        movie.logical_tick();
+        movie.logical_tick();
+        ok = ok && movie.logicalTicks == 2;
+
+        OSReport("Logical movie clock: %s (ticks to frames; position independent of the"
+            " audio cursor at 66150 vs 22050 samples, frame %llu either way, where the"
+            " sample-derived position would have been %llu vs %llu). Clock only.\n",
+            ok ? "PASS" : "FAIL", expected, sampleDerived[0], sampleDerived[1]);
+        return ok;
     }
 
     int total_frames() const { return static_cast<int>(frames.size()); }
@@ -218,6 +299,7 @@ public:
     void restart() {
         cursor.store(0, std::memory_order_relaxed);
         stopped.store(false, std::memory_order_relaxed);
+        logicalTicks = 0;
     }
 
     void set_volume(int volume, int rampMs) {
@@ -499,6 +581,9 @@ private:
     float fps = 0.0f;
     int textureSlot = 0;
     int uploadedFrame = -1;
+    // Accepted simulation ticks since the movie started. Game thread only; the
+    // audio thread never reads or writes it.
+    uint32_t logicalTicks = 0;
 };
 
 std::mutex g_movieMutex;
@@ -574,6 +659,13 @@ extern "C" void HuTHPRestart(void) {
     if (g_movie) g_movie->restart();
 }
 
+/* Exactly once per accepted simulation tick, from PadReadSimulationTick, so the
+ * movie advances on the lockstep clock rather than on the audio device's. */
+extern "C" void PartyBoard_ThpLogicalTick(void) {
+    std::lock_guard<std::mutex> lock(g_movieMutex);
+    if (g_movie) g_movie->logical_tick();
+}
+
 extern "C" BOOL HuTHPEndCheck(void) {
     std::lock_guard<std::mutex> lock(g_movieMutex);
     return g_movie ? g_movie->ended() : TRUE;
@@ -592,6 +684,10 @@ extern "C" s32 HuTHPTotalFrameGet(void) {
 extern "C" void HuTHPSetVolume(s32 left, s32 right) {
     std::lock_guard<std::mutex> lock(g_movieMutex);
     if (g_movie) g_movie->set_volume(left, right);
+}
+
+extern "C" BOOL PartyBoard_ThpLogicalSelfTest(void) {
+    return ThpMovie::self_test() ? TRUE : FALSE;
 }
 
 extern "C" void HuTHPPCM16Mix(int16_t* destination, uint32_t frames) {

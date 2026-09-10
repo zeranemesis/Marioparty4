@@ -3,6 +3,7 @@
 #include "game/object.h"
 #include "game/objsub.h"
 #include "game/pad.h"
+#include "game/thpmain.h"
 #include "port/rollback.h"
 #include <stdint.h>
 #include <string.h>
@@ -374,6 +375,14 @@ static BOOL PadReadSimulationTick(u32 retraceCount)
         PadApplySimulationStatus(status, rumble, TRUE);
     }
     msmSysRegularProc();
+#ifdef TARGET_PC
+    /* Logical audio clock. Kept out of msmSysRegularProc because bank
+     * changes call that one repeatedly inside a drain loop. */
+    msmStreamLogicalTick();
+    /* Same reasoning for movie playback: gameplay blocks on the movie ending,
+     * so its position must come from accepted ticks, not from the device. */
+    PartyBoard_ThpLogicalTick();
+#endif
     VCounter++;
     return TRUE;
 }
