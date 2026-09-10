@@ -49,7 +49,18 @@ jobs:
 
       - name: Configure CMake
         shell: pwsh
-        run: cmake --preset x-windows-ci-msvc
+        # The default desktop backend is deliberately silent.  CubeShelf must
+        # ship the same MusyX-backed configuration as the tested Windows build.
+        run: cmake --preset x-windows-ci-msvc -DPARTYBOARD_EXPERIMENTAL_MUSYX_AUDIO=ON
+
+      - name: Validate audio configuration
+        shell: pwsh
+        run: |
+          $audio = Select-String -Path "build/x-windows-ci-msvc/CMakeCache.txt" `
+            -Pattern '^PARTYBOARD_EXPERIMENTAL_MUSYX_AUDIO:BOOL=ON$'
+          if (-not $audio) {
+            throw "CubeShelf build was configured with the silent audio backend."
+          }
 
       - name: Build
         shell: pwsh
