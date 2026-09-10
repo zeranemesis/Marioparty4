@@ -1137,3 +1137,62 @@ Là où un élément 2D est translucide, le décor qu'on voit à travers perd so
 occlusion. C'est le compromis assumé : une boîte de dialogue à moitié
 transparente laisse voir une scène non ombrée plutôt qu'une interface assombrie
 de 22 %. `AURORA_RT_ORTHO_MASK=0` rétablit l'ancien comportement.
+
+## Un vrai mini-jeu, enfin (10 septembre 2026)
+
+`m416Dll`, joué jusqu'à son écran de résultats, puis retour au menu. Aucune
+erreur, aucun retrait de périphérique, 60 FPS.
+
+### Ce qu'il a fallu pour y entrer
+
+Les écrans de mise en place lisent un port de manette **par joueur** —
+`HuPadBtnDown[cfg.unk6C]` dans `mgmodedll/main.c` — et la boucle ne sort que
+lorsque les quatre ont confirmé. Un appui envoyé au seul port 0 ne pouvait donc
+jamais la satisfaire : c'est ce qui bloquait toutes les tentatives précédentes
+sur « Select the characters that will be joining in the party ». Le canal
+d'automatisation portait déjà un numéro de port ; il suffisait de s'en servir, en
+espaçant les quatre écritures d'au moins une frame puisqu'une seule commande est
+verrouillée par sondage.
+
+Deux autres détails appris en chemin, tous deux appliqués :
+
+* Les menus se pilotent au **stick**, pas à la croix.
+* Ils lisent le stick **sans détection de front** : une impulsion tenue huit
+  frames déplaçait le curseur de huit crans.
+
+### Mesures sur le mini-jeu
+
+| | |
+|---|---|
+| triangles | 23 400 – 25 600 |
+| construction | médiane 0,80 ms, p95 1,00 ms, max 2,80 ms |
+| tracé | 0,05 ms en 1920 × 1440 |
+| masque 2D | 9,8 % de l'écran |
+| projections par frame | 2 |
+| luminosité contre ray tracing éteint | **−2,3 %**, saturation identique |
+
+La scène est une salle de château éclairée à la bougie : elle est sombre par
+choix artistique, pas à cause du tracé. Les deux images sont à deux pour cent
+l'une de l'autre.
+
+### Le correctif de durée de vie valait bien plus que ce que j'avais mesuré
+
+J'avais annoncé, sur des écrans de menu, que la passe de tracé était encore en
+vol au moment où la construction suivante voulait ses tampons « une à deux fois
+par plusieurs milliers de frames ». En jeu réel :
+
+```
+Trace still running when the next build wanted its buffers: 166 times, 455.4 ms
+```
+
+Et la progression est par rafales : 49, puis 67 pendant neuf cents frames sans
+bouger, puis **99 occurrences en trois cents frames** — un tiers des frames — pour
+415 ms d'attente. Les menus ne sollicitent pas le GPU ; un mini-jeu, si, et la
+file de calcul privée passe alors après le travail de Dawn.
+
+Autrement dit, avant le correctif, chacune de ces 166 occasions était un usage
+après libération ou une réinitialisation d'allocateur interdite, concentrés
+précisément sur les moments chargés — les transitions d'écran. C'est bien plus
+cohérent avec « ça plante à la sélection du plateau » que le chiffre des menus ne
+le laissait croire. Ce n'est toujours pas une reproduction du plantage signalé,
+mais ce n'est plus le même ordre de grandeur de présomption.
