@@ -74,17 +74,38 @@ jobs:
         shell: pwsh
         run: cmake --build --preset x-windows-ci-msvc
 
+      - name: Build online launcher
+        shell: pwsh
+        run: |
+          ./tools/build_online.ps1 -OutputDirectory "build/install"
+          Copy-Item -LiteralPath "tools/package/Jouer en ligne.cmd" -Destination "build/install" -Force
+          Copy-Item -LiteralPath "tools/package/Lancer PartyBoard.cmd" -Destination "build/install" -Force
+
       - name: Validate runtime
         shell: pwsh
         run: |
-          $exe = Get-ChildItem -Path "build/install" -Filter "partyboard.exe" -Recurse -ErrorAction SilentlyContinue |
-            Select-Object -First 1
+          $required = @(
+            "partyboard.exe",
+            "PartyBoardOnline.exe",
+            "PartyBoardOnline.exe.config",
+            "Jouer en ligne.cmd",
+            "Lancer PartyBoard.cmd"
+          )
 
-          if (-not $exe) {
-            throw "partyboard.exe was not produced under build/install."
+          foreach ($file in $required) {
+            $path = Join-Path "build/install" $file
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "$file was not produced under build/install."
+            }
           }
 
-          Write-Host "PartyBoard executable: $($exe.FullName)"
+          $test = Start-Process -FilePath "build/install/PartyBoardOnline.exe" `
+            -ArgumentList "--self-test" -Wait -PassThru -NoNewWindow
+          if ($test.ExitCode -ne 0) {
+            throw "PartyBoardOnline self-test failed with exit code $($test.ExitCode)."
+          }
+
+          Write-Host "Offline and online launchers are ready."
 
       - name: Create CubeShelf package
         shell: pwsh

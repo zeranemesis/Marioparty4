@@ -7,6 +7,7 @@ using System.Net.Sockets;
 using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Security.Principal;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -37,6 +38,10 @@ static class Wire {
             using(var cert=req.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5),DateTimeOffset.UtcNow.AddHours(12))) {
                 // A temporary PFX import makes the private key usable by Schannel
                 // on .NET Framework. Nothing is installed in a certificate store.
+                var identity=WindowsIdentity.GetCurrent();
+                var keyDirectory=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "Microsoft","Crypto","RSA",identity.User.Value);
+                Directory.CreateDirectory(keyDirectory);
                 return new X509Certificate2(cert.Export(X509ContentType.Pfx));
             }
         }
