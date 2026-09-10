@@ -28,6 +28,14 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
+      - name: Apply PartyBoard dependency patches
+        shell: pwsh
+        run: |
+          git -C extern/musyx apply --check ../../patches/musyx-partyboard.patch
+          git -C extern/musyx apply ../../patches/musyx-partyboard.patch
+          git -C extern/aurora apply --check ../../patches/aurora-partyboard.patch
+          git -C extern/aurora apply ../../patches/aurora-partyboard.patch
+
       - name: Enable Visual Studio environment
         uses: ilammy/msvc-dev-cmd@v1
         with:
