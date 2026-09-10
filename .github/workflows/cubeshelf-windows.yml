@@ -1,4 +1,4 @@
-name: CubeShelf Windows Release
+name: CubeShelf Desktop Release
 
 on:
   push:
@@ -13,12 +13,12 @@ permissions:
   contents: write
 
 concurrency:
-  group: cubeshelf-windows-${{ github.ref }}
+  group: cubeshelf-desktop-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   windows:
-    name: Build and publish PartyBoard Windows
+    name: PartyBoard Windows x64
     runs-on: windows-latest
 
     steps:
@@ -55,10 +55,8 @@ jobs:
           choco install ninja -y
           vcpkg install freetype:x64-windows-static zstd:x64-windows-static
 
-      - name: Configure CMake
+      - name: Configure
         shell: pwsh
-        # The default desktop backend is deliberately silent.  CubeShelf must
-        # ship the same MusyX-backed configuration as the tested Windows build.
         run: cmake --preset x-windows-ci-msvc -DPARTYBOARD_EXPERIMENTAL_MUSYX_AUDIO=ON
 
       - name: Validate audio configuration
@@ -81,112 +79,288 @@ jobs:
           Copy-Item -LiteralPath "tools/package/Jouer en ligne.cmd" -Destination "build/install" -Force
           Copy-Item -LiteralPath "tools/package/Lancer PartyBoard.cmd" -Destination "build/install" -Force
 
-      - name: Validate runtime
+      - name: Validate Windows runtime
         shell: pwsh
         run: |
-          $required = @(
+          foreach ($file in @(
             "partyboard.exe",
             "PartyBoardOnline.exe",
             "PartyBoardOnline.exe.config",
             "Jouer en ligne.cmd",
             "Lancer PartyBoard.cmd"
-          )
-
-          foreach ($file in $required) {
-            $path = Join-Path "build/install" $file
-            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+          )) {
+            if (-not (Test-Path -LiteralPath (Join-Path "build/install" $file) -PathType Leaf)) {
               throw "$file was not produced under build/install."
             }
           }
 
           $test = Start-Process -FilePath "build/install/PartyBoardOnline.exe" `
             -ArgumentList "--self-test" -Wait -PassThru -NoNewWindow
+
           if ($test.ExitCode -ne 0) {
             throw "PartyBoardOnline self-test failed with exit code $($test.ExitCode)."
           }
 
-          Write-Host "Offline and online launchers are ready."
-
-      - name: Create CubeShelf package
+      - name: Package Windows
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
+          Compress-Archive `
+            -Path "build/install/*" `
+            -DestinationPath "PartyBoard-win-x64.zip" `
+            -Force
 
-          $zip = "PartyBoard-win-x64.zip"
-          if (Test-Path $zip) {
-            Remove-Item $zip -Force
-          }
-
-          Compress-Archive -Path "build/install/*" -DestinationPath $zip -Force
-
-          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $zip" | Set-Content "checksums.txt" -Encoding ascii
-
-          $shortSha = "${{ github.sha }}".Substring(0, 12)
-          $changes = (git log -5 --pretty=format:"%h %s") -join "`n"
-
-          $manifest = [ordered]@{
-            schema = 1
-            game = "Mario Party 4"
-            gameId = "GMPE01_00"
-            version = "nightly-$shortSha"
-            commit = "${{ github.sha }}"
-            branch = "${{ github.ref_name }}"
-            platform = "win-x64"
-            executable = "partyboard.exe"
-            supportedDiscs = @(
-              "GMPE01_00",
-              "GMPE01_01"
-            )
-            changes = $changes
-          } | ConvertTo-Json -Depth 6
-
-          Set-Content "manifest.json" -Value $manifest -Encoding utf8
-
-          @"
-          CubeShelf automatic Windows build
-
-          Commit: ${{ github.sha }}
-          Branch: ${{ github.ref_name }}
-
-          Recent changes:
-          $changes
-          "@ | Set-Content "release-notes.txt" -Encoding utf8
-
-      - name: Upload Actions artifact
-        uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7
         with:
-          name: PartyBoard-win-x64-${{ github.sha }}
-          path: |
-            PartyBoard-win-x64.zip
-            manifest.json
-            checksums.txt
-            release-notes.txt
+          name: cubeshelf-partyboard-win-x64
+          path: PartyBoard-win-x64.zip
           retention-days: 14
 
-      - name: Publish CubeShelf nightly release
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $ErrorActionPreference = "Continue"
+  linux:
+    name: PartyBoard Linux x64
+    runs-on: ubuntu-latest
 
-          gh release view cubeshelf-nightly *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release delete cubeshelf-nightly --yes --cleanup-tag
-            if ($LASTEXITCODE -ne 0) {
-              throw "Unable to replace existing cubeshelf-nightly release."
-            }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install \
+            ninja-build clang lld openssl libcurl4-openssl-dev \
+            zlib1g-dev libglu1-mesa-dev libdbus-1-dev libvulkan-dev \
+            libxi-dev libxrandr-dev libasound2-dev libpulse-dev libudev-dev \
+            libpng-dev libncurses5-dev libx11-xcb-dev libfreetype-dev \
+            libxinerama-dev libxcursor-dev python3-markupsafe libgtk-3-dev \
+            libssl-dev libxss-dev libfuse2 libusb-1.0-0-dev libdecor-0-dev \
+            libpipewire-0.3-dev libunwind-dev
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Configure
+        run: cmake --preset x-linux-ci-gcc
+
+      - name: Build
+        run: cmake --build --preset x-linux-ci-gcc
+
+      - name: Build AppImage
+        run: ci/build-appimage.sh
+
+      - name: Standardize Linux artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          appimage="$(find build/install -maxdepth 1 -type f -name 'Party_Board-*.AppImage' | head -n 1)"
+          test -n "$appimage"
+          cp "$appimage" PartyBoard-linux-x64.AppImage
+          chmod +x PartyBoard-linux-x64.AppImage
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cubeshelf-partyboard-linux-x64
+          path: PartyBoard-linux-x64.AppImage
+          retention-days: 14
+
+  macos:
+    name: PartyBoard macOS ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: arm64
+            preset: x-macos-ci-arm64
+            asset: PartyBoard-macos-arm64.zip
+          - runner: macos-15-intel
+            arch: x64
+            preset: x-macos-ci-x86_64
+            asset: PartyBoard-macos-x64.zip
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install dependencies
+        run: brew install cmake ninja
+
+      - name: Install Rust x86_64 target
+        if: matrix.arch == 'x64'
+        run: |
+          rustup toolchain install stable
+          rustup target add x86_64-apple-darwin
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Validate app bundle
+        shell: bash
+        run: |
+          test -d build/install/PartyBoard.app
+          test -f build/install/PartyBoard.app/Contents/Info.plist
+
+      - name: Package app bundle
+        shell: bash
+        run: |
+          ditto \
+            -c -k \
+            --sequesterRsrc \
+            --keepParent \
+            build/install/PartyBoard.app \
+            "${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cubeshelf-partyboard-macos-${{ matrix.arch }}
+          path: ${{ matrix.asset }}
+          retention-days: 14
+
+  publish:
+    name: Publish CubeShelf PartyBoard release
+    needs:
+      - windows
+      - linux
+      - macos
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download all desktop packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: cubeshelf-partyboard-*
+          path: release
+          merge-multiple: true
+
+      - name: Generate schema-2 manifest/checksums
+        shell: python
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+          BRANCH_NAME: ${{ github.ref_name }}
+        run: |
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("release")
+
+          artifacts = {
+              "win-x64": {
+                  "name": "PartyBoard-win-x64.zip",
+                  "kind": "zip",
+                  "launch": "partyboard.exe",
+              },
+              "linux-x64": {
+                  "name": "PartyBoard-linux-x64.AppImage",
+                  "kind": "appimage",
+                  "launch": "PartyBoard-linux-x64.AppImage",
+              },
+              "osx-arm64": {
+                  "name": "PartyBoard-macos-arm64.zip",
+                  "kind": "app-bundle-zip",
+                  "launch": "PartyBoard.app",
+              },
+              "osx-x64": {
+                  "name": "PartyBoard-macos-x64.zip",
+                  "kind": "app-bundle-zip",
+                  "launch": "PartyBoard.app",
+              },
           }
 
-          $ErrorActionPreference = "Stop"
+          checksum_lines = []
 
-          gh release create cubeshelf-nightly `
-            "PartyBoard-win-x64.zip" `
-            "manifest.json" `
-            "checksums.txt" `
-            "release-notes.txt" `
-            --target "${{ github.sha }}" `
-            --title "CubeShelf Nightly - PartyBoard Windows" `
-            --notes-file "release-notes.txt" `
+          for rid, item in artifacts.items():
+              path = root / item["name"]
+              if not path.is_file():
+                  raise SystemExit(f"Missing release asset: {path}")
+
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              item["sha256"] = digest
+              item["size"] = path.stat().st_size
+              checksum_lines.append(f"{digest}  {item['name']}")
+
+          sha = os.environ["COMMIT_SHA"]
+
+          manifest = {
+              "schema": 2,
+              "game": "Mario Party 4",
+              "gameId": "GMPE01_00",
+              "version": f"nightly-{sha[:12]}",
+              "commit": sha,
+              "branch": os.environ["BRANCH_NAME"],
+              "supportedDiscs": [
+                  "GMPE01_00",
+                  "GMPE01_01"
+              ],
+              "artifacts": artifacts,
+          }
+
+          (root / "manifest.json").write_text(
+              json.dumps(manifest, indent=2),
+              encoding="utf-8")
+
+          (root / "checksums.txt").write_text(
+              "\n".join(checksum_lines) + "\n",
+              encoding="ascii")
+
+      - name: Generate release notes
+        shell: bash
+        run: |
+          {
+            echo "CubeShelf automatic PartyBoard desktop build"
+            echo
+            echo "Commit: ${{ github.sha }}"
+            echo "Branch: ${{ github.ref_name }}"
+            echo
+            echo "Desktop packages:"
+            echo "- Windows x64"
+            echo "- Linux x64 AppImage"
+            echo "- macOS Apple Silicon"
+            echo "- macOS Intel"
+            echo
+            echo "Recent changes:"
+            git log -5 --pretty=format:'- %h %s'
+          } > release/release-notes.txt
+
+      - name: Publish/replace cubeshelf-nightly
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if gh release view cubeshelf-nightly >/dev/null 2>&1; then
+            gh release delete cubeshelf-nightly --yes --cleanup-tag
+          fi
+
+          gh release create cubeshelf-nightly \
+            release/PartyBoard-win-x64.zip \
+            release/PartyBoard-linux-x64.AppImage \
+            release/PartyBoard-macos-arm64.zip \
+            release/PartyBoard-macos-x64.zip \
+            release/manifest.json \
+            release/checksums.txt \
+            release/release-notes.txt \
+            --target "${{ github.sha }}" \
+            --title "CubeShelf Nightly - PartyBoard Desktop" \
+            --notes-file release/release-notes.txt \
             --prerelease
