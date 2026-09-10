@@ -19,6 +19,7 @@
 #ifdef TARGET_PC
 #include "port/port_version.h"
 #include "port/netplay_runtime.h"
+#include <stdio.h>
 #endif
 
 typedef struct camera_view_params {
@@ -85,7 +86,13 @@ void fn_1_414(void)
 {
     s32 skipFileSelect = omovlevtno;
 #ifdef TARGET_PC
-    skipFileSelect = skipFileSelect || PartyBoard_NetplayEnabled();
+    const BOOL online = PartyBoard_NetplayEnabled();
+    char diagnostic[112];
+    skipFileSelect = skipFileSelect || online;
+    snprintf(diagnostic, sizeof(diagnostic), "mode_select online=%d menu_event=%d skip_file=%d",
+        online, omovlevtno, skipFileSelect);
+    OSReport("%s\n", diagnostic);
+    PartyBoard_NetplayTrace(diagnostic);
 #endif
     fn_1_9F4();
     if (skipFileSelect) {

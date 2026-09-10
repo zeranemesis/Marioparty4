@@ -16,6 +16,8 @@ extern "C" {
  * only by command-line arguments, so the normal offline game remains untouched. */
 bool PartyBoard_NetplayConfigureFromArgs(int argc, char **argv);
 bool PartyBoard_NetplayEnabled(void);
+/* One named boot/menu diagnostic event; no-op outside a network session. */
+void PartyBoard_NetplayTrace(const char *event);
 /* Companion-controlled start barrier, called only after game initialization. */
 bool PartyBoard_OnlineWaitForStart(void);
 bool PartyBoard_NetplayAllowsMultipleInstances(void);

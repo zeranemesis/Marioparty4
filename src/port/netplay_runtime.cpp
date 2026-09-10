@@ -77,6 +77,11 @@ constexpr std::size_t kHistorySize = 256;
 constexpr std::uint8_t kDefaultInputDelay = 3;
 constexpr std::uint8_t kMaximumInputDelay = 8;
 constexpr std::uint32_t kContextMismatchGraceFrames = 120;
+enum class MenuProbeOverlay {
+#define DLL(name) name,
+#include "ovl_table.h"
+#undef DLL
+};
 
 struct InputSlot {
     std::uint32_t frame = 0;
@@ -92,6 +97,7 @@ struct Runtime {
     std::array<CanonicalState, kStateHistorySize> canonicalHistory {};
     bool lockstepPrepared = false;
     bool desyncProbe = false;
+    bool menuProbe = false;
     std::uint64_t lastStateRepairMs = 0;
     std::uint32_t stateRepairCursor = 0;
     std::string error;
@@ -893,6 +899,8 @@ extern "C" bool PartyBoard_NetplayConfigureFromArgs(int argc, char **argv)
             gRuntime.contextMismatchProbe = true;
         } else if (argument == "--netplay-probe-desync") {
             gRuntime.desyncProbe = true;
+        } else if (argument == "--netplay-menu-probe") {
+            gRuntime.menuProbe = true;
         } else if (argument == "--netplay-probe-realtime") {
             gRuntime.realtimeProbe = true;
         } else if (argument == "--netplay-host" || argument == "--netplay-join"
@@ -951,6 +959,12 @@ extern "C" bool PartyBoard_NetplayConfigureFromArgs(int argc, char **argv)
 extern "C" bool PartyBoard_NetplayEnabled(void)
 {
     return partyboard::netplay::gRuntime.enabled;
+}
+
+extern "C" void PartyBoard_NetplayTrace(const char *event)
+{
+    if (partyboard::netplay::gRuntime.enabled && event)
+        partyboard::netplay::writeDiagnostic(event, true);
 }
 
 extern "C" bool PartyBoard_NetplayAllowsMultipleInstances(void)
@@ -1136,6 +1150,14 @@ extern "C" bool PartyBoard_NetplayTick(void)
     }
     if (!runtime.localCaptured) {
         runtime.pendingLocal = capturePad(runtime.localPad);
+        if (runtime.menuProbe) {
+            // Explicit real-game regression only. Send the host's Start through
+            // the normal input timeline; never advance an overlay directly.
+            runtime.pendingLocal = {};
+            if (runtime.localPlayer == 0 && runtime.observedContext == static_cast<int>(MenuProbeOverlay::bootDll)
+                && runtime.frame >= 600 && runtime.frame % 120 < 2)
+                runtime.pendingLocal.buttons = PAD_BUTTON_START;
+        }
         storeInput(runtime.localHistory, runtime.frame + runtime.inputDelay, runtime.pendingLocal);
         runtime.localCaptured = true;
         // Advertise the captured future sample immediately, including while

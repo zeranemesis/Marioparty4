@@ -593,6 +593,12 @@ extern "C" int port_main(int argc, char* argv[]) {
     }
 
     partyboard::version::init();
+    if (PartyBoard_NetplayEnabled()) {
+        const auto &id = partyboard::version::getDiskID();
+        char diagnostic[96];
+        std::snprintf(diagnostic, sizeof(diagnostic), "boot_disc id=%.4s%.2s", id.gameName, id.company);
+        PartyBoard_NetplayTrace(diagnostic);
+    }
     LanguageInit();
 
     // OSInit();

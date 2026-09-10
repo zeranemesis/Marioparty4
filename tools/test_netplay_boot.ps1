@@ -2,7 +2,9 @@ param(
     [Parameter(Mandatory=$true)][string]$DiscPath,
     [string]$BinaryDirectory='build/aexp/RelWithDebInfo',
     [string]$OutputDirectory='work/netplay-real-boot',
-    [int]$DurationSeconds=30
+    [int]$DurationSeconds=30,
+    [switch]$Menu,
+    [string]$HostProfile
 )
 $ErrorActionPreference='Stop'
 $projectPath=Split-Path $PSScriptRoot -Parent
@@ -25,12 +27,22 @@ try {
     foreach ($side in 0,1) {
         $profile=Join-Path $runPath "profile-$side"
         New-Item -ItemType Directory -Path $profile | Out-Null
-        @{
+        $settings=@{
             'backend.graphicsBackend'='d3d12';'backend.isoPath'=$disc;
             'backend.isoVerification'=2;'backend.wasPresetChosen'=$true;
             'game.internalResolutionScale'=1;'game.shadowResolutionMultiplier'=1;
             'video.targetFrameRate'=60;'audio.masterVolume'=0
-        } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $profile 'config.json') -Encoding utf8NoBOM
+        }
+        if ($side -eq 0 -and $HostProfile) {
+            $sourceProfile=Resolve-TestPath $HostProfile
+            $settings=Get-Content -LiteralPath (Join-Path $sourceProfile 'config.json') -Raw | ConvertFrom-Json -AsHashtable
+            foreach ($card in Get-ChildItem -LiteralPath $sourceProfile -File -Filter 'MemoryCard*.raw') {
+                Copy-Item -LiteralPath $card.FullName -Destination $profile
+            }
+            # Preserve a different offline disc path to exercise the online override.
+            $settings['audio.masterVolume']=0
+        }
+        $settings | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $profile 'config.json') -Encoding utf8NoBOM
         $prefix='Local\PartyBoardOnlineStart-'+[Guid]::NewGuid().ToString('N')
         $ready=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$prefix+'-ready')
         $go=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$prefix+'-go')
@@ -40,6 +52,7 @@ try {
         $start.WorkingDirectory=$binaryPath
         $transport=if ($side -eq 0) { "--netplay-host $port" } else { "--netplay-join 127.0.0.1:$port" }
         $start.Arguments="$transport --netplay-full --netplay-loopback --netplay-delay 3"
+        if ($Menu) { $start.Arguments+=" --netplay-menu-probe" }
         $start.UseShellExecute=$false
         $start.CreateNoWindow=$true
         $start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
@@ -68,20 +81,25 @@ try {
             if ($peer.Process.HasExited) { throw "Peer $($peer.Side) exited during gameplay." }
             if (Test-Path -LiteralPath $peer.Diagnostic) {
                 $log=Get-Content -Raw -LiteralPath $peer.Diagnostic
-                if ($log -match 'DESYNC[^\r\n]*') { throw $Matches[0] }
+                if ($log -match '(DESYNC|PROTOCOL)[^\r\n]*') { throw $Matches[0] }
             }
         }
         Start-Sleep -Milliseconds 100
     }
     $hashes=@(@{},@{})
+    $discIds=@()
     foreach ($peer in $testPeers) {
         $log=Get-Content -Raw -LiteralPath $peer.Diagnostic
+        if ($log -notmatch 'event=boot_disc id=([A-Z0-9]{6})') { throw 'Missing actual disc identity.' }
+        $discIds+=$Matches[1]
         $samples=[regex]::Matches($log,'checkpoint hash_frame=(\d+) state_hash=([0-9a-f]+) hash_version=(\d+) equal_next=(\d+)')
         if ($samples.Count -lt 2 -or [int]$samples[$samples.Count-1].Groups[4].Value -lt 120) {
             throw 'No confirmed real gameplay state progress.'
         }
         foreach ($sample in $samples) { $hashes[$peer.Side][$sample.Groups[1].Value]=$sample.Groups[2].Value }
     }
+    if ($discIds[0] -ne $discIds[1]) { throw 'The games loaded different discs.' }
+    Write-Output "Actual disc: $($discIds[0])"
     $compared=0
     foreach ($frame in $hashes[0].Keys) {
         if ($hashes[1].ContainsKey($frame)) {
@@ -106,4 +124,15 @@ finally {
 }
 Write-Output "Real boot logs: $runPath"
 if ($failure) { throw $failure }
+if ($Menu) {
+    foreach ($side in 0,1) {
+        $log=Get-Content -LiteralPath (Join-Path $runPath "peer-$side-stdout.log") -Raw
+        $native=Get-Content -LiteralPath (Join-Path $runPath "peer-$side-native.log") -Raw
+        if ($native -notmatch 'event=mode_select online=1 menu_event=0 skip_file=1' -or
+            $log -notmatch 'Online mode select: fresh session profile') {
+            throw "Peer $side did not reach the shared online mode-selection path."
+        }
+    }
+    Write-Output 'PASS: both peers entered mode selection with online=1 and skip_file=1.'
+}
 Write-Output "PASS: real online boot observed for $DurationSeconds seconds. No board/minigame scenario coverage claimed."
