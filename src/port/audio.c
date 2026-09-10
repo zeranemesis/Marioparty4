@@ -5,6 +5,10 @@
 #include "game/wipe.h"
 #include "game/gamework_data.h"
 
+#ifdef TARGET_PC
+#include "port/rollback_audio_bridge.h"
+#endif
+
 static int HuSePlay(int seId, MSM_SEPARAM *param);
 
 extern s16 omSysExitReq;
@@ -126,6 +130,11 @@ int HuAudFXPlayVolPan(int seId, s16 vol, s16 pan)
     if (omSysExitReq != 0) {
         return 0;
     }
+#ifdef TARGET_PC
+    if (PartyBoard_RollbackAudioBridgeActive()) {
+        return PartyBoard_RollbackAudioBridgePlay2D(seId, vol, pan);
+    }
+#endif
     seParam.flag = MSM_SEPARAM_VOL|MSM_SEPARAM_PAN;
     seParam.vol = vol;
     seParam.pan = pan;
@@ -133,7 +142,13 @@ int HuAudFXPlayVolPan(int seId, s16 vol, s16 pan)
 }
 
 void HuAudFXStop(int seNo) {
-    // msmSeStop(seNo, 0);
+#ifdef TARGET_PC
+    if (PartyBoard_RollbackAudioBridgeIsVirtual(seNo)) {
+        PartyBoard_RollbackAudioBridgeStopFX(seNo, 0);
+        return;
+    }
+#endif
+    msmSeStop(seNo, 0);
 }
 
 void HuAudFXAllStop(void) {
@@ -141,16 +156,29 @@ void HuAudFXAllStop(void) {
 }
 
 void HuAudFXFadeOut(int seNo, s32 speed) {
-    // msmSeStop(seNo, speed);
+#ifdef TARGET_PC
+    if (PartyBoard_RollbackAudioBridgeIsVirtual(seNo)) {
+        PartyBoard_RollbackAudioBridgeStopFX(seNo, speed);
+        return;
+    }
+#endif
+    msmSeStop(seNo, speed);
 }
 
 void HuAudFXPanning(int seNo, s16 pan) {
     MSM_SEPARAM seParam;
 
     if (omSysExitReq == 0) {
+#ifdef TARGET_PC
+        if (PartyBoard_RollbackAudioBridgeIsVirtual(seNo)) {
+            PartyBoard_RollbackAudioBridgeParameter(
+                seNo, PARTYBOARD_ROLLBACK_FX_PAN, pan);
+            return;
+        }
+#endif
         seParam.flag = MSM_SEPARAM_PAN;
         seParam.pan = pan;
-        // msmSeSetParam(seNo, &seParam);
+        msmSeSetParam(seNo, &seParam);
     }
 }
 
@@ -230,8 +258,12 @@ void HuAudFXPauseAll(s32 pause) {
 }
 
 s32 HuAudFXStatusGet(int seNo) {
-    // return msmSeGetStatus(seNo);
-    return 12;
+#ifdef TARGET_PC
+    if (PartyBoard_RollbackAudioBridgeIsVirtual(seNo)) {
+        return PartyBoard_RollbackAudioBridgeStatus(seNo);
+    }
+#endif
+    return msmSeGetStatus(seNo);
 }
 
 s32 HuAudFXPitchSet(int seNo, s16 pitch)
@@ -240,10 +272,15 @@ s32 HuAudFXPitchSet(int seNo, s16 pitch)
     if(omSysExitReq) {
         return 0;
     }
+#ifdef TARGET_PC
+    if (PartyBoard_RollbackAudioBridgeIsVirtual(seNo)) {
+        return PartyBoard_RollbackAudioBridgeParameter(
+            seNo, PARTYBOARD_ROLLBACK_FX_PITCH, pitch) ? 0 : MSM_ERR_INVALIDSE;
+    }
+#endif
     param.flag = MSM_SEPARAM_PITCH;
     param.pitch = pitch;
-    // return msmSeSetParam(seNo, &param);
-    return 12;
+    return msmSeSetParam(seNo, &param);
 }
 
 s32 HuAudFXVolSet(int seNo, s16 vol)
@@ -253,10 +290,15 @@ s32 HuAudFXVolSet(int seNo, s16 vol)
     if(omSysExitReq) {
         return 0;
     }
+#ifdef TARGET_PC
+    if (PartyBoard_RollbackAudioBridgeIsVirtual(seNo)) {
+        return PartyBoard_RollbackAudioBridgeParameter(
+            seNo, PARTYBOARD_ROLLBACK_FX_VOLUME, vol) ? 0 : MSM_ERR_INVALIDSE;
+    }
+#endif
     param.flag = MSM_SEPARAM_VOL;
     param.vol = vol;
-    // return msmSeSetParam(seNo, &param);
-    return 12;
+    return msmSeSetParam(seNo, &param);
 }
 
 s32 HuAudSeqPlay(s16 musId) {
@@ -675,6 +717,79 @@ static int HuSePlay(int seId, MSM_SEPARAM *param)
     // }
     return 12;
     // return result;
+}
+
+
+/*
+ * Minimal sound-effect voice shim for the default desktop backend.
+ *
+ * rollback_audio.cpp talks to the msmSe API after an effect is confirmed.
+ * The normal desktop build does not compile src/msm/msmse.c, so these three
+ * symbols live here. They only model lifecycle/status; this backend is silent.
+ */
+#define PORTABLE_SE_VOICE_COUNT 64
+
+typedef struct PortableSeVoice_s {
+    s32 handle;
+    s32 status;
+} PortableSeVoice;
+
+static PortableSeVoice sPortableSeVoices[PORTABLE_SE_VOICE_COUNT];
+static s32 sPortableSeNextHandle = 0x1000;
+
+static PortableSeVoice *PortableSeFind(s32 handle)
+{
+    s32 i;
+    for (i = 0; i < PORTABLE_SE_VOICE_COUNT; i++) {
+        if (sPortableSeVoices[i].status != MSM_SE_DONE
+            && sPortableSeVoices[i].handle == handle) {
+            return &sPortableSeVoices[i];
+        }
+    }
+    return NULL;
+}
+
+int msmSePlay(int seId, MSM_SEPARAM *param)
+{
+    s32 i;
+    (void)param;
+
+    if (seId < 0 || seId > 0xFFFF) {
+        return MSM_ERR_INVALIDID;
+    }
+
+    for (i = 0; i < PORTABLE_SE_VOICE_COUNT; i++) {
+        if (sPortableSeVoices[i].status == MSM_SE_DONE) {
+            if (++sPortableSeNextHandle <= 0) {
+                sPortableSeNextHandle = 0x1000;
+            }
+            sPortableSeVoices[i].handle = sPortableSeNextHandle;
+            sPortableSeVoices[i].status = MSM_SE_PLAY;
+            return sPortableSeVoices[i].handle;
+        }
+    }
+
+    return MSM_ERR_CHANLIMIT;
+}
+
+s32 msmSeStop(int seNo, s32 speed)
+{
+    PortableSeVoice *voice;
+    (void)speed;
+
+    voice = PortableSeFind(seNo);
+    if (voice == NULL) {
+        return MSM_ERR_INVALIDSE;
+    }
+
+    voice->status = MSM_SE_DONE;
+    return 0;
+}
+
+s32 msmSeGetStatus(int seNo)
+{
+    PortableSeVoice *voice = PortableSeFind(seNo);
+    return voice != NULL ? voice->status : MSM_SE_DONE;
 }
 
 /*
