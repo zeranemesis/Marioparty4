@@ -4,6 +4,9 @@ param(
     [string]$OutputDirectory='work/netplay-real-boot',
     [int]$DurationSeconds=30,
     [switch]$Menu,
+    [switch]$Walk,
+    [string]$RecordInput,
+    [string]$ReplayInput,
     [string]$HostProfile
 )
 $ErrorActionPreference='Stop'
@@ -35,14 +38,22 @@ try {
         }
         if ($side -eq 0 -and $HostProfile) {
             $sourceProfile=Resolve-TestPath $HostProfile
-            $settings=Get-Content -LiteralPath (Join-Path $sourceProfile 'config.json') -Raw | ConvertFrom-Json -AsHashtable
+            # ConvertFrom-Json -AsHashtable needs PowerShell 6.2+; 5.1 returns a
+            # PSCustomObject, which ConvertTo-Json would re-emit unchanged but
+            # which cannot take the audio override below.
+            $parsed=Get-Content -LiteralPath (Join-Path $sourceProfile 'config.json') -Raw | ConvertFrom-Json
+            $settings=@{}
+            foreach ($field in $parsed.PSObject.Properties) { $settings[$field.Name]=$field.Value }
             foreach ($card in Get-ChildItem -LiteralPath $sourceProfile -File -Filter 'MemoryCard*.raw') {
                 Copy-Item -LiteralPath $card.FullName -Destination $profile
             }
             # Preserve a different offline disc path to exercise the online override.
             $settings['audio.masterVolume']=0
         }
-        $settings | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $profile 'config.json') -Encoding utf8NoBOM
+        # Windows PowerShell 5.1 has no utf8NoBOM encoding name, and the game's
+        # config parser rejects a byte-order mark.
+        [IO.File]::WriteAllText((Join-Path $profile 'config.json'),
+            ($settings | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
         $prefix='Local\PartyBoardOnlineStart-'+[Guid]::NewGuid().ToString('N')
         $ready=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$prefix+'-ready')
         $go=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$prefix+'-go')
@@ -53,6 +64,17 @@ try {
         $transport=if ($side -eq 0) { "--netplay-host $port" } else { "--netplay-join 127.0.0.1:$port" }
         $start.Arguments="$transport --netplay-full --netplay-loopback --netplay-delay 3"
         if ($Menu) { $start.Arguments+=" --netplay-menu-probe" }
+        if ($Walk) { $start.Arguments+=" --netplay-walk-probe" }
+        # Each peer records both seats to its own file so the two can be
+        # compared; a replay reads one shared file.
+        if ($RecordInput) {
+            $start.Arguments+=" --netplay-record-input " + [char]34 +
+                (Join-Path $runPath "peer-$side-input.txt") + [char]34
+        }
+        if ($ReplayInput) {
+            $start.Arguments+=" --netplay-replay-input " + [char]34 +
+                (Resolve-TestPath $ReplayInput) + [char]34
+        }
         $start.UseShellExecute=$false
         $start.CreateNoWindow=$true
         $start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
@@ -124,6 +146,69 @@ finally {
 }
 Write-Output "Real boot logs: $runPath"
 if ($failure) { throw $failure }
+# Both peers must cross the same overlays on the same simulation frames. A
+# transition even one frame apart is already a divergent game path, and it is
+# what the wall-clock boot waits used to produce.
+$overlays = @()
+foreach ($side in 0, 1) {
+    $log = Get-Content -LiteralPath (Join-Path $runPath "peer-$side-stdout.log") -Raw
+    $seen = [regex]::Matches($log, 'game context (-?\d+) at network frame (\d+)') |
+        ForEach-Object { "$($_.Groups[1].Value)@$($_.Groups[2].Value)" }
+    $overlays += , @($seen)
+}
+Write-Output ("Overlay path: " + ($overlays[0] -join " -> "))
+if ($overlays[0].Count -lt 2) { throw 'No overlay transition observed.' }
+if (Compare-Object $overlays[0] $overlays[1] -SyncWindow 0) {
+    $a = $overlays[0] -join ' '
+    $b = $overlays[1] -join ' '
+    throw "Peers took different overlay paths. peer0: $a | peer1: $b"
+}
+Write-Output "PASS: both peers crossed $($overlays[0].Count) overlay transitions on identical frames."
+if ($RecordInput) {
+    # Every peer records both seats, so the frames both of them reached must match
+    # exactly. A difference there would mean the peers disagreed about the input
+    # timeline itself, which the canonical hash could only catch a frame later.
+    # The two files do differ in length: the run ends by closing both processes,
+    # and one of them always commits a few more frames than the other before it
+    # goes. Only the common prefix is an invariant, and only that prefix is kept
+    # as the replay timeline.
+    $recorded = @()
+    foreach ($side in 0, 1) {
+        $path = Join-Path $runPath "peer-$side-input.txt"
+        if (-not (Test-Path -LiteralPath $path)) { throw "Peer $side wrote no input recording." }
+        $recorded += , @(Get-Content -LiteralPath $path)
+    }
+    $shared = [Math]::Min($recorded[0].Count, $recorded[1].Count)
+    if ($shared -lt 60) { throw "Input recording too short: $shared shared rows." }
+    if (Compare-Object $recorded[0][0..($shared - 1)] $recorded[1][0..($shared - 1)] -SyncWindow 0) {
+        throw "The two peers disagreed within their first $shared recorded rows."
+    }
+    $target = Resolve-TestPath $RecordInput
+    [IO.File]::WriteAllLines($target, $recorded[0][0..($shared - 1)])
+    # Store the overlay path the recording produced. A later replay must land on
+    # the same overlays at the same frames, which is what makes the recording a
+    # regression test rather than just a saved session.
+    [IO.File]::WriteAllLines("$target.overlays", $overlays[0])
+    $tail = [Math]::Abs($recorded[0].Count - $recorded[1].Count)
+    Write-Output "PASS: both peers recorded an identical $shared-row input timeline ($tail trailing rows dropped at shutdown)."
+    Write-Output "Recording saved to $target"
+}
+
+if ($ReplayInput) {
+    $expectedPath = (Resolve-TestPath $ReplayInput) + '.overlays'
+    if (Test-Path -LiteralPath $expectedPath) {
+        $expected = @(Get-Content -LiteralPath $expectedPath)
+        if (Compare-Object $expected $overlays[0] -SyncWindow 0) {
+            $want = $expected -join ' -> '
+            $got = $overlays[0] -join ' -> '
+            throw "Replay diverged from the recording. expected: $want | got: $got"
+        }
+        Write-Output "PASS: the replay reproduced all $($expected.Count) recorded overlay transitions on the same frames."
+    } else {
+        Write-Output "NOTE: no $expectedPath beside the recording, so the replay path was not compared."
+    }
+}
+
 if ($Menu) {
     foreach ($side in 0,1) {
         $log=Get-Content -LiteralPath (Join-Path $runPath "peer-$side-stdout.log") -Raw
