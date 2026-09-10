@@ -1082,3 +1082,58 @@ mais ne choisissait rien. Deux champs optionnels de plus dans
 `audio_diagnostics.enable` (`compteur port boutons frames stickX stickY`) et la
 séquence va jusqu'au plateau. Les anciens écrivains, qui n'écrivent que quatre
 champs, continuent de fonctionner.
+
+## Le HUD était éclairé comme s'il faisait partie de la scène (10 septembre 2026)
+
+Reste du signalement sur les mini-jeux. La composition multiplie l'image
+*finie* — interface comprise — par le terme tracé pour la géométrie. Une
+interface posée devant une zone occultée était donc assombrie par l'occlusion de
+ce qu'elle cachait.
+
+Mesuré sur l'écran de sélection des personnages du mode Mini-Game, en séparant
+le panneau 2D du décor 3D visible à côté :
+
+| | panneau 2D | scène 3D | image entière |
+|---|---|---|---|
+| ray tracing éteint | — | — | — |
+| ray tracing, sans masque | −53,5 % | −25,4 % | −36,3 % |
+| ray tracing, avec masque | **±0,0 %** | −8,1 % | −9,6 % |
+
+Le panneau perdait plus de la moitié de sa luminosité, deux fois plus que le
+décor qu'il recouvre. Sur un plateau, la boîte de dialogue perdait 22 %.
+
+### Le masque
+
+`capture_draw` voyait déjà passer les draws orthographiques — il les jetait. Il
+en garde maintenant l'emprise à l'écran. GX stocke une projection orthographique
+sous la forme `clip.x = m0[0]*x + m0[3]`, `clip.y = m1[1]*y + m1[3]` avec `w = 1`
+(voir `command_processor.cpp`), donc les sommets en espace vue se projettent sans
+division. Une boîte englobante par draw suffit : les éléments d'interface *sont*
+des quads.
+
+La grille fait 96 × 72 tuiles, un `uint` par tuile, envoyée au shader en t5. Un
+pixel marqué sort immédiatement : blanc dans `gOutput`, zéro dans `gReflection`,
+et aucun rayon tiré.
+
+### Le piège, et pourquoi la première version ne servait à rien
+
+Première mesure : **100 % de l'écran masqué**. Le diagnostic ajouté en même temps
+que le masque — le pourcentage de tuiles couvertes — l'a dit tout de suite, ce
+qui a évité de livrer un réglage qui éteignait silencieusement tout l'effet.
+
+La cause : le calque 2D dessine un quad plein écran. Sa géométrie ne dit rien de
+l'endroit où quelque chose est réellement peint, mais elle couvre tout. La
+distribution le montre : sur un écran de mini-jeu, **1 draw plein écran et 45
+draws bornés à 2,5 % de l'écran en moyenne**. Écarter les draws couvrant plus de
+90 % de l'écran ramène la couverture à 54 % là, 18,9 % sur un plateau, et donne
+les chiffres du tableau.
+
+C'est ce quad plein écran qui, la fois précédente, m'avait fait conclure qu'un
+masque de couverture ne pouvait pas marcher. Ce n'était vrai que de lui.
+
+### Ce que ça coûte
+
+Là où un élément 2D est translucide, le décor qu'on voit à travers perd son
+occlusion. C'est le compromis assumé : une boîte de dialogue à moitié
+transparente laisse voir une scène non ombrée plutôt qu'une interface assombrie
+de 22 %. `AURORA_RT_ORTHO_MASK=0` rétablit l'ancien comportement.
