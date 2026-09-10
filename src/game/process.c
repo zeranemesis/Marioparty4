@@ -658,6 +658,65 @@ void HuPrcAllUPause(s32 flag)
 #include "process_snapshot_test.inc"
 
 #ifdef TARGET_PC
+#include "port/netplay_state.h"
+
+/* Read-only head of the scheduler list, for canonical exporters that need to
+ * find a specific process without keeping a second registry of their own. */
+Process *PartyBoard_PrcListHead(void)
+{
+    return processtop;
+}
+
+/* Canonical index of a process in the scheduler list, or -1. Addresses differ
+ * legitimately between two machines; the position in the list does not. */
+static s32 HuPrcCanonicalIndex(const Process *target)
+{
+    Process *process;
+    s32 index = 0;
+    if (target == NULL) {
+        return -1;
+    }
+    for (process = processtop; process != NULL; process = process->next, ++index) {
+        if (process == target) {
+            return index;
+        }
+    }
+    return -2; /* Reachable only from a corrupt or foreign descriptor. */
+}
+
+void PartyBoard_NetplayProcessState(PartyBoardNetplayStateSink sink, void *context)
+{
+    Process *process;
+    s32 index = 0;
+#define WORD(value) sink(context, #value, (uint32_t)(value))
+    WORD(processcnt);
+    WORD(thread_arg);
+    WORD(HuPrcCanonicalIndex(processcur));
+    for (process = processtop; process != NULL; process = process->next, ++index) {
+        WORD(index);
+        WORD(process->exec);
+        WORD(process->stat);
+        WORD(process->prio);
+        WORD(process->sleep_time);
+        WORD(process->thread_size);
+        WORD(HuPrcCanonicalIndex(process->parent));
+        WORD(HuPrcCanonicalIndex(process->child));
+        WORD(HuPrcCanonicalIndex(process->next_child));
+        WORD(HuPrcCanonicalIndex(process->first_child));
+        /* Pointers are never hashed; only whether the slot is populated. */
+        WORD(process->dtor != NULL);
+        WORD(process->user_data != NULL);
+        WORD(process->heap != NULL);
+        if (index > 4096) {
+            break; /* Corrupt list: stop instead of walking forever. */
+        }
+    }
+    WORD(index);
+#undef WORD
+}
+#endif
+
+#ifdef TARGET_PC
 #include "port/rollback_scene.h"
 bool PartyBoard_RollbackProcessRegions(PartyBoardRollbackRegionSink sink, void *context)
 {

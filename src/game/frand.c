@@ -5,6 +5,13 @@
 
 static u32 frand_seed;
 
+#ifdef TARGET_PC
+/* Consumption counters. A differing seed proves an extra draw happened; these
+ * say which generator drew it and at which call index, which is what a desync
+ * report needs. Rebased when a network timeline starts. */
+u32 partyboardFrandCalls;
+#endif
+
 extern s32 rand8(void);
 
 static inline u32 frandom(u32 param)
@@ -30,6 +37,9 @@ static inline u32 frandom(u32 param)
 }
 
 u32 frand(void) {
+#ifdef TARGET_PC
+    ++partyboardFrandCalls;
+#endif
     return frand_seed = frandom(frand_seed);
 }
 
@@ -43,6 +53,9 @@ f32 frandf(void) {
 
 u32 frandmod(u32 arg0) {
     u32 ret;
+#ifdef TARGET_PC
+    ++partyboardFrandCalls;
+#endif
     frand_seed = frandom(frand_seed);
 #ifdef TARGET_PC
     if (arg0 == 0) {
@@ -62,10 +75,29 @@ u32 frand_state_get(void) {
 void frand_state_set(u32 state) {
     frand_seed = state;
 }
+
+#include "port/netplay_state.h"
+
+extern u32 partyboardRand8Calls;
+extern u32 partyboardBoardRandCalls;
+
+void PartyBoard_NetplayRandomCountersReset(void) {
+    partyboardFrandCalls = 0;
+    partyboardRand8Calls = 0;
+    partyboardBoardRandCalls = 0;
+}
+
+uint32_t PartyBoard_NetplayFrandCalls(void) { return partyboardFrandCalls; }
+uint32_t PartyBoard_NetplayRand8Calls(void) { return partyboardRand8Calls; }
+uint32_t PartyBoard_NetplayBoardRandCalls(void) { return partyboardBoardRandCalls; }
 #endif
 
 #ifdef TARGET_PC
 #include "port/rollback_scene.h"
 bool PartyBoard_RollbackRandomRegions(PartyBoardRollbackRegionSink sink, void *context)
-{ return sink && sink(context, &frand_seed, sizeof(frand_seed)); }
+{
+    return sink && sink(context, &frand_seed, sizeof(frand_seed))
+        && sink(context, &partyboardFrandCalls, sizeof(partyboardFrandCalls))
+        && PartyBoard_RollbackBoardRandomRegions(sink, context);
+}
 #endif

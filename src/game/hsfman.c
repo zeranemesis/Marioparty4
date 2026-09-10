@@ -2368,3 +2368,58 @@ bool PartyBoard_RollbackRenderSafetySelfTest(void)
     return ok;
 }
 #endif
+
+#ifdef TARGET_PC
+#include "port/netplay_state.h"
+
+/*
+ * Logical animation time. Gameplay reads this constantly: Hu3DMotionTimeGet and
+ * Hu3DMotionEndCheck are called from 549 sites across the game and its overlays,
+ * and board and minigame code sequences events on "has this motion finished".
+ * A one-tick difference here becomes a different game path on the next frame.
+ *
+ * Only the motion clocks and attributes are exported. Model pointers, HSF data,
+ * matrices, light ids and malloc handles are addresses or presentation state and
+ * differ legitimately between two machines, so they are left out; the slot being
+ * occupied is exported as a boolean rather than as its pointer.
+ */
+void PartyBoard_NetplayAnimationState(PartyBoardNetplayStateSink sink, void *context)
+{
+    s32 i;
+    s32 j;
+    s32 live = 0;
+#define WORD(value) sink(context, #value, (uint32_t)(value))
+#define FWORD(value) sink(context, #value, PartyBoard_NetplayFloatWord(value))
+#define MOTWORK(work) \
+    FWORD((work).time); FWORD((work).speed); FWORD((work).start); FWORD((work).end);
+    for (i = 0; i < HU3D_MODEL_MAX; i++) {
+        const HU3DMODEL *model = &Hu3DData[i];
+        const int used = model->hsf != NULL;
+        WORD(used);
+        if (!used) {
+            continue;
+        }
+        ++live;
+        WORD(i);
+        WORD(model->attr);
+        WORD(model->motAttr);
+        MOTWORK(model->motWork)
+        MOTWORK(model->motOvlWork)
+        MOTWORK(model->motShiftWork)
+        MOTWORK(model->motShapeWork)
+        for (j = 0; j < HU3D_CLUSTER_MAX; j++) {
+            FWORD(model->clusterTime[j]);
+            FWORD(model->clusterSpeed[j]);
+            WORD(model->clusterAttr[j]);
+            WORD(model->motIdCluster[j]);
+        }
+        WORD(model->motIdSrc);
+        WORD(model->linkMdlId);
+        WORD(model->cameraBit);
+    }
+    WORD(live);
+#undef MOTWORK
+#undef FWORD
+#undef WORD
+}
+#endif

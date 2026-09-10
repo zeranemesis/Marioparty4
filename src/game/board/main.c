@@ -1431,6 +1431,10 @@ float BoardArcCos(float value)
 extern u32 frand_state_get(void);
 #endif
 
+#ifdef TARGET_PC
+u32 partyboardBoardRandCalls;
+#endif
+
 void BoardRandInit(void)
 {
 #ifdef TARGET_PC
@@ -1445,9 +1449,23 @@ void BoardRandInit(void)
 
 u32 BoardRand(void)
 {
+#ifdef TARGET_PC
+    ++partyboardBoardRandCalls;
+#endif
     boardRandSeed = (boardRandSeed*0x19660D)+(0x3C6EF35F);
     return boardRandSeed;
 }
+
+#ifdef TARGET_PC
+#include "port/rollback_scene.h"
+/* boardRandSeed lives in the dol's own data, not in a snapshotted heap: a
+ * restore that skipped it would replay the board with different draws. */
+bool PartyBoard_RollbackBoardRandomRegions(PartyBoardRollbackRegionSink sink, void *context)
+{
+    return sink && sink(context, &boardRandSeed, sizeof(boardRandSeed))
+        && sink(context, &partyboardBoardRandCalls, sizeof(partyboardBoardRandCalls));
+}
+#endif
 
 u32 BoardRandMod(u32 value)
 {

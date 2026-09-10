@@ -59,6 +59,7 @@ bool PartyBoard_RollbackFlagRegions(PartyBoardRollbackRegionSink sink, void *con
 bool PartyBoard_RollbackSequenceRegions(PartyBoardRollbackRegionSink sink, void *context);
 bool PartyBoard_RollbackClockRegions(PartyBoardRollbackRegionSink sink, void *context);
 bool PartyBoard_RollbackRandomRegions(PartyBoardRollbackRegionSink sink, void *context);
+bool PartyBoard_RollbackBoardRandomRegions(PartyBoardRollbackRegionSink sink, void *context);
 bool PartyBoard_RollbackProcessRegions(PartyBoardRollbackRegionSink sink, void *context);
 bool PartyBoard_RollbackModuleRegions(PartyBoardRollbackRegionSink sink, void *context);
 uint64_t PartyBoard_RollbackModuleGeneration(void);

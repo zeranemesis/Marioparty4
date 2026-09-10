@@ -226,3 +226,30 @@ size_t HuMemMemorySizeGet(void *ptr)
         return 0;
     }
 }
+
+#ifdef TARGET_PC
+#include "port/netplay_state.h"
+
+/* Allocator bookkeeping only. Block addresses differ legitimately between two
+ * machines; the number of live blocks and the bytes they occupy do not, and a
+ * divergence there is an early, precise sign of a different code path. */
+void PartyBoard_NetplayHeapState(PartyBoardNetplayStateSink sink, void *context)
+{
+    static const HeapID heaps[3] = { HEAP_SYSTEM, HEAP_DATA, HEAP_DVD };
+    int i;
+#define WORD(value) sink(context, #value, (uint32_t)(value))
+    for (i = 0; i < 3; i++) {
+        const HeapID heap = heaps[i];
+        const int ready = HuMemHeapPtrGet(heap) != NULL;
+        WORD(heap);
+        WORD(ready);
+        if (!ready) {
+            continue; /* Self-tests run before the arenas exist. */
+        }
+        WORD(HuMemHeapSizeGet(heap));
+        WORD(HuMemUsedMallocSizeGet(heap));
+        WORD(HuMemUsedMallocBlockGet(heap));
+    }
+#undef WORD
+}
+#endif

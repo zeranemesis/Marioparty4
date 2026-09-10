@@ -1,6 +1,7 @@
 #include "port/netplay_state.hpp"
 #include <cstdio>
 #include <cstdlib>
+#include <string_view>
 #include <vector>
 using namespace partyboard::netplay;
 static unsigned checks = 0;
@@ -13,6 +14,67 @@ static StateDigest digest(std::uint32_t frame) {
     value.hash = state.hash;
     return value;
 }
+static void subsystems() {
+    // A value only changes the hash of the subsystem that was open when it was
+    // added, so a report can name the area that diverged.
+    CanonicalState reference;
+    reference.begin(Subsystem::Rng);
+    reference.add("frand", 0x11111111u);
+    reference.begin(Subsystem::Board);
+    reference.add("space", 42);
+    reference.begin(Subsystem::Players);
+    reference.add("coins", 7);
+    CHECK(reference.size() == 3);
+    CHECK(reference.subsystemOf(0) == static_cast<std::uint8_t>(Subsystem::Rng));
+    CHECK(reference.subsystemOf(1) == static_cast<std::uint8_t>(Subsystem::Board));
+    CHECK(reference.subsystemOf(2) == static_cast<std::uint8_t>(Subsystem::Players));
+
+    CanonicalState moved;
+    moved.begin(Subsystem::Rng);
+    moved.add("frand", 0x11111111u);
+    moved.begin(Subsystem::Board);
+    moved.add("space", 43); // BoardPlayer[1].space = 42 vs 43
+    moved.begin(Subsystem::Players);
+    moved.add("coins", 7);
+    CHECK(moved.hash != reference.hash);
+    for (std::size_t index = 0; index < kSubsystemCount; ++index) {
+        const bool board = index == static_cast<std::size_t>(Subsystem::Board);
+        CHECK((moved.parts[index] != reference.parts[index]) == board);
+    }
+    StateDigest left {}, right {};
+    left.parts = reference.parts; right.parts = moved.parts;
+    CHECK(left.firstDifferentPart(right) == static_cast<std::size_t>(Subsystem::Board));
+    CHECK(left.firstDifferentPart(left) == kSubsystemCount);
+    CHECK(!(left == right));
+
+    // The same values captured in a different subsystem order still diverge:
+    // the global hash covers capture order, while each subsystem hash stays a
+    // digest of that area alone and is deliberately order-independent across
+    // subsystems. Both properties are needed for the comparison to be usable.
+    CanonicalState reordered;
+    reordered.begin(Subsystem::Board);
+    reordered.add("space", 42);
+    reordered.begin(Subsystem::Rng);
+    reordered.add("frand", 0x11111111u);
+    reordered.begin(Subsystem::Players);
+    reordered.add("coins", 7);
+    CHECK(reordered.hash != reference.hash);
+    CHECK(reordered.parts == reference.parts);
+
+    CanonicalState cleared = reference;
+    cleared.reset();
+    CHECK(cleared.size() == 0 && cleared.parts == initialSubsystemHashes());
+    CHECK(cleared.hash == CanonicalState {}.hash);
+    // Labels stay metadata: only values feed the hashes.
+    CanonicalState labelled;
+    labelled.begin(Subsystem::Board);
+    labelled.add("a-completely-different-label", 42);
+    CHECK(labelled.parts[static_cast<std::size_t>(Subsystem::Board)]
+        == reference.parts[static_cast<std::size_t>(Subsystem::Board)]);
+    CHECK(std::string_view(subsystemName(static_cast<std::size_t>(Subsystem::Board))) == "BOARD");
+    CHECK(std::string_view(subsystemName(kSubsystemCount)) == "UNKNOWN");
+}
+
 static void invariants() {
     CanonicalState bytes;
     bytes.add("ignored-label", 0x01020304u);
@@ -99,6 +161,7 @@ static void profile(int rtt, int jitter, unsigned loss, bool faults) {
     CHECK(false);
 }
 int main() {
+    subsystems();
     invariants();
     for (int rtt : {0,50,100,150,250})
         for (int jitter : {0,10,30})

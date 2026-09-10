@@ -17,6 +17,10 @@
 #include "port/rollback_scene.h"
 #include "port/settings.h"
 #include "port/config.hpp"
+#include <filesystem> // port/main.h declares a std::filesystem::path global.
+#include "port/main.h"
+#include "port/port_version.h"
+#include "partyboard_version.h"
 
 extern "C" {
 #include "game/gamework.h"
@@ -33,6 +37,8 @@ extern "C" {
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -64,6 +70,15 @@ extern "C" BOOL omDLLSnapshotSave(void *destination, std::size_t capacity);
 extern "C" std::size_t HuPadSnapshotSizeGet(void);
 extern "C" BOOL HuPadSnapshotSave(void *destination, std::size_t capacity);
 extern "C" BOOL HuPadSnapshotSelfTest(void);
+extern "C" BOOL msmStreamLogicalSelfTest(void);
+extern "C" BOOL PartyBoard_RetraceCounterSelfTest(void);
+extern "C" BOOL PartyBoard_ThpLogicalSelfTest(void);
+extern "C" s32 msmMusGetStatus(int musNo);
+extern "C" void msmStreamLogicalTick(void);
+extern "C" bool msmStreamLogicalProbeInstall(void);
+extern "C" void msmStreamLogicalProbeStart(int channel, int samples, int frequency);
+extern "C" void msmStreamLogicalProbeFinishPhysical(int channel);
+extern "C" s32 msmStreamGetStatus(int streamNo);
 
 namespace partyboard::netplay {
 namespace {
@@ -94,7 +109,10 @@ struct Runtime {
     UdpTransport transport;
     SessionProgress progress;
     StateHistory states;
-    std::array<CanonicalState, kStateHistorySize> canonicalHistory {};
+    // Field-level evidence for the frames a divergence can still be reported
+    // at. Digests cover the full 256-frame stream; only the detail is shorter.
+    std::array<CanonicalState, kDetailHistorySize> detailHistory {};
+    std::array<std::uint32_t, kDetailHistorySize> detailFrames {};
     bool lockstepPrepared = false;
     bool desyncProbe = false;
     bool menuProbe = false;
@@ -104,6 +122,17 @@ struct Runtime {
     bool disconnectProbe = false;
     bool contextMismatchProbe = false;
     bool realtimeProbe = false;
+    bool audioProbe = false;
+    bool walkProbe = false;
+    // Input recording and replay. A recording is raw pad samples keyed by the
+    // frame they are APPLIED on, so the same file replays correctly at any
+    // input delay. Both seats are stored, and each peer replays its own.
+    std::string recordPath;
+    std::string replayPath;
+    std::FILE *recordFile = nullptr;
+    std::vector<std::array<PartyBoardRollbackInput, 2>> replaySamples;
+    std::vector<bool> replayPresent;
+    std::uint32_t replayExhaustedFrame = UINT32_MAX;
     std::array<InputSlot, kHistorySize> localHistory {};
     std::array<InputSlot, kHistorySize> remoteHistory {};
     PartyBoardRollbackInput lastRemote {};
@@ -288,7 +317,11 @@ void resetOverlayTimeline(std::uint8_t contextId)
     gRuntime.rollbackBaseFrame = 0;
     gRuntime.rollbackSessionContext = -1;
     gRuntime.states = {};
-    for (auto &state : gRuntime.canonicalHistory) state.fields.clear();
+    for (auto &state : gRuntime.detailHistory) state.reset();
+    gRuntime.detailFrames.fill(kNoHashFrame);
+    // A network timeline owns its own RNG consumption baseline, exactly like
+    // the seeds it agrees on: counters must start at zero on both peers.
+    PartyBoard_NetplayRandomCountersReset();
     gRuntime.lockstepPrepared = false;
     gRuntime.lastStateRepairMs = 0;
     gRuntime.localHistory = {};
@@ -466,37 +499,96 @@ void serviceStateRepair(bool force)
     }
 }
 
+#include "netplay_report.inc"
+
+// A recording is plain text so it can be diffed and read by a human:
+//   frame seat buttons stickX stickY substickX substickY triggerL triggerR
+// The frame is the one the sample is APPLIED on, never the one it was captured
+// on, so a recording made at one input delay replays correctly at another.
+bool loadReplaySamples()
+{
+    std::FILE *file = std::fopen(gRuntime.replayPath.c_str(), "rb");
+    if (!file) return false;
+    unsigned frame = 0, seat = 0, buttons = 0, triggerL = 0, triggerR = 0;
+    int stickX = 0, stickY = 0, substickX = 0, substickY = 0;
+    while (std::fscanf(file, "%u %u %u %d %d %d %d %u %u", &frame, &seat, &buttons,
+        &stickX, &stickY, &substickX, &substickY, &triggerL, &triggerR) == 9) {
+        if (seat > 1 || frame > 60u * 60u * 60u) continue; // Ignore malformed rows.
+        if (frame >= gRuntime.replaySamples.size()) {
+            gRuntime.replaySamples.resize(frame + 1);
+            gRuntime.replayPresent.resize(frame + 1, false);
+        }
+        PartyBoardRollbackInput &sample = gRuntime.replaySamples[frame][seat];
+        sample.buttons = static_cast<u16>(buttons);
+        sample.stickX = static_cast<s8>(stickX);
+        sample.stickY = static_cast<s8>(stickY);
+        sample.substickX = static_cast<s8>(substickX);
+        sample.substickY = static_cast<s8>(substickY);
+        sample.triggerLeft = static_cast<u8>(triggerL);
+        sample.triggerRight = static_cast<u8>(triggerR);
+        gRuntime.replayPresent[frame] = true;
+    }
+    std::fclose(file);
+    return !gRuntime.replaySamples.empty();
+}
+
+void recordAppliedInputs(std::uint32_t frame, const PartyBoardRollbackInput &local,
+    const PartyBoardRollbackInput &remote)
+{
+    if (!gRuntime.recordFile) return;
+    const PartyBoardRollbackInput *seats[2];
+    seats[gRuntime.localPlayer] = &local;
+    seats[gRuntime.localPlayer ^ 1u] = &remote;
+    for (unsigned seat = 0; seat < 2; ++seat) {
+        std::fprintf(gRuntime.recordFile, "%u %u %u %d %d %d %d %u %u\n", frame, seat,
+            seats[seat]->buttons, seats[seat]->stickX, seats[seat]->stickY,
+            seats[seat]->substickX, seats[seat]->substickY,
+            seats[seat]->triggerLeft, seats[seat]->triggerRight);
+    }
+}
+
 bool checkStateFailure()
 {
     if (gRuntime.states.error() == StateFailure::None) return true;
     if (!gRuntime.error.empty()) return false;
     const auto frame = gRuntime.states.errorFrame();
     const auto *a = gRuntime.states.getLocal(frame), *b = gRuntime.states.getRemote(frame);
+    const char *category = a && b ? subsystemName(a->firstDifferentPart(*b)) : "UNKNOWN";
+    // One self-contained file per peer; tools/netplay_compare.py diffs the two
+    // and names the first divergent field.
+    const auto report = writeDesyncReport(frame, gRuntime.states.error());
     char message[1024];
     std::snprintf(message, sizeof(message),
-        "%s frame=%u context=%u/%u localHash=%016llx remoteHash=%016llx RNG=%08x/%08x:%08x/%08x counter=%u/%u hash_version=%u confirmed_input=%u last_equal_next=%u last_checkpoint=none state_error=%u session=%08x player=%u",
+        "%s frame=%u category=%s context=%u/%u localHash=%016llx remoteHash=%016llx RNG=%08x/%08x:%08x/%08x counter=%u/%u hash_version=%u confirmed_input=%u last_equal_next=%u state_error=%u session=%08x player=%u report=%s",
         gRuntime.states.error() == StateFailure::Desync ? "DESYNC" : "PROTOCOL_STATE",
-        frame, a ? a->context : UINT32_MAX, b ? b->context : UINT32_MAX,
+        frame, category, a ? a->context : UINT32_MAX, b ? b->context : UINT32_MAX,
         static_cast<unsigned long long>(a ? a->hash : 0), static_cast<unsigned long long>(b ? b->hash : 0),
         a ? a->frand : 0, a ? a->rand8 : 0, b ? b->frand : 0, b ? b->rand8 : 0,
         a ? a->counter : 0, b ? b->counter : 0, kStateHashVersion,
         gRuntime.frame ? gRuntime.frame - 1 : UINT32_MAX, gRuntime.states.equalThrough(),
-        static_cast<unsigned>(gRuntime.states.error()), kSessionId, gRuntime.localPlayer);
-    FILE *file = nullptr;
+        static_cast<unsigned>(gRuntime.states.error()), kSessionId, gRuntime.localPlayer,
+        report.empty() ? "none" : report.c_str());
+    // The companion collects this sidecar next to its native log; keep writing
+    // it. The per-peer report above holds the field-level evidence, which is
+    // too large to flood stderr or the capped routine log with.
+    FILE *sidecar = nullptr;
 #ifdef _WIN32
-    const auto *path = _wgetenv(L"PARTYBOARD_NET_DIAGNOSTIC");
-    if (path && *path) file = _wfopen((std::wstring(path) + L".desync").c_str(), L"ab");
+    const auto *diagnostic = _wgetenv(L"PARTYBOARD_NET_DIAGNOSTIC");
+    if (diagnostic && *diagnostic)
+        sidecar = _wfopen((std::wstring(diagnostic) + L".desync").c_str(), L"ab");
 #endif
-    if (file) std::fprintf(file, "%s\n", message);
-    if (a) {
-        const auto &state = gRuntime.canonicalHistory[frame % kStateHistorySize];
-        for (std::size_t i = 0; i < state.fields.size(); ++i) {
-            const auto &field = state.fields[i];
-            std::fprintf(stderr, "[STATE] frame=%u field=%zu name=%s value=%08x\n", frame, i, field.name, field.value);
-            if (file) std::fprintf(file, "STATE frame=%u field=%zu name=%s value=%08x\n", frame, i, field.name, field.value);
+    if (sidecar) std::fprintf(sidecar, "%s\n", message);
+    if (a && b) {
+        for (std::size_t index = 0; index < kSubsystemCount; ++index) {
+            const char *verdict = a->parts[index] == b->parts[index] ? "OK" : "DIFFERENT";
+            std::fprintf(stderr, "[STATE] frame=%u %-10s local=%08x remote=%08x %s\n", frame,
+                subsystemName(index), a->parts[index], b->parts[index], verdict);
+            if (sidecar)
+                std::fprintf(sidecar, "SUBSYSTEM frame=%u %-10s local=%08x remote=%08x %s\n",
+                    frame, subsystemName(index), a->parts[index], b->parts[index], verdict);
         }
     }
-    if (file) std::fclose(file);
+    if (sidecar) std::fclose(sidecar);
     serviceStateRepair(true);
     failSession(message, gRuntime.states.error() == StateFailure::Desync); // Retry failed digest while stopped.
     return false;
@@ -510,7 +602,9 @@ bool captureCommittedState()
         frand_state_get(), static_cast<std::uint32_t>(rand8_state_get()), GlobalCounter};
     auto state = captureCanonical(stamp);
     stamp.hash = state.hash;
-    gRuntime.canonicalHistory[frame % kStateHistorySize] = std::move(state);
+    stamp.parts = state.parts;
+    gRuntime.detailHistory[frame % kDetailHistorySize] = std::move(state);
+    gRuntime.detailFrames[frame % kDetailHistorySize] = frame;
     gRuntime.states.capture(stamp);
     // New frames stream immediately; input traffic repairs the oldest missing
     // state in parallel. No extra round-trip barrier for each gameplay frame.
@@ -903,6 +997,14 @@ extern "C" bool PartyBoard_NetplayConfigureFromArgs(int argc, char **argv)
             gRuntime.menuProbe = true;
         } else if (argument == "--netplay-probe-realtime") {
             gRuntime.realtimeProbe = true;
+        } else if (argument == "--netplay-probe-audio") {
+            gRuntime.audioProbe = true;
+        } else if (argument == "--netplay-walk-probe") {
+            gRuntime.walkProbe = true;
+        } else if (argument == "--netplay-record-input" && index + 1 < argc) {
+            gRuntime.recordPath = argv[++index];
+        } else if (argument == "--netplay-replay-input" && index + 1 < argc) {
+            gRuntime.replayPath = argv[++index];
         } else if (argument == "--netplay-host" || argument == "--netplay-join"
             || argument == "--netplay-delay" || argument == "--netplay-pad") {
             argumentsValid = false;
@@ -943,6 +1045,19 @@ extern "C" bool PartyBoard_NetplayConfigureFromArgs(int argc, char **argv)
     // forwards inputs over UDP too, so it needs the same loss recovery.
     gRuntime.rollbackProbe = rollbackProbe;
     gRuntime.enabled = true;
+    if (!gRuntime.recordPath.empty()) {
+        gRuntime.recordFile = std::fopen(gRuntime.recordPath.c_str(), "wb");
+        if (!gRuntime.recordFile) {
+            std::fprintf(stderr, "Netplay: cannot write the input recording %s.\n",
+                gRuntime.recordPath.c_str());
+            return false;
+        }
+    }
+    if (!gRuntime.replayPath.empty() && !loadReplaySamples()) {
+        std::fprintf(stderr, "Netplay: cannot read the input recording %s.\n",
+            gRuntime.replayPath.c_str());
+        return false;
+    }
     std::fprintf(stdout,
         "Netplay experimental: %s, UDP port %u, local player %u, physical controller port %u, input delay %u frame(s). %s.\n",
         host ? "host" : "client", gRuntime.localPort,
@@ -1150,13 +1265,53 @@ extern "C" bool PartyBoard_NetplayTick(void)
     }
     if (!runtime.localCaptured) {
         runtime.pendingLocal = capturePad(runtime.localPad);
-        if (runtime.menuProbe) {
-            // Explicit real-game regression only. Send the host's Start through
+        if (!runtime.replaySamples.empty()) {
+            const std::uint32_t applied = runtime.frame + runtime.inputDelay;
+            if (applied < runtime.replaySamples.size() && runtime.replayPresent[applied]) {
+                runtime.pendingLocal = runtime.replaySamples[applied][runtime.localPlayer];
+            } else {
+                // Past the end of the recording: hold neutral rather than let
+                // a physical controller join a replay half way through.
+                runtime.pendingLocal = {};
+                if (runtime.replayExhaustedFrame == UINT32_MAX) {
+                    runtime.replayExhaustedFrame = applied;
+                    std::printf("[NET TEST] replay_exhausted_frame=%u\n", applied);
+                }
+            }
+        }
+        if (runtime.menuProbe || runtime.walkProbe) {
+            // Explicit real-game regression only. Send the host's input through
             // the normal input timeline; never advance an overlay directly.
             runtime.pendingLocal = {};
-            if (runtime.localPlayer == 0 && runtime.observedContext == static_cast<int>(MenuProbeOverlay::bootDll)
-                && runtime.frame >= 600 && runtime.frame % 120 < 2)
+            if (runtime.walkProbe) {
+                // A deterministic walk, not a hand-written menu script: the
+                // point is to cross many overlays, wipes and audio waits while
+                // the canonical state proves both peers stayed identical. A
+                // fixed menu path would break on the first layout change.
+                // Both seats act. Selection screens wait for every player to
+                // confirm, so a walk driven by the host alone would stall on the
+                // first one. The offset keeps the two seats from always pressing
+                // the same button on the same frame.
+                const unsigned beat = runtime.frame + runtime.localPlayer * 15u;
+                if (beat % 30 < 3) {
+                    switch ((beat / 30) % 8) {
+                    case 2: runtime.pendingLocal.buttons = PAD_BUTTON_START; break;
+                    // The D-pad is masked out by HuPadRead; menus read the
+                    // analog stick through PadADConv.
+                    case 4: runtime.pendingLocal.stickY = -100; break;
+                    // Measured: with no cancel at all the walk settles on the
+                    // first screen that needs one; with a cancel every eighth
+                    // beat it backs out of everything and covers less. Rare.
+                    case 5: if ((beat / 240) % 2) runtime.pendingLocal.buttons = PAD_BUTTON_B; break;
+                    case 6: runtime.pendingLocal.stickX = 100; break;
+                    default: runtime.pendingLocal.buttons = PAD_BUTTON_A; break;
+                    }
+                }
+            } else if (runtime.localPlayer == 0
+                && runtime.observedContext == static_cast<int>(MenuProbeOverlay::bootDll)
+                && runtime.frame >= 600 && runtime.frame % 120 < 2) {
                 runtime.pendingLocal.buttons = PAD_BUTTON_START;
+            }
         }
         storeInput(runtime.localHistory, runtime.frame + runtime.inputDelay, runtime.pendingLocal);
         runtime.localCaptured = true;
@@ -1244,6 +1399,7 @@ extern "C" bool PartyBoard_NetplayTick(void)
         PartyBoard_NetplayPadApplyRemote(1, &local, &runtime.lastLocal);
         PartyBoard_NetplayPadApplyRemote(0, &remote, &previousRemote);
     }
+    recordAppliedInputs(runtime.frame, local, remote);
     runtime.lastLocal = local;
     runtime.localCaptured = false;
     runtime.lockstepPrepared = !runtime.rollbackRequested;
@@ -1301,6 +1457,10 @@ extern "C" const char *PartyBoard_NetplayError(void)
 extern "C" void PartyBoard_NetplayShutdown(void)
 {
     using namespace partyboard::netplay;
+    if (gRuntime.recordFile) {
+        std::fclose(gRuntime.recordFile);
+        gRuntime.recordFile = nullptr;
+    }
     PartyBoard_RollbackAudioBridgeStop();
     gRuntime.transport.close();
     gRuntime = Runtime {};
@@ -1467,7 +1627,7 @@ extern "C" bool PartyBoard_NetplayRuntimeRunSelfTest(void)
         && partyboard::netplay::progressSelfTest() && HuPadSnapshotSelfTest()
         && PartyBoard_RollbackClockSelfTest() && availabilityPassed
         && runNativePadRollbackSelfTest() && topologyPassed && gamePassed
-        && PartyBoard_AnimationRollbackSelfTest() && PartyBoard_RollbackIOSelfTest() && PartyBoard_RollbackSequenceSelfTest() && HuPrcSnapshotExecutionSelfTest() && PartyBoard_RollbackSceneSelfTest() && PartyBoard_RollbackResourcesSelfTest() && PartyBoard_RollbackCheckpointSelfTest() && PartyBoard_RollbackWipeSafetySelfTest() && PartyBoard_RollbackRenderSafetySelfTest() && PartyBoard_RollbackAudioSelfTest();
+        && PartyBoard_AnimationRollbackSelfTest() && PartyBoard_RollbackIOSelfTest() && PartyBoard_RollbackSequenceSelfTest() && HuPrcSnapshotExecutionSelfTest() && PartyBoard_RollbackSceneSelfTest() && PartyBoard_RollbackResourcesSelfTest() && PartyBoard_RollbackCheckpointSelfTest() && PartyBoard_RollbackWipeSafetySelfTest() && PartyBoard_RollbackRenderSafetySelfTest() && PartyBoard_RollbackAudioSelfTest() && msmStreamLogicalSelfTest() && PartyBoard_RetraceCounterSelfTest() && PartyBoard_ThpLogicalSelfTest();
     OSReport("Netplay runtime self-test: %s\n", passed ? "PASS" : "FAIL");
     return passed;
 }
@@ -1494,6 +1654,17 @@ extern "C" bool PartyBoard_NetplayPadRunProbe(void)
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(gRuntime.disconnectProbe ? 135 : gRuntime.realtimeProbe ? 150 : 90);
     unsigned frame = 0;
     bool loadingPauseDone = false;
+    // Deterministic audio wait: both peers arm the same one-second stream at
+    // frame 100, but their simulated audio threads finish it at very different
+    // frames, exactly as two machines with different audio buffering do.
+    constexpr unsigned kAudioArmFrame = 100;
+    constexpr unsigned kAudioSampleRate = 32000;
+    const unsigned physicalFinishFrame = gRuntime.localPlayer == 0 ? 120u : 200u;
+    unsigned audioDoneFrame = 0;
+    if (gRuntime.audioProbe && !msmStreamLogicalProbeInstall()) {
+        std::fputs("[NET TEST] FAIL: a real stream table is already installed\n", stderr);
+        return false;
+    }
     while (frame < frames && std::chrono::steady_clock::now() < deadline) {
         // Revisit a context with inputs still in the delay buffer. The client
         // pauses alone to model wall-clock loading without extra simulation.
@@ -1536,6 +1707,16 @@ extern "C" bool PartyBoard_NetplayPadRunProbe(void)
                     + pads[player].triggerLeft + (pads[player].button & PAD_BUTTON_A ? 3 : 0)) % 999);
                 GWPlayer[player].roll = static_cast<s8>(pads[player].stickX % 10);
             }
+            if (gRuntime.audioProbe) {
+                if (frame == kAudioArmFrame)
+                    msmStreamLogicalProbeStart(0, kAudioSampleRate, kAudioSampleRate);
+                if (frame == physicalFinishFrame) msmStreamLogicalProbeFinishPhysical(0);
+                // The real loop advances this from PadReadSimulationTick, once
+                // per accepted tick and before the canonical state is captured.
+                msmStreamLogicalTick();
+                if (frame > kAudioArmFrame && audioDoneFrame == 0
+                    && msmStreamGetStatus(0) == 0) audioDoneFrame = frame;
+            }
             if (frame == 0 || frame == 400) BoardRandInit();
             frand(); rand8(); BoardRand();
             if (gRuntime.desyncProbe && gRuntime.localPlayer == 1 && frame == 87)
@@ -1572,6 +1753,9 @@ extern "C" bool PartyBoard_NetplayPadRunProbe(void)
         }
         // Windows coarse Sleep(1) can take 15.6 ms and invalidate the probe's
         // wall-time budget at delay zero. Precise waiting only affects this test.
+        // Asymmetric wall clock: one peer runs visibly slower in real time.
+        if (gRuntime.audioProbe && gRuntime.localPlayer == 1)
+            SDL_DelayPrecise(5000000ull);
         SDL_DelayPrecise(gRuntime.realtimeProbe ? 16000000ull : 1000000ull);
     }
     // Drain final hashes/ACKs without simulating extra input. Keep responding
@@ -1590,6 +1774,9 @@ extern "C" bool PartyBoard_NetplayPadRunProbe(void)
     }
     if (frame == frames && (gRuntime.states.equalThrough() != frames || gRuntime.states.peerEqualThrough() != frames))
         return false;
+    if (gRuntime.audioProbe)
+        std::printf("[NET TEST] audio_done_frame=%u physical_finish_frame=%u\n",
+            audioDoneFrame, physicalFinishFrame);
     std::printf("[NET TEST] equal_states=%u peer_equal_states=%u\n",
         gRuntime.states.equalThrough(), gRuntime.states.peerEqualThrough());
     std::fprintf(stdout, "[NET TEST] %s: %u/%u frames, local physical PAD=%u, game port=%u\n",

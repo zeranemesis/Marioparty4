@@ -78,6 +78,7 @@ s16 HuSysVWaitGet(s16 param);
 #ifdef TARGET_PC
 void PartyBoard_RequestRestart(void)
 {
+    PartyBoard_NetplayTrace("loop_exit reason=restart_requested");
     PartyBoard_RestartRequested = SUPPORTS_PROCESS_RESTART;
     PartyBoard_IsRunning = FALSE;
 }
@@ -195,6 +196,7 @@ void main(void)
             ++event;
         }
         if (exiting) {
+            PartyBoard_NetplayTrace("loop_exit reason=aurora_exit");
             break;
         }
 #endif
@@ -355,8 +357,15 @@ s16 HuSysVWaitGet(s16 param)
 
 s32 rnd_seed = 0x0000D9ED;
 
+#ifdef TARGET_PC
+u32 partyboardRand8Calls;
+#endif
+
 s32 rand8(void)
 {
+#ifdef TARGET_PC
+    ++partyboardRand8Calls;
+#endif
     rnd_seed = (rnd_seed * 0x41C64E6D) + 0x3039;
     return (u8)(((rnd_seed + 1) >> 16) & 0xFF);
 }
@@ -416,12 +425,38 @@ BOOL PartyBoard_RollbackClockSelfTest(void) {
 #endif
 
 #ifdef TARGET_PC
+#include "port/netplay_state.h"
+
+extern s32 VCounter;
+
+/* Frame-domain counters. All of them must advance once per accepted
+ * simulation tick; real display time must never appear here. */
+void PartyBoard_NetplayTimerState(PartyBoardNetplayStateSink sink, void *context)
+{
+#define WORD(value) sink(context, #value, (uint32_t)(value))
+    WORD(GlobalCounter);
+    WORD(VCounter);
+    WORD(minimumVcount);
+    WORD(PartyBoard_NetplayFloatWord(minimumVcountf));
+    WORD(SystemInitF);
+    WORD(HuDvdErrWait);
+    /* PartyBoard_SimulationTicksThisFrame and PartyBoard_IsSimulationTick
+     * describe the presentation frame that produced this tick, not the tick
+     * itself: a peer that stalled once carries a different value. */
+#undef WORD
+}
+#endif
+
+#ifdef TARGET_PC
 #include "port/rollback_scene.h"
 bool PartyBoard_RollbackClockRegions(PartyBoardRollbackRegionSink sink, void *context)
 {
     if (!sink) return false;
 #define REGION(value) if (!sink(context, &(value), sizeof(value))) return false;
     REGION(rnd_seed) REGION(GlobalCounter) REGION(minimumVcount) REGION(minimumVcountf)
+    /* Consumption counters are part of the deterministic RNG state: a replayed
+     * frame must draw the same number of samples as the original one. */
+    REGION(partyboardRand8Calls)
 #undef REGION
     return PartyBoard_RollbackRandomRegions(sink, context);
 }
