@@ -276,6 +276,10 @@ static void migrate_directory(const std::filesystem::path& from, const std::file
 
 static std::filesystem::path calculate_config_path() {
 #ifdef _WIN32
+    // Keep offline menu/save regression tests isolated from the user's normal
+    // preferences and memory cards. Normal launches never set this variable.
+    if (const auto *path = _wgetenv(L"PARTYBOARD_TEST_PROFILE"); path && *path)
+        return std::filesystem::path(path);
     // Explicit online test isolation: normal online/offline preference paths
     // are unchanged unless the test runner supplies a temporary profile.
     if (PartyBoard_NetplayEnabled()) {
