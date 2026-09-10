@@ -276,6 +276,18 @@ static void migrate_directory(const std::filesystem::path& from, const std::file
 }
 
 static std::filesystem::path calculate_config_path() {
+#ifdef _WIN32
+    // Keep offline menu/save regression tests isolated from the user's normal
+    // preferences and memory cards. Normal launches never set this variable.
+    if (const auto *path = _wgetenv(L"PARTYBOARD_TEST_PROFILE"); path && *path)
+        return std::filesystem::path(path);
+    // Explicit online test isolation: normal online/offline preference paths
+    // are unchanged unless the test runner supplies a temporary profile.
+    if (PartyBoard_NetplayEnabled()) {
+        if (const auto *path = _wgetenv(L"PARTYBOARD_NETPLAY_TEST_PROFILE"); path && *path)
+            return std::filesystem::path(path);
+    }
+#endif
 #ifdef __APPLE__
 #if TARGET_OS_IOS && !TARGET_OS_TV
     const char* documentsPath = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);
@@ -596,6 +608,12 @@ extern "C" int port_main(int argc, char* argv[]) {
     }
 
     partyboard::version::init();
+    if (PartyBoard_NetplayEnabled()) {
+        const auto &id = partyboard::version::getDiskID();
+        char diagnostic[96];
+        std::snprintf(diagnostic, sizeof(diagnostic), "boot_disc id=%.4s%.2s", id.gameName, id.company);
+        PartyBoard_NetplayTrace(diagnostic);
+    }
     LanguageInit();
 
     // OSInit();

@@ -16,6 +16,8 @@ extern "C" {
  * only by command-line arguments, so the normal offline game remains untouched. */
 bool PartyBoard_NetplayConfigureFromArgs(int argc, char **argv);
 bool PartyBoard_NetplayEnabled(void);
+/* One named boot/menu diagnostic event; no-op outside a network session. */
+void PartyBoard_NetplayTrace(const char *event);
 /* Companion-controlled start barrier, called only after game initialization. */
 bool PartyBoard_OnlineWaitForStart(void);
 bool PartyBoard_NetplayAllowsMultipleInstances(void);
@@ -25,8 +27,8 @@ bool PartyBoard_NetplayTick(void);
  * False leaves the game tick uncommitted. Startup advertises occupied ports
  * without starting a network timeline before the game has initialized. */
 bool PartyBoard_NetplayPreparePads(PADStatus status[4], u32 *rumble, bool startup);
-/* Completes a rollback-prepared tick after the main game logic ran. Lockstep
- * and offline ticks treat this as a no-op. */
+/* After accepted game logic: captures a canonical lockstep state, or completes
+ * an experimental rollback-prepared tick. Offline remains a no-op. */
 bool PartyBoard_NetplayCommitTick(void);
 void PartyBoard_NetplayControlMotor(u32 port, u32 command);
 bool PartyBoard_NetplayPadRunProbe(void);

@@ -17,11 +17,11 @@ A work-in-progress Windows/Linux/macOS/Android/iOS port of Mario Party 4.
 
 This repository does **not** contain any game assets or assembly whatsoever. An existing copy of the game is required.
 
-## Online rollback build
+## Online build
 
 This branch includes the Windows online build used for two-player testing:
 
-- rollback netcode with deterministic input and coordinated state checkpoints;
+- synchronized input (lockstep) by default, with a three-frame input delay;
 - host-created lobbies with short join codes, host-only start permission and
   automatic peer status/ping display;
 - full disc-image hash and game-version verification before joining;
@@ -32,10 +32,15 @@ This branch includes the Windows online build used for two-player testing:
   notifications;
 - automatic online 4:3 viewport, native internal resolution and 60 Hz simulation
   to keep HUD and effects deterministic;
-- GitHub update management in the online launcher: version check, signed SHA-256
+- GitHub update management in the online launcher: version check, SHA-256 verified
   download and automatic replacement on restart;
-- rollback-safe animation, texture, shadow, audio, wipe and scene state, with
-  recovery from temporary packet loss.
+- recovery from temporary packet loss using input retransmission.
+
+Since 0.15.6 the launcher no longer enables experimental rollback automatically.
+The native `--netplay-rollback` option remains available for development, but
+full-game rollback is not yet reliable across resource and scene transitions.
+Both PCs must use the same release. Online sessions start a fresh profile and
+do not load personal memory-card saves.
 
 ### Technologies
 

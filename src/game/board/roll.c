@@ -79,6 +79,22 @@ static char sameRollCoinStr[8];
 static s8 tutorialRollF;
 static Process *rollProc;
 
+#ifdef TARGET_PC
+#include "port/netplay_state.h"
+void PartyBoard_NetplayDiceState(PartyBoardNetplayStateSink sink, void *context)
+{
+    int i;
+#define WORD(value) sink(context, #value, (uint32_t)(value))
+    WORD(rollProc != NULL);
+    if (!rollProc) return;
+    WORD(rollPlayer); WORD(numDice); WORD(inputTimer); WORD(maxRoll);
+    WORD(destMode); WORD(diceSize); WORD(tutorialRollF); WORD(lbl_801D4098);
+    for (i = 0; i < 3; ++i) { WORD(diceValue[i]); WORD(tutorialRoll[i]); }
+#undef WORD
+}
+#endif
+
+
 static s16 diceMdl[3] = { -1, -1, -1 };
 static s16 diceEff[3] = { -1, -1, -1 };
 static s16 rollWin = -1;

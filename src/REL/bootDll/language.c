@@ -21,6 +21,10 @@
 
 #include <string.h>
 
+#ifdef TARGET_PC
+#include "port/netplay_runtime.h"
+#endif
+
 s32 flagFileTbl[] = {
     TITLE_FLAG_EN_ANM,
     TITLE_FLAG_ES_ANM,
@@ -211,6 +215,17 @@ s32 LanguageBootGet(void)
     s16 result = -1;
     s16 i;
     s16 j;
+#ifdef TARGET_PC
+    // LanguageBootGet copies the entire offline GameStat from a card, including
+    // continuation flags and records. Do not import that state into netplay.
+    // Use the common English menu path until language negotiation is supported.
+    if (PartyBoard_NetplayEnabled()) {
+        SLSaveFlagSet(0);
+        OSReport("Online boot language: common=1; local card untouched.\n");
+        PartyBoard_NetplayTrace("boot_profile source=session language=1 card=skipped");
+        return 1;
+    }
+#endif
     for(i=0; i<2; i++) {
         if(HuCardSlotCheck(i) < 0) {
             continue;

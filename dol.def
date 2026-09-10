@@ -4,6 +4,8 @@ EXPORTS
     PartyBoard_RollbackIsResimulating
     PartyBoard_NetTransportRunSelfTest
     PartyBoard_NetplayConfigureFromArgs
+    PartyBoard_NetplayEnabled
+    PartyBoard_NetplayTrace
     PartyBoard_OnlineCheckDisc
     PartyBoard_OnlineBarrierProbe
     PartyBoard_NetplayAllowsMultipleInstances

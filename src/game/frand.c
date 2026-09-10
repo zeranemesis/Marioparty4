@@ -1,4 +1,7 @@
 #include "dolphin.h"
+#ifdef TARGET_PC
+#include "port/netplay_runtime.h"
+#endif
 
 static u32 frand_seed;
 
@@ -10,7 +13,12 @@ static inline u32 frandom(u32 param)
 
     if (param == 0) {
         param = rand8();
+#ifdef TARGET_PC
+        /* The zero-seed path is also reachable after the online RNG handshake. */
+        param ^= PartyBoard_NetplayEnabled() ? 0x4d503452u : (u32)OSGetTime();
+#else
         param = param ^ (s64)OSGetTime();
+#endif
         param ^= 0xD826BC89;
     }
 

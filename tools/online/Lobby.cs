@@ -141,6 +141,11 @@ sealed class Lobby {
 // Local process readiness is independent of network readiness. The game signals
 // READY only after initialization; GO is released by the authenticated host.
 sealed class GameStart : IDisposable {
+    // Normal online play stays in lockstep for the whole session. Live
+    // rollback remains an explicit native developer option, not a lobby default.
+    public static string OnlineArguments(string transportArguments) {
+        return transportArguments+" --netplay-loopback --netplay-full --netplay-pad 1 --netplay-delay 3";
+    }
     readonly EventWaitHandle ready,go,cancel;readonly string prefix;
     public Process Process {get;private set;} public readonly Guid Attempt;
     public GameStart(Guid id){Attempt=id;prefix="Local\\PartyBoardOnlineStart-"+Guid.NewGuid().ToString("N");ready=new EventWaitHandle(false,EventResetMode.ManualReset,prefix+"-ready");go=new EventWaitHandle(false,EventResetMode.ManualReset,prefix+"-go");cancel=new EventWaitHandle(false,EventResetMode.ManualReset,prefix+"-cancel");}

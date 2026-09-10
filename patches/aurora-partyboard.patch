@@ -1,0 +1,202 @@
+diff --git a/lib/dolphin/pad/pad.cpp b/lib/dolphin/pad/pad.cpp
+index 2d7f795..145a9cf 100644
+--- a/lib/dolphin/pad/pad.cpp
++++ b/lib/dolphin/pad/pad.cpp
+@@ -4,9 +4,12 @@
+ #include "../../fs_helper.hpp"
+ #include <dolphin/pad.h>
+ #include <dolphin/si.h>
++#include <SDL3/SDL_events.h>
+ #include <SDL3/SDL_mouse.h>
+ 
+ #include <array>
++#include <cstdio>
++#include <cstdlib>
+ #include <sys/stat.h>
+ #include <ranges>
+ 
+@@ -31,6 +34,10 @@ std::array<PADButtonMapping, PAD_BUTTON_COUNT> g_defaultButtonsStandard{{
+ 
+ std::array<PADStatus, PAD_CHANMAX> g_virtualPadStatus{};
+ std::array<bool, PAD_CHANMAX> g_virtualPadActive{};
++std::array<uint8_t, PAD_CHANMAX> g_automationPulseFrames{};
++std::array<PADButton, PAD_CHANMAX> g_automationPulseButtons{};
++uint32_t g_automationLastCounter = UINT32_MAX;
++std::array<uint8_t, SDL_SCANCODE_COUNT> g_keyboardPulseFrames{};
+ 
+ std::array<PADButtonMapping, PAD_BUTTON_COUNT> g_defaultButtonsXBox360{{
+     {SDL_GAMEPAD_BUTTON_SOUTH, PAD_BUTTON_A},
+@@ -305,6 +312,52 @@ bool is_mouse_button_pressed(const s32 scancode) {
+   const auto buttons = SDL_GetMouseState(&x, &y);
+   return (buttons & 1u << (buttonNum - 1)) != 0u;
+ }
++
++/* Test-only input bridge.  A short SendInput key pulse can fall between two
++ * PADRead calls, especially at high render rates.  The launcher writes
++ * "counter port buttons frames" here; a command is latched for a few reads
++ * and is ignored unless the audio diagnostic marker is present. */
++void poll_automation_input() {
++  const char* appData = std::getenv("APPDATA");
++  if (appData == nullptr || appData[0] == '\0')
++    return;
++  char path[1024];
++  /* Reuse the diagnostic marker as the command channel so no extra file or
++   * permission is needed in the user's configuration directory. */
++  std::snprintf(path, sizeof(path), "%s\\MarioPartyRD\\Party Board\\audio_diagnostics.enable", appData);
++  FILE* file = std::fopen(path, "rb");
++  if (file == nullptr)
++    return;
++
++  unsigned counter = 0;
++  unsigned port = 0;
++  unsigned buttons = 0;
++  unsigned frames = 0;
++  const int parsed = std::fscanf(file, "%u %u %x %u", &counter, &port, &buttons, &frames);
++  std::fclose(file);
++  if (parsed != 4 || port >= PAD_CHANMAX || counter == g_automationLastCounter)
++    return;
++
++  g_automationLastCounter = counter;
++  g_automationPulseButtons[port] = static_cast<PADButton>(buttons);
++  g_automationPulseFrames[port] = static_cast<uint8_t>(std::clamp(frames, 1u, 30u));
++}
++
++bool SDLCALL keyboard_event_watch(void*, SDL_Event* event) {
++  if (event->type == SDL_EVENT_KEY_DOWN && !event->key.repeat &&
++      event->key.scancode >= 0 && event->key.scancode < SDL_SCANCODE_COUNT) {
++    /* Keep a key-down visible to PADRead for several polls.  This covers
++     * short OS-generated pulses and high-FPS render loops. */
++    g_keyboardPulseFrames[event->key.scancode] = 4;
++  }
++  return true;
++}
++
++bool keyboard_key_pressed(const s32 scancode, const bool* kbState, const int numKeys) {
++  if (scancode <= PAD_KEY_INVALID || scancode >= SDL_SCANCODE_COUNT)
++    return false;
++  return (scancode < numKeys && kbState[scancode]) || g_keyboardPulseFrames[scancode] != 0;
++}
+ } // namespace
+ 
+ void PADSetSpec(u32 spec [[maybe_unused]]) {}
+@@ -373,6 +426,17 @@ BOOL PADInit() {
+     state.m_axisMapping = g_defaultKeyAxis;
+   });
+ 
++  // PartyBoard lets the user configure the keyboard in its pre-launch UI,
++  // before the original game calls PADInit. Reload the serialized mappings
++  // here so PADInit does not silently replace that configuration with the
++  // all-unbound defaults.
++  load_keyboard_bindings();
++  g_keyboardBindingsLoaded = true;
++  // Keep the keyboard available as a local test controller even when a
++  // stale controller_ports.dat marks every port as unassigned.
++  std::ranges::for_each(g_keyboardBindings, [](auto& state) { state.m_mappingsSet = true; });
++  SDL_AddEventWatch(keyboard_event_watch, nullptr);
++
+   return true;
+ }
+ 
+@@ -680,6 +744,7 @@ u32 PADRead(PADStatus* status) {
+ 
+   int numKeys = 0;
+   const bool* kbState = SDL_GetKeyboardState(&numKeys);
++  poll_automation_input();
+   const bool captureHeldInput = g_suppressHeldOnRead && !g_blockPAD;
+   g_suppressHeldOnRead = false;
+ 
+@@ -691,7 +756,8 @@ u32 PADRead(PADStatus* status) {
+       rumbleSupport |= PAD_CHAN0_BIT;
+     }
+     auto controller = aurora::input::get_controller_for_player(i);
+-    if (controller == nullptr && !g_keyboardBindings[i].m_mappingsSet && !g_virtualPadActive[i]) {
++    if (controller == nullptr && !g_keyboardBindings[i].m_mappingsSet && !g_virtualPadActive[i] &&
++        g_automationPulseFrames[i] == 0) {
+       status[i].err = PAD_ERR_NO_CONTROLLER;
+       g_suppressedButtons[i] = 0;
+       g_suppressLeftTrigger[i] = false;
+@@ -702,8 +768,8 @@ u32 PADRead(PADStatus* status) {
+     status[i].err = PAD_ERR_NONE;
+     if (g_keyboardBindings[i].m_mappingsSet) {
+       std::ranges::for_each(
+-          g_keyboardBindings[i].m_buttonMapping, [&kbState, &i, &status](const PADKeyButtonBinding& mapping) {
+-            if (mapping.scancode > PAD_KEY_INVALID && kbState[mapping.scancode]) {
++          g_keyboardBindings[i].m_buttonMapping, [&kbState, &i, &status, &numKeys](const PADKeyButtonBinding& mapping) {
++            if (keyboard_key_pressed(mapping.scancode, kbState, numKeys)) {
+               status[i].button |= mapping.padButton;
+             } else if (is_mouse_scancode(mapping.scancode) && is_mouse_button_pressed(mapping.scancode)) {
+               status[i].button |= mapping.padButton;
+@@ -714,7 +780,7 @@ u32 PADRead(PADStatus* status) {
+       for (const auto& binding : g_keyboardBindings[i].m_axisMapping) {
+         bool pressed = false;
+         if (binding.scancode > PAD_KEY_INVALID) {
+-          pressed = binding.scancode < numKeys && kbState[binding.scancode];
++          pressed = keyboard_key_pressed(binding.scancode, kbState, numKeys);
+         } else if (is_mouse_scancode(binding.scancode)) {
+           pressed = is_mouse_button_pressed(binding.scancode);
+         }
+@@ -907,8 +973,16 @@ u32 PADRead(PADStatus* status) {
+       if (g_virtualPadActive[i]) {
+         merge_virtual_status(status[i], g_virtualPadStatus[i]);
+       }
++      if (g_automationPulseFrames[i] != 0) {
++        status[i].button |= g_automationPulseButtons[i];
++        --g_automationPulseFrames[i];
++      }
+     }
+   }
++  for (auto& frames : g_keyboardPulseFrames) {
++    if (frames != 0)
++      --frames;
++  }
+   return rumbleSupport;
+ }
+ 
+diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
+index a969465..6f5e446 100644
+--- a/lib/webgpu/gpu.cpp
++++ b/lib/webgpu/gpu.cpp
+@@ -177,13 +177,15 @@ wgpu::PresentMode best_present_mode(bool vsync) {
+       return wgpu::PresentMode::FifoRelaxed;
+     }
+   } else {
+-    // Dawn only disables CAMetalLayer displaySyncEnabled for Immediate on Metal
+-    if (g_backendType != wgpu::BackendType::Metal && supports(wgpu::PresentMode::Mailbox)) {
+-      return wgpu::PresentMode::Mailbox;
+-    }
++    // Mailbox still waits for the display refresh and therefore caps unlocked
++    // rendering to the monitor's rate. Prefer Immediate when VSync is disabled
++    // so user-selected targets such as 240 FPS are actually reachable.
+     if (supports(wgpu::PresentMode::Immediate)) {
+       return wgpu::PresentMode::Immediate;
+     }
++    if (supports(wgpu::PresentMode::Mailbox)) {
++      return wgpu::PresentMode::Mailbox;
++    }
+   }
+   return wgpu::PresentMode::Fifo;
+ }
+diff --git a/lib/window.cpp b/lib/window.cpp
+index 0d1a5c2..1d80f01 100644
+--- a/lib/window.cpp
++++ b/lib/window.cpp
+@@ -359,6 +359,19 @@ void show_window() {
+ 
+ bool initialize() {
+   /* We don't want to initialize anything input related here, otherwise the add events will get lost to the void */
++  // The official Nintendo adapter (WUP-028, VID 057E / PID 0337) needs
++  // SDL's HIDAPI GameCube driver and its libusb transport on Windows.  Keep
++  // these explicit instead of relying on SDL defaults so a system-wide SDL
++  // environment variable cannot silently fall back to a generic joystick
++  // mapping (which loses the analogue triggers, C-stick and adapter rumble).
++  TRY(SDL_SetHintWithPriority(SDL_HINT_HIDAPI_LIBUSB, "1", SDL_HINT_OVERRIDE), "Error setting {}: {}",
++      SDL_HINT_HIDAPI_LIBUSB, SDL_GetError());
++  TRY(SDL_SetHintWithPriority(SDL_HINT_HIDAPI_LIBUSB_GAMECUBE, "1", SDL_HINT_OVERRIDE), "Error setting {}: {}",
++      SDL_HINT_HIDAPI_LIBUSB_GAMECUBE, SDL_GetError());
++  TRY(SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_HIDAPI, "1", SDL_HINT_OVERRIDE), "Error setting {}: {}",
++      SDL_HINT_JOYSTICK_HIDAPI, SDL_GetError());
++  TRY(SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_HIDAPI_GAMECUBE, "1", SDL_HINT_OVERRIDE), "Error setting {}: {}",
++      SDL_HINT_JOYSTICK_HIDAPI_GAMECUBE, SDL_GetError());
+   TRY(SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight"), "Error setting {}: {}", SDL_HINT_ORIENTATIONS,
+       SDL_GetError());
+   TRY(SDL_InitSubSystem(SDL_INIT_EVENTS | SDL_INIT_VIDEO), "Error initializing SDL: {}", SDL_GetError());

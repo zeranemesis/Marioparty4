@@ -2,6 +2,7 @@
 #define PARTYBOARD_PORT_NETPLAY_TRANSPORT_HPP
 
 #include "port/rollback.h"
+#include "port/netplay_state.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -9,9 +10,10 @@
 
 namespace partyboard::netplay {
 
-// v4 keeps a continuous full-game timeline across module transitions.
-// v3 reset the timeline per module; mixing the two would silently diverge.
-constexpr std::uint16_t kProtocolVersion = 5;
+// v6 separates input/RTX/state packets and carries versioned canonical state.
+constexpr std::uint16_t kProtocolVersion = 6;
+constexpr std::size_t kNetplayPacketSize = 88;
+enum class PacketType : std::uint8_t { Input = 1, Retransmit = 2, State = 3 };
 
 struct InputPacket {
     std::uint32_t sessionId = 0;
@@ -22,7 +24,9 @@ struct InputPacket {
     std::uint32_t configSignature = 0;
     std::uint32_t frandSeed = 0;
     std::uint32_t rand8Seed = 0;
-    std::uint32_t stateChecksum = 0; // v5: control flags until state checksums are enabled.
+    PacketType type = PacketType::Input;
+    StateDigest state {};
+    std::uint32_t hashAckNext = 0; // Exclusive count of equal canonical states.
     std::uint32_t captureContext = 0;
 };
 
