@@ -100,6 +100,9 @@ def compare_environment(a: Report, b: Report) -> List[str]:
     for key, label in (
         ("build_describe", "build"),
         ("build_revision", "build revision"),
+        # The git macros are empty in a local build, so this is usually the only
+        # value that actually tells two binaries apart.
+        ("build_stamp", "build stamp"),
         ("protocol", "network protocol"),
         ("hash_version", "canonical hash version"),
         ("disc", "game disc"),

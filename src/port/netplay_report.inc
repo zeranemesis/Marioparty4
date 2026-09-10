@@ -69,6 +69,12 @@ std::string writeDesyncReport(std::uint32_t frame, StateFailure failure)
     std::fprintf(file, "PARTYBOARD_NETPLAY_DESYNC_REPORT version=%u\n", kReportVersion);
     std::fprintf(file, "build_describe=%s\n", PARTY_BOARD_WC_DESCRIBE);
     std::fprintf(file, "build_revision=%s\n", PARTY_BOARD_WC_REVISION);
+    // A local build leaves the git macros empty, and two reports then carry no
+    // way to tell which binary produced them. The compile stamp of this
+    // translation unit always discriminates one build from another, and a
+    // recording is only valid against the build it was made with.
+    std::fprintf(file, "build_stamp=%s %s\n", __DATE__, __TIME__);
+    std::fprintf(file, "build_version=%s\n", PARTY_BOARD_VERSION_STRING);
     std::fprintf(file, "build_branch=%s\n", PARTY_BOARD_WC_BRANCH);
     std::fprintf(file, "build_type=%s\n", PARTY_BOARD_BUILD_TYPE);
     std::fprintf(file, "protocol=%u hash_version=%u packet_bytes=%zu\n",
