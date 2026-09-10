@@ -182,3 +182,90 @@ terme et on lui donne de quoi se voir, soit on le retire.
 - [IDXGIFactory4::EnumAdapterByLuid](https://learn.microsoft.com/en-us/windows/win32/api/DXGI1_4/nf-dxgi1_4-idxgifactory4-enumadapterbyluid)
 - [A Fast and Robust Method for Avoiding Self-Intersection](https://link.springer.com/content/pdf/10.1007/978-1-4842-4427-2_6.pdf)
 - [How to Compact Acceleration Structures in D3D12](https://alextardif.com/Compaction.html)
+
+---
+
+# Suites données — 10 septembre 2026
+
+Sept des huit constats traités, chacun mesuré sur la même image de plateau
+(28 547 triangles) pour que les chiffres soient comparables entre eux.
+
+| | avant | après |
+|---|---|---|
+| tracé | 8,72 ms | **3,50 ms** |
+| construction | 1,23 ms | **0,92 ms** |
+| mémoire BLAS | 1 874 Ko | **1 590 Ko** |
+| total par frame | ≈ 9,95 ms | **≈ 4,42 ms** |
+
+Sur un budget de 16,7 ms, la charge passe de 60 % à 26 %. L'image est
+indistinguable à 2× d'agrandissement.
+
+## Ce qui a payé
+
+**§1 — mesure.** Requêtes d'horodatage GPU autour du dispatch. Le chiffre CPU
+que l'ancien `traceMs` rapportait est conservé sous `submitMs` : 0,07 ms, ce qui
+est bien son ordre de grandeur.
+
+**§2 — demi-résolution.** 1280 × 960 au lieu de 1920 × 1440 : 8,72 → 3,80 ms.
+La composition reconstruit le tampon en bilinéaire à la main, puisque les cibles
+sont `unfilterable-float` et qu'aucun échantillonneur ne peut les toucher. Sans
+ça, un tampon en résolution réduite se voit comme tel.
+
+**Drapeau de construction.** `PREFER_FAST_BUILD` sur les BLAS : construction
+−24 %, mémoire −15 %, tracé inchangé. La structure est jetée trop souvent pour
+amortir ce que coûte `PREFER_FAST_TRACE` à fabriquer. Le TLAS garde
+`PREFER_FAST_TRACE`, conformément à la recommandation.
+
+## Ce qui n'a rien payé, et il faut le dire
+
+**§3 — tampons en mémoire vidéo.** Mise en scène par tampon de transit vers un
+tas `DEFAULT`, comme le demandent toutes les recommandations publiées. Résultat
+sur cette machine : **3,72 ms avant, 3,72 ms après**. Soit le cache absorbait
+déjà les lectures, soit la traversée domine. Conservé quand même — la forme
+précédente créait une dépendance par rayon vers la mémoire système, qui coûterait
+ailleurs — mais l'audit citait ce point comme candidat au coût de l'occlusion
+ambiante, et il ne l'est pas.
+
+**Groupes 16 × 8.** Recommandé pour un noyau RayQuery. Mesure : aucun écart.
+Gardé parce que c'est la forme recommandée, pas parce que ça a rapporté.
+
+**§4 — drapeaux de traversée.** `RAY_FLAG_FORCE_OPAQUE |
+RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES` en drapeaux de compilation : aucun gain
+mesurable, mais le `Proceed()` unique devient correct par construction au lieu de
+correct par accident.
+
+## Corrigés sans mesure associée
+
+**§5 — LUID.** Dawn expose son propre périphérique D3D12 ; quand il est sur ce
+backend, `GetAdapterLuid` donne la réponse exacte et `EnumAdapterByLuid` est
+l'appel prévu pour être apparié avec. L'ancienne recherche par vendeur et modèle
+reste en repli.
+
+**§6 — décalage proportionnel.** `max(0.01, t × 1e-3)` le long de la normale
+géométrique, au lieu d'une constante de 0,05 contre des scènes allant de 1 476 à
+22 600 unités.
+
+**§7 — graine figée.** Non modifié, mais désormais justifié dans le code : faire
+varier le motif par frame ne vaut qu'accompagné d'une accumulation temporelle
+contre laquelle converger. Sans elle, ce serait du scintillement. Le vrai
+correctif est un filtre temporel, pas une autre graine.
+
+**Points mineurs.** Une seule barrière UAV globale avant le TLAS ; le commentaire
+du débruiteur ne prétend plus que l'exposant monte par passe alors que le code le
+tient à 12 ; la liaison en UAV de la source du filtre est maintenant expliquée
+(le ping-pong l'échange avec la cible, un descripteur ne peut pas être les deux).
+
+## Reste ouvert
+
+**§8 — les réflexions.** Toujours 0,33 ms pour 0,0 % d'écart mesurable. Le terme
+ne peut pas être rendu visible tel qu'il est conçu : la seule couleur disponible
+au point d'impact est la moyenne d'une texture entière, donc monter le mélange
+produirait des aplats faux plutôt qu'un reflet. Le rendre juste demande
+d'échantillonner la vraie texture à l'impact, ce qui suppose des UV par sommet
+dans les tampons et un accès bindless aux textures. C'est un chantier, pas un
+réglage. La décision — investir ou retirer — appartient à qui a demandé la
+fonctionnalité.
+
+**Tampons d'indices.** Toujours trois sommets uniques par triangle. La source GX
+est souvent déjà indexée ; les réutiliser réduirait les tampons et le coût de
+construction. Non tenté.
