@@ -674,19 +674,6 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         $record.rollback_failures = [Math]::Max($record.rollback_failures, [int]$last.Groups[3].Value)
     }
 
-    # ---- which minigames this run actually entered ----
-    # Read from the overlay path rather than from the scenario's declaration: a
-    # scenario that says it plays a minigame and a run that reached it are two
-    # different claims. Board and system overlays are excluded by number.
-    $systemOverlays = @(1, 3, 70, 74, 84, 89, 90, 91, 92, 93, 94, 95, 96, 97)
-    $seen = @{}
-    foreach ($entryText in $overlays[0]) {
-        $id = [int]($entryText -split '@')[0]
-        if ($id -lt 0 -or $systemOverlays -contains $id) { continue }
-        $seen[$id] = $true
-    }
-    $record.minigames_played = @($seen.Keys | Sort-Object)
-
     # ---- progress ----
     # The furthest either peer got. They are in lockstep, so they should agree;
     # taking the maximum means a peer that died a tick early cannot under-report
@@ -728,6 +715,20 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         }
     }
     $record.overlays = $overlays[0]
+
+    # ---- which minigames this run actually entered ----
+    # Read from the overlay path rather than from the scenario's declaration: a
+    # scenario that says it plays a minigame and a run that reached it are two
+    # different claims. Board and system overlays are excluded by number.
+    $systemOverlays = @(1, 3, 70, 74, 84, 89, 90, 91, 92, 93, 94, 95, 96, 97)
+    $seen = @{}
+    foreach ($entryText in $overlays[0]) {
+        $id = [int]($entryText -split '@')[0]
+        if ($id -lt 0 -or $systemOverlays -contains $id) { continue }
+        $seen[$id] = $true
+    }
+    $record.minigames_played = @($seen.Keys | Sort-Object)
+
     $record.transitions = $overlays[0].Count
 
     # Defect D6: a rendered frame that batched more than one simulation tick.
