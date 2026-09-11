@@ -113,7 +113,33 @@ option(SKIP_HU_ALLOC "Skip the game's built in allocator" OFF)
 option(RUNTIME_SANITIZE "Runtime (stack) sanitization" OFF)
 option(PARTYBOARD_EXPERIMENTAL_MUSYX_AUDIO "Enable the experimental MusyX audio backend" OFF)
 
-set(USE_ASAN OFF CACHE BOOL "Disable ASan" FORCE)
+# ASan stays off by default, but the switch has to be reachable: this line used
+# to FORCE it off, which silently discarded -DUSE_ASAN=ON and made the option
+# below decorative. A build that asks for it explicitly now gets it.
+if (NOT USE_ASAN)
+    set(USE_ASAN OFF CACHE BOOL "Disable ASan" FORCE)
+endif ()
+
+if (USE_ASAN AND MSVC)
+    # /fsanitize=address turns on the MSVC STL container annotations, and that
+    # choice has to match across every object in the link. Only the game, the
+    # port and the overlays are instrumented, so abseil, aurora, fmt and rmlui
+    # disagreed and the link failed with LNK2038 mismatches on annotate_string,
+    # annotate_vector and annotate_optional.
+    #
+    # _DISABLE_STL_ANNOTATION turns all of them off on both sides at once,
+    # which is the documented remedy and covers any container Microsoft
+    # annotates later. It costs exactly one class of detection: overflows
+    # INSIDE a std::string, std::vector or std::optional buffer. Nothing this
+    # investigation needs is affected, namely heap-buffer-overflow,
+    # stack-buffer-overflow, global-buffer-overflow, use-after-free,
+    # double-free and invalid-free. The corruption being hunted is in the
+    # game's own arrays and in HuMem, not in an STL container.
+    #
+    # Set before any add_subdirectory or FetchContent call, so the dependencies
+    # built from source pick it up too.
+    add_compile_definitions(_DISABLE_STL_ANNOTATION=1)
+endif ()
 set(AURORA_ENABLE_DVD ON)
 set(AURORA_ENABLE_RMLUI ON CACHE BOOL "Enable RmlUi UI support" FORCE)
 set(RUNTIME_SANITIZE OFF)
@@ -178,7 +204,12 @@ endif ()
 if (WIN32)
     if(USE_ASAN)
         target_compile_definitions(dol PRIVATE USE_ASAN)
-        set_source_files_properties(${GAME_FILES} PROPERTIES COMPILE_OPTIONS "-fsanitize=address")
+        # Both halves, not just the game: instrumenting GAME_FILES alone leaves
+        # the whole port unchecked, and a partially instrumented build must not
+        # be mistaken for an ASan build. libco is deliberately excluded, because
+        # it switches stacks under the sanitizer's feet.
+        set_source_files_properties(${GAME_FILES} ${PORT_FILES} PROPERTIES
+                COMPILE_OPTIONS "/fsanitize=address")
     endif()
     if(SKIP_HU_ALLOC)
         target_compile_definitions(dol PRIVATE SKIP_HU_ALLOC)
@@ -220,6 +251,32 @@ target_include_directories(partyboard PRIVATE include ${CMAKE_BINARY_DIR})
 target_link_libraries(partyboard PRIVATE dol aurora::main)
 aurora_copy_runtime_dlls(partyboard dol)
 
+if (USE_ASAN AND MSVC)
+    # The launcher itself is instrumented too, so the sanitizer runtime is
+    # initialised before any game module loads rather than by whichever DLL
+    # happens to come first.
+    target_compile_options(partyboard PRIVATE "/fsanitize=address")
+    # ASan cannot coexist with incremental linking, and CMake turns that on by
+    # default for RelWithDebInfo. Without this the link fails outright.
+    foreach (asan_target dol partyboard)
+        target_link_options(${asan_target} PRIVATE "/INCREMENTAL:NO")
+    endforeach ()
+    # Ship the sanitizer runtime beside the executable: the game is launched
+    # from its output directory, not from a developer command prompt, so the
+    # DLL is not otherwise on the search path.
+    get_filename_component(PARTY_BOARD_MSVC_BIN "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    set(PARTY_BOARD_ASAN_DLL "${PARTY_BOARD_MSVC_BIN}/clang_rt.asan_dynamic-x86_64.dll")
+    if (EXISTS "${PARTY_BOARD_ASAN_DLL}")
+        add_custom_command(TARGET partyboard POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${PARTY_BOARD_ASAN_DLL}" "$<TARGET_FILE_DIR:partyboard>"
+                COMMENT "Copying the AddressSanitizer runtime")
+    else ()
+        message(WARNING "AddressSanitizer runtime not found at ${PARTY_BOARD_ASAN_DLL};"
+                " the instrumented build will not start.")
+    endif ()
+endif ()
+
 list(APPEND BINARY_TARGETS partyboard dol)
 
 set(REL_TARGETS "")
@@ -240,8 +297,13 @@ foreach (dir ${REL_TARGETS})
             add_library(${dir} SHARED ${REL_SOURCE_FILES})
             list(APPEND BINARY_TARGETS ${dir})
             if (USE_ASAN)
-                set_source_files_properties(${REL_SOURCE_FILES} PROPERTIES COMPILE_OPTIONS "-fsanitize=address")
+                set_source_files_properties(${REL_SOURCE_FILES} PROPERTIES COMPILE_OPTIONS "/fsanitize=address")
                 target_compile_definitions(${dir} PRIVATE USE_ASAN)
+                if (MSVC)
+                    # Same incompatibility as the main targets: ASan and
+                    # incremental linking cannot both be on.
+                    target_link_options(${dir} PRIVATE "/INCREMENTAL:NO")
+                endif ()
             endif()
             if (dir MATCHES "^w..Dll")
                 target_sources(${dir} PRIVATE src/REL/board_executor.c)
