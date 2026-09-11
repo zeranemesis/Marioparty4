@@ -1,12 +1,16 @@
 name: CubeShelf Windows Release
 
+# Releases come from a deliberate act, never from a branch push.
+#
+# This workflow used to trigger on every push to audio-local and its only gate
+# was that the build succeeded. That contradicts the project's first rule -
+# "ca compile" is never "ca fonctionne" - and it meant a work-in-progress commit
+# published a public artifact. Publishing is now a tag, or a hand-pressed
+# button.
 on:
   push:
-    branches:
-      - audio-local
-    paths-ignore:
-      - '*.md'
-      - 'docs/**'
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -107,6 +111,39 @@ jobs:
 
           Write-Host "Offline and online launchers are ready."
 
+      - name: Engine self-tests
+        shell: pwsh
+        # The launcher self-test was, until now, the only thing between a build
+        # and a public download. The engine carries eight self-tests of its own -
+        # rollback, transport, netplay runtime, crash reporter, heap detector,
+        # audio lifetime, crash manifest, crash uploader - and none of them ran
+        # here. They need no disc and no network.
+        run: |
+          $ErrorActionPreference = "Stop"
+          $log = & "build/install/partyboard.exe" "--netplay-self-test" 2>&1
+          $code = $LASTEXITCODE
+          $log | ForEach-Object { Write-Host $_ }
+
+          $summary = $log | Where-Object { $_ -match '^SELFTEST total=' } | Select-Object -Last 1
+          if (-not $summary) {
+            throw "The engine self-test produced no summary line; it did not run to the end."
+          }
+          if ($summary -notmatch 'total=(\d+) failed=(\d+)') {
+            throw "Unreadable self-test summary: $summary"
+          }
+          $total = [int]$Matches[1]
+          $failed = [int]$Matches[2]
+
+          # A gate that cannot say how many checks ran is not a gate: if a
+          # component is ever removed from the chain this step has to notice.
+          if ($total -ne 8) {
+            throw "Expected 8 engine self-tests, the binary ran $total."
+          }
+          if ($failed -ne 0 -or $code -ne 0) {
+            throw "$failed of $total engine self-tests failed (exit code $code)."
+          }
+          Write-Host "All $total engine self-tests passed."
+
       - name: Create CubeShelf package
         shell: pwsh
         run: |
@@ -129,9 +166,12 @@ jobs:
             schema = 1
             game = "Mario Party 4"
             gameId = "GMPE01_00"
-            version = "nightly-$shortSha"
+            version = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "dev-$shortSha" }
             commit = "${{ github.sha }}"
-            branch = "${{ github.ref_name }}"
+            ref = "${{ github.ref_name }}"
+            refType = "${{ github.ref_type }}"
+            runId = "${{ github.run_id }}"
+            runNumber = "${{ github.run_number }}"
             platform = "win-x64"
             executable = "partyboard.exe"
             supportedDiscs = @(
@@ -164,29 +204,45 @@ jobs:
             release-notes.txt
           retention-days: 14
 
-      - name: Publish CubeShelf nightly release
+      - name: Publish release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $ErrorActionPreference = "Continue"
-
-          gh release view cubeshelf-nightly *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release delete cubeshelf-nightly --yes --cleanup-tag
-            if ($LASTEXITCODE -ne 0) {
-              throw "Unable to replace existing cubeshelf-nightly release."
-            }
+          # Every release keeps its own tag, and no published artifact is ever
+          # deleted. The previous version replaced a single rolling
+          # "cubeshelf-nightly" release on each run, which left no download URL
+          # that stayed valid and nothing to bisect when a tester reported a
+          # crash against a build that no longer existed.
+          $shortSha = "${{ github.sha }}".Substring(0, 12)
+          $releaseTag = if ("${{ github.ref_type }}" -eq "tag") {
+            "${{ github.ref_name }}"
+          } else {
+            "dev-$shortSha"
           }
 
+          $ErrorActionPreference = "Continue"
+          gh release view $releaseTag *> $null
+          $exists = ($LASTEXITCODE -eq 0)
           $ErrorActionPreference = "Stop"
 
-          gh release create cubeshelf-nightly `
-            "PartyBoard-win-x64.zip" `
-            "manifest.json" `
-            "checksums.txt" `
-            "release-notes.txt" `
-            --target "${{ github.sha }}" `
-            --title "CubeShelf Nightly - PartyBoard Windows" `
-            --notes-file "release-notes.txt" `
-            --prerelease
+          if ($exists) {
+            # A re-run of the same commit refreshes its own assets; it does not
+            # touch anyone else's release.
+            gh release upload $releaseTag `
+              "PartyBoard-win-x64.zip" `
+              "manifest.json" `
+              "checksums.txt" `
+              "release-notes.txt" `
+              --clobber
+          } else {
+            gh release create $releaseTag `
+              "PartyBoard-win-x64.zip" `
+              "manifest.json" `
+              "checksums.txt" `
+              "release-notes.txt" `
+              --target "${{ github.sha }}" `
+              --title "PartyBoard Windows - $releaseTag" `
+              --notes-file "release-notes.txt" `
+              --prerelease
+          }

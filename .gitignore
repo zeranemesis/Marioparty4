@@ -35,3 +35,10 @@ compile_commands.json
 # Miscellaneous
 /*.txt
 *.exe
+
+# Build outputs never belong in the tree. A 32 MB zip committed here is carried
+# by every clone forever, and the URL that serves it from the branch is mutable:
+# the same link gives different bytes tomorrow, so an artifact a tester crashed
+# on cannot be fetched back to reproduce the crash. Releases carry their own
+# immutable assets - see tools/test_update_channel.ps1.
+dist/*.zip
