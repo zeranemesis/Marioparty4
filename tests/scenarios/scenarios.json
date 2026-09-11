@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "note": "Scenarios the campaign runner can execute. Every entry must correspond to something that actually exists: a recorded replay on disk, or a probe the binary implements. Nothing here is invented from memory. Boards and overlays are named from include/ovl_table.h, where the TARGET_PC block gives overlay 89..97 to w01Dll..w21Dll, 84 to resultDll and 3 to instDll.",
+  "scenarios": [
+    {
+      "id": "w04-board-replay",
+      "description": "Recorded human session on the w04 board: four minigames, four returns through the results screen, the Big Boo event that used to overflow a coroutine stack at frame 48671.",
+      "board": "w04Dll (overlay 92)",
+      "minigame": "m416Dll, m408Dll, m417Dll, m443Dll (overlays 24, 16, 25, 51)",
+      "kind": "replay",
+      "replay": "work/netplay-recordings/board-replay.txt",
+      "expectedOverlays": "work/netplay-recordings/board-replay.txt.overlays",
+      "durationSeconds": 900,
+      "minFrames": 44000,
+      "repeats": 1,
+      "netplayDelay": 3,
+      "seed": "recorded"
+    },
+    {
+      "id": "w04-results-unload",
+      "description": "The same recording, stopped just past the fourth unload of the results screen. This is the D3 window: overlay 84 is torn down at frames 18141, 27744, 34604 and 43970, and the invalid ADPCM read has only ever been seen on one of those frames. Short enough to be repeated twenty times.",
+      "board": "w04Dll (overlay 92)",
+      "minigame": "m416Dll, m408Dll, m417Dll, m443Dll",
+      "kind": "replay",
+      "replay": "work/netplay-recordings/board-replay.txt",
+      "expectedOverlays": "work/netplay-recordings/board-replay.txt.overlays",
+      "durationSeconds": 800,
+      "minFrames": 44000,
+      "repeats": 20,
+      "netplayDelay": 3,
+      "seed": "recorded"
+    }
+  ]
+}
