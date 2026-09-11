@@ -11,7 +11,11 @@ param(
     [ValidateSet('board', 'minigame')][string]$Target = 'board',
     [ValidateSet('on', 'off')][string]$RayTracing = 'on',
     [int]$Runs = 6,
-    [int[]]$BoardIndices = @(0),
+    # A comma separated list, not [int[]]: powershell.exe -File passes arguments
+    # as literal strings, and "0,1,2,3,4,5" binds to an int array as the single
+    # value 12345 without complaining. That silently gave every run the same
+    # board, which is exactly the failure this sweep exists to avoid.
+    [string]$BoardIndices = '0',
     [string]$OutputDirectory = 'work/raytracing-sweep'
 )
 $ErrorActionPreference = 'Continue'
@@ -21,14 +25,22 @@ New-Item -ItemType Directory -Force -Path $root | Out-Null
 
 $rows = @()
 foreach ($run in 1..$Runs) {
-    $boardIndex = $BoardIndices[($run - 1) % $BoardIndices.Count]
+    $indices = @($BoardIndices -split ',' | ForEach-Object { [int]$_.Trim() })
+    $boardIndex = $indices[($run - 1) % $indices.Count]
     $dir = Join-Path $root "$Target-$RayTracing-$run"
-    Write-Host "=== run $run / $Runs ==="
+    Write-Host "=== run $run / $Runs (plateau +$boardIndex) ==="
     $out = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test_raytracing.ps1') `
         -Target $Target -RayTracing $RayTracing -OutputDirectory $dir -Attempts 2 -BoardIndex $boardIndex 2>&1
     $text = $out -join "`n"
     $scene = if ($text -match 'reached (\S+) on attempt') { $Matches[1] } else { 'none' }
-    if ($scene -eq 'none') { Write-Host "  aucune scene atteinte"; continue }
+    # Echo what the child said about walking the carousel: without this the run
+    # looks identical whether the board moved or not.
+    $out | Select-String 'plateau suivant' | ForEach-Object { Write-Host "  $_" }
+    if ($scene -eq 'none') {
+        Write-Host "  aucune scene atteinte"
+        $out | Select-Object -Last 4 | ForEach-Object { Write-Host "    $_" }
+        continue
+    }
     $row = [ordered]@{ scene = $scene }
     if ($text -match '(\d+) triangles, BLAS (\d+) KB, build (?:reused, )?([0-9.]+) ms, (\d+x\d+) ([0-9.]+) ms GPU') {
         $row.triangles = [int]$Matches[1]; $row.buildMs = [double]$Matches[3]
