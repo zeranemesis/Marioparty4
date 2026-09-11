@@ -233,3 +233,63 @@ l'hypothèse pour réfutée avec un maximum rassurant de 27 %.
 
 La sortie a été la sémantique `PAGE_GUARD` de Windows, qui lève une exception
 *et* débloque la page dans le même geste, laissant assez de pile pour rapporter.
+
+---
+
+## D5 — L'horloge de motion HSF n'avance pas dans un tick rejoué
+
+**Classification : state advanced outside the replayed tick, making SAVE /
+RESTORE / REPLAY non-reproducible.**
+
+**Statut : trouvé par le harnais rollback local, non corrigé.**
+
+Premier test du probe `PARTYBOARD_FORCE_ROLLBACK`, sur la toute première frame
+qu'il a examinée : un retour arrière d'**une seule frame** ne se reproduit pas.
+
+```
+save_frame=300  target_frame=301  replay_length=1
+first_divergent_subsystem=ANIMATION
+first_divergent_field=(model->motWork).time
+expected_value=0x43860000 (268.0)   actual_value=0x43858000 (267.0)
+```
+
+Quinze des seize sous-systèmes canoniques sont identiques au bit près. Seul
+`ANIMATION` diverge, et sur un seul champ, pour trois modèles : le temps de
+motion est **exactement une frame en retard** après le rejeu.
+
+### Pourquoi
+
+`src/game/hsfman.c:348` : `PartyBoard_AnimationAdvance()` est appelée à la fin de
+`Hu3DExec()`, c'est-à-dire dans la **passe de présentation**, pas dans la logique
+de jeu. Or un tick rejoué est
+`PartyBoard_RollbackRunGameLogicTick` → `PartyBoard_RunGameLogicTick`
+(`src/game/main.c:98`), qui ne fait pas de passe de présentation. L'horloge de
+motion n'avance donc jamais pendant un rejeu.
+
+C'est le même genre de trou que `GlobalCounter`, que le chemin de rollback réel
+compense déjà explicitement par un `++GlobalCounter` dans `simulateFrame`. Rien
+ne compense l'animation.
+
+### Ce que cela implique
+
+Le chemin de rollback réseau réel a exactement le même trou : son `simulateFrame`
+n'appelle que `PartyBoard_RollbackRunGameLogicTick` et `++GlobalCounter`. Donc
+**tout rollback réseau complet construit sur cette base ferait dériver les
+animations d'une frame par frame rejouée.** C'est précisément la raison pour
+laquelle le harnais local devait exister avant le rollback réseau.
+
+### Ce qu'il faudra décider avant de corriger
+
+L'ordre. Dans une frame normale la séquence est `logique(F)` puis `dessin(F)`,
+et c'est `dessin(F)` qui fait avancer l'horloge. L'instantané est pris après
+`logique(F)`. Pour que le rejeu de `logique(F+1)` reproduise l'état, il doit donc
+d'abord rejouer l'avance d'animation qu'avait faite `dessin(F)`, puis la logique.
+Et `PartyBoard_AnimationAdvance` appelle aussi `HuSprFinish()` et
+`Hu3DAnimExec()` : il faudra vérifier ce que ces deux-là touchent avant de les
+rejouer hors de la passe de dessin.
+
+### Coût du snapshot, mesuré au passage
+
+`snapshot_bytes=53949214`, soit **51,5 Mo par point de sauvegarde**. Le probe en
+garde deux à la fois. C'est une mesure, pas une estimation, et elle appartient au
+dossier du rollback réseau.

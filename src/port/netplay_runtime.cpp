@@ -423,6 +423,366 @@ SnapshotProbeResult runRollbackSnapshotProbe()
     return SnapshotProbeResult::Captured;
 }
 
+// ---------------------------------------------------------------------------
+// Forced rollback probe
+//
+// SAVE at frame F, let the game run D frames, SAVE again, RESTORE F, replay the
+// same D frames, and require the canonical state to come back identical. It is
+// the local, deterministic half of rollback: no network, no prediction, no
+// remote peer. If a frame cannot be reproduced from a snapshot plus its inputs
+// on one machine, no amount of network machinery will make it reproducible on
+// two.
+//
+// The experiment is a side excursion and it is undone. A second snapshot is
+// taken at the target frame and restored at the end, so the forward timeline
+// continues exactly where it was and two peers running the same probe stay in
+// step whatever the result. Nothing is repaired, resynchronized or hidden: a
+// failure writes a report naming the first divergent subsystem and field, and
+// stops the session.
+//
+//   PARTYBOARD_FORCE_ROLLBACK=<period>[:<distance,distance,...>]
+//
+// The distance ladder exists because a one-frame rollback proves very little:
+// state the snapshot forgets often only matters once enough frames have been
+// re-simulated. Default ladder 1,2,4,8,15,30,60,120, rotated so successive
+// tests use different distances.
+// ---------------------------------------------------------------------------
+
+struct ForceRollbackProbe {
+    bool configured = false;
+    std::uint32_t period = 0;
+    std::vector<std::uint32_t> distances;
+    std::size_t ladderIndex = 0;
+
+    bool recording = false;
+    std::uint32_t saveFrame = 0;
+    std::uint32_t targetFrame = 0;
+    std::vector<std::uint8_t> before;
+    std::vector<std::uint8_t> after;
+    std::vector<std::array<PartyBoardRollbackInput, rollback::kMaxPlayers>> inputs;
+    CanonicalState expected;
+
+    std::uint32_t attempted = 0;
+    std::uint32_t refused = 0;
+    std::uint32_t passed = 0;
+    std::uint32_t failed = 0;
+    bool stopped = false;
+};
+
+ForceRollbackProbe gForceRollback;
+
+void configureForceRollback()
+{
+    if (gForceRollback.configured) return;
+    gForceRollback.configured = true;
+    const char *value = std::getenv("PARTYBOARD_FORCE_ROLLBACK");
+    if (value == nullptr || value[0] == 0) return;
+
+    const std::string text(value);
+    const auto colon = text.find(':');
+    const std::string periodText = colon == std::string::npos ? text : text.substr(0, colon);
+    gForceRollback.period = static_cast<std::uint32_t>(std::strtoul(periodText.c_str(), nullptr, 10));
+    if (gForceRollback.period == 0) return;
+
+    if (colon != std::string::npos) {
+        std::size_t start = colon + 1;
+        while (start < text.size()) {
+            const auto comma = text.find(',', start);
+            const auto piece =
+                text.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+            const auto distance = static_cast<std::uint32_t>(std::strtoul(piece.c_str(), nullptr, 10));
+            if (distance > 0) gForceRollback.distances.push_back(distance);
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+        }
+    }
+    if (gForceRollback.distances.empty()) {
+        gForceRollback.distances = {1, 2, 4, 8, 15, 30, 60, 120};
+    }
+    char event[160];
+    std::snprintf(event, sizeof(event), "force-rollback armed period=%u distances=%zu",
+        gForceRollback.period, gForceRollback.distances.size());
+    writeDiagnostic(event, true);
+}
+
+// Progress is reported on every outcome, not only on failure: a probe that
+// silently refuses every test looks exactly like a probe that silently passes
+// every test, and the two must never be confusable. writeDiagnostic throttles
+// the repeats, so this stays one line every couple of seconds.
+void reportForceRollbackProgress(std::uint32_t distance, const char *outcome)
+{
+    const ForceRollbackProbe &probe = gForceRollback;
+    char event[224];
+    std::snprintf(event, sizeof(event),
+        "force-rollback %s save_frame=%u distance=%u attempted=%u passed=%u failed=%u refused=%u",
+        outcome, probe.saveFrame, distance, probe.attempted, probe.passed, probe.failed,
+        probe.refused);
+    // The first test of a session and every failure are always written; the rest
+    // are throttled.
+    writeDiagnostic(event, probe.attempted <= 1 || probe.failed != 0);
+}
+
+std::array<PartyBoardRollbackInput, rollback::kMaxPlayers> currentAppliedInputs()
+{
+    std::array<PartyBoardRollbackInput, rollback::kMaxPlayers> inputs {};
+    for (std::size_t player = 0; player < rollback::kMaxPlayers; ++player) {
+        inputs[player] = inputFromPad(gSynchronizedPads[player]);
+    }
+    return inputs;
+}
+
+CanonicalState captureCanonicalNow(std::uint32_t frame)
+{
+    const StateDigest stamp {frame,
+        static_cast<std::uint32_t>(gRuntime.probeContext >= 0 ? gRuntime.probeContext
+                                                             : PartyBoard_NetplayContextId()),
+        frand_state_get(), static_cast<std::uint32_t>(rand8_state_get()), GlobalCounter};
+    return captureCanonical(stamp);
+}
+
+// Names the first field whose value differs. Both captures walk the same code,
+// so a length difference is itself a finding and is reported as one.
+void describeFirstDivergence(const CanonicalState &expected, const CanonicalState &actual,
+    std::string &subsystem, std::string &field, std::uint32_t &expectedValue,
+    std::uint32_t &actualValue)
+{
+    subsystem = "NONE";
+    field = "none";
+    expectedValue = 0;
+    actualValue = 0;
+    if (expected.values.size() != actual.values.size()) {
+        subsystem = "SHAPE";
+        field = "field count";
+        expectedValue = static_cast<std::uint32_t>(expected.values.size());
+        actualValue = static_cast<std::uint32_t>(actual.values.size());
+        return;
+    }
+    for (std::size_t index = 0; index < expected.values.size(); ++index) {
+        if (expected.values[index] == actual.values[index]) continue;
+        subsystem = subsystemName(expected.subsystemOf(index));
+        field = expected.names[index] != nullptr ? expected.names[index] : "?";
+        expectedValue = expected.values[index];
+        actualValue = actual.values[index];
+        return;
+    }
+}
+
+// Reports land beside the rest of a session's evidence: the crash directory the
+// launcher chose, or failing that the directory of the netplay diagnostic.
+std::string rollbackReportDirectory()
+{
+    if (const char *directory = std::getenv("PARTYBOARD_CRASH_DIR")) {
+        if (directory[0] != 0) return directory;
+    }
+    if (const char *diagnostic = std::getenv("PARTYBOARD_NET_DIAGNOSTIC")) {
+        std::string text(diagnostic);
+        const auto cut = text.find_last_of("/\\");
+        if (cut != std::string::npos) return text.substr(0, cut);
+    }
+    return ".";
+}
+
+void writeRollbackFailureReport(const CanonicalState &expected, const CanonicalState &actual,
+    std::uint32_t distance)
+{
+    std::string subsystem, field;
+    std::uint32_t expectedValue = 0, actualValue = 0;
+    describeFirstDivergence(expected, actual, subsystem, field, expectedValue, actualValue);
+
+    char name[256];
+    std::snprintf(name, sizeof(name), "rollback-failure-peer-%u-frame-%u-distance-%u.txt",
+        gRuntime.localPlayer, gForceRollback.saveFrame, distance);
+    std::string path = rollbackReportDirectory();
+    if (!path.empty()) path += "/";
+    path += name;
+
+    if (FILE *file = std::fopen(path.c_str(), "w")) {
+        std::fprintf(file, "PARTYBOARD_ROLLBACK_FAILURE version=1\n");
+        std::fprintf(file, "peer=%u role=%s\n", gRuntime.localPlayer,
+            gRuntime.localPlayer == 0 ? "host" : "client");
+        std::fprintf(file, "save_frame=%u\n", gForceRollback.saveFrame);
+        std::fprintf(file, "target_frame=%u\n", gForceRollback.targetFrame);
+        std::fprintf(file, "replay_length=%u\n", distance);
+        std::fprintf(file, "snapshot_bytes=%zu\n", gForceRollback.before.size());
+        std::fprintf(file, "first_divergent_subsystem=%s\n", subsystem.c_str());
+        std::fprintf(file, "first_divergent_field=%s\n", field.c_str());
+        std::fprintf(file, "expected_value=0x%08x actual_value=0x%08x\n", expectedValue,
+            actualValue);
+        std::fprintf(file, "expected_hash=%016llx actual_hash=%016llx\n",
+            static_cast<unsigned long long>(expected.hash),
+            static_cast<unsigned long long>(actual.hash));
+        std::fprintf(file, "\n[SUBSYSTEM HASHES]\n");
+        for (std::size_t index = 0; index < kSubsystemCount; ++index) {
+            std::fprintf(file, "%-10s expected=%08x actual=%08x %s\n", subsystemName(index),
+                expected.parts[index], actual.parts[index],
+                expected.parts[index] == actual.parts[index] ? "" : "<-- DIVERGENT");
+        }
+        std::fprintf(file, "\n[CONTEXT]\n");
+        std::fprintf(file, "game_context=%d minigame=%d\n", PartyBoard_NetplayContextId(),
+            PartyBoard_NetplayMinigameId());
+        std::fprintf(file, "rng frand=%08x rand8=%08x boardrand=%08x\n", frand_state_get(),
+            static_cast<unsigned>(rand8_state_get()), boardRandSeed);
+        std::fprintf(file, "global_counter=%u\n", GlobalCounter);
+        std::fprintf(file, "audio_bridge_active=%d healthy=%d\n",
+            PartyBoard_RollbackAudioBridgeActive() ? 1 : 0,
+            PartyBoard_RollbackAudioBridgeHealthy() ? 1 : 0);
+        std::fprintf(file, "\n[DIVERGENT FIELDS - first 64]\n");
+        std::size_t shown = 0;
+        const std::size_t count = std::min(expected.values.size(), actual.values.size());
+        for (std::size_t index = 0; index < count && shown < 64; ++index) {
+            if (expected.values[index] == actual.values[index]) continue;
+            std::fprintf(file, "%-10s %-40s expected=0x%08x actual=0x%08x\n",
+                subsystemName(expected.subsystemOf(index)),
+                expected.names[index] != nullptr ? expected.names[index] : "?",
+                expected.values[index], actual.values[index]);
+            ++shown;
+        }
+        std::fclose(file);
+    }
+
+    char event[256];
+    std::snprintf(event, sizeof(event),
+        "ROLLBACK-FAILURE save_frame=%u target_frame=%u distance=%u subsystem=%s field=%s",
+        gForceRollback.saveFrame, gForceRollback.targetFrame, distance, subsystem.c_str(),
+        field.c_str());
+    writeDiagnostic(event, true);
+    PartyBoard_CrashBreadcrumb(PARTYBOARD_CRASH_CAT_WARN, "%s", event);
+}
+
+// Runs the restore and the replay, then puts the game back where it was.
+void runForceRollbackComparison(std::uint32_t frame)
+{
+    ForceRollbackProbe &probe = gForceRollback;
+    const auto distance = static_cast<std::uint32_t>(probe.inputs.size());
+
+    const auto bytes = PartyBoard_RollbackCheckpointSize();
+    probe.after.assign(bytes, 0);
+    if (bytes == 0 || !PartyBoard_RollbackCheckpointSave(probe.after.data(), bytes)) {
+        // The forward snapshot is what makes the excursion undoable. Without it
+        // the experiment is abandoned rather than run: leaving the game on a
+        // replayed timeline would be a change nobody asked for.
+        ++probe.refused;
+        probe.recording = false;
+        reportForceRollbackProgress(distance, "refused-forward-save-failed");
+        return;
+    }
+
+    probe.expected = captureCanonicalNow(frame);
+    ++probe.attempted;
+
+    const char *stage = "ok";
+    bool ok = PartyBoard_RollbackCheckpointLoad(probe.before.data(), probe.before.size());
+    if (!ok) stage = "restore";
+    bool startedBridge = false;
+    if (ok && !PartyBoard_RollbackAudioBridgeActive()) {
+        // The queue only accepts frames from the one the bridge was started on
+        // upwards, and the first tick replayed here is the logic for saveFrame+1
+        // because the snapshot was taken after the logic for saveFrame.
+        startedBridge = PartyBoard_RollbackAudioBridgeStartAtFrame(probe.saveFrame + 1);
+        ok = startedBridge;
+        if (!ok) stage = "audio-bridge-start";
+    }
+    if (ok) {
+        for (std::uint32_t step = 0; step < distance && ok; ++step) {
+            const auto replayFrame = probe.saveFrame + 1 + step;
+            if (!PartyBoard_RollbackAudioBridgeFrameBegin(replayFrame)) {
+                ok = false;
+                stage = "audio-frame-begin";
+            } else if (!PartyBoard_RollbackRunGameLogicTick(probe.inputs[step].data(), 3)) {
+                ok = false;
+                stage = "game-tick";
+            } else {
+                // The rendered path publishes this after the frame; a replayed
+                // tick has no presentation pass, so it is published here,
+                // exactly as the real rollback replay does.
+                ++GlobalCounter;
+            }
+            if (!PartyBoard_RollbackAudioBridgeFrameEnd() && ok) {
+                ok = false;
+                stage = "audio-frame-end";
+            }
+        }
+    }
+
+    if (ok) {
+        const auto actual = captureCanonicalNow(frame);
+        if (actual.hash == probe.expected.hash && actual.values == probe.expected.values) {
+            ++probe.passed;
+            reportForceRollbackProgress(distance, "pass");
+        } else {
+            ++probe.failed;
+            writeRollbackFailureReport(probe.expected, actual, distance);
+        }
+    } else {
+        ++probe.refused;
+        char outcome[64];
+        std::snprintf(outcome, sizeof(outcome), "refused-at-%s", stage);
+        reportForceRollbackProgress(distance, outcome);
+    }
+
+    // Back to the real timeline, whatever happened above.
+    const bool restored =
+        PartyBoard_RollbackCheckpointLoad(probe.after.data(), probe.after.size());
+    if (startedBridge) PartyBoard_RollbackAudioBridgeStop();
+    probe.recording = false;
+    probe.ladderIndex = (probe.ladderIndex + 1) % probe.distances.size();
+
+    if (!restored) {
+        probe.stopped = true;
+        failSession("Forced rollback probe could not restore the live timeline");
+        return;
+    }
+    if (probe.failed != 0) {
+        // No repair, no resynchronization, no continuing as if nothing happened.
+        probe.stopped = true;
+        failSession("Forced rollback replay did not reproduce the state");
+    }
+}
+
+void forceRollbackTick(std::uint32_t frame)
+{
+    configureForceRollback();
+    ForceRollbackProbe &probe = gForceRollback;
+    if (probe.period == 0 || probe.stopped) return;
+    // The replay below runs game logic. If anything in there ever reached this
+    // point again the probe would be measuring itself, so it is refused rather
+    // than nested.
+    static bool inside = false;
+    if (inside) return;
+    struct Guard {
+        bool &flag;
+        explicit Guard(bool &f) : flag(f) { flag = true; }
+        ~Guard() { flag = false; }
+    } guard(inside);
+
+    if (probe.recording) {
+        probe.inputs.push_back(currentAppliedInputs());
+        if (frame >= probe.targetFrame) runForceRollbackComparison(frame);
+        return;
+    }
+
+    if (frame == 0 || (frame % probe.period) != 0) return;
+    const auto bytes = PartyBoard_RollbackCheckpointSize();
+    if (bytes == 0) {
+        // Not a safe boundary: a wipe, a render callback, an I/O operation or a
+        // module transition is in flight. Refused and counted, never forced.
+        ++probe.refused;
+        reportForceRollbackProgress(0, "refused-unsafe-boundary");
+        return;
+    }
+    probe.before.assign(bytes, 0);
+    if (!PartyBoard_RollbackCheckpointSave(probe.before.data(), bytes)) {
+        ++probe.refused;
+        reportForceRollbackProgress(0, "refused-save-failed");
+        return;
+    }
+    probe.saveFrame = frame;
+    probe.targetFrame = frame + probe.distances[probe.ladderIndex];
+    reportForceRollbackProgress(probe.distances[probe.ladderIndex], "armed");
+    probe.inputs.clear();
+    probe.recording = true;
+}
+
 void storeInput(std::array<InputSlot, kHistorySize> &history, std::uint32_t frame,
     const PartyBoardRollbackInput &input)
 {
@@ -692,6 +1052,9 @@ bool captureCommittedState()
             frame, static_cast<unsigned long long>(stamp.hash), kStateHashVersion, gRuntime.states.equalThrough());
         writeDiagnostic(event, true);
     }
+    // After the state for this frame exists and has been published, so the probe
+    // compares against exactly what the peer was told.
+    forceRollbackTick(frame);
     return checkStateFailure();
 }
 
