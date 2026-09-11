@@ -48,8 +48,20 @@ function Check([string]$name, [bool]$ok, [string]$detail) {
     else { Write-Output ("  FAIL  {0} - {1}" -f $name, $detail); $failures.Add($name) }
 }
 function Run([string[]]$arguments) {
-    $output = & $python $tool @arguments 2>&1 | ForEach-Object { "$_" }
-    return @{ Text = ($output -join "`n"); Exit = $LASTEXITCODE }
+    # ErrorActionPreference is restored around the call, not dropped for the
+    # file. In Windows PowerShell 5.1, redirecting a native command's stderr
+    # wraps each line in an ErrorRecord, and under 'Stop' that terminates the
+    # script - so testing a tool's REFUSAL path would kill the test that is
+    # checking the refusal. Which is what happened.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $python $tool @arguments 2>&1 | ForEach-Object { "$_" }
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    return @{ Text = ($output -join "`n"); Exit = $code }
 }
 # Line endings are not part of the content: the tool writes LF and git may hand
 # back CRLF.
@@ -124,7 +136,29 @@ if (Test-Path -LiteralPath $joined) {
         "last frame index is $lastFrame, expected $(214 + 3000 - 1)"
 }
 
-# 6. An unreadable file is reported, not silently treated as empty input.
+# 6. Slice: the approach prefix comes out of a recording we already have, and
+#    the boundary cases are refused rather than silently clamped.
+$prefix = Join-Path $work 'prefix.txt'
+$r = Run @('slice', $reference, '--end', '5385', '-o', $prefix)
+Check 'slice cuts a prefix out of a real recording' ($r.Exit -eq 0) $r.Text
+if (Test-Path -LiteralPath $prefix) {
+    $sliceRows = @([IO.File]::ReadAllLines($prefix) | Where-Object { $_.Trim() }).Count
+    Check 'and gives exactly the frames asked for' ($sliceRows -eq 5385 * 2) `
+        "expected $(5385 * 2) rows, got $sliceRows"
+    # The slice must be the SAME bytes as the head of the original, or a prefix
+    # silently stops being the approach it was cut from.
+    $head = [IO.File]::ReadAllLines($reference) | Select-Object -First (5385 * 2)
+    $cut = [IO.File]::ReadAllLines($prefix)
+    $same = $true
+    for ($i = 0; $i -lt $cut.Count; $i++) { if ($cut[$i] -ne $head[$i]) { $same = $false; break } }
+    Check 'and is byte-for-byte the head of the original' $same 'the slice altered the input'
+}
+$r = Run @('slice', $reference, '--end', '9999999', '-o', (Join-Path $work 'past-end.txt'))
+Check 'slicing past the end is refused' ($r.Exit -ne 0) 'a slice past the end was accepted'
+$r = Run @('slice', $reference, '--start', '100', '--end', '100', '-o', (Join-Path $work 'empty-range.txt'))
+Check 'an empty range is refused' ($r.Exit -ne 0) 'an empty slice was accepted'
+
+# 7. An unreadable file is reported, not silently treated as empty input.
 $empty = Join-Path $work 'empty.txt'
 [IO.File]::WriteAllText($empty, "")
 $r = Run @('describe', $empty)

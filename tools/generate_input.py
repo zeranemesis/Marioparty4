@@ -45,6 +45,19 @@ USAGE
     tools/generate_input.py navigator --script tools/scripts/boot-to-w04.txt -o work/gen/prefix.txt
     tools/generate_input.py concat prefix.txt monkey.txt -o work/gen/full.txt
     tools/generate_input.py describe work/netplay-recordings/walk.txt
+    tools/generate_input.py slice board-replay.txt --end 5961 -o prefix-w04.txt
+
+THE APPROACH PREFIX, FOR FREE
+-----------------------------
+Getting from boot to a board takes about 5500 frames of menu navigation, and
+every recording already contains one. ``slice`` cuts it out: the first 5961
+frames of board-replay.txt ARE a working approach to Boo's Haunted Bash, and
+the first 5385 of walk.txt are one to Toad's Midway Madness. Two boards cost
+nothing at all; only the seven boards with no recording yet need five human
+minutes each.
+
+Find the frame to cut at in the .overlays file beside the recording - it is the
+frame the board overlay first appears on.
 """
 
 import argparse
@@ -294,7 +307,14 @@ def describe(path):
                  moved, 100.0 * moved / len(frames)))
         print("                  buttons seen: %s" % (", ".join(names) or "none"))
         if mask & PAD_BUTTON_START:
-            print("                  WARNING: START appears; this file can pause and quit")
+            # WHERE it appears is the whole question. A sliced human prefix
+            # legitimately presses START to work the menus; a monkey never may.
+            # A warning that fires on every valid file is a warning nobody reads,
+            # so this names the range and lets the reader decide.
+            hits = [i for i, f in enumerate(frames) if f.seats[seat]["buttons"] & PAD_BUTTON_START]
+            print("                  START on %d frames, first %d, last %d"
+                  % (len(hits), hits[0], hits[-1]))
+            print("                  ^ expected inside a recorded approach prefix, never after it")
     return 0
 
 
@@ -323,6 +343,13 @@ def main(argv=None):
 
     show = sub.add_parser("describe", help="report what a file contains")
     show.add_argument("input")
+
+    cut = sub.add_parser("slice", help="take a frame range out of a recording")
+    cut.add_argument("input")
+    cut.add_argument("--start", type=int, default=0)
+    cut.add_argument("--end", type=int, required=True,
+                     help="exclusive; the frame the slice stops before")
+    cut.add_argument("-o", "--output", required=True)
 
     args = parser.parse_args(argv)
 
@@ -355,6 +382,20 @@ def main(argv=None):
             frames.extend(part)
         count = write_frames(frames, args.output)
         print("concat frames=%d -> %s" % (count, args.output))
+        return 0
+
+    if args.command == "slice":
+        frames = read_frames(args.input)
+        if not frames:
+            raise SystemExit("%s produced no frames" % args.input)
+        if args.end > len(frames):
+            raise SystemExit("%s has %d frames; --end %d is past the end"
+                             % (args.input, len(frames), args.end))
+        if args.start >= args.end:
+            raise SystemExit("--start must be less than --end")
+        count = write_frames(frames[args.start:args.end], args.output)
+        print("slice %s [%d,%d) frames=%d -> %s"
+              % (args.input, args.start, args.end, count, args.output))
         return 0
 
     if args.command == "describe":
