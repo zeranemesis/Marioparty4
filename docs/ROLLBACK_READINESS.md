@@ -15,7 +15,7 @@ Le jeu en ligne reste en lockstep. Le noyau de rollback sait prédire, restaurer
 2. Isoler un tick déterministe complet. HuPrcCall et MGSeqMain ne suffisent pas : Hu3DExec avance aussi Hu3DMotionNext, HuSprFinish et Hu3DAnimExec hors de la boucle de simulation actuelle. — **Mesuré et corrigé pour le tick rejoué** (défaut D5) ; reste ouvert pour le cadencement hors rejeu (défaut D6).
 3. Gérer les durées de vie des allocations, coroutines et modules. Une adresse réutilisée ne prouve pas que l'objet est le même ; la prévalidation d'un composant ne rend pas l'ensemble des snapshots atomique.
 4. Gérer les effets externes : audio, vibrations, sauvegardes et succès. Le signal de resimulation est disponible mais il n'est pas encore consommé par ces sous-systèmes.
-5. ~~Vérifier une vraie restauration puis resimulation sur le moteur et comparer l'état obtenu à une exécution sans prédiction~~ — **fait**, par `PARTYBOARD_FORCE_ROLLBACK`. Voir la section de mesure ci-dessous : quatre comparaisons réussies, zéro échec, mais seulement quatre parce que la porte de capture refuse 97 % des occasions.
+5. ~~Vérifier une vraie restauration puis resimulation sur le moteur et comparer l'état obtenu à une exécution sans prédiction~~ — **fait**, par `PARTYBOARD_FORCE_ROLLBACK`. Voir la section de mesure ci-dessous : quatre comparaisons réussies, zéro échec, sur 159 instants interrogés. La proportion de refus porte sur ces 159 instants, pas sur les 47 921 frames du replay ; la nuance est développée dans la section, et elle est importante.
 
 Les tests de noyau utilisent un état synthétique. Les tests PAD/horloge vérifient de vrais globals du jeu en mode headless, sans partie graphique. Aucune de ces validations ne prouve à elle seule le déterminisme du jeu complet.
 
@@ -37,9 +37,40 @@ C'est le défaut D5 du registre. `PartyBoard_RollbackRunGameLogicTick` appelle
 maintenant `PartyBoard_AnimationAdvance()` avant la logique, dans l'ordre qu'une
 image rendue impose, et les distances 1, 2 et 4 se reproduisent exactement.
 
-### 2. La porte de capture refuse 97 % du temps, et on sait laquelle
+### 2. La porte de capture a refusé 155 des 159 instants interrogés, et on sait laquelle
 
-Replay de plateau complet, 47 921 frames, période 300, donc 159 occasions :
+> **Correction, 2026-09-11.** Cette section s'intitulait « la porte de capture
+> refuse 97 % du temps » et concluait que « le moteur en autorise quatre sur
+> 47 921 frames ». **Les deux formulations dépassent la mesure**, et l'erreur est
+> de ma part.
+>
+> `src/port/netplay_runtime.cpp` n'interroge la porte qu'aux multiples de la
+> période :
+>
+> ```cpp
+> if (frame == 0 || (frame % probe.period) != 0) return;
+> ```
+>
+> et, en cas de refus, abandonne l'occasion jusqu'au multiple suivant plutôt que
+> de réessayer à la frame d'après. Les 159 « occasions » sont donc **159 instants
+> choisis par ma politique d'échantillonnage**, espacés de 300 frames. « 155 refus
+> sur 159 » signifie « la porte était fermée à ces 159 instants précis » et
+> **non** « la porte est fermée 97 % du temps ». Les 47 762 frames jamais
+> interrogées n'ont rien dit, ni dans un sens ni dans l'autre.
+>
+> Ce que la mesure établit réellement, et qui reste solide : **quelles clauses**
+> ferment la porte, dans quelles proportions relatives, et le fait que quatre
+> restaurations réelles se sont reproduites exactement. Ce qu'elle n'établit pas :
+> la fréquence d'ouverture de la porte dans le temps.
+>
+> La mesure qui trancherait est décrite en W5 du plan : évaluer
+> `PartyBoard_RollbackCheckpointSize() != 0` **à chaque frame** du replay et
+> histogrammer les fenêtres ouvertes. Un run de treize minutes. Tant qu'il n'a pas
+> eu lieu, aucun chiffre de cette section ne doit être cité comme une propriété du
+> moteur.
+
+Replay de plateau complet, 47 921 frames, période 300, donc 159 instants
+interrogés :
 
 | | |
 |---|---|
@@ -67,10 +98,13 @@ La clause dominante a un coupable unique : `sprput.c:371` installe
 dire presque en permanence pendant le jeu de plateau.
 
 **Conséquence pour la section 19 du cahier des charges** : la demande de milliers
-de tests de rollback par replay n'est pas satisfiable en l'état. Le moteur en
-autorise quatre sur 47 921 frames. Ce n'est pas une limite du probe, c'est une
-propriété du moteur, et c'est elle qu'il faut traiter avant d'espérer une
-couverture de rollback digne de ce nom.
+de tests de rollback par replay n'est pas satisfaite en l'état — quatre
+comparaisons ont eu lieu sur ce replay. Mais, la correction ci-dessus l'impose :
+on ne sait pas encore si c'est une propriété du moteur ou de la politique
+d'échantillonnage du probe. Les deux hypothèses restent ouvertes, elles appellent
+des remèdes opposés — desserrer les clauses de sûreté dans un cas, changer
+seulement le moment où l'on demande dans l'autre — et c'est précisément pourquoi
+la mesure par frame doit précéder toute décision.
 
 #### Les clauses se recouvrent — expérience faite, et négative
 

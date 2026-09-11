@@ -347,10 +347,49 @@ dossier du rollback réseau.
 ## D6 — L'horloge d'animation avance par image rendue, pas par tick simulé
 
 **Classification : logical state driven by the render cadence, which is
-wall-clock dependent. Candidate — mécanisme établi par lecture, occurrence non
-observée.**
+wall-clock dependent. Latent, hors ligne uniquement — mécanisme établi par
+lecture, inatteignable en ligne, occurrence non observée.**
 
-**Statut : non corrigé, non observé. Trouvé en lisant le code autour de D5.**
+**Statut : non corrigé, non observé, et neutralisé en ligne par le bridage de
+`target_frame_rate()`. Trouvé en lisant le code autour de D5.**
+
+### Correction de cette entrée, 2026-09-11
+
+La version précédente de cette entrée disait que le silence du détecteur venait
+du choix de la campagne — « tous les runs tournent à 60 » — et que deux pairs
+pouvaient se connecter à des cadences différentes sans que rien ne le signale.
+**C'était faux, et la conclusion pratique était dangereuse.**
+
+`src/port/imgui.cpp` :
+
+```cpp
+int target_frame_rate()
+{
+    return PartyBoard_TargetFrameRateFor(PartyBoard_NetplayEnabled(),
+        partyboard::getSettings().video.targetFrameRate.getValue());
+}
+```
+
+et la fonction pure qu'elle appelle retourne `kOriginalSimulationRate` — 60 —
+dès que le netplay est actif, **quel que soit le réglage vidéo**. En ligne, les
+deux pairs sont donc bridés à 60 par le moteur, pas par la campagne. Il n'existe
+aucune configuration en ligne où `simulatedTicks >= 2`.
+
+Conséquence sur le plan de mesure : l'expérience prévue — « un pair à 60,
+l'autre à 240, voir si `ANIMATION` diverge » — **aurait produit un résultat nul
+ressemblant à une preuve.** Les deux pairs auraient tourné à 60, le hash aurait
+concordé, et on aurait écrit « D6 non reproductible en ligne » en croyant l'avoir
+testé. C'est exactement le genre de faux vert que ce registre existe pour
+empêcher.
+
+Le bridage est donc une **propriété de sûreté porteuse**, et non une préférence :
+c'est lui qui rend inoffensive l'absence de la fréquence d'images dans
+`runtimeConfigSignature`. Il est désormais épinglé par le sous-test
+`frame-rate-clamp` de `--netplay-self-test`, qui vérifie que huit réglages
+distincts donnent 60 en ligne et que le réglage hors ligne reste honoré. Retirer
+le bridage pour laisser le netplay tourner à 144 fait rougir ce test
+immédiatement, au lieu de produire un an plus tard une désynchronisation que
+personne ne saura relier à un réglage vidéo.
 
 ### Le mécanisme
 
@@ -381,10 +420,16 @@ d'animation **une seule fois**.
 le temps réel et peut rendre 0, 1 ou plusieurs ticks, borné par
 `kMaxSimulationTicksPerFrame`.
 
-Tous les runs de campagne tournent à 60 (`tools/netplay_campaign.ps1` écrit
-`video.targetFrameRate = 60` dans le profil), ce qui explique que le
-sous-système `ANIMATION` n'ait jamais divergé entre pairs : le rapport a toujours
-été 1:1.
+Mais en ligne cette porte est fermée en amont : `target_frame_rate()` ignore le
+réglage vidéo dès que `PartyBoard_NetplayEnabled()` est vrai et retourne 60. La
+campagne écrit bien `video.targetFrameRate = 60` dans le profil, mais ce n'est
+pas ce qui garantit le rapport 1:1 — le moteur le garantissait déjà. Si le
+sous-système `ANIMATION` n'a jamais divergé entre pairs, ce n'est pas parce que
+la campagne a bien choisi ses réglages, c'est parce qu'**aucun réglage ne peut
+ouvrir ce chemin en ligne**.
+
+Hors ligne, au-dessus de 60, le mécanisme reste entier. C'est pourquoi D6 est
+classé latent et hors ligne uniquement, et non fermé.
 
 ### Pourquoi cela compte
 
@@ -392,22 +437,29 @@ sous-système `ANIMATION` n'ait jamais divergé entre pairs : le rapport a toujo
 regrouperait deux ticks dans une image, décalerait son horloge d'animation d'une
 frame **définitivement**, et la partie serait déclarée désynchronisée.
 
-Aggravant : `runtimeConfigSignature` (`src/port/netplay_runtime.cpp:800`) ne
-contient que le délai d'entrée, le contexte, le drapeau partie complète et le
-drapeau rollback. **La fréquence d'images n'y est pas.** Deux pairs peuvent donc
-se connecter avec des réglages différents, l'un à 60 et l'autre à 240, sans que
-rien ne le signale.
+`runtimeConfigSignature` (`src/port/netplay_runtime.cpp:800`) ne contient que le
+délai d'entrée, le contexte, le drapeau partie complète et le drapeau rollback.
+**La fréquence d'images n'y est pas.** Deux pairs peuvent donc se connecter avec
+des réglages vidéo différents sans que rien ne le signale — et c'est sans
+conséquence **uniquement grâce au bridage** : les deux simuleront à 60 quoi qu'ils
+aient réglé. Cette omission et ce bridage sont liés. Si l'un disparaît, l'autre
+doit disparaître aussi, ce que le sous-test `frame-rate-clamp` rend visible.
 
 ### Ce qu'il reste à mesurer, avant toute correction
 
-Rien de tout cela n'a été observé. Il faut :
+Rien de tout cela n'a été observé, et **la mesure en ligne qui avait été prévue
+n'a plus de sens** : voir la correction datée en tête d'entrée. Il reste :
 
-1. instrumenter `simulatedTicks` et vérifier qu'une valeur `>= 2` se produit
-   réellement au-dessus de 60 images par seconde ;
-2. faire tourner une campagne avec un pair à 60 et l'autre à 240, et voir si
-   `ANIMATION` diverge.
+1. hors ligne, instrumenter `simulatedTicks` au-dessus de 60 images par seconde
+   et vérifier qu'une valeur `>= 2` se produit réellement. C'est la seule mesure
+   qui puisse encore dire quelque chose sur ce mécanisme ;
+2. en ligne, la seule vérification utile n'est plus de chercher D6 mais de
+   prouver que le bridage tient dans le binaire livré : lancer deux minutes avec
+   un pair réglé à 240 et constater que le détecteur reste muet **parce que le
+   pacer a rendu 60**, ce que le sous-test `frame-rate-clamp` affirme et qu'une
+   exécution réelle confirme.
 
-Tant que ces deux mesures n'existent pas, ceci est un mécanisme lu, pas un défaut
+Tant que le point 1 n'existe pas, ceci est un mécanisme lu, pas un défaut
 constaté, et il est inscrit comme tel.
 
 ### Lien avec D5
