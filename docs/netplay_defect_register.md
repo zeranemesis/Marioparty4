@@ -94,14 +94,41 @@ arbitraire.
   `arg1` est `lbl_1_bss_80[4]` (`boo_event.c:87`) et `unk08` est un index de
   joueur 0..3 ou -1, le -1 étant exclu par le garde.
 
+### Le seuil réel, mesuré
+
+`tools/test_board_corner_index.ps1` transcrit l'arithmétique de `fn_1_52A0` et
+énumère ses 40 000 états. Résultat :
+
+| hypothèse sur les emplacements | index maximal | occupants nécessaires |
+|---|---|---|
+| un joueur peut détenir deux emplacements | **7** | **1** |
+| un joueur ne détient qu'un emplacement | **6** | **2** |
+
+**Le tableau de cas ci-dessus est donc trompeur, et je l'avais lu de travers.**
+Il n'a jamais fallu quatre joueurs sur la case : la condition est
+`occupants + emplacements_qualifiants > 4`, et avec quatre emplacements dont un
+exclu pour le joueur courant, **un seul occupant suffit** si un joueur peut
+détenir deux emplacements, deux sinon. La première version du test affirmait
+quatre et a échoué ; c'était le test qui avait tort, pas le registre, dont la
+condition nécessaire était correctement écrite dès le départ.
+
+Que `unk08` puisse se répéter d'un emplacement à l'autre n'est pas tranché : le
+défaut D2 décrit précisément une affectation qui écrase le quatrième emplacement
+au lieu de refuser. Les deux seuils sont donc rapportés plutôt qu'un seul
+supposé.
+
 ### Ce qui reste à prouver
 
-Le chemin est-il réellement emprunté en jeu ? La condition exige au moins cinq
-occupants cumulés, ce qui n'arrive pas dans une partie à deux joueurs où les
-emplacements inactifs ne qualifient pas. **Une détection est donc instrumentée**
-dans `BoardSpaceCornerPosGet` : elle signale tout appel avec `corner >= 4` dans
-le fil d'événements du rapport de crash, sans modifier l'arithmétique. Une
-session réelle dira si le cas se produit.
+Le chemin est-il réellement emprunté en jeu ? L'arithmétique dit que oui à partir
+d'un ou deux occupants ; elle ne dit rien de la fréquence de ces états dans une
+vraie partie. **Une détection est donc instrumentée** dans
+`BoardSpaceCornerPosGet` : elle signale tout appel avec `corner >= 4` dans le fil
+d'événements du rapport de crash, sans modifier l'arithmétique.
+
+**Elle n'a jamais déclenché**, sur les **142 journaux de pair** accumulés à ce
+jour. C'est un chiffre, pas une impression, et c'est la raison pour laquelle la
+correction reste différée : corriger maintenant serait spéculatif au sens exact
+du mot.
 
 ### Correction envisagée, volontairement différée
 
