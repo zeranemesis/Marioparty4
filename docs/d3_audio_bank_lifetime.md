@@ -189,7 +189,47 @@ Un correctif qui ne ferme que l'un des deux laisse le défaut ouvert.
 
 ---
 
-## 5. Comment reproduire cette mesure
+## 5. Pourquoi la barrière ne peut pas s'interbloquer
+
+La barrière prend `globalMutex`, celui-là même que le thread audio tient pendant
+tout `salCtrlDsp`. Cela mérite d'être justifié plutôt que supposé.
+
+**Elle ne s'exécute que sur le thread de jeu.** La seule façon d'atteindre
+`hwRemoveSample` est :
+
+```
+sndPopGroup  (s_data.c:686)
+  RemoveSamples
+    ScanIDListReverse -> InsertData(remove=1)
+      dataRemoveSampleReference  (synthdata.c:471)
+        hwRemoveSample           (hardware.c:642)
+```
+
+et le seul appelant de `sndPopGroup` est `msmSysPopExpectedGroup`
+(`src/msm/msmsys.c:597`), atteint depuis `msmSysDelGroupAll` et
+`msmSysLoadGroupSub`, eux-mêmes appelés depuis `HuAudSndGrpSetSet` et ses
+voisines — toutes sur le thread de jeu.
+
+**Le thread audio ne peut pas y arriver.** Son unique point d'entrée périodique
+est `snd_handle_irq`, et l'autre fonction que l'on pourrait croire partagée,
+`msmSysRegularProc`, n'est appelée que depuis `src/game/audio.c` et
+`src/game/pad.c`, et ne fait qu'appeler les trois `*PeriodicProc`. Aucune ne
+retire de groupe.
+
+**Aucun verrou n'est tenu à l'entrée.** `sndPopGroup` rend `globalMutex` avant
+`RemoveSamples` — c'est précisément le défaut — donc la barrière le prend depuis
+un état où le thread de jeu n'en détient aucun. L'ordre est le même des deux
+côtés, et il n'y a rien à inverser. Accessoirement, un `SDL_Mutex` est récursif,
+donc même une ré-entrée par le rappel du synthétiseur serait sans danger.
+
+**La marche des voix se fait par index, pas par la liste chaînée.** La barrière
+parcourt `dspVoice[0..salNumVoices)` ; détacher une voix la retire de
+`stp->voiceRoot`, ce qui invaliderait un parcours de liste mais pas un parcours
+d'index.
+
+---
+
+## 6. Comment reproduire cette mesure
 
 ```
 tools\netplay_campaign.ps1 -DiscPath <iso> -Scenario w04-results-unload -Repeat 1
