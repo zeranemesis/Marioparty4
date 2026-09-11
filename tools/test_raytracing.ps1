@@ -35,7 +35,9 @@ param(
     [int]$BootSeconds = 25,
     [int]$MaxSteps = 60,
     [int]$Frames = 4,
-    [int]$Attempts = 3
+    [int]$Attempts = 3,
+    # How many cards right of the first board to take on the selection carousel.
+    [int]$BoardIndex = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -70,6 +72,28 @@ public class RtCapture {
         tot++;
       }
     return tot == 0 ? 0 : (100 * n) / tot;
+  }
+  // Fraction of a box that is both bright and saturated, as a percentage.
+  static double Frac(Bitmap b, double x0, double y0, double x1, double y1, int vmin, int smin) {
+    int n = 0, tot = 0;
+    for (int y = (int)(b.Height * y0); y < (int)(b.Height * y1); y += 2)
+      for (int x = (int)(b.Width * x0); x < (int)(b.Width * x1); x += 2) {
+        Color c = b.GetPixel(x, y);
+        int mx = Math.Max(c.R, Math.Max(c.G, c.B));
+        int mn = Math.Min(c.R, Math.Min(c.G, c.B));
+        if (mx > vmin && mx - mn > smin) n++;
+        tot++;
+      }
+    return tot == 0 ? 0 : (100.0 * n) / tot;
+  }
+  // The board carousel is the one screen carrying both a large colourful board
+  // preview and a coloured board name in its description box. Either alone also
+  // matches something else -- the character select is just as colourful, the
+  // mode select's description is also coloured -- so both are required. Across
+  // 32 captured frames of that overlay the pair selects exactly one.
+  public static bool IsBoardCarousel(Bitmap b) {
+    return Frac(b, 0.20, 0.15, 0.60, 0.42, 90, 70) > 30.0
+        && Frac(b, 0.02, 0.79, 0.62, 0.93, 120, 60) > 3.0;
   }
 }
 "@ -ReferencedAssemblies System.Drawing
@@ -140,6 +164,7 @@ function Save-Frame([System.IntPtr]$Window, [string]$Name) {
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.CopyFromScreen($r.L, $r.T, 0, 0, $bmp.Size)
     $score = [RtCapture]::BannerScore($bmp)
+    $script:onCarousel = [RtCapture]::IsBoardCarousel($bmp)
     if ($Name) { $bmp.Save((Join-Path $output "$Name.png"), [System.Drawing.Imaging.ImageFormat]::Png) }
     $g.Dispose(); $bmp.Dispose()
     return $score
@@ -164,7 +189,8 @@ function Invoke-Run {
     if ($process.HasExited) { return @{ Reached = $false; Reason = 'exited during boot' } }
 
     $window = $process.MainWindowHandle
-    $index = 0; $moved = 0; $previous = ''; $reached = $false; $scene = ''
+    $index = 0; $moved = 0; $boards = 0; $previous = ''; $reached = $false; $scene = ''
+    $script:onCarousel = $false
     foreach ($step in 1..$MaxSteps) {
         $overlay = Get-CurrentOverlay
         if ($overlay -ne $previous) {
@@ -180,6 +206,14 @@ function Invoke-Run {
         elseif ($overlay -match 'modesel') {
             if ($banner -ge 50 -and $moved -lt $cardsRight) { $moved++; Send-Pad 0 100 0 }
             else { Send-Pad $A }
+        }
+        elseif ($script:onCarousel -and $boards -lt $BoardIndex) {
+            # One card right per visit, so the board actually changes rather than
+            # the cursor racing past several: the carousel re-reads the stick
+            # every frame it is held.
+            $boards++
+            Write-Host "  plateau suivant ($boards/$BoardIndex)"
+            Send-Pad 0 100 0
         }
         else { $e = $setup[$index % $setup.Count]; Send-PadAllPorts $e[0] $e[1] $e[2]; $index++ }
 

@@ -11,6 +11,7 @@ param(
     [ValidateSet('board', 'minigame')][string]$Target = 'board',
     [ValidateSet('on', 'off')][string]$RayTracing = 'on',
     [int]$Runs = 6,
+    [int[]]$BoardIndices = @(0),
     [string]$OutputDirectory = 'work/raytracing-sweep'
 )
 $ErrorActionPreference = 'Continue'
@@ -20,15 +21,16 @@ New-Item -ItemType Directory -Force -Path $root | Out-Null
 
 $rows = @()
 foreach ($run in 1..$Runs) {
+    $boardIndex = $BoardIndices[($run - 1) % $BoardIndices.Count]
     $dir = Join-Path $root "$Target-$RayTracing-$run"
     Write-Host "=== run $run / $Runs ==="
     $out = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test_raytracing.ps1') `
-        -Target $Target -RayTracing $RayTracing -OutputDirectory $dir -Attempts 2 2>&1
+        -Target $Target -RayTracing $RayTracing -OutputDirectory $dir -Attempts 2 -BoardIndex $boardIndex 2>&1
     $text = $out -join "`n"
     $scene = if ($text -match 'reached (\S+) on attempt') { $Matches[1] } else { 'none' }
     if ($scene -eq 'none') { Write-Host "  aucune scene atteinte"; continue }
     $row = [ordered]@{ scene = $scene }
-    if ($text -match '(\d+) triangles, BLAS (\d+) KB, build ([0-9.]+) ms, (\d+x\d+) ([0-9.]+) ms GPU') {
+    if ($text -match '(\d+) triangles, BLAS (\d+) KB, build (?:reused, )?([0-9.]+) ms, (\d+x\d+) ([0-9.]+) ms GPU') {
         $row.triangles = [int]$Matches[1]; $row.buildMs = [double]$Matches[3]
         $row.res = $Matches[4]; $row.traceMs = [double]$Matches[5]
     }
