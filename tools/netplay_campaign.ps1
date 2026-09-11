@@ -37,6 +37,11 @@ param(
     # Verbosity of the audio lifetime trace: '' off, '1' banks and violations,
     # '2' every voice event as well.
     [string]$AudioDiagnostics = '1',
+    # HuMem heap integrity detector, '' off. On by default: session S1 died of
+    # STATUS_HEAP_CORRUPTION and this is the only detector that can see inside
+    # MEM1, yet no script had ever set it, so every campaign so far ran with the
+    # one instrument that could have explained that crash switched off.
+    [string]$MemDiagnostics = '1',
     # Forced local rollback probe, '' off. See PARTYBOARD_FORCE_ROLLBACK.
     [string]$ForceRollback = '',
     # Suffix for the campaign directory, so several campaigns started in the
@@ -194,6 +199,7 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         binary_written = $build.BinaryWritten
         seed = $entry.Seed
         audio_diagnostics = $AudioDiagnostics
+        mem_diagnostics = $MemDiagnostics
         force_rollback = $ForceRollback
         target_frame_rate = $TargetFrameRate
         target_frame_rate_peer_1 = $(if ($TargetFrameRatePeer1 -gt 0) { $TargetFrameRatePeer1 } else { $TargetFrameRate })
@@ -215,6 +221,9 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         audio_lifetime_violations = 0
         audio_lifetime_bank_frees = 0
         audio_lifetime_armed = $false
+        mem_diag_armed = $false
+        mem_diag_heaps = 0
+        mem_corruption_detected = $false
         d6_batched_frames = 0
         d6_worst_batch = 0
         crash_fingerprint = ''
@@ -280,6 +289,7 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
             # left over in the launching shell can never silently change what a
             # campaign measured.
             $start.EnvironmentVariables['PARTYBOARD_AUDIO_DIAGNOSTICS'] = $AudioDiagnostics
+            $start.EnvironmentVariables['PARTYBOARD_MEM_DIAGNOSTICS'] = $MemDiagnostics
             $start.EnvironmentVariables['PARTYBOARD_FORCE_ROLLBACK'] = $ForceRollback
 
             $process = [Diagnostics.Process]::Start($start)
@@ -398,6 +408,25 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
     $record.audio_lifetime_bank_frees = $bankFrees
     $record.audio_lifetime_armed = ($AudioDiagnostics -ne '') -and ($bankFrees -gt 0)
 
+    # ---- heap integrity detector ----
+    # Armed is not "we set the variable"; it is "the detector said out loud that
+    # it registered a heap". The detector prints one line per heap from
+    # HuMemInitAll, and writes a report file the moment a heap stops being
+    # intact.
+    $heaps = 0
+    $corruption = $false
+    foreach ($side in 0, 1) {
+        $logPath = Join-Path $runPath "peer-$side-stderr.log"
+        if (Test-Path -LiteralPath $logPath) {
+            $heaps += @(Select-String -Path $logPath -Pattern '^\[MEM DIAG\] heap \d+ registered' -ErrorAction SilentlyContinue).Count
+            if (@(Select-String -Path $logPath -Pattern 'HuMem corruption report:' -ErrorAction SilentlyContinue).Count -gt 0) { $corruption = $true }
+        }
+    }
+    if (@(Get-ChildItem -LiteralPath $runPath -Filter 'mem-corruption-*.txt' -ErrorAction SilentlyContinue).Count -gt 0) { $corruption = $true }
+    $record.mem_diag_heaps = $heaps
+    $record.mem_diag_armed = ($MemDiagnostics -ne '') -and ($heaps -gt 0)
+    $record.mem_corruption_detected = $corruption
+
     # ---- overlay paths ----
     $overlays = @(, @(), @())
     foreach ($side in 0, 1) {
@@ -490,6 +519,21 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
     } elseif ($overlays[0].Count -eq 0 -or (Compare-Object $overlays[0] $overlays[1] -SyncWindow 0)) {
         $record.result = 'DESYNC'
         $record.notes += 'the two peers took different overlay paths'
+    } elseif ($record.mem_corruption_detected) {
+        # A heap that stopped being intact is a defect whether or not the
+        # process went on to die of it. This is the classification session S1
+        # should have received and could not, because the detector was off.
+        $record.result = 'CRASH'
+        $record.notes += 'HuMem heap corruption detected'
+        if (-not $record.crash_fingerprint) {
+            $record.crash_fingerprint = 'HEAP_CORRUPTION:detected-by-sweep:mem_diagnostics'
+        }
+    } elseif (($MemDiagnostics -ne '') -and -not $record.mem_diag_armed) {
+        # Same rule as the audio detector: a detector asked for and unproven is
+        # a harness failure, not a pass. Without this the campaign could run for
+        # a week with the instrument switched off and report nothing but green.
+        $record.result = 'HARNESS_FAILURE'
+        $record.notes += 'the heap integrity detector was requested but never registered a heap'
     } elseif (($AudioDiagnostics -ne '') -and -not $record.audio_lifetime_armed) {
         # The scenario asked for the lifetime detector and the run has no
         # evidence it ever watched a bank being released. Whatever else the run

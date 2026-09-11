@@ -143,10 +143,16 @@ double nowMs()
 
 } // namespace
 
+// Raised only for the duration of the self-test, which works on a fixture heap
+// of its own. Without it the self-test inherited the master switch and returned
+// true without running, so a build whose detector was broken reported the same
+// thing as a build whose detector was sound.
+static std::atomic<bool> gSelfTestForced{false};
+
 extern "C" bool PartyBoard_MemDiagEnabled(void)
 {
     static const bool enabled = envEnabled("PARTYBOARD_MEM_DIAGNOSTICS");
-    return enabled;
+    return enabled || gSelfTestForced.load(std::memory_order_acquire);
 }
 
 extern "C" bool PartyBoard_MemDiagPoisonFreeEnabled(void)
@@ -616,12 +622,18 @@ extern "C" void PartyBoard_MemDiagTick(void)
 extern "C" bool PartyBoard_MemDiagRunSelfTest(void)
 {
     // The detector has to be given known corruptions before it can be trusted.
-    // A fixture heap is used so nothing here touches a real HuMem heap.
-    if (!PartyBoard_MemDiagEnabled()) {
-        std::printf("HuMem diagnostics: SKIPPED (set PARTYBOARD_MEM_DIAGNOSTICS=1 to exercise). "
-                    "Detector not verified in this run.\n");
-        return true;
-    }
+    // A fixture heap is used so nothing here touches a real HuMem heap, which is
+    // why this no longer honours the master switch: it used to print SKIPPED and
+    // return true whenever PARTYBOARD_MEM_DIAGNOSTICS was unset - which is
+    // always, since no script set it - so the one detector that could have
+    // explained the STATUS_HEAP_CORRUPTION of session S1 had never once been
+    // shown to work. A self-test that passes without running is worse than no
+    // self-test, because it reports the same thing as a passing one.
+    const bool wasEnabled = PartyBoard_MemDiagEnabled();
+    gSelfTestForced.store(true, std::memory_order_release);
+    struct ForceGuard {
+        ~ForceGuard() { gSelfTestForced.store(false, std::memory_order_release); }
+    } forceGuard;
 
     constexpr std::size_t kArena = 64 * 1024;
     auto *arena = static_cast<unsigned char *>(std::malloc(kArena));
@@ -718,10 +730,11 @@ extern "C" bool PartyBoard_MemDiagRunSelfTest(void)
     std::free(arena);
     std::printf("HuMem diagnostics: %s (no false positive over 64 alloc/free cycles: %s; "
                 "1-byte underflow: %s; wide underflow: %s; bad magic: %s; bad size: %s; "
-                "link out of heap: %s; double free refused: %s). Fixture heap, not a real one.\n",
+                "link out of heap: %s; double free refused: %s). Fixture heap, not a real one; "
+                "detector %s for the rest of this run.\n",
         ok ? "PASS" : "FAIL", noFalsePositive ? "yes" : "NO", caughtOneByte ? "caught" : "MISSED",
         caughtWide ? "caught" : "MISSED", caughtMagic ? "caught" : "MISSED",
         caughtSize ? "caught" : "MISSED", caughtLink ? "caught" : "MISSED",
-        doubleFreeSurvived ? "yes" : "NO");
+        doubleFreeSurvived ? "yes" : "NO", wasEnabled ? "armed" : "NOT armed");
     return ok;
 }

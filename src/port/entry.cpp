@@ -8,6 +8,7 @@
 #include "port/crash_manifest.h"
 #include "port/crash_uploader.h"
 
+#include <cstdio>
 #include <cstring>
 
 #if defined(_WIN32)
@@ -47,16 +48,33 @@ int main(int argc, char *argv[])
         return PartyBoard_OnlineCheckDisc() ? 0 : 3;
     if (argc == 2 && std::strcmp(argv[1], "--rollback-self-test") == 0)
         return PartyBoard_RollbackRunSelfTest() ? 0 : 1;
-    if (argc == 2 && std::strcmp(argv[1], "--netplay-self-test") == 0)
-        return PartyBoard_RollbackRunSelfTest() && PartyBoard_NetTransportRunSelfTest()
-                && PartyBoard_NetplayRuntimeRunSelfTest()
-                && PartyBoard_CrashReportRunSelfTest()
-                && PartyBoard_MemDiagRunSelfTest()
-                && PartyBoard_AudioLifetimeRunSelfTest()
-                && PartyBoard_CrashManifestRunSelfTest()
-                && PartyBoard_CrashUploaderRunSelfTest()
-            ? 0
-            : 1;
+    if (argc == 2 && std::strcmp(argv[1], "--netplay-self-test") == 0) {
+        // Every component runs, and every component reports. The chain of &&
+        // this replaced stopped at the first failure, so one broken component
+        // hid an unknown number of others behind it - and a component became
+        // silently untested the day anything before it started failing. A
+        // release gate that cannot say which of its eight checks ran is not a
+        // gate.
+        int total = 0;
+        int failed = 0;
+        auto check = [&](const char* name, bool ok) {
+            ++total;
+            if (!ok) ++failed;
+            std::printf("SELFTEST %-16s %s\n", name, ok ? "PASS" : "FAIL");
+            std::fflush(stdout);
+        };
+        check("rollback", PartyBoard_RollbackRunSelfTest());
+        check("transport", PartyBoard_NetTransportRunSelfTest());
+        check("netplay-runtime", PartyBoard_NetplayRuntimeRunSelfTest());
+        check("crash-report", PartyBoard_CrashReportRunSelfTest());
+        check("mem-diagnostics", PartyBoard_MemDiagRunSelfTest());
+        check("audio-lifetime", PartyBoard_AudioLifetimeRunSelfTest());
+        check("crash-manifest", PartyBoard_CrashManifestRunSelfTest());
+        check("crash-uploader", PartyBoard_CrashUploaderRunSelfTest());
+        std::printf("SELFTEST total=%d failed=%d\n", total, failed);
+        std::fflush(stdout);
+        return failed == 0 ? 0 : 1;
+    }
 
     // Anything the previous run left behind becomes a queued incident here, at
     // the next launch rather than while the last one was dying. A no-op in a
