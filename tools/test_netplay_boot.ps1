@@ -7,7 +7,16 @@ param(
     [switch]$Walk,
     [string]$RecordInput,
     [string]$ReplayInput,
-    [string]$HostProfile
+    [string]$HostProfile,
+    # Diagnostic only: leave the child's stdout and stderr attached to this
+    # console instead of capturing them through a pipe, so the pipe itself can be
+    # taken out of an experiment. The stdout log and the overlay-path check are
+    # skipped, because there is nothing to read them from.
+    [switch]$NoStdoutPipe,
+    # Diagnostic only: leave PARTYBOARD_NET_DIAGNOSTIC empty so the periodic
+    # netplay log never opens a file. The in-run DESYNC poll goes with it,
+    # because it reads that same log.
+    [switch]$NoNetDiagnostic
 )
 $ErrorActionPreference='Stop'
 $projectPath=Split-Path $PSScriptRoot -Parent
@@ -84,15 +93,19 @@ try {
         $start.UseShellExecute=$false
         $start.CreateNoWindow=$true
         $start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
-        $start.RedirectStandardOutput=$true
-        $start.RedirectStandardError=$true
+        $start.RedirectStandardOutput=(-not $NoStdoutPipe)
+        $start.RedirectStandardError=(-not $NoStdoutPipe)
         $start.EnvironmentVariables['PARTYBOARD_ONLINE_DISC']=$disc
         $start.EnvironmentVariables['PARTYBOARD_ONLINE_READY']=$prefix+'-ready'
         $start.EnvironmentVariables['PARTYBOARD_ONLINE_GO']=$prefix+'-go'
         $start.EnvironmentVariables['PARTYBOARD_ONLINE_CANCEL']=$prefix+'-cancel'
         $start.EnvironmentVariables['PARTYBOARD_NETPLAY_TEST_PROFILE']=$profile
         $diagnostic=Join-Path $runPath "peer-$side-native.log"
+        if ($NoNetDiagnostic) {
+            $start.EnvironmentVariables['PARTYBOARD_NET_DIAGNOSTIC']=''
+        } else {
         $start.EnvironmentVariables['PARTYBOARD_NET_DIAGNOSTIC']=$diagnostic
+        }
         # Crash reports, minidumps and the live state file go beside the run's
         # other evidence, named per seat. Without this the reporter falls back to
         # the diagnostic's directory, which works but cannot name the seat.
@@ -100,7 +113,11 @@ try {
         $start.EnvironmentVariables['PARTYBOARD_CRASH_PEER']="$side"
         $start.EnvironmentVariables['PARTYBOARD_CRASH_ROLE']=$(if ($side -eq 0) { 'host' } else { 'client' })
         $process=[Diagnostics.Process]::Start($start)
-        $testPeers+=@{Process=$process;Out=$process.StandardOutput.ReadToEndAsync();Err=$process.StandardError.ReadToEndAsync();Ready=$ready;Go=$go;Cancel=$cancel;Side=$side;Diagnostic=$diagnostic}
+        if ($NoStdoutPipe) {
+            $testPeers+=@{Process=$process;Out=$null;Err=$null;Ready=$ready;Go=$go;Cancel=$cancel;Side=$side;Diagnostic=$diagnostic}
+        } else {
+            $testPeers+=@{Process=$process;Out=$process.StandardOutput.ReadToEndAsync();Err=$process.StandardError.ReadToEndAsync();Ready=$ready;Go=$go;Cancel=$cancel;Side=$side;Diagnostic=$diagnostic}
+        }
     }
     $timer=[Diagnostics.Stopwatch]::StartNew()
     while (-not ($testPeers[0].Ready.WaitOne(0) -and $testPeers[1].Ready.WaitOne(0))) {
@@ -113,7 +130,7 @@ try {
     while ($timer.Elapsed.TotalSeconds -lt $DurationSeconds) {
         foreach ($peer in $testPeers) {
             if ($peer.Process.HasExited) { throw "Peer $($peer.Side) exited during gameplay." }
-            if (Test-Path -LiteralPath $peer.Diagnostic) {
+            if ((-not $NoNetDiagnostic) -and (Test-Path -LiteralPath $peer.Diagnostic)) {
                 $log=Get-Content -Raw -LiteralPath $peer.Diagnostic
                 if ($log -match '(DESYNC|PROTOCOL)[^\r\n]*') { throw $Matches[0] }
             }
@@ -151,8 +168,10 @@ finally {
             $peer.Process.CloseMainWindow() | Out-Null
             if (-not $peer.Process.WaitForExit(3000)) { $peer.Process.Kill();$peer.Process.WaitForExit() }
         }
-        [IO.File]::WriteAllText((Join-Path $runPath "peer-$($peer.Side)-stdout.log"),$peer.Out.Result)
-        [IO.File]::WriteAllText((Join-Path $runPath "peer-$($peer.Side)-stderr.log"),$peer.Err.Result)
+        if (-not $NoStdoutPipe) {
+            [IO.File]::WriteAllText((Join-Path $runPath "peer-$($peer.Side)-stdout.log"),$peer.Out.Result)
+            [IO.File]::WriteAllText((Join-Path $runPath "peer-$($peer.Side)-stderr.log"),$peer.Err.Result)
+        }
         $peer.Process.Dispose();$peer.Ready.Dispose();$peer.Go.Dispose();$peer.Cancel.Dispose()
     }
 }
