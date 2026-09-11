@@ -593,12 +593,79 @@ peut déclencher, et il vaut mieux savoir avant qu'après.
 
 ---
 
-## D9 — Un plantage réel n'a produit aucun rapport
+## D9 — Un plantage réel n'a produit aucun rapport — **CAUSE ÉTABLIE ET PROUVÉE**
 
-**Classification : crash reporter produced no artifact for a real
-EXCEPTION_ACCESS_VIOLATION. Observé, reproductible, cause non établie.**
+**Classification : crash reporter silent because its guard pages were never
+armed. Cause établie par lecture, puis démontrée par l'expérience.**
 
-**Statut : non corrigé. Recette de reproduction disponible.**
+**Statut : l'instrument est désormais armé par défaut. Aucune ligne de code du
+rapporteur n'a été modifiée — il n'était pas cassé, il était éteint.**
+
+### La cause
+
+`PARTYBOARD_STACK_WATCHDOG` commande les pages de garde des piles de coroutine,
+et **aucun script ne le posait**. `src/port/coroutine_stack.cpp` dit exactement
+ce que cela coûte, dans un commentaire écrit le jour où le mécanisme a été
+construit :
+
+> A reserved page gives a plain access violation, and the faulting instruction
+> is the push of a return address: the kernel then cannot push an exception
+> frame either, so no handler ever runs and the process dies silently.
+
+Non armé, le garde bas est **une page RÉSERVÉE** et c'est la première branche
+qui s'applique. Armé, ce sont **quatre pages ENGAGÉES** avec `PAGE_GUARD`, qui
+lève `STATUS_GUARD_PAGE_VIOLATION` *et* efface son propre bit de garde dans le
+même geste, laissant au fil assez de pile pour parler.
+
+### La preuve, le même scénario dans les deux états
+
+Correctif D4 annulé dans les deux cas, `d4-big-boo`, un run complet chacun.
+
+| | garde **éteinte** | garde **armée** |
+|---|---|---|
+| résultat | CRASH frame 48671 | CRASH frame 48685 |
+| rapport de plantage | **aucun** | **58 042 octets** |
+| relevé de piles | **aucun** | **7 211 octets** |
+| empreinte | *(aucune)* | `STACK_OVERFLOW:overlay92:fn_1_30A4` |
+| piles gardées | 0 | 16 |
+
+Et ce que le rapport dit, là où il n'y avait rien :
+
+```
+reason=COROUTINE_STACK_OVERFLOW
+COROUTINE STACK OVERFLOW at frame 48685, faulting address 0x264ea433ff8:
+GUARD PAGE BELOW the coroutine stack of fn_1_30A4:
+stack 0x264ea434000-0x264ea436000, size 8192 (game constant 4096 doubled by process.c),
+faulting address is 8 bytes past the bottom of the stack, peak observed 7936
+```
+
+**« 8 octets au-delà du bas de la pile »** — exactement les huit octets que
+l'entrée D4 décrit, l'adresse de retour d'un `call`. Le rapporteur ne produit
+donc pas seulement *un* rapport : il produit **le** rapport, celui qui aurait
+identifié D4 en quelques minutes au lieu de l'enquête que D4 raconte.
+
+### Ce que cela apprend au-delà de D9
+
+Trois instruments ont été trouvés dans le même état le même jour — détecteur
+audio, intégrité du tas, pages de garde — existants, fonctionnels, et armés par
+aucun script. **Un interrupteur de diagnostic par défaut éteint sera éteint le
+jour où il aurait servi.** La règle appliquée aux trois est désormais la même :
+la campagne les arme, et un détecteur demandé sans preuve qu'il a tourné vaut
+`HARNESS_FAILURE`, jamais `PASS`.
+
+### Ce qui reste ouvert
+
+Le coût. Quatre pages engagées par coroutine au lieu d'une page réservée, sur
+seize piles observées ici. Ce n'est pas mesuré sur une partie longue, et c'est
+la seule raison qui pourrait justifier de ne pas l'armer partout.
+
+L'ancienne recette de reproduction reste valable et vaut d'être conservée : elle
+est le premier plantage moteur de ce projet reproductible **à la frame près et à
+volonté**, et c'est un banc d'essai, pas seulement un souvenir.
+
+---
+
+## D9 — annexe : la recette de reproduction
 
 ### Ce qui a été observé
 
