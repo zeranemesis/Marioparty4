@@ -42,6 +42,20 @@
       "repeats": 20,
       "netplayDelay": 3,
       "seed": "recorded"
+    },
+    {
+      "id": "w01-walk-replay",
+      "description": "The walking recording, which is the only one that reaches a second board. Boot, mode select twice, the entry menu, then w01Dll at frame 5385, the minigame instructions and m408Dll SKY DIVE at 14090. Shorter than the w04 session and the only coverage this project has outside Boo's Haunted Bash.",
+      "board": "w01Dll, Toad's Midway Madness (overlay 89, GWSystem.board 0)",
+      "minigame": "m408Dll SKY DIVE (overlay 16, type 0, four players)",
+      "kind": "replay",
+      "replay": "work/netplay-recordings/walk.txt",
+      "expectedOverlays": "work/netplay-recordings/walk.txt.overlays",
+      "durationSeconds": 600,
+      "minFrames": 32000,
+      "repeats": 1,
+      "netplayDelay": 3,
+      "seed": "recorded"
     }
   ]
 }

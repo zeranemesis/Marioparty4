@@ -1,39 +1,39 @@
-{
-  "manifest_version": 1,
-  "note": "Recordings are evidence, and they are large: this manifest is versioned and the files are not. A recording whose sha256 no longer matches is a different recording, and any campaign result obtained with it belongs to that different recording. Keep the files where the paths below say, or copy them there before running a campaign.",
-  "generated_at": "2026-09-11T15:01:42+02:00",
-  "replays": [
-    {
-      "path": "work/netplay-recordings/board-replay.txt",
-      "board": "w04Dll",
-      "description": "Human session on the w04 board: four minigames, four returns through the results screen, the Big Boo event that used to overflow a coroutine stack at frame 48671.",
-      "bytes": 2220016,
-      "lines": 99755,
-      "sha256": "237849e89515d7fe41c72f874932dd77e4b4dfb4edc7f97d8c8ded14230aceea"
-    },
-    {
-      "path": "work/netplay-recordings/board-replay.txt.overlays",
-      "board": "w04Dll",
-      "description": "The overlay path that recording produced, frame by frame. The replay is only valid if it reproduces this exactly.",
-      "bytes": 373,
-      "lines": 39,
-      "sha256": "6f46bc2fafc48e33cdb13bc0c21ad5f4e9c79e293a24d841a6c62c0522e9290a"
-    },
-    {
-      "path": "work/netplay-recordings/board.txt",
-      "board": "w04Dll",
-      "description": "The raw recording before the incomplete trailing line was removed.",
-      "bytes": 2319789,
-      "lines": 99756,
-      "sha256": "c49b67f2ced59a8762fbfb02cfa690674616853509e83f929bb58b9e063c58d5"
-    },
-    {
-      "path": "work/netplay-recordings/walk.txt",
-      "board": "unknown",
-      "description": "Short walking probe, kept because it boots quickly.",
-      "bytes": 755074,
-      "lines": 33486,
-      "sha256": "46ab63ed53e08c61416fb31afe451d7f38ed6b4364df55886899f87a1cd86944"
-    }
-  ]
+﻿{
+    "manifest_version":  1,
+    "note":  "Recordings are evidence, and they are large: this manifest is versioned and the files are not. A recording whose sha256 no longer matches is a different recording, and any campaign result obtained with it belongs to that different recording. Keep the files where the paths below say, or copy them there before running a campaign.",
+    "generated_at":  "2026-09-11T15:53:47.3921207+02:00",
+    "replays":  [
+                    {
+                        "path":  "work/netplay-recordings/board-replay.txt",
+                        "board":  "w04Dll",
+                        "description":  "Human session on the w04 board: four minigames, four returns through the results screen, the Big Boo event that used to overflow a coroutine stack at frame 48671.",
+                        "bytes":  2220016,
+                        "lines":  99755,
+                        "sha256":  "237849e89515d7fe41c72f874932dd77e4b4dfb4edc7f97d8c8ded14230aceea"
+                    },
+                    {
+                        "path":  "work/netplay-recordings/board-replay.txt.overlays",
+                        "board":  "w04Dll",
+                        "description":  "The overlay path that recording produced, frame by frame. The replay is only valid if it reproduces this exactly.",
+                        "bytes":  373,
+                        "lines":  39,
+                        "sha256":  "6f46bc2fafc48e33cdb13bc0c21ad5f4e9c79e293a24d841a6c62c0522e9290a"
+                    },
+                    {
+                        "path":  "work/netplay-recordings/board.txt",
+                        "board":  "w04Dll",
+                        "description":  "The raw recording before the incomplete trailing line was removed.",
+                        "bytes":  2319789,
+                        "lines":  99756,
+                        "sha256":  "c49b67f2ced59a8762fbfb02cfa690674616853509e83f929bb58b9e063c58d5"
+                    },
+                    {
+                        "path":  "work/netplay-recordings/walk.txt",
+                        "board":  "unknown",
+                        "description":  "Short walking probe, kept because it boots quickly.",
+                        "bytes":  755074,
+                        "lines":  33486,
+                        "sha256":  "46ab63ed53e08c61416fb31afe451d7f38ed6b4364df55886899f87a1cd86944"
+                    }
+                ]
 }
