@@ -18,7 +18,11 @@ function Resolve-TestPath([string]$path) {
 $binaryPath=Resolve-TestPath $BinaryDirectory
 $disc=[IO.Path]::GetFullPath($DiscPath)
 if (-not (Test-Path -LiteralPath $disc -PathType Leaf)) { throw 'Disc file missing.' }
-if ($DurationSeconds -lt 1 -or $DurationSeconds -gt 300) { throw 'Duration must be 1..300 seconds.' }
+# The cap used to be 300 seconds, which is fine for a boot check but cannot
+# replay a real recorded session: the Big Boo recording alone is 49877 frames,
+# about 831 seconds of game time. An hour is the new ceiling, still bounded so a
+# hung run cannot sit forever.
+if ($DurationSeconds -lt 1 -or $DurationSeconds -gt 3600) { throw 'Duration must be 1..3600 seconds.' }
 $runPath=Join-Path (Resolve-TestPath $OutputDirectory) ([Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $runPath -Force | Out-Null
 $reservation=[Net.Sockets.UdpClient]::new([Net.IPEndPoint]::new([Net.IPAddress]::Loopback,0))
