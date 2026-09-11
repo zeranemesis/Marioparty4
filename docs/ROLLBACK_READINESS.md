@@ -12,12 +12,73 @@ Le jeu en ligne reste en lockstep. Le noyau de rollback sait prédire, restaurer
 ## Travail indispensable avant activation
 
 1. Couvrir explicitement les globals du moteur : objets, séquences de mini-jeu, modèles, motions, caméras et sprites. Ne pas copier en bloc le processus ou les sections du moteur contenant SDL, audio, fichiers et sockets.
-2. Isoler un tick déterministe complet. HuPrcCall et MGSeqMain ne suffisent pas : Hu3DExec avance aussi Hu3DMotionNext, HuSprFinish et Hu3DAnimExec hors de la boucle de simulation actuelle.
+2. Isoler un tick déterministe complet. HuPrcCall et MGSeqMain ne suffisent pas : Hu3DExec avance aussi Hu3DMotionNext, HuSprFinish et Hu3DAnimExec hors de la boucle de simulation actuelle. — **Mesuré et corrigé pour le tick rejoué** (défaut D5) ; reste ouvert pour le cadencement hors rejeu (défaut D6).
 3. Gérer les durées de vie des allocations, coroutines et modules. Une adresse réutilisée ne prouve pas que l'objet est le même ; la prévalidation d'un composant ne rend pas l'ensemble des snapshots atomique.
 4. Gérer les effets externes : audio, vibrations, sauvegardes et succès. Le signal de resimulation est disponible mais il n'est pas encore consommé par ces sous-systèmes.
-5. Vérifier une vraie restauration puis resimulation sur le moteur et comparer l'état obtenu à une exécution sans prédiction, avant toute activation dans le salon.
+5. ~~Vérifier une vraie restauration puis resimulation sur le moteur et comparer l'état obtenu à une exécution sans prédiction~~ — **fait**, par `PARTYBOARD_FORCE_ROLLBACK`. Voir la section de mesure ci-dessous : quatre comparaisons réussies, zéro échec, mais seulement quatre parce que la porte de capture refuse 97 % des occasions.
 
 Les tests de noyau utilisent un état synthétique. Les tests PAD/horloge vérifient de vrais globals du jeu en mode headless, sans partie graphique. Aucune de ces validations ne prouve à elle seule le déterminisme du jeu complet.
+
+## Ce que le harnais local a mesuré — 2026-09-11
+
+`PARTYBOARD_FORCE_ROLLBACK` fait ce que le point 5 ci-dessus réclamait : une
+vraie restauration suivie d'une resimulation, comparée à l'exécution sans
+prédiction. Il n'est plus à faire, il est fait, et il a produit trois résultats.
+
+### 1. Le point 2 était exact, et il est maintenant corrigé pour le rejeu
+
+« `Hu3DExec` avance aussi `Hu3DMotionNext`, `HuSprFinish` et `Hu3DAnimExec` hors
+de la boucle de simulation » — c'était écrit comme une prédiction. Le probe l'a
+mesuré : un retour arrière d'**une seule frame** ne se reproduisait pas, quinze
+sous-systèmes canoniques revenant identiques et `ANIMATION` non,
+`(model->motWork).time` valant 267.0 au lieu de 268.0.
+
+C'est le défaut D5 du registre. `PartyBoard_RollbackRunGameLogicTick` appelle
+maintenant `PartyBoard_AnimationAdvance()` avant la logique, dans l'ordre qu'une
+image rendue impose, et les distances 1, 2 et 4 se reproduisent exactement.
+
+### 2. La porte de capture refuse 97 % du temps, et on sait laquelle
+
+Replay de plateau complet, 47 921 frames, période 300, donc 159 occasions :
+
+| | |
+|---|---|
+| refusées | **155** |
+| comparaisons tentées | 6 |
+| réussies | **4** |
+| échouées | **0** |
+| refusées pendant la comparaison | 2 (limite du probe, pas du jeu) |
+
+Et la porte qui refuse, clause par clause :
+
+| clause | refus | part |
+|---|---|---|
+| `layer-hook` | **89** | 57 % |
+| `model-draw-hook` | 46 | 30 % |
+| `sprite-draw-hook` | 10 | 6 % |
+| `wipe-active` | 8 | 5 % |
+
+Ni coroutine active, ni E/S disque : **des rappels au moment du dessin**. Un tick
+rejoué n'a pas de passe de dessin pour les exécuter, donc `PartyBoard_Rollback
+RenderCanReplayWithoutDraw` refuse toute image qui en porte un.
+
+La clause dominante a un coupable unique : `sprput.c:371` installe
+`HuSprLayerHook` pour chaque calque utilisé par le système de sprites, c'est-à-
+dire presque en permanence pendant le jeu de plateau.
+
+**Conséquence pour la section 19 du cahier des charges** : la demande de milliers
+de tests de rollback par replay n'est pas satisfiable en l'état. Le moteur en
+autorise quatre sur 47 921 frames. Ce n'est pas une limite du probe, c'est une
+propriété du moteur, et c'est elle qu'il faut traiter avant d'espérer une
+couverture de rollback digne de ce nom.
+
+### 3. D6 ne peut pas se produire à 60 images par seconde
+
+Le détecteur ajouté dans `main.c` n'a rien imprimé sur 47 921 frames. C'est
+exactement ce que prédit la lecture de `frame_pacer_simulation_tick`, qui rend
+exactement 1 tant que `video.targetFrameRate <= 60`. La moitié positive de la
+mesure — un pair à 240 — reste à faire, et la campagne a `-TargetFrameRate` pour
+ça.
 
 ## Validation de cet incrément
 
