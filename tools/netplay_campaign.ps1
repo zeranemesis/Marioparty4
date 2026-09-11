@@ -204,6 +204,8 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         repaired = 'unknown'
         send_errors = 'unknown'
         audio_lifetime_violations = 0
+        audio_lifetime_bank_frees = 0
+        audio_lifetime_armed = $false
         crash_fingerprint = ''
         desync_fingerprint = ''
         result = 'HARNESS_FAILURE'
@@ -363,15 +365,24 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
     $record.send_errors = $peers[0].LiveState.SendErrors
 
     # ---- audio lifetime evidence ----
+    #
+    # Counting violations is only half of it. A detector that was never armed
+    # reports zero exactly like a detector that found nothing, so the run also
+    # has to show the detector was alive: a trace that contains at least one
+    # BANK_FREE is one that watched a bank being released.
     $violations = 0
+    $bankFrees = 0
     foreach ($side in 0, 1) {
         $trace = Join-Path $runPath "audio-lifetime-peer-$side.txt"
         if (Test-Path -LiteralPath $trace) {
             $hits = @(Select-String -Path $trace -Pattern 'STALE_REFERENCE_AT_FREE|STALE_SAMPLE_READ|STARTED_ON_RETIRED_SAMPLE' -ErrorAction SilentlyContinue)
             $violations += $hits.Count
+            $bankFrees += @(Select-String -Path $trace -Pattern '^BANK_FREE ' -ErrorAction SilentlyContinue).Count
         }
     }
     $record.audio_lifetime_violations = $violations
+    $record.audio_lifetime_bank_frees = $bankFrees
+    $record.audio_lifetime_armed = ($AudioDiagnostics -ne '') -and ($bankFrees -gt 0)
 
     # ---- overlay paths ----
     $overlays = @(, @(), @())
@@ -450,6 +461,12 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
     } elseif ($overlays[0].Count -eq 0 -or (Compare-Object $overlays[0] $overlays[1] -SyncWindow 0)) {
         $record.result = 'DESYNC'
         $record.notes += 'the two peers took different overlay paths'
+    } elseif (($AudioDiagnostics -ne '') -and -not $record.audio_lifetime_armed) {
+        # The scenario asked for the lifetime detector and the run has no
+        # evidence it ever watched a bank being released. Whatever else the run
+        # shows, it did not measure what it was asked to.
+        $record.result = 'HARNESS_FAILURE'
+        $record.notes += "the audio lifetime detector was requested but never observed a bank free"
     } elseif ($violations -gt 0) {
         # A lifetime violation is a defect even when nothing crashed. Calling
         # such a run PASS would hide the very thing the detector exists for.
