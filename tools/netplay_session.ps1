@@ -22,15 +22,49 @@
 # NTSTATUS values arrive as exit codes when a process dies of an exception the
 # reporter could not intercept. 0xC0000374 (heap corruption) is the important
 # one: it goes through __fastfail and no user-mode handler ever runs.
+#
+# The mask is [uint32]::MaxValue and NOT the literal 0xFFFFFFFF. Windows
+# PowerShell 5.1 parses a hex literal that fits in 32 bits as [int], so
+# 0xFFFFFFFF is -1: `$code -band 0xFFFFFFFF` returned $code unchanged, still
+# negative, and the cast to [uint32] then threw "the value was too large or too
+# small". The whole campaign died on the first peer that crashed - on exactly
+# the case these functions exist to record, so a broken harness read as a broken
+# game, which is the confusion the HARNESS_FAILURE classification exists to
+# prevent. tools/record_board_session.ps1 had the correct form all along; this
+# file did not, and nothing compared them.
 function Test-IsNtStatus([int64]$code) {
     if ($code -eq 0) { return $false }
-    $unsigned = [uint32]($code -band 0xFFFFFFFF)
-    return ($unsigned -ge 0xC0000000) -and ($unsigned -le 0xCFFFFFFF)
+    # [int64] on both sides of the comparison, and never a bare hex literal:
+    # 0xC0000000 is ALSO parsed as [int] in 5.1, so it is -1073741824, and
+    # `$unsigned -le 0xCFFFFFFF` compared a positive number against a negative
+    # one and was always false. The self-test below caught this second bug in
+    # the same two lines the moment it was written.
+    $unsigned = [int64]([uint32]::MaxValue -band $code)
+    return ($unsigned -ge [int64]3221225472) -and ($unsigned -le [int64]3489660927)
 }
 
 function Format-ExitCode([int64]$code) {
-    $unsigned = [uint32]($code -band 0xFFFFFFFF)
+    $unsigned = [uint32]([uint32]::MaxValue -band $code)
     return ('0x{0:X8} ({1})' -f $unsigned, $code)
+}
+
+# Proven rather than assumed, because the bug above was invisible until a real
+# peer crashed. Runs on import: it costs microseconds and it is the difference
+# between a harness that records a crash and one that dies of it.
+foreach ($case in @(
+    @{ Code = -1073741819; Text = '0xC0000005'; Nt = $true },   # access violation
+    @{ Code = -1073740940; Text = '0xC0000374'; Nt = $true },   # heap corruption
+    @{ Code = -1073741571; Text = '0xC00000FD'; Nt = $true },   # stack overflow
+    @{ Code = 0;           Text = '0x00000000'; Nt = $false },
+    @{ Code = 1;           Text = '0x00000001'; Nt = $false },
+    @{ Code = 2;           Text = '0x00000002'; Nt = $false })) {
+    $formatted = Format-ExitCode $case.Code
+    if ($formatted -notlike ($case.Text + '*')) {
+        throw "Exit code formatting is broken: $($case.Code) formatted as '$formatted', expected $($case.Text)."
+    }
+    if ((Test-IsNtStatus $case.Code) -ne $case.Nt) {
+        throw "NTSTATUS detection is broken for $($case.Code) ($($case.Text))."
+    }
 }
 
 # Windows Application event log record for a process that faulted, used when the

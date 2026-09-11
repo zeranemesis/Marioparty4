@@ -138,9 +138,29 @@ function Format-ExitCode([int]$code) {
 }
 # A non-zero exit code that sits in the 0xC0000000 range is an NT status, which
 # means the process was killed by an exception rather than returning a value.
+#
+# The bounds are [int64] literals and never bare hex. Windows PowerShell 5.1
+# parses a hex literal that fits in 32 bits as [int], so 0xC0000000 is
+# -1073741824 - and `$unsigned -ge 0xC0000000` was therefore true for EVERY exit
+# code, including 1 and 2. A peer that simply returned non-zero was classified
+# PROCESS_CRASH, with a fault record it never had. Proven by the cases below
+# rather than assumed, because the error was invisible until a peer really
+# crashed.
 function Test-IsNtStatus([int]$code) {
-    $unsigned = [uint32]([uint32]::MaxValue -band $code)
-    return $unsigned -ge 0xC0000000
+    if ($code -eq 0) { return $false }
+    $unsigned = [int64]([uint32]::MaxValue -band $code)
+    return ($unsigned -ge [int64]3221225472) -and ($unsigned -le [int64]3489660927)
+}
+foreach ($ntCase in @(
+    @{ Code = -1073741819; Nt = $true },   # 0xC0000005 access violation
+    @{ Code = -1073740940; Nt = $true },   # 0xC0000374 heap corruption
+    @{ Code = -1073741571; Nt = $true },   # 0xC00000FD stack overflow
+    @{ Code = 0;           Nt = $false },
+    @{ Code = 1;           Nt = $false },
+    @{ Code = 2;           Nt = $false })) {
+    if ((Test-IsNtStatus $ntCase.Code) -ne $ntCase.Nt) {
+        throw "NTSTATUS detection is broken for exit code $($ntCase.Code); a session cannot be classified."
+    }
 }
 
 $peers = @()
