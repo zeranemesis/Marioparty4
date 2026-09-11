@@ -41,6 +41,16 @@ param(
     # default, and recorded in the results when used, because the whole point of
     # the fingerprint is that it cannot be waved away silently.
     [switch]$SkipReplayVerification,
+    # Coroutine stack guard pages, '' off. On by default, and this is the third
+    # instrument found today that existed, worked, and was never armed: without
+    # it the low guard is one RESERVED page, an overflow is a plain access
+    # violation on the push of a return address, the kernel cannot push an
+    # exception frame either, and the process dies with no report at all. That
+    # is defect D9, observed for real. With it the guard is four COMMITTED pages
+    # with PAGE_GUARD, which raises STATUS_GUARD_PAGE_VIOLATION and clears its
+    # own guard bit in the same step, leaving the thread enough stack to say
+    # what happened.
+    [string]$StackWatchdog = '1',
     # HuMem heap integrity detector, '' off. On by default: session S1 died of
     # STATUS_HEAP_CORRUPTION and this is the only detector that can see inside
     # MEM1, yet no script had ever set it, so every campaign so far ran with the
@@ -258,6 +268,7 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         seed = $entry.Seed
         audio_diagnostics = $AudioDiagnostics
         mem_diagnostics = $MemDiagnostics
+        stack_watchdog = $StackWatchdog
         replay_fingerprints_verified = (-not $SkipReplayVerification)
         force_rollback = $ForceRollback
         gate_survey = [bool]$GateSurvey
@@ -284,6 +295,8 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         mem_diag_armed = $false
         mem_diag_heaps = 0
         mem_corruption_detected = $false
+        stack_guard_armed = $false
+        stack_guards = 0
         board_turn = -1
         board_max_turn = -1
         board_id = -1
@@ -358,6 +371,7 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
             # campaign measured.
             $start.EnvironmentVariables['PARTYBOARD_AUDIO_DIAGNOSTICS'] = $AudioDiagnostics
             $start.EnvironmentVariables['PARTYBOARD_MEM_DIAGNOSTICS'] = $MemDiagnostics
+            $start.EnvironmentVariables['PARTYBOARD_STACK_WATCHDOG'] = $StackWatchdog
             $start.EnvironmentVariables['PARTYBOARD_FORCE_ROLLBACK'] = $ForceRollback
             # Explicit in both directions, like the two detectors above: a
             # variable left in the launching shell must not be able to turn a
@@ -495,6 +509,18 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         }
     }
     if (@(Get-ChildItem -LiteralPath $runPath -Filter 'mem-corruption-*.txt' -ErrorAction SilentlyContinue).Count -gt 0) { $corruption = $true }
+    # ---- coroutine stack guards ----
+    # Armed is what the allocator says out loud, not the fact that the variable
+    # was set. Same rule as the other two detectors.
+    $guards = 0
+    foreach ($side in 0, 1) {
+        $logPath = Join-Path $runPath "peer-$side-stderr.log"
+        if (-not (Test-Path -LiteralPath $logPath)) { continue }
+        $guards += @(Select-String -Path $logPath -Pattern '^\[STACK GUARD\] armed stack .* guarded=1' -ErrorAction SilentlyContinue).Count
+    }
+    $record.stack_guards = $guards
+    $record.stack_guard_armed = ($StackWatchdog -ne '') -and ($guards -gt 0)
+
     $record.mem_diag_heaps = $heaps
     $record.mem_diag_armed = ($MemDiagnostics -ne '') -and ($heaps -gt 0)
     $record.mem_corruption_detected = $corruption
@@ -716,6 +742,12 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         if (-not $record.crash_fingerprint) {
             $record.crash_fingerprint = 'HEAP_CORRUPTION:detected-by-sweep:mem_diagnostics'
         }
+    } elseif (($StackWatchdog -ne '') -and -not $record.stack_guard_armed) {
+        # A stack guard asked for and unproven means a coroutine overflow in
+        # this run would have died silently, which is D9. Whatever else the run
+        # shows, it did not carry the instrument it was told to carry.
+        $record.result = 'HARNESS_FAILURE'
+        $record.notes += 'the coroutine stack guard was requested but no guarded stack was announced'
     } elseif (($MemDiagnostics -ne '') -and -not $record.mem_diag_armed) {
         # Same rule as the audio detector: a detector asked for and unproven is
         # a harness failure, not a pass. Without this the campaign could run for

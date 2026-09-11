@@ -233,6 +233,7 @@ campagne : le contournement ne peut pas être silencieux.
 | `PARTYBOARD_AUDIO_DIAGNOSTICS` | `1` trace banques et violations, `2` ajoute chaque voix |
 | `PARTYBOARD_FORCE_ROLLBACK` | `<période>[:<distances>]` arme le probe de rollback local |
 | `PARTYBOARD_ROLLBACK_GATE_SURVEY` | `1` évalue la porte de capture **à chaque frame** et histogramme les séries de frames ouvertes. Mesure, pas politique : ne change ni quand on tente une capture ni ce qu'on accepte. Coûteux ; un run de relevé est un run de relevé |
+| `PARTYBOARD_STACK_WATCHDOG` | `1` commet les pages de garde des piles de coroutine avec `PAGE_GUARD`. **Armé par défaut.** Sans lui, un débordement de pile est une violation d'accès nue sur l'empilement d'une adresse de retour : le noyau ne peut pas empiler de cadre d'exception non plus, aucun gestionnaire ne tourne, et le processus meurt **sans aucun rapport** — c'est le défaut D9 |
 | `PARTYBOARD_MEM_DIAGNOSTICS` | `1` arme la vérification d'intégrité des blocs HuMem. **Armée par défaut** par la campagne et par l'enregistreur de session : S1 est morte de `STATUS_HEAP_CORRUPTION` et aucun script ne la posait |
 | `PARTYBOARD_CRASH_DIR` | dossier des rapports ; sa présence signifie « session supervisée » |
 | `PARTYBOARD_CRASH_QUEUE` | remplace la file locale des incidents, pour les tests |
@@ -241,8 +242,13 @@ La campagne écrit les trois premières **explicitement** dans l'environnement d
 pairs plutôt que de les hériter : une variable oubliée dans un shell ne doit pas
 pouvoir changer en silence ce qu'une campagne a mesuré.
 
-Et la règle symétrique, appliquée aux deux détecteurs : **un détecteur demandé
-sans preuve qu'il a tourné vaut `HARNESS_FAILURE`, jamais `PASS`.** La preuve est
-ce que le détecteur dit lui-même — les libérations de banque pour l'audio, les
-enregistrements de tas pour la mémoire — et non le fait que la variable ait été
-posée.
+Et la règle symétrique, appliquée aux **trois** détecteurs : **un détecteur
+demandé sans preuve qu'il a tourné vaut `HARNESS_FAILURE`, jamais `PASS`.** La
+preuve est ce que le détecteur dit lui-même — les libérations de banque pour
+l'audio, les enregistrements de tas pour la mémoire, les piles gardées pour les
+coroutines — et non le fait que la variable ait été posée.
+
+Les trois ont été trouvés dans le même état au cours de la même journée :
+existants, fonctionnels, et jamais armés par aucun script. C'est un motif, pas
+une coïncidence — un interrupteur de diagnostic par défaut éteint finira éteint
+le jour où il aurait servi.
