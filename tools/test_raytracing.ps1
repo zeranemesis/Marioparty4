@@ -38,6 +38,9 @@ param(
     [int]$Attempts = 3,
     # How many cards right of the first board to take on the selection carousel.
     [int]$BoardIndex = 0,
+    # How far down the mini-game list to go before confirming. The list is
+    # vertical, unlike the board carousel.
+    [int]$MinigameIndex = 0,
     # Steps of actual play once the scene is up. Loading a board is not playing
     # one: the intro fly-through carries no interface, so the 2D mask is never
     # exercised until a turn starts and the HUD appears.
@@ -95,6 +98,19 @@ public class RtCapture {
   // matches something else -- the character select is just as colourful, the
   // mode select's description is also coloured -- so both are required. Across
   // 32 captured frames of that overlay the pair selects exactly one.
+  // The mini-game list: a bright banner across the top and a preview panel on
+  // the right. The character select shares the banner but not the panel, so
+  // both are needed.
+  //
+  // These fractions are of the whole window, title bar included, which is what
+  // every Frac call here measures. Thresholds tuned against images cropped to
+  // the client area do not transfer: the first pair, 60 and 60, came from
+  // cropped frames and never fired once, because the same screen scores 46.5
+  // and 70.8 uncropped.
+  public static bool IsMinigameList(Bitmap b) {
+    return Frac(b, 0.27, 0.10, 0.73, 0.19, 90, 70) > 40.0
+        && Frac(b, 0.55, 0.24, 0.85, 0.50, 90, 40) > 60.0;
+  }
   public static bool IsBoardCarousel(Bitmap b) {
     return Frac(b, 0.20, 0.15, 0.60, 0.42, 90, 70) > 30.0
         && Frac(b, 0.02, 0.79, 0.62, 0.93, 120, 60) > 3.0;
@@ -136,11 +152,13 @@ $START = 0x1000
 $A = 0x100
 $script:counter = 0
 
-function Send-Pad([int]$Buttons, [int]$StickX = 0, [int]$StickY = 0, [int]$Port = 0) {
+function Send-Pad([int]$Buttons, [int]$StickX = 0, [int]$StickY = 0, [int]$Frames = 0, [int]$Port = 0) {
     # A stick deflection lasts one frame: the menus re-read it every frame it is
     # held and would move the cursor once per frame. Buttons come through
-    # HuPadBtnDown and need the longer pulse to be caught at all.
-    $frames = if ($StickX -ne 0 -or $StickY -ne 0) { 1 } else { 8 }
+    # HuPadBtnDown and need the longer pulse to be caught at all. A caller that
+    # passes a count means it -- the d-pad in these menus is polled like the
+    # stick, not edge detected, so it wants one frame too.
+    $frames = if ($Frames -gt 0) { $Frames } elseif ($StickX -ne 0 -or $StickY -ne 0) { 1 } else { 8 }
     $script:counter++
     $line = '{0} {1} {2:x} {3} {4} {5}' -f $script:counter, $Port, $Buttons, $frames, $StickX, $StickY
     for ($try = 0; $try -lt 5; $try++) {
@@ -150,7 +168,7 @@ function Send-Pad([int]$Buttons, [int]$StickX = 0, [int]$StickY = 0, [int]$Port 
 }
 
 function Send-PadAllPorts([int]$Buttons, [int]$StickX = 0, [int]$StickY = 0) {
-    foreach ($port in 0..3) { Send-Pad $Buttons $StickX $StickY $port; Start-Sleep -Milliseconds 70 }
+    foreach ($port in 0..3) { Send-Pad $Buttons $StickX $StickY 0 $port; Start-Sleep -Milliseconds 70 }
 }
 
 function Get-CurrentOverlay {
@@ -169,6 +187,7 @@ function Save-Frame([System.IntPtr]$Window, [string]$Name) {
     $g.CopyFromScreen($r.L, $r.T, 0, 0, $bmp.Size)
     $score = [RtCapture]::BannerScore($bmp)
     $script:onCarousel = [RtCapture]::IsBoardCarousel($bmp)
+    $script:onMinigameList = [RtCapture]::IsMinigameList($bmp)
     if ($Name) { $bmp.Save((Join-Path $output "$Name.png"), [System.Drawing.Imaging.ImageFormat]::Png) }
     $g.Dispose(); $bmp.Dispose()
     return $score
@@ -193,8 +212,9 @@ function Invoke-Run {
     if ($process.HasExited) { return @{ Reached = $false; Reason = 'exited during boot' } }
 
     $window = $process.MainWindowHandle
-    $index = 0; $moved = 0; $boards = 0; $previous = ''; $reached = $false; $scene = ''
+    $index = 0; $moved = 0; $boards = 0; $games = 0; $previous = ''; $reached = $false; $scene = ''
     $script:onCarousel = $false
+    $script:onMinigameList = $false
     foreach ($step in 1..$MaxSteps) {
         $overlay = Get-CurrentOverlay
         if ($overlay -ne $previous) {
@@ -210,6 +230,18 @@ function Invoke-Run {
         elseif ($overlay -match 'modesel') {
             if ($banner -ge 50 -and $moved -lt $cardsRight) { $moved++; Send-Pad 0 100 0 }
             else { Send-Pad $A }
+        }
+        elseif ($script:onMinigameList -and $games -lt $MinigameIndex) {
+            $want = $MinigameIndex - $games
+            Write-Host "  mini-jeu : $want crans vers le bas"
+            # Stick and d-pad together, one frame each. The menus in this
+            # overlay test both (HuPadStkY <= -5 || HuPadBtn & 4 in
+            # mgmodedll/main.c) and neither is edge detected, so a longer pulse
+            # would move as many notches as frames it is held. Three notches of
+            # stick alone left the cursor on the first entry, so the list is
+            # reading the d-pad.
+            foreach ($i in 1..$want) { Send-Pad 0x0004 0 -100 1; Start-Sleep -Milliseconds 300 }
+            $games = $MinigameIndex
         }
         elseif ($script:onCarousel -and $boards -lt $BoardIndex) {
             # All the moves in one visit. The carousel only stays up for about

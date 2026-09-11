@@ -16,6 +16,8 @@ param(
     # value 12345 without complaining. That silently gave every run the same
     # board, which is exactly the failure this sweep exists to avoid.
     [string]$BoardIndices = '0',
+    # Same idea for mini-games: how far down the list each run goes.
+    [string]$MinigameIndices = '0',
     [string]$OutputDirectory = 'work/raytracing-sweep'
 )
 $ErrorActionPreference = 'Continue'
@@ -27,15 +29,17 @@ $rows = @()
 foreach ($run in 1..$Runs) {
     $indices = @($BoardIndices -split ',' | ForEach-Object { [int]$_.Trim() })
     $boardIndex = $indices[($run - 1) % $indices.Count]
+    $mgIndices = @($MinigameIndices -split ',' | ForEach-Object { [int]$_.Trim() })
+    $mgIndex = $mgIndices[($run - 1) % $mgIndices.Count]
     $dir = Join-Path $root "$Target-$RayTracing-$run"
-    Write-Host "=== run $run / $Runs (plateau +$boardIndex) ==="
+    Write-Host "=== run $run / $Runs (plateau +$boardIndex, mini-jeu +$mgIndex) ==="
     $out = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test_raytracing.ps1') `
-        -Target $Target -RayTracing $RayTracing -OutputDirectory $dir -Attempts 2 -BoardIndex $boardIndex 2>&1
+        -Target $Target -RayTracing $RayTracing -OutputDirectory $dir -Attempts 2 -BoardIndex $boardIndex -MinigameIndex $mgIndex 2>&1
     $text = $out -join "`n"
     $scene = if ($text -match 'reached (\S+) on attempt') { $Matches[1] } else { 'none' }
     # Echo what the child said about walking the carousel: without this the run
     # looks identical whether the board moved or not.
-    $out | Select-String 'plateau :' | ForEach-Object { Write-Host "  $_" }
+    $out | Select-String 'plateau :|mini-jeu :' | ForEach-Object { Write-Host "  $_" }
     if ($scene -eq 'none') {
         Write-Host "  aucune scene atteinte"
         $out | Select-Object -Last 4 | ForEach-Object { Write-Host "    $_" }
