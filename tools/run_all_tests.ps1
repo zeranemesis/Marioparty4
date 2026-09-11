@@ -60,21 +60,37 @@ $notApplicableExit = @{
     'test_direct_connection' = 2
 }
 
+# Most scripts compile and run their own standalone test with cl.exe and never
+# touch partyboard.exe. Only these two launch it, and only they accept
+# -BinaryDirectory - so only they are given it. Passing it to a script that does
+# not take it is an error, and not passing it to one that does means the CI run
+# silently tests the wrong binary, or no binary at all.
+$takesBinaryDirectory = @('test_netplay_boot', 'test_netplay_pad')
+
 $scripts = @(Get-ChildItem $PSScriptRoot -Filter 'test_*.ps1' | Sort-Object Name)
 if ($scripts.Count -eq 0) { Write-Output 'No test_*.ps1 found.'; exit 2 }
 
 if ($List) {
     foreach ($script in $scripts) {
         $name = [IO.Path]::GetFileNameWithoutExtension($script.Name)
-        $note = if ($needsDisc -contains $name) { 'needs a disc' } else { 'no disc' }
+        $note = if ($needsDisc -contains $name) { 'needs a disc and the game binary' }
+                elseif ($takesBinaryDirectory -contains $name) { 'needs the game binary' }
+                else { 'compiles and runs on its own' }
         Write-Output ('  {0,-32} {1}' -f $name, $note)
     }
     exit 0
 }
 
+# Only checked when a script that needs it will actually run: a suite reduced to
+# the standalone compile-and-run tests should not refuse to start because no game
+# binary has been built.
+$willRunBinary = @($takesBinaryDirectory | Where-Object {
+    $Exclude -notcontains $_ -and (($needsDisc -notcontains $_) -or $DiscPath)
+})
 $binary = Join-Path (Resolve-RunnerPath $BinaryDirectory) 'partyboard.exe'
-if (-not (Test-Path -LiteralPath $binary)) {
-    Write-Output "partyboard.exe not found at $binary. Build first, or pass -BinaryDirectory."
+if ($willRunBinary.Count -gt 0 -and -not (Test-Path -LiteralPath $binary)) {
+    $who = if ($willRunBinary.Count -eq 1) { "$($willRunBinary[0]) needs it" } else { "$($willRunBinary -join ', ') need it" }
+    Write-Output "partyboard.exe not found at $binary, and $who. Build first, or pass -BinaryDirectory."
     exit 2
 }
 
@@ -96,16 +112,41 @@ foreach ($script in $scripts) {
     $started = Get-Date
     $arguments = @{}
     if ($needsDisc -contains $name) { $arguments['DiscPath'] = $DiscPath }
+    if ($takesBinaryDirectory -contains $name) { $arguments['BinaryDirectory'] = $BinaryDirectory }
     if ($extraArguments.ContainsKey($name)) {
         foreach ($key in $extraArguments[$name].Keys) { $arguments[$key] = $extraArguments[$name][$key] }
     }
+    # Each script runs in its own PowerShell process, and that process's exit
+    # code is the result.
+    #
+    # The obvious spelling - `& $script; $code = $LASTEXITCODE` - is wrong, and
+    # wrong in the direction that hides failures. $LASTEXITCODE is only written
+    # by a native command or an explicit `exit`; a .ps1 that simply ends leaves
+    # whatever the PREVIOUS script put there. In the first full run that meant
+    # test_netplay_boot inherited a 0 from the script before it and was reported
+    # as passing. A separate process has one exit code and it belongs to that
+    # script alone.
+    #
+    # It also isolates $ErrorActionPreference, module state and variables
+    # between scripts, so one script cannot change how the next behaves.
+    $argumentLine = foreach ($key in $arguments.Keys) {
+        $value = $arguments[$key]
+        if ($value -is [switch] -or $value -is [bool]) {
+            if ($value) { "-$key" }
+        } else {
+            "-$key"; "$value"
+        }
+    }
+    $code = 99
     try {
-        & $script.FullName @arguments 2>&1 | ForEach-Object { Write-Output "  $_" }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script.FullName @argumentLine 2>&1 |
+            ForEach-Object { Write-Output "  $_" }
         $code = $LASTEXITCODE
     } catch {
         Write-Output ("  threw: " + $_.Exception.Message)
         $code = 99
     }
+    if ($null -eq $code) { $code = 99 }
     $seconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
     $reason = ''
     $outcome = if ($code -eq 0) {

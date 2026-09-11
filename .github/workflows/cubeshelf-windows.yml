@@ -144,6 +144,27 @@ jobs:
           }
           Write-Host "All $total engine self-tests passed."
 
+      - name: Test suite
+        shell: pwsh
+        # The scripts that need no disc image. This is the second half of the
+        # release gate: the engine self-tests say the binary's own components
+        # work, and these say the harness around it does - snapshot restore, PAD
+        # ticks, the crash pipeline, the rollback suites, the merge fixtures, the
+        # update channel guard.
+        #
+        # test_netplay_boot is excluded because it needs a real disc, which a CI
+        # runner does not have. test_direct_connection is excluded deliberately
+        # and permanently: it probes the router and can open a port, which must
+        # never happen unattended on a shared machine.
+        run: |
+          $ErrorActionPreference = "Stop"
+          ./tools/run_all_tests.ps1 `
+            -BinaryDirectory "build/install" `
+            -Exclude test_direct_connection
+          if ($LASTEXITCODE -ne 0) {
+            throw "The test suite failed with exit code $LASTEXITCODE."
+          }
+
       - name: Create CubeShelf package
         shell: pwsh
         run: |
