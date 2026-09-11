@@ -22,6 +22,10 @@
 #include <vi.h>
 
 namespace partyboard::ui {
+
+// Ray tracing quality levels; the order matches kQualityLevels in aurora's
+// rt_capture.cpp, and High is what the pass did before the setting existed.
+constexpr const char *kRayTracingQualityNames[] = { "Low", "Medium", "High", "Ultra" };
 namespace {
 
     struct LanguageChoice {
@@ -460,6 +464,36 @@ SettingsWindow::SettingsWindow(bool prelaunch)
                 .helpText = "Hardware ray traced reflections, on the surfaces the game already "
                             "environment maps. Requires a Windows PC with an NVIDIA RTX card.",
                 .onChange = [applyRayTracingTerms](bool) { applyRayTracingTerms(); },
+            });
+        leftPane.register_control(leftPane.add_select_button({
+                                      .key = "Ray Tracing Quality",
+                                      .getValue = [] {
+                                          return Rml::String { kRayTracingQualityNames[std::clamp(
+                                              getSettings().video.rayTracingQuality.getValue(), 0, 3)] };
+                                      },
+                                      .isModified = [] {
+                                          return getSettings().video.rayTracingQuality.getValue()
+                                              != getSettings().video.rayTracingQuality.getDefaultValue();
+                                      },
+                                  }),
+            rightPane, [](Pane &pane) {
+                for (int level = 0; level < 4; ++level) {
+                    pane.add_button({
+                                        .text = Rml::String { kRayTracingQualityNames[level] },
+                                        .isSelected = [level] {
+                                            return getSettings().video.rayTracingQuality.getValue() == level;
+                                        },
+                                    })
+                        .on_pressed([level] {
+                            getSettings().video.rayTracingQuality.setValue(level);
+                            aurora_set_ray_tracing_quality(level);
+                            config::Save();
+                        });
+                }
+                pane.add_rml("<br/>How much work the ray tracing pass does: the resolution it traces at and how many "
+                             "rays each pixel casts. Measured between 1.8 and 6.6 ms a frame at High on real boards, "
+                             "so lower this first if the game does not hold its frame rate. Has no effect without a "
+                             "Windows PC and an RTX card.");
             });
         leftPane.register_control(leftPane.add_select_button({
                                       .key = "Frame Rate",

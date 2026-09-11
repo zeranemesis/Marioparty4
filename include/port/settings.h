@@ -66,6 +66,10 @@ struct UserSettings {
         ConfigVar<bool> enableRayTracedAo;
         ConfigVar<bool> enableRayTracedShadows;
         ConfigVar<bool> enableRayTracedReflections;
+        // Trace resolution and ray counts as one level, 0 cheapest. The cost of
+        // the pass measured between 1.8 and 6.6 ms across real boards at the
+        // middle level, so this is what a card with less headroom turns down.
+        ConfigVar<int> rayTracingQuality;
     } video;
 
     struct {

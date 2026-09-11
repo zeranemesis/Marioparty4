@@ -81,10 +81,10 @@ index e81b621..26b0b7a 100644
      target_sources(aurora_gx PRIVATE
          lib/rmlui/pipeline.cpp
 diff --git a/include/aurora/gfx.h b/include/aurora/gfx.h
-index 61388d7..530017f 100644
+index 61388d7..f49d92c 100644
 --- a/include/aurora/gfx.h
 +++ b/include/aurora/gfx.h
-@@ -32,6 +32,13 @@ const AuroraStats* aurora_get_stats();
+@@ -32,6 +32,17 @@ const AuroraStats* aurora_get_stats();
  
  void aurora_enable_vsync(bool enabled);
  
@@ -94,6 +94,10 @@ index 61388d7..530017f 100644
 +// Ambient occlusion and shadows are separate terms of the same pass: both
 +// need the acceleration structure, so the pass runs when either is on.
 +void aurora_set_ray_tracing_terms(bool ambientOcclusion, bool shadows, bool reflections);
++// Trace resolution and ray counts as one level, 0 being cheapest. Out of range
++// values are clamped. See aurora_ray_tracing_quality_levels.
++void aurora_set_ray_tracing_quality(int level);
++int aurora_ray_tracing_quality_levels(void);
 +
  #ifdef __cplusplus
  }
@@ -1346,10 +1350,10 @@ index 0000000..a439f0a
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_capture.cpp b/lib/rt/rt_capture.cpp
 new file mode 100644
-index 0000000..e8593b9
+index 0000000..b6c43d4
 --- /dev/null
 +++ b/lib/rt/rt_capture.cpp
-@@ -0,0 +1,1455 @@
+@@ -0,0 +1,1508 @@
 +#include "rt_capture.hpp"
 +
 +#include "rt_accel.hpp"
@@ -1497,7 +1501,7 @@ index 0000000..e8593b9
 +// to shade the models, and the boards are enclosed rooms. A ray allowed to cross
 +// the whole room hits the ceiling from every pixel, so every pixel came back
 +// fully shadowed and the term stopped being a shadow and became a 44% dimmer on
-+// the entire frame. Measured on Toad's Midway Madness, mean frame brightness at
++// the entire frame. Measured on the w10Dll board, mean frame brightness at
 +// the same point of the same scene, against 151.3 with ray tracing off:
 +//
 +//   factor  reach    brightness
@@ -1514,6 +1518,34 @@ index 0000000..e8593b9
 +// Fraction of the internal render resolution the trace runs at.
 +// AURORA_RT_TRACE_SCALE overrides it.
 +float g_traceScale = 0.5f;
++
++// An environment override is a deliberate act and outranks the quality setting,
++// so whichever of the three it touched stops following the level.
++bool g_scaleFromEnv = false;
++bool g_samplesFromEnv = false;
++bool g_shadowSamplesFromEnv = false;
++
++// Quality levels, coarse on purpose: the trace costs 1.8 to 6.6 ms across real
++// boards at the default, so a card with less headroom needs somewhere to go and
++// a card with more has something to spend. Level 2 is what the defaults were
++// before this existed, so an untouched configuration renders identically.
++struct QualityLevel {
++  float scale;
++  uint32_t aoSamples;
++  uint32_t shadowSamples;
++};
++constexpr QualityLevel kQualityLevels[] = {
++    {0.25f, 16u, 8u},  // 0, roughly a quarter of the cost
++    {0.35f, 24u, 12u}, // 1
++    {0.50f, 48u, 16u}, // 2, the previous fixed behaviour
++    // 3 trades rays for resolution rather than asking for more of both: 1.00
++    // with 64 and 24 measured at 19.21 ms on w01Dll, past a whole 16.7 ms frame,
++    // which is not a quality level but a trap. The denoiser can clean noise; it
++    // cannot invent resolution, so the sharper buffer is the better half to buy.
++    {1.00f, 24u, 12u}, // 3, full resolution, fewer rays
++};
++constexpr int kQualityCount = static_cast<int>(sizeof(kQualityLevels) / sizeof(kQualityLevels[0]));
++int g_quality = 2;
 +
 +// View-space bounds of the captured geometry, rebuilt every frame.
 +float g_boundsMin[3] = {0.f, 0.f, 0.f};
@@ -2376,6 +2408,28 @@ index 0000000..e8593b9
 +
 +bool enabled() noexcept { return g_enabled; }
 +
++void set_quality(int level) noexcept {
++  const int clamped = level < 0 ? 0 : (level >= kQualityCount ? kQualityCount - 1 : level);
++  if (clamped == g_quality) {
++    return;
++  }
++  g_quality = clamped;
++  const QualityLevel& q = kQualityLevels[clamped];
++  if (!g_scaleFromEnv) {
++    g_traceScale = q.scale;
++  }
++  if (!g_samplesFromEnv) {
++    g_samples = q.aoSamples;
++  }
++  if (!g_shadowSamplesFromEnv) {
++    g_shadowSamples = q.shadowSamples;
++  }
++  Log.info("Ray tracing quality {}: scale {:.2f}, {} AO samples, {} shadow samples", clamped,
++           g_traceScale, g_samples, g_shadowSamples);
++}
++
++int quality_levels() noexcept { return kQualityCount; }
++
 +void set_features(bool ambientOcclusion, bool shadows, bool reflections) noexcept {
 +  const uint32_t features = (ambientOcclusion ? trace::FeatureAmbientOcclusion : 0u) |
 +                            (shadows ? trace::FeatureShadows : 0u) |
@@ -2406,6 +2460,7 @@ index 0000000..e8593b9
 +    }
 +    if (const char* env = std::getenv("AURORA_RT_AO_SAMPLES")) {
 +      g_samples = static_cast<uint32_t>(std::atoi(env));
++      g_samplesFromEnv = true;
 +    }
 +    if (const char* env = std::getenv("AURORA_RT_AO_RADIUS")) {
 +      g_radius = static_cast<float>(std::atof(env));
@@ -2418,6 +2473,7 @@ index 0000000..e8593b9
 +    }
 +    if (const char* env = std::getenv("AURORA_RT_TRACE_SCALE")) {
 +      g_traceScale = static_cast<float>(std::atof(env));
++      g_scaleFromEnv = true;
 +      Log.info("Trace resolution scale {:.2f}", g_traceScale);
 +    }
 +    if (const char* env = std::getenv("AURORA_RT_ORTHO_MASK")) {
@@ -2442,6 +2498,7 @@ index 0000000..e8593b9
 +    if (const char* env = std::getenv("AURORA_RT_SHADOW_SAMPLES")) {
 +      const int count = std::atoi(env);
 +      g_shadowSamples = count <= 0 ? 1u : static_cast<uint32_t>(count);
++      g_shadowSamplesFromEnv = true;
 +    }
 +    if (const char* env = std::getenv("AURORA_RT_DEBUG_MODE")) {
 +      const int mode = std::atoi(env);
@@ -2807,10 +2864,10 @@ index 0000000..e8593b9
 +} // namespace aurora::rt
 diff --git a/lib/rt/rt_capture.hpp b/lib/rt/rt_capture.hpp
 new file mode 100644
-index 0000000..9e699be
+index 0000000..ba93b45
 --- /dev/null
 +++ b/lib/rt/rt_capture.hpp
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,47 @@
 +#pragma once
 +
 +#include <dolphin/gx.h>
@@ -2841,6 +2898,11 @@ index 0000000..9e699be
 +// setter keeps the engine layer free of the game's configuration types.
 +void set_enabled(bool enabled) noexcept;
 +bool enabled() noexcept;
++
++// Trace resolution and ray counts, as one coarse level. Clamped to range; an
++// AURORA_RT_* override of any of the three keeps precedence over it.
++void set_quality(int level) noexcept;
++int quality_levels() noexcept;
 +
 +// Which terms the trace computes, independently of the master toggle above.
 +// Turning both off leaves the pass running but writing an untouched white
@@ -4969,7 +5031,7 @@ index 0000000..a8d233a
 +  gTarget[tid.xy] = float4(result, 1.0f);
 +}
 diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
-index a969465..23673c5 100644
+index a969465..73337ad 100644
 --- a/lib/webgpu/gpu.cpp
 +++ b/lib/webgpu/gpu.cpp
 @@ -21,6 +21,23 @@
@@ -5251,7 +5313,7 @@ index a969465..23673c5 100644
    g_CopyBindGroupLayout = {};
    g_CopyPipeline = {};
    g_CopyBindGroup = {};
-@@ -1043,9 +1226,40 @@ void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, ui
+@@ -1043,9 +1226,56 @@ void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, ui
    g_depthBuffer = create_depth_texture(width, height);
    g_CopyBindGroup = create_copy_bind_group(present_source());
  }
@@ -5290,6 +5352,22 @@ index a969465..23673c5 100644
 +  (void)ambientOcclusion;
 +  (void)shadows;
 +  (void)reflections;
++#endif
++}
++
++void aurora_set_ray_tracing_quality(const int level) {
++#ifdef _WIN32
++  aurora::rt::set_quality(level);
++#else
++  (void)level;
++#endif
++}
++
++int aurora_ray_tracing_quality_levels(void) {
++#ifdef _WIN32
++  return aurora::rt::quality_levels();
++#else
++  return 0;
 +#endif
 +}
 diff --git a/lib/webgpu/gpu.hpp b/lib/webgpu/gpu.hpp

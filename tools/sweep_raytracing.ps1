@@ -35,7 +35,7 @@ foreach ($run in 1..$Runs) {
     $scene = if ($text -match 'reached (\S+) on attempt') { $Matches[1] } else { 'none' }
     # Echo what the child said about walking the carousel: without this the run
     # looks identical whether the board moved or not.
-    $out | Select-String 'plateau suivant' | ForEach-Object { Write-Host "  $_" }
+    $out | Select-String 'plateau :' | ForEach-Object { Write-Host "  $_" }
     if ($scene -eq 'none') {
         Write-Host "  aucune scene atteinte"
         $out | Select-Object -Last 4 | ForEach-Object { Write-Host "    $_" }

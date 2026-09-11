@@ -23,6 +23,7 @@ UserSettings g_userSettings = {
         .enableRayTracedAo {"video.enableRayTracedAo", false},
         .enableRayTracedShadows {"video.enableRayTracedShadows", true},
         .enableRayTracedReflections {"video.enableRayTracedReflections", true},
+        .rayTracingQuality {"video.rayTracingQuality", 2},
     },
 
     .audio = {
@@ -102,6 +103,7 @@ void registerSettings() {
     Register(g_userSettings.video.enableRayTracedAo);
     Register(g_userSettings.video.enableRayTracedShadows);
     Register(g_userSettings.video.enableRayTracedReflections);
+    Register(g_userSettings.video.rayTracingQuality);
 
     // Audio
     Register(g_userSettings.audio.masterVolume);

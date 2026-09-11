@@ -208,12 +208,14 @@ function Invoke-Run {
             else { Send-Pad $A }
         }
         elseif ($script:onCarousel -and $boards -lt $BoardIndex) {
-            # One card right per visit, so the board actually changes rather than
-            # the cursor racing past several: the carousel re-reads the stick
-            # every frame it is held.
-            $boards++
-            Write-Host "  plateau suivant ($boards/$BoardIndex)"
-            Send-Pad 0 100 0
+            # All the moves in one visit. The carousel only stays up for about
+            # two steps, so taking one card per visit put a ceiling of two on how
+            # far right the sweep could ever reach. Each deflection is its own
+            # one frame pulse, spaced so the game latches them separately.
+            $want = $BoardIndex - $boards
+            Write-Host "  plateau : $want cartes vers la droite"
+            foreach ($i in 1..$want) { Send-Pad 0 100 0; Start-Sleep -Milliseconds 250 }
+            $boards = $BoardIndex
         }
         else { $e = $setup[$index % $setup.Count]; Send-PadAllPorts $e[0] $e[1] $e[2]; $index++ }
 
