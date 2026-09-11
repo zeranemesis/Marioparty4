@@ -96,14 +96,38 @@ NAMED_BUTTONS = {
     "NONE": 0,
 }
 
-# Everything a monkey is allowed to press. START is deliberately absent: it
-# opens the pause menu, which can quit to the title screen, and a run that
-# quits itself reports a clean exit having tested nothing.
-SAFE_BUTTONS = [
-    PAD_BUTTON_A, PAD_BUTTON_B, PAD_BUTTON_X, PAD_BUTTON_Y,
-    PAD_BUTTON_UP, PAD_BUTTON_DOWN, PAD_BUTTON_LEFT, PAD_BUTTON_RIGHT,
-    PAD_TRIGGER_Z,
+# Everything a monkey is allowed to press, with weights. START is deliberately
+# absent: it opens the pause menu, which can quit to the title screen, and a run
+# that quits itself reports a clean exit having tested nothing.
+#
+# WHY WEIGHTED, AND NOT UNIFORM. The first unattended run measured it: seed 1001
+# drove Boo's Haunted Bash for 51843 frames - fourteen minutes - and reached
+# TURN 1. It entered one minigame and then stalled.
+#
+# A board game is a corridor of confirmation dialogs, and A is what walks
+# through them. Picking uniformly from nine buttons presses A on about one
+# active period in nine, so the monkey spends most of its time pressing things
+# that do nothing to a dialog waiting for A. Weighting A heavily is not making
+# the monkey play well - it still chooses at random - it is giving it the key to
+# the doors that are actually in front of it.
+#
+# B is second because it cancels and backs out, which is how a monkey escapes a
+# submenu it wandered into. The d-pad and Z are kept low but non-zero: they
+# reach things A never will, and a monkey that only presses A is a script.
+WEIGHTED_BUTTONS = [
+    (PAD_BUTTON_A, 50),
+    (PAD_BUTTON_B, 15),
+    (PAD_BUTTON_UP, 5),
+    (PAD_BUTTON_DOWN, 5),
+    (PAD_BUTTON_LEFT, 5),
+    (PAD_BUTTON_RIGHT, 5),
+    (PAD_BUTTON_X, 5),
+    (PAD_BUTTON_Y, 5),
+    (PAD_TRIGGER_Z, 5),
 ]
+# The safety mask stays a plain list, derived from the weights so the two can
+# never drift apart: what may be pressed is defined in exactly one place.
+SAFE_BUTTONS = [button for button, _ in WEIGHTED_BUTTONS]
 
 STICK_MAX = 72  # what the game clamps an analog stick to; see PADClamp.
 
@@ -237,6 +261,19 @@ def run_navigator(steps):
 
 # --- monkey ----------------------------------------------------------------
 
+def weighted_button(rng):
+    """Pick a button from WEIGHTED_BUTTONS. Uses the rng passed in, so the file
+    stays reproducible from its seed."""
+    total = sum(weight for _, weight in WEIGHTED_BUTTONS)
+    roll = rng.randint(1, total)
+    running = 0
+    for button, weight in WEIGHTED_BUTTONS:
+        running += weight
+        if roll <= running:
+            return button
+    return WEIGHTED_BUTTONS[0][0]
+
+
 def run_monkey(frames_wanted, seed, hold_min, hold_max, idle_bias):
     """Seeded random input over the safe mask.
 
@@ -267,7 +304,7 @@ def run_monkey(frames_wanted, seed, hold_min, hold_max, idle_bias):
                     state["buttons"] = 0
                     state["sx"] = state["sy"] = 0
                 else:
-                    state["buttons"] = seat_rng.choice(SAFE_BUTTONS)
+                    state["buttons"] = weighted_button(seat_rng)
                     # A stick position more often than not: board movement and
                     # most minigames are analog, and a button-only monkey never
                     # walks anywhere.

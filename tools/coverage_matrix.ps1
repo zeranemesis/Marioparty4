@@ -145,8 +145,21 @@ foreach ($file in $runFiles) {
     $source = if ($run.PSObject.Properties.Name -contains 'coverage_source') { [string]$run.coverage_source } else { 'RECORDED' }
     foreach ($overlay in $played) {
         $id = [int]$overlay
-        if ($run.result -ne 'PASS') {
+        # FAIL is for something going wrong WHERE THE MINIGAME IS, not for the
+        # run failing elsewhere. A monkey that entered a minigame cleanly and
+        # then stalled on the board two minutes later has told us something true
+        # about that minigame - it was reached and it did not break - and
+        # condemning it would both lose that and cry wolf.
+        #
+        # A crash or a desync still marks FAIL, because attributing them is hard
+        # and hiding them would be worse. TIMEOUT and ABNORMAL_EXIT are progress
+        # verdicts about the run, not about the minigame.
+        if ($run.result -eq 'CRASH' -or $run.result -eq 'DESYNC') {
             Promote $id 'FAIL' "$($run.result) in $($run.scenario) run $($run.run_index)"
+        } elseif ($run.result -eq 'HARNESS_FAILURE') {
+            # The harness could not deliver the scenario, so the run says nothing
+            # about anything. Credit nothing.
+            continue
         } else {
             # RECORDED replays a human session; it is still not a human session,
             # so it is capped exactly where SCRIPTED is.

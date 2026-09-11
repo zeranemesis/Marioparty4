@@ -331,6 +331,7 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         min_turns = 0
         generated_seed = -1
         generated_frames = 0
+        generator_version = ''
         mem_sweep_blocks = 0
         mem_sweep_average_ms = 0
         mem_sweep_worst_ms = 0
@@ -397,6 +398,11 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         Remove-Item -LiteralPath $monkeyOnly -Force -ErrorAction SilentlyContinue
         $record.generated_seed = [int]$recipe.seed
         $record.generated_frames = [int]$recipe.frames
+        # A seed only reproduces a file against a GIVEN generator. Changing the
+        # button weights changed what seed 1001 produces, which is correct and
+        # intended - and it means the seed alone no longer identifies the input.
+        # The generator's own hash does, so it is recorded beside the seed.
+        $record.generator_version = (Get-FileHash -LiteralPath $generator -Algorithm SHA256).Hash.Substring(0, 12).ToLower()
     }
 
     $timer = [Diagnostics.Stopwatch]::StartNew()
