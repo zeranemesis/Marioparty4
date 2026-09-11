@@ -31,6 +31,13 @@ void msmStreamLogicalTick(void) { ++logicalAudioTicks; }
  * tick the network refused. */
 void PartyBoard_ThpLogicalTick(void) { ++logicalMovieTicks; }
 void PartyBoard_NetplayControlMotor(u32 port, u32 command) { (void)port; (void)command; }
+/* Per-tick detectors that pad.c drives. Both only observe - the heap sweep
+ * reports corruption and the watchdog reports stack headroom - so stubbing them
+ * cannot change what this test measures, which is that the logical clocks
+ * advance exactly once per accepted tick. This build broke the day those hooks
+ * were added; nothing ran this file until tools/run_all_tests.ps1. */
+void PartyBoard_MemDiagTick(void) {}
+void PartyBoard_CoroutineWatchdogTick(void) {}
 bool PartyBoard_NetplayPreparePads(PADStatus status[4], u32* rumble, bool startup)
 {
     (void)rumble; (void)startup;

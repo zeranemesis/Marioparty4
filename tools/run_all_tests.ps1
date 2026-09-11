@@ -36,6 +36,30 @@ function Resolve-RunnerPath([string]$path) {
 # machine that has never seen the game, which is what lets CI run them.
 $needsDisc = @('test_netplay_boot')
 
+# Two scripts need more than a disc path to mean anything, and the knowledge of
+# how to call them already lives in validate_netplay.ps1. Rather than guess,
+# this mirrors it.
+#
+# test_netplay_boot is a driver with several modes, not a single test. Run with
+# no mode it boots two instances, sits still for thirty seconds and fails on
+# "No overlay transition observed" - which is the script correctly reporting
+# that nothing happened, not a defect. -Menu is its shortest meaningful mode.
+$extraArguments = @{
+    'test_netplay_boot' = @{ Menu = $true; DurationSeconds = 60 }
+}
+
+# Scripts that use exit code 2 to mean "this environment cannot run me", as
+# distinct from "I ran and something is wrong". Listed by name rather than
+# assumed for every script, because for most of them a non-zero exit is a real
+# failure and silently forgiving one would be worse than any missing coverage.
+#
+# test_direct_connection exits 2 when a VPN owns the priority route: it refuses
+# to probe the router or open a port through someone's VPN, which is the correct
+# thing to do and must not be reported as a failing test.
+$notApplicableExit = @{
+    'test_direct_connection' = 2
+}
+
 $scripts = @(Get-ChildItem $PSScriptRoot -Filter 'test_*.ps1' | Sort-Object Name)
 if ($scripts.Count -eq 0) { Write-Output 'No test_*.ps1 found.'; exit 2 }
 
@@ -72,6 +96,9 @@ foreach ($script in $scripts) {
     $started = Get-Date
     $arguments = @{}
     if ($needsDisc -contains $name) { $arguments['DiscPath'] = $DiscPath }
+    if ($extraArguments.ContainsKey($name)) {
+        foreach ($key in $extraArguments[$name].Keys) { $arguments[$key] = $extraArguments[$name][$key] }
+    }
     try {
         & $script.FullName @arguments 2>&1 | ForEach-Object { Write-Output "  $_" }
         $code = $LASTEXITCODE
@@ -80,8 +107,16 @@ foreach ($script in $scripts) {
         $code = 99
     }
     $seconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
-    $outcome = if ($code -eq 0) { 'PASS' } else { "FAIL(exit $code)" }
-    $results += @{ Name = $name; Outcome = $outcome; Seconds = $seconds; Reason = '' }
+    $reason = ''
+    $outcome = if ($code -eq 0) {
+        'PASS'
+    } elseif ($notApplicableExit.ContainsKey($name) -and $code -eq $notApplicableExit[$name]) {
+        $reason = "the script reported this environment cannot run it (exit $code)"
+        'NOT_APPLICABLE'
+    } else {
+        "FAIL(exit $code)"
+    }
+    $results += @{ Name = $name; Outcome = $outcome; Seconds = $seconds; Reason = $reason }
     Write-Output ('--- {0}: {1} in {2} s' -f $name, $outcome, $seconds)
 }
 
@@ -94,11 +129,12 @@ foreach ($result in $results) {
 $passed = @($results | Where-Object { $_.Outcome -eq 'PASS' }).Count
 $failed = @($results | Where-Object { $_.Outcome -like 'FAIL*' }).Count
 $skipped = @($results | Where-Object { $_.Outcome -eq 'SKIPPED' }).Count
+$notApplicable = @($results | Where-Object { $_.Outcome -eq 'NOT_APPLICABLE' }).Count
 Write-Output ''
-Write-Output ('{0} scripts: {1} passed, {2} failed, {3} skipped, {4:n0} s total' -f
-    $results.Count, $passed, $failed, $skipped, ((Get-Date) - $startedAll).TotalSeconds)
-if ($skipped -gt 0) {
-    Write-Output 'Skipped scripts did not run and prove nothing. The reasons are above.'
+Write-Output ('{0} scripts: {1} passed, {2} failed, {3} skipped, {4} not applicable, {5:n0} s total' -f
+    $results.Count, $passed, $failed, $skipped, $notApplicable, ((Get-Date) - $startedAll).TotalSeconds)
+if ($skipped -gt 0 -or $notApplicable -gt 0) {
+    Write-Output 'Scripts that did not run prove nothing. The reasons are above.'
 }
 
 if ($failed -gt 0) { exit 1 }

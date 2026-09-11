@@ -16,6 +16,18 @@ void co_delete(cothread_t thread) { abort(); }
 void co_switch(cothread_t thread) { abort(); }
 /* omDLLInit logs while invalidating a previous module lifetime. */
 void OSReport(const char *message, ...) { (void)message; }
+/* Diagnostics hooks that process.c calls. They observe and report; they change
+ * no process state, so a snapshot test is unaffected by stubbing them out. This
+ * build broke the day those hooks were added and nobody noticed, because until
+ * tools/run_all_tests.ps1 existed nothing ran this file. */
+u32 PartyBoard_CoroutineStackPeak(const void *stack, u32 size)
+{
+    (void)stack; (void)size; return 0;
+}
+void PartyBoard_CrashBreadcrumb(const char *category, const char *format, ...)
+{
+    (void)category; (void)format;
+}
 void *HuMemDirectMalloc(HeapID heap, size_t size) { abort(); return NULL; }
 void HuMemDirectFree(void *ptr) { abort(); }
 void *HuMemHeapInit(void *ptr, size_t size) { abort(); return NULL; }
