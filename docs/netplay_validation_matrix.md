@@ -106,6 +106,33 @@ a son point d'entree (`include/port/board_coverage.h`) :
 | premiers tours — des | `DICE` | `roll.c` |
 | adversaires CPU | `CPU` | `com.c` |
 | tutoriel | `TUTORIAL` | `tutorial.c` |
+| gimmicks — Big Boo (w04) | `W04_BIG_BOO` | `src/REL/w04Dll/boo_event.c` |
+
+Les gimmicks propres à un plateau ne sont **pas** dans `src/game/board/` : ils
+sont dans le module du plateau. C'est le premier run marqué qui l'a montré — un
+enregistrement de 48 671 frames de Boo's Haunted Bash n'a signalé **aucun** `BOO`
+tout en traversant l'événement Big Boo, parce que `board/boo.c` est le vol de
+pièces et d'étoile générique et non cet événement-là. Le marqueur `W04_BIG_BOO`
+est posé sur la ligne exacte où vivait le défaut D4.
+
+Les huit autres plateaux n'ont pas encore de marqueur de gimmick. Ils en auront
+un quand un run y sera mené, pas avant : poser un marqueur dans un module qu'on
+n'a pas lu reviendrait à inventer la ligne de la matrice qu'il est censé prouver.
+
+#### Ce que l'enregistrement `board-replay.txt` couvre réellement
+
+Première mesure, le 2026-09-11, sur 48 671 frames de `w04Dll` :
+
+```
+TUTORIAL@5962  DICE@8665  SHOP@9086  MUSHROOM@11111  WARP@18439  CPU@20504  ITEM@20695
+```
+
+Sept mécaniques. **Ne sont donc pas couvertes par cet enregistrement** : `STAR`,
+`BOO`, `BOO_HOUSE`, `LOTTERY`, `BATTLE`, `FORTUNE`, `BOWSER`, `BLOCK`, `LAST5`.
+
+C'est la première fois que cette liste est établie à partir de ce que le jeu a
+fait plutôt qu'à partir d'un souvenir, et elle est plus courte que ce que la
+matrice laissait entendre.
 
 Le jeu ecrit `COVERAGE> <marqueur> first reached at frame <n>` sur sa sortie
 standard ; `netplay_campaign.ps1` et `record_board_session.ps1` la relisent et
