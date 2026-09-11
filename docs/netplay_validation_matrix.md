@@ -19,22 +19,25 @@ document du binaire sans que quelqu'un s'en apercoive.
 
 ## Plateaux
 
-Neuf overlays de plateau existent dans la table. `w01` a `w06` sont les six
-plateaux principaux ; `w10`, `w20` et `w21` sont les autres terrains. Les noms
-commerciaux ne sont volontairement pas inscrits ici tant qu'ils n'auront pas
-ete lus depuis les donnees du disque plutot que depuis un souvenir.
+Trois sources croisees : `include/ovl_table.h` pour le numero d'overlay,
+`src/game/board/main.c:137` pour l'identite que le module de plateau affecte a
+`GWSystem.board`, et `include/game/board/main.h` pour le nom, qui y est en
+commentaire de chaque `BOARD_ID_`.
 
-| overlay | dll | sources dans l'arbre | statut | ce qui a ete exerce |
-|---|---|---|---|---|
-| 89 | `w01Dll` | oui | `UNTESTED` | rien |
-| 90 | `w02Dll` | oui | `UNTESTED` | rien |
-| 91 | `w03Dll` | oui | `UNTESTED` | rien |
-| 92 | `w04Dll` | oui | `PARTIAL` | un replay enregistre : entree, plusieurs tours, quatre mini-jeux, quatre retours par l'ecran de resultats, evenement Big Boo |
-| 93 | `w05Dll` | oui | `UNTESTED` | rien |
-| 94 | `w06Dll` | oui | `UNTESTED` | rien |
-| 95 | `w10Dll` | oui | `UNTESTED` | rien |
-| 96 | `w20Dll` | oui | `UNTESTED` | rien |
-| 97 | `w21Dll` | oui | `UNTESTED` | rien |
+| overlay | dll | `GWSystem.board` | nom | role | statut |
+|---|---|---|---|---|---|
+| 89 | `w01dll` | 0 | Toads Midway Madness | plateau principal | `UNTESTED` |
+| 90 | `w02dll` | 1 | Goombas Greedy Gala | plateau principal | `UNTESTED` |
+| 91 | `w03dll` | 2 | Shy Guys Jungle Jam | plateau principal | `UNTESTED` |
+| 92 | `w04dll` | 3 | Boos Haunted Bash | plateau principal | `PARTIAL` |
+| 93 | `w05dll` | 4 | Koopas Seaside Soiree | plateau principal | `UNTESTED` |
+| 94 | `w06dll` | 5 | Bowsers Gnarly Party | plateau principal | `UNTESTED` |
+| 95 | `w10dll` | 6 | Tutorial Board | tutoriel | `UNTESTED` |
+| 96 | `w20dll` | 7 | Mega Board Mayhem | plateau supplementaire | `UNTESTED` |
+| 97 | `w21dll` | 8 | Mini Board Mad Dash | plateau supplementaire | `UNTESTED` |
+
+**Six plateaux principaux, un tutoriel, deux plateaux supplementaires.** Seul
+`w04Dll`, Boo's Haunted Bash, a ete exerce en ligne, et seulement en partie.
 
 ### Liste de controle par plateau
 
@@ -57,11 +60,10 @@ pairs, sans crash et sans divergence :
 - [ ] plusieurs tours consecutifs
 - [ ] fin de partie
 
-Etat actuel de `w04Dll` sur cette liste : les lignes *entree*, *deplacements*,
-*mini-jeux* et *retour mini-jeu vers plateau* sont exercees par le replay
-enregistre ; *evenements* l'est partiellement (Big Boo). Les autres sont
-`UNTESTED`. C'est pourquoi le plateau reste `PARTIAL` et non `PASS`.
-
+Etat de Boo's Haunted Bash sur cette liste : *entree*, *deplacements*,
+*mini-jeux* et *retour mini-jeu vers plateau* sont exerces par l'enregistrement ;
+*evenements* l'est partiellement, par le seul evenement Big Boo. Les dix autres
+lignes sont `UNTESTED`, et c'est pourquoi le plateau reste `PARTIAL`.
 ## Mini-jeux
 
 Deux tables du depot, croisees : `src/REL/selmenuDll/main.c` donne les noms,
