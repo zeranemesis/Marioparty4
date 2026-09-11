@@ -61,7 +61,16 @@ param(
     [int]$ClientPad = 1,
     # A name for this session folder, so the two machines' folders can be told
     # apart once they are copied together.
-    [string]$Label = ''
+    [string]$Label = '',
+    # Rehearsal only. Feeds both seats a recorded input file instead of a live
+    # controller, so the Host/Join plumbing - ports, addresses, two independent
+    # supervisors, the merge - can be exercised end to end before two people sit
+    # down. A rehearsal is marked as such in session.json and can NEVER count as
+    # human coverage: it reproduces a recording, it does not play a game.
+    [string]$ReplayInput = '',
+    # Rehearsal only: stop after this many seconds rather than waiting for a
+    # window to close.
+    [int]$MaxSeconds = 0
 )
 $ErrorActionPreference = 'Stop'
 $projectPath = Split-Path $PSScriptRoot -Parent
@@ -180,6 +189,9 @@ foreach ($side in $sides) {
     $start.WorkingDirectory = $binaryPath
     $start.Arguments = "$net --netplay-full --netplay-pad $pad " +
         '--netplay-record-input ' + [char]34 + $recording + [char]34
+    if ($ReplayInput) {
+        $start.Arguments += ' --netplay-replay-input ' + [char]34 + (Resolve-TestPath $ReplayInput) + [char]34
+    }
     $start.UseShellExecute = $false
     # Captured so the overlay path can be extracted with the same pattern the
     # replay test uses; without it a human recording cannot become a regression.
@@ -253,12 +265,15 @@ Write-Output "Session files: $runPath"
 # recording, which is precisely why the determinism comparison has to move to a
 # merge step performed afterwards on both folders.
 $pollMilliseconds = 250
+$deadline = if ($MaxSeconds -gt 0) { (Get-Date).AddSeconds($MaxSeconds) } else { [datetime]::MaxValue }
+$deadlineReached = $false
 while ($true) {
     $exited = @($peers | Where-Object { $_.Process.HasExited })
     if ($exited.Count -gt 0) {
         foreach ($peer in $exited) { $peer.ObservedFirst = $true }
         break
     }
+    if ((Get-Date) -ge $deadline) { $deadlineReached = $true; break }
     Start-Sleep -Milliseconds $pollMilliseconds
 }
 $observedSimultaneously = (@($peers | Where-Object { $_.ObservedFirst })).Count -gt 1
@@ -507,6 +522,9 @@ if ($Role -eq 'Local') {
     if ($shared -gt 0) { [IO.File]::WriteAllLines($target, $recorded[$sides[0]]) }
 }
 
+if ($deadlineReached) {
+    foreach ($peer in $peers) { $peer.Classification = 'SUPERVISOR_TERMINATED' }
+}
 $crashed = @($peers | Where-Object { $_.Classification -eq 'PROCESS_CRASH' -or $_.Classification -eq 'HEAP_CORRUPTION' })
 $unexplained = @($peers | Where-Object { $_.Classification -eq 'UNKNOWN_ABNORMAL_EXIT' })
 $userAsked = @($peers | Where-Object { $_.Classification -eq 'USER_REQUESTED_EXIT' })
@@ -516,7 +534,18 @@ $determinism = if ($Role -ne 'Local') {
 } elseif ($determinismProblems.Count -eq 0 -and $shared -ge 600) { 'PASS' } else { 'FAIL' }
 $stability = if ($crashed.Count -eq 0 -and $unexplained.Count -eq 0) { 'PASS' } else { 'FAIL' }
 $userTerminated = if ($userAsked.Count -gt 0) { 'YES' } else { 'NO' }
-$overall = if (($determinism -eq 'PASS' -or $determinism -eq 'DEFERRED') -and $stability -eq 'PASS' `
+# A rehearsal ends on its deadline, not on a player deciding to quit, so
+# USER_TERMINATED is NO by construction. Bending the acceptance criterion to
+# accommodate that would make it meaningless for the sessions it exists for, so a
+# rehearsal is judged on what it can actually establish - the two sides connected
+# over real UDP, stayed in sync and neither died - and says plainly that it is
+# not a human session.
+$isRehearsal = [bool]$ReplayInput
+$overall = if ($isRehearsal) {
+    if ($stability -eq 'PASS' -and $determinism -ne 'FAIL' -and $playability -ne 'FAIL') {
+        if ($determinism -eq 'DEFERRED') { 'REHEARSAL_PENDING_MERGE' } else { 'REHEARSAL_PASS' }
+    } else { 'FAIL' }
+} elseif (($determinism -eq 'PASS' -or $determinism -eq 'DEFERRED') -and $stability -eq 'PASS' `
         -and $userTerminated -eq 'YES' -and $playability -ne 'FAIL') {
     if ($determinism -eq 'DEFERRED') { 'PENDING_MERGE' } else { 'PASS' }
 } else { 'FAIL' }
@@ -526,6 +555,13 @@ $summaryPath = Join-Path $runPath 'session-crash-summary.txt'
 $summary = New-Object Collections.Generic.List[string]
 $summary.Add('PARTYBOARD_SESSION_SUMMARY version=2')
 $summary.Add("role=$Role")
+$summary.Add("rehearsal=$isRehearsal")
+if ($isRehearsal) {
+    $summary.Add("replay_input=$ReplayInput")
+    $summary.Add('NOTE: a rehearsal reproduces a recording. It exercises the connection, the two')
+    $summary.Add('      supervisors and the merge. It is NOT human coverage and no matrix row may')
+    $summary.Add('      be moved on its evidence.')
+}
 $summary.Add("session_directory=$runPath")
 $summary.Add("udp_port=$port")
 if ($Role -eq 'Join') { $summary.Add("join_address=$JoinAddress") }
@@ -639,6 +675,9 @@ $document = [ordered]@{
     schema = 2
     role = $Role
     label = $Label
+    rehearsal = $isRehearsal
+    replay_input = $ReplayInput
+    coverage_source = $(if ($isRehearsal) { 'SCRIPTED' } else { 'HUMAN' })
     session_directory = $runPath
     udp_port = $port
     join_address = $JoinAddress
@@ -736,6 +775,10 @@ if ($Role -ne 'Local') {
     Write-Output "  tools\merge_session.ps1 $mine"
 }
 
+if ($isRehearsal) {
+    Write-Output ''
+    Write-Output 'REHEARSAL: this run replayed a recording. It proves the plumbing, not the game.'
+}
 if ($overall -eq 'FAIL') {
     Write-Output ''
     Write-Output 'This session is NOT a pass. A session passes only when the peers stayed in sync,'
@@ -743,7 +786,8 @@ if ($overall -eq 'FAIL') {
     Write-Output 'session was not spent waiting for the other machine.'
     exit 1
 }
-if ($overall -eq 'PENDING_MERGE') { exit 2 }
+if ($overall -eq 'PENDING_MERGE' -or $overall -eq 'REHEARSAL_PENDING_MERGE') { exit 2 }
+if ($overall -eq 'REHEARSAL_PASS') { exit 0 }
 Write-Output ''
 Write-Output 'Replay it with:'
 Write-Output "  tools\test_netplay_boot.ps1 -DiscPath ""$disc"" -ReplayInput ""$Output"""
