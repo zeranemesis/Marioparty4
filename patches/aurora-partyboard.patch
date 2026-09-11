@@ -1282,10 +1282,10 @@ index 0000000..6859eeb
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_accel.hpp b/lib/rt/rt_accel.hpp
 new file mode 100644
-index 0000000..b4a896f
+index 0000000..ca1df2c
 --- /dev/null
 +++ b/lib/rt/rt_accel.hpp
-@@ -0,0 +1,88 @@
+@@ -0,0 +1,99 @@
 +#pragma once
 +
 +#include <cstddef>
@@ -1338,6 +1338,17 @@ index 0000000..b4a896f
 +  MaterialTranslucent = 1u << 2,
 +};
 +
++// The high byte of the same word carries how much of a cut-out surface is
++// solid, 0..255. Cut-out geometry is traced as opaque -- alpha testing in
++// traversal would cost far more -- so a canopy of leaves blocks light like a
++// wall. Weighting a hit by this is not alpha testing and does not produce
++// hole-shaped light, but it stops a surface that is mostly holes from occluding
++// as though it were solid. Only meaningful with MaterialCutout set.
++enum : uint32_t {
++  MaterialOpacityShift = 8u,
++  MaterialOpacityMask = 0xffu,
++};
++
 +// `materials` holds one MaterialFlag set per triangle, so vertexCount / 3.
 +// `contentHash` identifies the geometry: when it matches the last successful
 +// build, the structures are still valid and the build is skipped. The caller
@@ -1376,10 +1387,10 @@ index 0000000..b4a896f
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_capture.cpp b/lib/rt/rt_capture.cpp
 new file mode 100644
-index 0000000..21342fd
+index 0000000..b0dce2a
 --- /dev/null
 +++ b/lib/rt/rt_capture.cpp
-@@ -0,0 +1,1641 @@
+@@ -0,0 +1,1656 @@
 +#include "rt_capture.hpp"
 +
 +#include "rt_accel.hpp"
@@ -1629,6 +1640,13 @@ index 0000000..21342fd
 +uint32_t g_orthoBounded = 0;
 +double g_orthoBoundedArea = 0.0;
 +bool g_maskEnabled = true;
++// AURORA_RT_CUTOUT_OPAQUE=1 packs every cut-out surface as fully solid, which
++// is what the trace did before the solid fraction was carried. There to measure
++// the difference against, on a scene that repeats.
++const bool g_cutoutOpaque = [] {
++  const char* env = std::getenv("AURORA_RT_CUTOUT_OPAQUE");
++  return env != nullptr && env[0] != '0';
++}();
 +// Brightest GX light of the frame, view space; w acts as a "present" flag.
 +float g_light[4] = {0.f, 0.f, 0.f, 0.f};
 +float g_lightWeight = 0.f;
@@ -2159,6 +2177,14 @@ index 0000000..21342fd
 +  if (const auto& tex = g_gxState.textures[0]; tex.ref && !ortho) {
 +    if (tex.ref->cutoutFraction > 0.05f) {
 +      material |= accel::MaterialCutout; // holes, rather than uniform haze
++      // How much of the surface is actually solid, as 0..255 in the high byte.
++      // Cut-out geometry is traced as opaque, so a leaf canopy blocks light like
++      // a wall; weighting a hit by this is not alpha testing, but it is far
++      // closer than counting every hit whole. See MaterialOpacityShift.
++      const float solid = g_cutoutOpaque ? 1.f : (1.f - tex.ref->cutoutFraction);
++      const uint32_t packed = static_cast<uint32_t>(
++          (solid < 0.f ? 0.f : (solid > 1.f ? 1.f : solid)) * 255.f + 0.5f);
++      material |= packed << accel::MaterialOpacityShift;
 +      ++g_drawsAlphaTested;
 +    } else if (tex.ref->averageAlpha < 0.95f) {
 +      material |= accel::MaterialTranslucent;
@@ -2988,9 +3014,9 @@ index 0000000..21342fd
 +             seen > 0 ? 100.0 * static_cast<double>(g_staticTriangles) / static_cast<double>(seen)
 +                      : 0.0,
 +             g_staticTriangles, seen);
-+    Log.info("Of {} captured draws: {} cut-out, {} uniformly translucent "
-+             "-- all traced as opaque; {} environment mapped; {} baked for want of "
-+             "a usable matrix",
++    Log.info("Of {} captured draws: {} cut-out, occluding by their solid fraction; {} "
++             "uniformly translucent, still traced as opaque; {} environment mapped; {} "
++             "baked for want of a usable matrix",
 +             g_drawsTotal, g_drawsAlphaTested, g_drawsBlended, g_drawsReflective,
 +             g_drawsSingularMatrix);
 +    // More than one means part of the picture is being traced through a
@@ -4611,10 +4637,10 @@ index 0000000..98c8d55
 +} // namespace aurora::rt::trace
 diff --git a/lib/rt/shaders/rt_ao.hlsl b/lib/rt/shaders/rt_ao.hlsl
 new file mode 100644
-index 0000000..4e7416c
+index 0000000..a3a876e
 --- /dev/null
 +++ b/lib/rt/shaders/rt_ao.hlsl
-@@ -0,0 +1,490 @@
+@@ -0,0 +1,506 @@
 +// Ray traced ambient occlusion for PartyBoard.
 +//
 +// Primary visibility is traced rather than rasterised: with inline RayQuery the
@@ -4731,6 +4757,20 @@ index 0000000..4e7416c
 +#define MATERIAL_REFLECTIVE 1u
 +#define MATERIAL_CUTOUT 2u
 +#define MATERIAL_TRANSLUCENT 4u
++#define MATERIAL_OPACITY_SHIFT 8u
++#define MATERIAL_OPACITY_MASK 0xffu
++
++// How much of a hit surface actually blocks. Cut-out geometry is traced as
++// opaque, so without this a canopy of leaves occludes like a wall; the capture
++// packs the solid fraction of the bound texture into the material word. Not
++// alpha testing -- the light it lets through is uniform rather than
++// hole-shaped -- but far closer than counting every hit whole.
++float hit_opacity(uint material) {
++  if ((material & MATERIAL_CUTOUT) == 0u) {
++    return 1.0f;
++  }
++  return float((material >> MATERIAL_OPACITY_SHIFT) & MATERIAL_OPACITY_MASK) * (1.0f / 255.0f);
++}
 +
 +// Interleaved gradient noise (Jimenez, 2014). A plain hash scatters samples
 +// randomly, so neighbouring pixels can agree by chance and clump into visible
@@ -4933,7 +4973,7 @@ index 0000000..4e7416c
 +      // instead gives a penumbra that widens with the occluder's distance,
 +      // which is what a soft shadow actually is.
 +      const uint shadowSamples = clamp(gShadowSamples, 1u, MAX_SHADOW_SAMPLES);
-+      uint blocked = 0u;
++      float blocked = 0.0f;
 +      for (uint sIdx = 0u; sIdx < shadowSamples; ++sIdx) {
 +        // Uniform inside the cone's disc; sqrt keeps the samples evenly spread.
 +        const float radius = gLightRadius * sqrt(rand(state));
@@ -4958,11 +4998,12 @@ index 0000000..4e7416c
 +        occluder.TraceRayInline(gScene, RAY_FLAG_NONE, 0xFF, shadowRay);
 +        occluder.Proceed();
 +        if (occluder.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
-+          ++blocked;
++          const uint occPrim = occluder.CommittedInstanceID() + occluder.CommittedPrimitiveIndex();
++          blocked += hit_opacity(gMaterials[occPrim]);
 +        }
 +      }
 +
-+      const float lit = 1.0f - float(blocked) / float(shadowSamples);
++      const float lit = 1.0f - blocked / float(shadowSamples);
 +      shadow = lerp(SHADOW_DARKNESS, 1.0f, lit);
 +    }
 +  }
@@ -4991,7 +5032,8 @@ index 0000000..4e7416c
 +    if (aoQuery.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
 +      const float t = aoQuery.CommittedRayT() / max(gRayLength, 1e-4f);
 +      const float falloff = 1.0f - t;
-+      const float weight = falloff * falloff;
++      const uint hitPrim0 = aoQuery.CommittedInstanceID() + aoQuery.CommittedPrimitiveIndex();
++      const float weight = falloff * falloff * hit_opacity(gMaterials[hitPrim0]);
 +      occlusion += weight;
 +
 +      // What the ray landed on, interpolated across the triangle: this is the
