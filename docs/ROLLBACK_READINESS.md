@@ -15,7 +15,7 @@ Le jeu en ligne reste en lockstep. Le noyau de rollback sait prédire, restaurer
 2. Isoler un tick déterministe complet. HuPrcCall et MGSeqMain ne suffisent pas : Hu3DExec avance aussi Hu3DMotionNext, HuSprFinish et Hu3DAnimExec hors de la boucle de simulation actuelle. — **Mesuré et corrigé pour le tick rejoué** (défaut D5) ; reste ouvert pour le cadencement hors rejeu (défaut D6).
 3. Gérer les durées de vie des allocations, coroutines et modules. Une adresse réutilisée ne prouve pas que l'objet est le même ; la prévalidation d'un composant ne rend pas l'ensemble des snapshots atomique.
 4. Gérer les effets externes : audio, vibrations, sauvegardes et succès. Le signal de resimulation est disponible mais il n'est pas encore consommé par ces sous-systèmes.
-5. ~~Vérifier une vraie restauration puis resimulation sur le moteur et comparer l'état obtenu à une exécution sans prédiction~~ — **fait**, par `PARTYBOARD_FORCE_ROLLBACK`. Voir la section de mesure ci-dessous : quatre comparaisons réussies, zéro échec, sur 159 instants interrogés. La proportion de refus porte sur ces 159 instants, pas sur les 47 921 frames du replay ; la nuance est développée dans la section, et elle est importante.
+5. ~~Vérifier une vraie restauration puis resimulation sur le moteur et comparer l'état obtenu à une exécution sans prédiction~~ — **fait**, par `PARTYBOARD_FORCE_ROLLBACK`. **Neuf comparaisons réussies, zéro échec, zéro gâchis** sur un replay de plateau complet, après que la politique d'armement a été corrigée à partir d'un relevé par frame. Les sections 2, 2bis et 2ter ci-dessous racontent la mesure, l'erreur de lecture qu'elle corrige, et le goulot qui s'est déplacé en cours de route.
 
 Les tests de noyau utilisent un état synthétique. Les tests PAD/horloge vérifient de vrais globals du jeu en mode headless, sans partie graphique. Aucune de ces validations ne prouve à elle seule le déterminisme du jeu complet.
 
@@ -63,11 +63,8 @@ image rendue impose, et les distances 1, 2 et 4 se reproduisent exactement.
 > restaurations réelles se sont reproduites exactement. Ce qu'elle n'établit pas :
 > la fréquence d'ouverture de la porte dans le temps.
 >
-> La mesure qui trancherait est décrite en W5 du plan : évaluer
-> `PartyBoard_RollbackCheckpointSize() != 0` **à chaque frame** du replay et
-> histogrammer les fenêtres ouvertes. Un run de treize minutes. Tant qu'il n'a pas
-> eu lieu, aucun chiffre de cette section ne doit être cité comme une propriété du
-> moteur.
+> **La mesure a eu lieu le même jour. Voir la section 2bis ci-dessous : elle
+> tranche, et elle donne tort à la lecture d'origine.**
 
 Replay de plateau complet, 47 921 frames, période 300, donc 159 instants
 interrogés :
@@ -105,6 +102,131 @@ d'échantillonnage du probe. Les deux hypothèses restent ouvertes, elles appell
 des remèdes opposés — desserrer les clauses de sûreté dans un cas, changer
 seulement le moment où l'on demande dans l'autre — et c'est précisément pourquoi
 la mesure par frame doit précéder toute décision.
+
+### 2bis. La porte interrogée à chaque frame — la mesure qui tranche
+
+`PARTYBOARD_ROLLBACK_GATE_SURVEY=1` évalue
+`PartyBoard_RollbackCheckpointSize() != 0` **à chaque frame** et histogramme les
+séries de frames ouvertes. Sur le même replay de plateau, 51 000 frames
+interrogées, **résultat identique au chiffre près sur les deux pairs** :
+
+| | |
+|---|---|
+| frames interrogées | 51 000 |
+| frames ouvertes | **1 718 — 3,37 %** |
+| première frame ouverte | **1** |
+| plus longue série ouverte | **312 frames**, soit 5,2 secondes |
+| séries ouvertes distinctes | **31** |
+
+Et la distribution de ces séries, qui est le vrai résultat :
+
+| longueur de la série | nombre |
+|---|---|
+| 1 frame | 15 |
+| 2–3 frames | 5 |
+| 4–31 frames | **0** |
+| 32–63 frames | 3 |
+| 64 frames et plus | **8** |
+
+Les clauses qui ferment la porte, sur ces 49 282 refus :
+
+| clause | refus | part |
+|---|---|---|
+| `layer-hook` | 30 203 | 61 % |
+| `model-draw-hook` | 13 287 | 27 % |
+| `sprite-draw-hook` | 2 991 | 6 % |
+| `wipe-active` | 2 780 | 6 % |
+| `region-set-refused` | 21 | 0,04 % |
+
+#### Ce que cela veut dire
+
+**Six captures sur 159 sondages aveugles d'une porte ouverte 3,37 % du temps,
+c'est exactement ce que le hasard prédit** (159 × 3,37 % ≈ 5,4). Les anciens
+chiffres mesuraient donc la foulée d'échantillonnage, et rien d'autre. La
+correction inscrite plus haut était juste, et cette mesure la confirme au lieu de
+simplement la soupçonner.
+
+Le comportement réel du moteur est **meilleur** que ce que « 97 % de refus »
+laissait croire, et d'une manière que le taux global ne dit pas : la porte ne
+s'ouvre pas sur des frames isolées, elle s'ouvre sur **des plages utilisables**.
+Onze séries d'au moins 32 frames, dont huit d'au moins 64, et une de 312 — cinq
+secondes pendant lesquelles des dizaines de tests de rewind tiennent.
+
+La distribution est nettement **bimodale** : soit une ou deux frames, soit 32 et
+plus, et strictement rien entre 4 et 31. Ce n'est pas du bruit ; c'est la
+structure du jeu de plateau, où les passes de dessin s'installent et se retirent
+par blocs.
+
+#### Décision, conforme au point 2 du plan W5
+
+La politique d'armement de la sonde passe de « aux multiples de la période » à
+« à la première frame où la porte est ouverte **à partir de** l'échéance ». La
+période cadence désormais les tests au lieu d'en choisir les instants.
+
+**Cela ne desserre aucune clause de sûreté.** Cela change *quand on demande*, pas
+*ce qu'on accepte* : chaque refus reste compté et rapporté, clause par clause, et
+aucune barrière n'est touchée. C'est la différence exacte avec l'expérience du
+hook de calque ci-dessous, qui desserrait une barrière et a été retirée.
+
+### 2ter. Trois politiques mesurées, et le goulot qui se déplace
+
+Le même replay, la même période de 300, les mêmes distances 1/2/4/8. Chaque ligne
+est un run complet de 900 secondes.
+
+| politique | armés | comparaisons | réussies | abandonnés à la sauvegarde avant |
+|---|---|---|---|---|
+| aux multiples de la période | 6 | 6 | 4 | 2 |
+| à la première frame ouverte | **23** | 5 | 4 | **18** |
+| première frame ouverte **après 4 frames d'ouverture** | 9 | **9** | **9** | **0** |
+
+La deuxième ligne est le résultat le plus instructif du lot, et ce n'est pas
+celui qui était attendu. Armer à la première frame ouverte a presque quadruplé
+les armements — la politique marchait — mais le nombre de **comparaisons
+réellement menées** n'a pas bougé. Le goulot s'était simplement déplacé.
+
+**Un test de rollback a besoin que la porte soit ouverte deux fois** : une fois
+pour prendre l'instantané, et de nouveau `distance` frames plus tard pour la
+sauvegarde avant qui rend l'excursion annulable. Armer à la première frame
+ouverte garantit la première et ne dit rien de la seconde. Or 15 des 31
+ouvertures mesurées durent **une seule frame** : s'armer sur l'une d'elles, c'est
+gâcher le test à coup sûr. Dix-huit fois sur vingt-trois.
+
+D'où la troisième ligne. La distribution des ouvertures est nettement bimodale —
+15 de longueur 1, 5 de longueur 2-3, **rien du tout entre 4 et 31**, puis 3 de
+32-63 et 8 de 64 et plus. « La porte est-elle déjà ouverte depuis quatre
+frames ? » est donc un discriminateur presque parfait : il rejette toutes les
+ouvertures courtes et accepte toutes les longues, **sans avoir besoin de voir
+l'avenir**. Quatre est le plus petit nombre qui franchit le mode court, et les
+distances testées tiennent largement dans une ouverture de 32 frames.
+
+Résultat : **neuf armements, neuf comparaisons, neuf réussites, aucun gâchis.**
+Chaque test armé aboutit. Deux fois plus de comparaisons utiles qu'à l'origine,
+et surtout un rendement de 100 % au lieu de 22 %.
+
+Neuf est proche du plafond pour ce replay à cette période : le relevé par frame
+n'a trouvé que onze ouvertures longues sur 51 000 frames. Pour en obtenir
+davantage il faut baisser la période, pas desserrer une clause.
+
+**Toujours aucune clause de sûreté touchée.** Les trois politiques acceptent
+exactement les mêmes instants ; elles diffèrent seulement sur ceux qu'elles
+prennent la peine de demander.
+
+#### Une erreur d'observabilité, corrigée en route
+
+La deuxième politique a d'abord été mesurée sur un run mutilé sans que rien ne le
+signale. Demander à chaque frame au lieu d'une sur 300 transforme un refus
+d'**événement** en **état**, et le probe écrivait toujours une ligne d'environ
+700 octets par frame refusée : le fichier de diagnostic a atteint son plafond de
+2 Mo à la frame 4449, et tout le reste du run a été perdu. Le changement
+détruisait l'observabilité de ce qu'il devait améliorer.
+
+Les compteurs par clause vivent désormais dans le probe lui-même et non dans le
+comptage des lignes du journal, de sorte que l'histogramme survit à un fichier
+tronqué. Le journal reçoit une ligne quand une attente commence, une quand la
+clause bloquante change, une toutes les 600 frames d'attente, et l'histogramme
+complet à chaque armement — plus `waited=N`, qui est le chiffre que cette
+politique existe pour produire. Sous l'ancienne, la réponse à « combien de temps
+a-t-il attendu ? » était toujours « il n'a pas attendu, il a renoncé ».
 
 #### Les clauses se recouvrent — expérience faite, et négative
 

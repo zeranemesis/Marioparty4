@@ -454,6 +454,25 @@ struct ForceRollbackProbe {
     std::uint32_t period = 0;
     std::vector<std::uint32_t> distances;
     std::size_t ladderIndex = 0;
+    /* The frame at which the next test becomes eligible. The period paces the
+       tests; it no longer selects the instants at which the gate is asked. */
+    std::uint32_t nextEligibleFrame = 1;
+    /* The current wait: since the probe now asks every frame until the gate
+       opens, a refusal is no longer an event - it is a state. These record how
+       long the wait has lasted and which clause is holding it, so the log can
+       report the wait once instead of once per frame. */
+    std::uint32_t waitingSince = 0;
+    std::uint32_t waitRefusals = 0;
+    std::string waitClause;
+    /* Consecutive frames the gate has been open for. A test needs the gate open
+       twice - once to save, once `distance` frames later to save the forward
+       state - so arming on a one-frame opening wastes the test. */
+    std::uint32_t openStreak = 0;
+    std::uint32_t abandonedAtForwardSave = 0;
+    /* Which clause refused, and how often, across the whole run. Kept here
+       rather than reconstructed by counting log lines, so the histogram
+       survives a truncated diagnostic file. */
+    std::map<std::string, std::uint32_t> refusalsByClause;
 
     bool recording = false;
     std::uint32_t saveFrame = 0;
@@ -679,8 +698,12 @@ void runForceRollbackComparison(std::uint32_t frame)
         // the experiment is abandoned rather than run: leaving the game on a
         // replayed timeline would be a change nobody asked for.
         ++probe.refused;
+        ++probe.abandonedAtForwardSave;
         probe.recording = false;
-        reportForceRollbackProgress(distance, "refused-forward-save-failed");
+        char outcome[96];
+        std::snprintf(outcome, sizeof(outcome), "refused-forward-save-failed(total=%u)",
+            probe.abandonedAtForwardSave);
+        reportForceRollbackProgress(distance, outcome);
         return;
     }
 
@@ -778,18 +801,91 @@ void forceRollbackTick(std::uint32_t frame)
         return;
     }
 
-    if (frame == 0 || (frame % probe.period) != 0) return;
+    // Arming policy: ask at the first frame the gate is open at or after the
+    // deadline, rather than only at exact multiples of the period.
+    //
+    // The old spelling was `frame % period != 0`, which asked at 159 instants
+    // over a 48000-frame replay and abandoned the opportunity until the next
+    // multiple whenever it was refused. It captured four times, and that was
+    // read as a property of the engine.
+    //
+    // It is not. Surveyed on every frame over 51000 frames of the same replay,
+    // identical to the digit on both peers:
+    //
+    //     open 1718 frames of 51000 (3.37%), first open at frame 1,
+    //     longest open run 312 frames, and 31 distinct open stretches -
+    //     15 of length 1, 5 of length 2-3, 3 of length 32-63, 8 of 64 or more.
+    //
+    // Six captures out of 159 blind samples of a gate open 3.37% of the time is
+    // exactly what chance predicts. The old numbers measured the stride. The
+    // engine's real behaviour is that the gate opens in USABLE STRETCHES - one
+    // of them five seconds long - and a probe that only ever asks on a fixed
+    // grid will keep missing them.
+    //
+    // This changes WHEN the probe asks, never WHAT it accepts: every safety
+    // clause below is untouched, and a refusal is still counted and reported.
+    if (frame == 0) return;
+    if (frame < probe.nextEligibleFrame) return;
     const auto bytes = PartyBoard_RollbackCheckpointSize();
     if (bytes == 0) {
         // Not a safe boundary: a wipe, a render callback, an I/O operation or a
         // module transition is in flight. Refused and counted, never forced.
+        //
+        // Unlike before, the opportunity is NOT abandoned until the next
+        // multiple: the probe keeps asking on the following frames until the
+        // gate opens.
+        //
+        // Which means a refusal is no longer an event, it is a state, and
+        // writing a line per refused frame is writing a line per frame. The
+        // first run under this policy did exactly that: roughly 700 bytes a
+        // frame filled the diagnostic file's 2 MB budget by frame 4449 and
+        // every later probe result was lost - the change destroyed the
+        // observability of the thing it was meant to improve.
+        //
+        // So the counters are authoritative and the log is a summary: a line
+        // when a wait begins, a line when the clause holding it changes, one
+        // every 600 frames of continued waiting, and the full histogram when a
+        // test finally arms. Nothing is lost, because refusalsByClause counts
+        // every single refusal whether or not it was printed.
+        probe.openStreak = 0;
         ++probe.refused;
-        char outcome[64];
-        std::snprintf(outcome, sizeof(outcome), "refused-%s",
-            PartyBoard_RollbackCheckpointRefusal());
-        reportForceRollbackProgress(0, outcome, frame);
+        const char *clause = PartyBoard_RollbackCheckpointRefusal();
+        const std::string clauseText = clause ? clause : "unknown";
+        ++probe.refusalsByClause[clauseText];
+
+        const bool waitBegan = probe.waitRefusals == 0;
+        const bool clauseChanged = !waitBegan && clauseText != probe.waitClause;
+        if (waitBegan) probe.waitingSince = frame;
+        ++probe.waitRefusals;
+        probe.waitClause = clauseText;
+
+        if (waitBegan || clauseChanged || (probe.waitRefusals % 600) == 0) {
+            char outcome[96];
+            std::snprintf(outcome, sizeof(outcome), "refused-%s(waited=%u)",
+                clauseText.c_str(), probe.waitRefusals);
+            reportForceRollbackProgress(0, outcome, frame);
+        }
         return;
     }
+    // The gate is open. But a test needs it open TWICE: once here, and again
+    // `distance` frames later for the forward save that makes the excursion
+    // undoable. Arming on a one-frame opening therefore wastes the test, and
+    // measurement says that is what was happening: of 23 tests armed on the
+    // first open frame after the deadline, 18 died at the forward save.
+    //
+    // The per-frame survey showed the openings are strikingly bimodal - 15 of
+    // length 1, 5 of length 2-3, NOTHING between 4 and 31, then 3 of 32-63 and
+    // 8 of 64 or more. So "has the gate been open for four frames already" is a
+    // near-perfect discriminator: it rejects every short opening and accepts
+    // every long one, without needing to see the future.
+    //
+    // Four, not more: it is the smallest number that clears the short mode, and
+    // the distances tested (1, 2, 4, 8) all fit comfortably inside a 32-frame
+    // opening. Still a question about WHEN to ask, not about what to accept.
+    ++probe.openStreak;
+    constexpr std::uint32_t kMinimumOpenStreak = 4;
+    if (probe.openStreak < kMinimumOpenStreak) return;
+
     probe.before.assign(bytes, 0);
     if (!PartyBoard_RollbackCheckpointSave(probe.before.data(), bytes)) {
         ++probe.refused;
@@ -798,7 +894,29 @@ void forceRollbackTick(std::uint32_t frame)
     }
     probe.saveFrame = frame;
     probe.targetFrame = frame + probe.distances[probe.ladderIndex];
-    reportForceRollbackProgress(probe.distances[probe.ladderIndex], "armed");
+    // The period now paces the tests rather than selecting the instants: the
+    // next one becomes eligible a period after this one was armed.
+    probe.nextEligibleFrame = frame + probe.period;
+    {
+        // How long this test had to wait for an open gate is the number the new
+        // policy exists to produce: under the old one the answer was always
+        // "it did not wait, it gave up".
+        char outcome[96];
+        std::snprintf(outcome, sizeof(outcome), "armed(waited=%u)", probe.waitRefusals);
+        reportForceRollbackProgress(probe.distances[probe.ladderIndex], outcome, frame);
+        std::string histogram;
+        for (const auto &entry : probe.refusalsByClause) {
+            if (!histogram.empty()) histogram += ' ';
+            histogram += entry.first + '=' + std::to_string(entry.second);
+        }
+        if (!histogram.empty()) {
+            char line[224];
+            std::snprintf(line, sizeof(line), "force-rollback clauses %s", histogram.c_str());
+            writeDiagnostic(line, true);
+        }
+    }
+    probe.waitRefusals = 0;
+    probe.waitClause.clear();
     probe.inputs.clear();
     probe.recording = true;
 }
