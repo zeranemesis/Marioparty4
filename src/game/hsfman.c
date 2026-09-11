@@ -2332,15 +2332,43 @@ bool PartyBoard_RollbackModelRegions(PartyBoardRollbackRegionSink sink, void *co
     return true;
 }
 
+/* Diagnostic only: which of the four conditions said no, last time.
+ * "A checkpoint was refused" is not actionable; "a sprite draw callback was
+ * live" is. Measured on a real board replay, this gate refuses 153 captures out
+ * of 159, so knowing which clause does it decides what the rollback work is. */
+static const char *rollbackRenderRefusal = "none";
+
+const char *PartyBoard_RollbackRenderRefusal(void)
+{
+    return rollbackRenderRefusal;
+}
+
 bool PartyBoard_RollbackRenderCanReplayWithoutDraw(void)
 {
     s16 i;
-    if (!PartyBoard_RollbackWipeCanReplayWithoutDraw()) return false;
-    for (i = 0; i < 8; ++i) if (layerHook[i]) return false;
-    for (i = 0; i < HU3D_MODEL_MAX; ++i)
-        if (Hu3DData[i].hsf && (Hu3DData[i].attr & HU3D_ATTR_HOOKFUNC)) return false;
-    for (i = 0; i < HUSPR_MAX; ++i)
-        if (HuSprData[i].data && (HuSprData[i].attr & HUSPR_ATTR_FUNC)) return false;
+    if (!PartyBoard_RollbackWipeCanReplayWithoutDraw()) {
+        rollbackRenderRefusal = "wipe-active";
+        return false;
+    }
+    for (i = 0; i < 8; ++i) {
+        if (layerHook[i]) {
+            rollbackRenderRefusal = "layer-hook";
+            return false;
+        }
+    }
+    for (i = 0; i < HU3D_MODEL_MAX; ++i) {
+        if (Hu3DData[i].hsf && (Hu3DData[i].attr & HU3D_ATTR_HOOKFUNC)) {
+            rollbackRenderRefusal = "model-draw-hook";
+            return false;
+        }
+    }
+    for (i = 0; i < HUSPR_MAX; ++i) {
+        if (HuSprData[i].data && (HuSprData[i].attr & HUSPR_ATTR_FUNC)) {
+            rollbackRenderRefusal = "sprite-draw-hook";
+            return false;
+        }
+    }
+    rollbackRenderRefusal = "none";
     return true;
 }
 

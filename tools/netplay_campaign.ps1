@@ -41,7 +41,14 @@ param(
     [string]$ForceRollback = '',
     # Suffix for the campaign directory, so several campaigns started in the
     # same second do not collide.
-    [string]$Label = ''
+    [string]$Label = '',
+    # Rendered frames per second each peer targets. 60 makes the frame pacer
+    # return exactly one simulation tick per rendered frame; above it the pacer
+    # catches up with real time and can batch several, which is the only
+    # condition under which defect D6 can occur. Two peers may be given
+    # different values, which is itself something no code prevents.
+    [int]$TargetFrameRate = 60,
+    [int]$TargetFrameRatePeer1 = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -188,6 +195,8 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         seed = $entry.Seed
         audio_diagnostics = $AudioDiagnostics
         force_rollback = $ForceRollback
+        target_frame_rate = $TargetFrameRate
+        target_frame_rate_peer_1 = $(if ($TargetFrameRatePeer1 -gt 0) { $TargetFrameRatePeer1 } else { $TargetFrameRate })
         replay = $entry.Replay
         netplay_delay = $entry.NetplayDelay
         started_at = (Get-Date).ToString('o')
@@ -206,6 +215,8 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         audio_lifetime_violations = 0
         audio_lifetime_bank_frees = 0
         audio_lifetime_armed = $false
+        d6_batched_frames = 0
+        d6_worst_batch = 0
         crash_fingerprint = ''
         desync_fingerprint = ''
         result = 'HARNESS_FAILURE'
@@ -228,7 +239,10 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
                 'backend.graphicsBackend' = 'd3d12'; 'backend.isoPath' = $disc
                 'backend.isoVerification' = 2; 'backend.wasPresetChosen' = $true
                 'game.internalResolutionScale' = 1; 'game.shadowResolutionMultiplier' = 1
-                'video.targetFrameRate' = 60; 'audio.masterVolume' = 0
+                'video.targetFrameRate' = $TargetFrameRate; 'audio.masterVolume' = 0
+            }
+            if ($side -eq 1 -and $TargetFrameRatePeer1 -gt 0) {
+                $settings['video.targetFrameRate'] = $TargetFrameRatePeer1
             }
             # PowerShell 5.1 writes a byte-order mark the config parser rejects.
             [IO.File]::WriteAllText((Join-Path $profile 'config.json'),
@@ -396,6 +410,21 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
     }
     $record.overlays = $overlays[0]
     $record.transitions = $overlays[0].Count
+
+    # Defect D6: a rendered frame that batched more than one simulation tick.
+    # The game prints it; the campaign only has to notice.
+    $batched = 0
+    $worstBatch = 0
+    foreach ($side in 0, 1) {
+        $logPath = Join-Path $runPath "peer-$side-stdout.log"
+        if (-not (Test-Path -LiteralPath $logPath)) { continue }
+        foreach ($hit in Select-String -Path $logPath -Pattern 'D6> (\d+) simulation ticks in one rendered frame \(occurrences (\d+), worst (\d+)\)') {
+            $batched = [Math]::Max($batched, [int]$hit.Matches[0].Groups[2].Value)
+            $worstBatch = [Math]::Max($worstBatch, [int]$hit.Matches[0].Groups[3].Value)
+        }
+    }
+    $record.d6_batched_frames = $batched
+    $record.d6_worst_batch = $worstBatch
 
     # ---- fingerprints ----
     # A minidump with no report beside it is a crash the reporter could not

@@ -783,7 +783,10 @@ void forceRollbackTick(std::uint32_t frame)
         // Not a safe boundary: a wipe, a render callback, an I/O operation or a
         // module transition is in flight. Refused and counted, never forced.
         ++probe.refused;
-        reportForceRollbackProgress(0, "refused-unsafe-boundary", frame);
+        char outcome[64];
+        std::snprintf(outcome, sizeof(outcome), "refused-%s",
+            PartyBoard_RollbackCheckpointRefusal());
+        reportForceRollbackProgress(0, outcome, frame);
         return;
     }
     probe.before.assign(bytes, 0);

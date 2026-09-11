@@ -292,6 +292,28 @@ void main(void)
         }
         PartyBoard_SimulationTicksThisFrame = simulatedTicks;
         PartyBoard_IsSimulationTick = simulatedTicks != 0;
+        /* Defect D6, detection only. PARTYBOARD_ADVANCE_FRAME is this bool, not
+         * a count, and Hu3DExec runs once per rendered frame - so a frame that
+         * batches two simulation ticks advances the animation clock once, for
+         * both. Below 61 frames per second frame_pacer_simulation_tick always
+         * returns 1 and this can never fire, which is why no run has ever shown
+         * it. Recording it costs one comparison and settles whether D6 is real.
+         */
+        if (simulatedTicks > 1) {
+            static s32 batchedFrames = 0;
+            static s32 worstBatch = 0;
+            if (simulatedTicks > worstBatch) {
+                worstBatch = simulatedTicks;
+            }
+            if (++batchedFrames == 1 || (batchedFrames % 100) == 0) {
+                PartyBoard_CrashBreadcrumb(PARTYBOARD_CRASH_CAT_WARN,
+                    "D6 %d simulation ticks in one rendered frame (occurrences %d, worst %d)",
+                    simulatedTicks, batchedFrames, worstBatch);
+                OSReport("D6> %d simulation ticks in one rendered frame "
+                         "(occurrences %d, worst %d)\n",
+                    simulatedTicks, batchedFrames, worstBatch);
+            }
+        }
         PartyBoard_FrameInterpolationSetStep(frame_pacer_interpolation_step());
         previousVCount = HuSysVWaitGet(0);
         HuSysVWaitSet((s16)simulatedTicks);

@@ -32,6 +32,14 @@ bool PartyBoard_RollbackResourcesSelfTest(void);
  * other heaps/managers, presentation and external effects remain excluded.
  * Every region and lifetime is validated before the first live write. */
 size_t PartyBoard_RollbackCheckpointSize(void);
+/* Names the gate that refused the last PartyBoard_RollbackCheckpointSize call:
+ * "inside-coroutine", "io-in-flight", "render-not-replay-safe",
+ * "region-set-refused", or "none". Diagnostic only. */
+const char *PartyBoard_RollbackCheckpointRefusal(void);
+/* When the refusal was "render-not-replay-safe", which clause of
+ * PartyBoard_RollbackRenderCanReplayWithoutDraw said no: "wipe-active",
+ * "layer-hook", "model-draw-hook", "sprite-draw-hook", or "none". */
+const char *PartyBoard_RollbackRenderRefusal(void);
 bool PartyBoard_RollbackCheckpointSave(void *destination, size_t capacity);
 bool PartyBoard_RollbackCheckpointLoad(const void *source, size_t size);
 bool PartyBoard_RollbackCheckpointSelfTest(void);
