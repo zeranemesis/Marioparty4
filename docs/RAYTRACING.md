@@ -1196,3 +1196,203 @@ précisément sur les moments chargés — les transitions d'écran. C'est bien 
 cohérent avec « ça plante à la sélection du plateau » que le chiffre des menus ne
 le laissait croire. Ce n'est toujours pas une reproduction du plantage signalé,
 mais ce n'est plus le même ordre de grandeur de présomption.
+
+## Composer avant le calque 2D, et rendre les ombres lisibles (11 septembre 2026)
+
+Retour d'usage : « des ombres propres sans bavure ; les découpes ne sont pas
+bonnes non plus sur pas mal de menus et d'éléments ; revoir la définition du
+ray tracing », avec **sm64coopdx** (le fork sm64rt de DarioSamo) comme
+référence — ombres, réflexions, réfractions et illumination globale tracées en
+temps réel, débruiteur temps réel, DLSS et FSR 2.
+
+### La composition multipliait l'image finie
+
+Le terme de ray tracing était appliqué sur la frame terminée, HUD compris. D'où
+le masque de couverture construit à partir des draws orthographiques pour
+épargner les pixels de l'interface — et d'où les découpes : un masque construit
+sur la géométrie ne voit pas l'alpha d'une texture, donc chaque rectangle
+protégé était plus grand que le panneau qu'il contenait. Autour de chaque boîte
+de dialogue s'étalait une bande de décor que l'ombrage n'atteignait pas, avec
+une marche franche au bord.
+
+La disposition de la frame a été **mesurée avant d'être supposée** : elle bascule
+deux à trois fois entre les deux projections, mais **aucun draw 3D ne suit jamais
+la dernière transition 3D vers 2D**, et seulement zéro à quatre de ses 112 à 148
+draws 2D la précèdent. C'est donc là qu'il faut composer. Et comme la liste de
+commandes est rejouée plus tard, la frontière est connue au moment où la passe
+est scellée : la commande est **insérée** à la position déjà enregistrée, sans
+rien prédire.
+
+Le masque est éteint par défaut. `AURORA_RT_COMPOSITE=present` rétablit l'ancien
+chemin pour comparer.
+
+Deux défauts sont sortis en chemin :
+
+- **Le terme était appliqué deux fois.** La frame rend dans plusieurs passes ;
+  mesuré à exactement 2 compositions par frame, la scène 20 à 30 de luma trop
+  sombre. L'une des deux était une copie EFB vers une texture du jeu, qui
+  n'aurait jamais dû être ombrée. Désormais : passes résolues et hors écran
+  ignorées, une composition par frame, et un compteur dit si une seconde passe
+  était éligible (ça n'est jamais arrivé).
+- **RmlUi appliquait l'occlusion de son côté**, quand son calque est affiché — et
+  ce chemin prend **le seul canal rouge** et le diffuse, reliquat de l'époque où
+  la cible était en R32Float, ce qu'elle n'est plus depuis que le rebond indirect
+  porte de la couleur. Compteur d'images affiché, la scène était donc multipliée
+  par du rouge seul, et les réflexions n'étaient pas appliquées du tout.
+
+Vérifié avec un mode de diagnostic qui écrit une rampe en espace écran dans le
+tampon (`AURORA_RT_DEBUG_MODE=10`) : rouge en abscisse, vert en ordonnée, une
+grille aux huitièmes. Composée, la nouvelle voie restitue les deux rampes à
+pleine amplitude et au bon endroit ; l'ancienne restituait le rouge et perdait
+le vert — c'est ce qui a mis le `.r` en cause.
+
+### Les ombres : une pénombre, pas du bruit
+
+Le tampon d'ombre brut était un champ de mouchetis gris à cinquante pour cent
+sur des surfaces planes entières. Tracé avec une lumière quasi ponctuelle, le
+même tampon revient net et parfaitement propre : donc **pas d'acné**
+d'auto-ombrage et aucun problème de décalage de rayon. Tout était de la pénombre.
+
+Le demi-angle du cône valait 6,8 degrés, vingt-cinq fois celui du soleil. La
+largeur de pénombre croît avec la distance de l'occulteur, donc les structures
+lointaines du plateau projetaient des pénombres larges de centaines d'unités, et
+quatre rayons ne peuvent pas les résoudre. Le commentaire qui défendait 0,12 a
+été écrit quand la portée d'ombre valait encore 1,5 fois la diagonale de la
+scène : presque tout était à l'ombre, il ne restait aucun bord à juger. À 0,10
+de portée, le même réglage fait l'inverse.
+
+Mesuré sur w01Dll, grain dans le tampon brut :
+
+| réglage | grain |
+|---|---|
+| 0,12 — 4 échantillons (livré) | 0,0345 |
+| 0,03 — 4 échantillons | 0,0221 |
+| 0,03 — 8 échantillons | 0,0201 |
+| 0,03 — 16 échantillons | 0,0149 |
+| lumière ponctuelle | 0,0139 (le plancher) |
+
+Resserrer le cône à 0,03 en récupère un tiers et ne coûte rien. Les rayons
+d'ombre pèsent désormais plus lourd que les rayons d'occlusion dans les niveaux
+de qualité : ils sont moins chers (quatre de plus coûtent 0,075 ms d'un tracé de
+1,1 à 2,0 ms) et ce sont eux que l'œil lit comme propre ou non. Défaut : 12.
+
+L'autre moitié était le filtre. L'à-trous pondérait ses échantillons par la
+normale et la profondeur seules ; un bord d'ombre sur un sol plat a la même
+normale et la même profondeur des deux côtés, donc rien n'arrêtait le flou, et
+quatre passes portent à quinze texels. Un **poids d'accord de signal**, mis à
+l'échelle de la dispersion locale — la solution de repli documentée de SVGF
+quand il n'y a pas de variance accumulée — a été ajouté : là où l'estimation est
+encore bruitée, tout le voisinage s'accorde et le filtre travaille comme avant ;
+là où elle a convergé, la dispersion s'effondre et une vraie marche écarte
+l'échantillon.
+
+| | grain | netteté |
+|---|---|---|
+| sans filtre | 0,0163 | 0,1608 |
+| filtre, sans le poids | 0,0108 | 0,1490 (−7,3 %) |
+| filtre, avec | 0,0111 | 0,1569 (−2,4 %) |
+
+### La définition : une échelle de l'écran, pas de la cible interne
+
+L'échelle de tracé était une fraction de la cible de rendu interne, ce qui liait
+la définition du ray tracing à un réglage qui n'a rien à voir : le même « 0,5 »
+valait 1280×960 à Résolution interne 4 et 320×240 à 1. C'est maintenant une
+fraction de ce qui arrive à l'écran, bornée par la cible de rendu. Vérifié : à
+Résolution interne 2 comme à 4, le même plateau trace en 1280×960.
+
+Un texel de tracé par pixel affiché est la bonne cible, et c'est mesuré. Marche
+la plus franche que le tampon d'ombre peut produire, et grain qui y reste, dans
+une fenêtre de 1272×958 :
+
+| tracé | netteté | grain | coût |
+|---|---|---|---|
+| 640×480 (0,5×) | 0,43 | 0,0076 | 0,59 ms |
+| 1280×960 (1,0×) | 0,67 | 0,0095 | 1,78 ms |
+| 1920×1440 (1,5×) | 0,63 | 0,0179 | 4,28 ms |
+
+Sous un texel par pixel, les bords sont visiblement mous. Au-dessus, ils ne sont
+pas plus nets et le bruit double : l'image est ramenée à la fenêtre de toute
+façon, donc un texel plus fin qu'un pixel moyenne moins d'échantillons dans ce
+qui est montré, et le rayon fixe du filtre couvre moins d'image. L'échelle
+s'arrête donc à 1,0 et le niveau supérieur achète des rayons à la place.
+
+### Le rayon primaire traverse ce qui est surtout du vide
+
+La géométrie découpée est dans la structure d'accélération comme des triangles
+opaques ordinaires, donc le rayon primaire s'arrêtait sur le quad d'une bulle
+même là où sa texture est transparente. Le rasteriseur avait dessiné ce qu'il y
+a derrière, et ombrer le quad posait l'occlusion du quad par-dessus ce fond :
+un rectangle sombre autour de chaque bulle et de chaque touffe de corail du
+mini-jeu sous-marin, exactement à la forme du quad. Même famille de défaut que
+le masque 2D, et même cause — de la géométrie qui tient lieu de quelque chose
+que seule la texture connaît.
+
+Le rayon primaire franchit maintenant jusqu'à quatre surfaces majoritairement
+translucides. Deux corrections ont été nécessaires pour que ce test veuille dire
+quelque chose : l'octet d'opacité portait la fraction de texels à demi-alpha ou
+plus, qui compte les trous et rate la brume — c'est maintenant l'alpha moyen de
+la texture ; et seule l'unité de texture 0 était inspectée, alors que balayer
+les huit est pire encore (le tableau garde ce qui a été lié en dernier, comme
+celui des texgens), donc ce sont les unités effectivement nommées par les étages
+TEV actifs.
+
+Le seuil vient de l'art du jeu et non du goût : l'alpha moyen des draws
+translucides se répartit en deux populations — quelques centaines de sprites
+entre 0,3 et 0,6, et une traîne d'une vingtaine de vraies surfaces de 0,6 à 0,9
+— avec un creux net entre les deux. Le plancher est à 0,6.
+
+Honnêteté sur la portée : le corail et l'essentiel de la grappe de bulles
+reviennent propres, mais quelques rectangles pâles subsistent. Je n'ai pas
+réussi à séparer l'amélioration de la variation d'une image à l'autre avec une
+métrique — les sprites s'animent et les runs ne tombent pas sur la même image.
+Ce qui est mesuré, c'est la classification ; le reste est ce que montrent les
+captures. Éliminer le reste demande un vrai test alpha en traversée.
+
+### L'accumulation temporelle ne faisait rien
+
+Le motif d'échantillonnage était identique à chaque frame, choix fait avant qu'il
+y ait une accumulation pour le converger. Une fois celle-ci en place, ce choix
+lui a coûté toute sa raison d'être : une scène immobile produit la même
+estimation à chaque frame, et mélanger une valeur avec elle-même converge vers
+la même valeur bruitée. `lerp(x, x, a)` vaut `x`. Le filtre ne retirait aucun
+bruit — il ne faisait que ralentir les changements, soit la moitié « traînée » du
+compromis sans aucun de ses bénéfices.
+
+Les deux graines portent maintenant un compteur de frames, tenu à zéro quand
+rien n'accumule, pour qu'un motif ne bouge jamais sans converger.
+
+Le taux d'acceptation de l'historique était une pure supposition ; il a sa vue
+(`AURORA_RT_DEBUG_MODE=11`) : vert accepté, rouge la normale a refusé, bleu la
+distance. Sur un plateau posé, **99,1 %** sont acceptés.
+
+| réglage | grain | variation image à image |
+|---|---|---|
+| motif fixe, sans accumulation | 0,0112 | 0,00810 |
+| mobile, alpha 0,05 | 0,0111 | 0,00751 |
+| mobile, alpha 0,10 | 0,0144 | 0,00850 |
+| mobile, alpha 0,15 (livré) | 0,0133 | 0,00864 |
+
+0,05 est le seul poids qui égale l'ancien grain tout en étant plus stable.
+
+Essayé puis abandonné : borner l'écart entre l'historique et l'estimation
+courante, faute de pouvoir faire un cadrage par le voisinage dans cette passe.
+À 0,15 la borne attrape le bruit d'échantillonnage plutôt que la traînée — grain
+de 0,0133 à 0,0146, stabilité inchangée. Un vrai cadrage demande les voisins,
+donc de faire le mélange là où on peut les lire.
+
+### État après ces changements
+
+Balayage de huit mini-jeux, **sept scènes distinctes, zéro erreur** : tracé de
+0,50 à 1,37 ms, masque à 0 % partout, une à deux projections par frame. Sur
+plateau, 1,9 ms pour 29 000 triangles.
+
+### Ce que ces mesures ne disent pas
+
+Presque toutes les comparaisons de cette session portent sur deux exécutions
+scriptées distinctes, qui ne tombent pas sur la même image : les personnages
+s'animent, l'ordre des tours est tiré au sort. Quand l'écart mesuré est large et
+monotone (le grain d'ombre, les rampes de composition) ça tient ; quand il est
+de l'ordre de la variation d'une image à l'autre, non, et c'est dit à chaque
+fois plutôt qu'arrondi dans le bon sens. Un banc déterministe — même séquence,
+même image, un seul processus qui bascule le réglage — reste à faire et rendrait
+la moitié de ces réserves inutiles.

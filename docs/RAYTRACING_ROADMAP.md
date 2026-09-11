@@ -1,7 +1,8 @@
 # Ray tracing : ce qu'il faudrait pour une qualité professionnelle
 
-État au 11 septembre 2026. Le ray tracing marche, coûte 0,89 ms au niveau par
-défaut, et n'a produit aucune erreur sur treize scènes. Ce document liste ce qui
+État au 11 septembre 2026, révisé le soir même après le lot composition /
+ombres / définition. Le ray tracing marche, coûte 1,1 à 2,1 ms au niveau par
+défaut, et n'a produit aucune erreur sur vingt scènes. Ce document liste ce qui
 sépare ça d'une implémentation qu'un studio expédierait.
 
 Il est ordonné par ce que je corrigerais d'abord, pas par difficulté. Chaque
@@ -67,10 +68,15 @@ actuelle n'a pas.
 
 ### 1.1 Vecteurs de mouvement
 
-L'accumulation temporelle converge **caméra immobile**. En mouvement, le test par
-tampon guide échoue à chaque pixel et on retombe sur 8 rayons par pixel, ce qui
-est plus bruité que les 48 d'avant. C'est le compromis assumé, et c'est la
-principale faiblesse d'image qui reste.
+**Corrigé au passage (11 septembre)** : l'affirmation ci-dessous était fausse
+des deux côtés. Le test par tampon guide accepte **99,1 %** des pixels sur un
+plateau posé, mesuré (`AURORA_RT_DEBUG_MODE=11`) — il n'échoue pas « à chaque
+pixel en mouvement ». Et l'accumulation ne convergeait rien du tout, caméra
+immobile comprise, parce que le motif d'échantillonnage était identique à chaque
+frame : `lerp(x, x, a)` vaut `x`. Le motif bouge maintenant.
+
+Ce qui reste vrai : sans vecteurs de mouvement, un pixel accepté dont la surface
+a bougé garde un historique qui ne la décrit plus.
 
 Le blocage est réel : la géométrie est cuite relativement à la matrice de chaque
 draw et placée par des transformations d'instance renouvelées chaque frame, donc
@@ -83,24 +89,25 @@ change). Pour un impact, reprojeter la position objet par la transformation
 précédente puis par la projection précédente. Rejeter sur désoccultation.
 C'est le plus gros morceau de ce document.
 
-### 1.2 Débruiteur guidé par la variance
+### 1.2 Débruiteur guidé par la variance — **à moitié fait** (11 septembre)
 
-Le filtre à-trous utilise des poids fixes : exposant de normale constant à 12,
-tolérance de profondeur constante. Un débruiteur professionnel estime la variance
-locale et filtre fort là où c'est bruité, peu là où c'est convergé (SVGF).
+Un poids d'accord de signal, mis à l'échelle de la dispersion locale, a été
+ajouté : c'est la solution de repli documentée de SVGF quand il n'y a pas de
+variance accumulée. Il garde 97,6 % de la netteté de bord contre 92,7 % sans lui,
+au même grain.
 
-Sans ça, une zone déjà propre est floutée autant qu'une zone bruitée. Coût
-supplémentaire faible — le débruiteur actuel est mesuré à ~0 ms.
+Reste le vrai SVGF : une variance **accumulée temporellement**, qui sait séparer
+le bruit d'échantillonnage d'un vrai bord, là où une dispersion spatiale voit les
+deux pareil. Il faut un canal pour la porter — l'alpha de `gOutput` est libre.
 
-### 1.3 Bruit variable par frame
+### 1.3 Bruit variable par frame — ~~à faire~~ **fait** (11 septembre)
 
-La graine est purement spatiale, donc le motif est verrouillé à l'écran et glisse
-sous une caméra qui bouge. C'était le bon choix **sans** accumulation ; avec elle,
-un bruit bleu variant par frame convergerait plus vite et supprimerait l'artefact
-de porte de douche.
+Fait, et ça n'aurait pas dû attendre les vecteurs de mouvement : sans motif
+mobile l'accumulation ne servait à rien du tout. Poids ramené de 0,15 à 0,05,
+seul réglage qui égale l'ancien grain en étant plus stable.
 
-À faire **après** les vecteurs de mouvement, pas avant : faire varier la graine
-sans convergence en mouvement ne ferait qu'ajouter du scintillement.
+Ce qui reste : la graine mobile est un hachage blanc, pas du bruit bleu variant
+par frame. Un vrai bruit bleu temporel convergerait plus vite encore.
 
 ### 1.4 Anti-ghosting
 
@@ -109,17 +116,16 @@ par le voisinage — borner l'historique par la plage des valeurs voisines de la
 frame courante — qui rattrape les cas où la géométrie passe le test mais
 l'éclairage a changé.
 
-### 1.5 Le masque 2D déborde
+### 1.5 Le masque 2D déborde — ~~à faire~~ **fait** (11 septembre)
 
-Mesuré : chaque rectangle protégé est plus grand que le panneau qu'il contient,
-parce que le quad d'un panneau est plus grand que la partie opaque de sa texture
-et qu'un masque construit sur la géométrie ne voit pas l'alpha. Le resserrement
-de grille a récupéré 6 % ; le reste est structurel.
+Le terme est composé **avant** le calque 2D, à la dernière transition 3D → 2D de
+la passe, et le masque est éteint. Voir `docs/RAYTRACING.md`. La tentative
+antérieure plantait parce qu'elle créait ses objets Dawn dans la passe, côté
+worker ; ils sont maintenant créés au scellement de la passe, du côté qui
+enregistre les commandes.
 
-**Le vrai correctif** est architectural : composer le terme de ray tracing
-**avant** que le calque 2D ne soit dessiné, au lieu de multiplier l'image finie.
-Le masque disparaît alors entièrement. Une tentative antérieure a provoqué un
-`0xC0000005` dans le worker de rendu ; c'est à reprendre proprement.
+Reste de cette famille : les quads de sprites découpés, dont le rayon primaire
+traverse désormais les plus translucides, mais pas tous (voir 2.1).
 
 ---
 
@@ -128,11 +134,16 @@ Le masque disparaît alors entièrement. Une tentative antérieure a provoqué u
 ### 2.1 Test alpha réel
 
 La géométrie découpée est tracée comme opaque, avec une pondération statistique
-par la fraction solide de sa texture. Ça évite qu'une canopée occulte comme un
-mur, mais la lumière qui passe est uniforme au lieu d'avoir la forme des trous.
+par l'alpha moyen de sa texture. Ça évite qu'une canopée occulte comme un mur,
+mais la lumière qui passe est uniforme au lieu d'avoir la forme des trous.
 
 Un studio utilise des any-hit shaders ou des *opacity micromaps*. C'est
-significatif ici : la découpe atteint 17 à 53 % des draws en mini-jeu.
+significatif ici : la découpe atteint 6 à 35 % des draws en mini-jeu.
+
+**Avancé le 11 septembre** : le rayon primaire franchit désormais jusqu'à quatre
+surfaces dont l'alpha moyen est sous 0,6, ce qui a supprimé l'essentiel des
+rectangles sombres autour des sprites. Pas tous — c'est le dernier tiers qui
+demande le vrai test alpha.
 
 ### 2.2 Réflexions
 
@@ -186,4 +197,20 @@ physique, mais le jeu est un Mario Party sur GameCube. La question « jusqu'où
 faut-il aller » est artistique, et elle n'a pas été posée.
 
 Mon ordre : **0.1 d'abord** — sans le coût réel par frame, on optimise à l'aveugle
-— puis 0.4, puis 1.5, puis 1.1.
+— puis 0.4, puis 1.1.
+
+---
+
+## Ajouté le 11 septembre : un banc déterministe
+
+Presque toutes les mesures de ce projet comparent deux exécutions scriptées qui
+ne tombent pas sur la même image — les personnages s'animent, l'ordre des tours
+est tiré au sort. Quand l'écart est large et monotone ça tient ; quand il est de
+l'ordre de la variation d'une image à l'autre, la mesure ne conclut pas, et
+plusieurs questions de cette session sont restées ouvertes pour cette seule
+raison.
+
+**À faire** : un seul processus qui rend la même image deux fois en basculant le
+réglage entre les deux, et écrit la différence. Ça rendrait inutiles la moitié
+des réserves de `docs/RAYTRACING.md`, et c'est moins de travail que la plupart
+des points ci-dessus.
