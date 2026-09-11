@@ -484,3 +484,227 @@ positif.
 
 Reste non couvert : le temps logique des sprites (`sprman.c`), dont aucune attente
 bloquante ne depend.
+---
+
+## 8. Session manuelle de référence (baseline `bc63c93c`)
+
+Première partie réelle à deux instances, conduite manuellement par le joueur, sans
+aucune automatisation des menus.
+
+| Mesure | Valeur |
+|---|---|
+| Frames simulées | 49 801 |
+| Durée de jeu | ~831 s (13 min 51 s) |
+| Lignes d'enregistrement, accord des deux pairs | 99 756 |
+| Transitions d'overlay franchies aux frames identiques | 39 |
+| Hash canonique divergent | **aucun** |
+| `mismatch` / `context_skew` / `repaired` / `send_errors` | 0 / 0 / 0 / 0 |
+| `rng_sync` | 1 sur toute la session |
+| Rapports de désynchronisation écrits | **aucun** |
+
+Chemin d'overlays : `bootDll@2 → modeseldll@840 → mentDll@2989 → w04Dll@5961`,
+puis quatre tours complets de Big Boo, chacun avec instructions de mini-jeu
+(`instDll`), un mini-jeu (`24`, `16`, `25`, `51`), l'écran de résultats (`84`) et le
+retour au plateau (`92`).
+
+Aux six derniers checkpoints (frames 49 200 à 49 800), les deux pairs rapportent le
+même `state_hash` à la valeur binaire près : `3c5c164f50a9214e`, `b44415cbdc4cbc99`,
+`22d50e650a9bfd1c`, `86f3c05f2bfbd453`, `35b7d178a8755609`, `4ac72e311c110fea`.
+
+**Ce que cela prouve.** Le lockstep, le hash canonique v2, les cinq correctifs de
+déterminisme (C1–C4, H3) et l'égalité RNG tiennent sur une partie réelle de plateau
+avec mini-jeux, dans le contexte `w04Dll` qui contient précisément les attentes C5/C6
+non corrigées.
+
+**Ce que cela ne prouve pas.** Un plateau sur huit, quatre mini-jeux sur plus de
+soixante, aucune boutique, aucune loterie, aucun Boo, aucune fin de partie, aucun
+joueur CPU, deux joueurs sur quatre, une seule machine en bouclage local. La matrice
+de validation reste donc très majoritairement `UNTESTED`, et C5/C6 n'a pas été
+*infirmé* : il n'a simplement pas mordu sur cette session.
+
+---
+
+## 9. Qualité « jeu de combat » : écart mesuré et estimation
+
+Objectif posé : une qualité de jeu en ligne comparable à celle d'un jeu de combat.
+Cette section quantifie l'écart et estime le travail, sans rien modifier.
+
+### 9.1 Ce que la barre implique réellement
+
+Un jeu de combat atteint cette qualité par du **rollback** : chaque machine simule
+immédiatement avec une prédiction de l'entrée distante, puis corrige en restaurant un
+instantané et en rejouant. Le lockstep ne peut pas y arriver par construction — il
+attend l'entrée distante, donc il paie le temps de transit.
+
+Arithmétique à 60 Hz (une frame = 16,67 ms), délai d'entrée minimal ≈ RTT / 16,67 :
+
+| Réseau | RTT typique | Délai nécessaire | Verdict lockstep |
+|---|---|---|---|
+| LAN | 1 ms | 1 frame | **déjà optimal**, indiscernable du rollback |
+| Fibre, même pays | 20 ms | 2 frames | très bon |
+| Fibre, pays voisin | 50 ms | 3 frames (défaut actuel) | bon pour un plateau, limite pour un réflexe |
+| Transatlantique | 100 ms | 6 frames | perceptible en mini-jeu de réflexe |
+| Intercontinental | 150 ms | 9 frames | **dépasse le maximum du port (8)** |
+
+C'est la réponse à l'observation « ce qui fonctionne sur Internet fonctionne mieux en
+LAN » : **en LAN, le build actuel est déjà à la cible.** L'écart ne s'ouvre que sur
+Internet, et seulement dans les phases en temps réel.
+
+### 9.2 Où part le coût aujourd'hui — mesure
+
+Banc de mesure du rollback existant (arènes synthétiques, sans rendu ni replay ni
+E/S) :
+
+```
+Resource capture benchmark: 5.760 ms average, 6.909 ms maximum,
+                            53765310 bytes, 12 warm samples
+Native resource rollback:        PASS (69 corrections, 511 ticks rejoués)
+Native coordinated checkpoint:   PASS (93 corrections, 691 ticks rejoués)
+```
+
+Décomposition de ces 53 765 310 octets, à partir de `HeapSizeTbl`
+(`src/game/malloc.c:5`, multiplié par 4 sous `TARGET_PC`) et de `currentHeaps()`
+(`src/port/rollback_scene.cpp:57`) :
+
+| Contenu | Octets | Part |
+|---|---|---|
+| `HEAP_SYSTEM` (arène entière) | 9 437 184 | 17,55 % |
+| `HEAP_DATA` (arène entière) | 44 040 192 | 81,91 % |
+| État de gameplay fin (17 exportateurs de régions + en-tête) | 287 934 | **0,54 %** |
+| **Total** | **53 765 310** | 100 % |
+
+**C'est le résultat décisif de cette analyse.** Le coût n'est pas intrinsèque à Mario
+Party : **99,46 % de l'instantané est une copie d'arènes de tas**, et l'état de
+gameplay réellement nécessaire tient déjà dans **281 Ko**, exporté par les dix-sept
+fonctions `PartyBoard_Rollback*Regions` écrites pour le hash canonique.
+
+Deux faits aggravants, tous deux favorables à la réduction :
+
+1. `HuMemHeapSizeGet()` (`malloc.c:115`) renvoie la taille de l'arène entière, pas
+   l'occupation. L'instantané copie donc aussi la partie jamais écrite.
+2. Le port **quadruple** chaque tas (`HeapSizeTbl[i] *= 4` sous `TARGET_PC`). Sur
+   GameCube les deux arènes font 13 369 344 octets. **Trois quarts des 54 Mo sont de
+   la marge propre au port**, statistiquement jamais touchée.
+
+### 9.3 Les trois leviers de réduction
+
+**L1 — copier l'occupation, pas l'arène.** `HuMemUsedMallocSizeGet()`
+(`malloc.c:105`) existe déjà. Gain attendu : 54 Mo → ~13 Mo au pire, beaucoup moins
+en mini-jeu ; coût divisé par ~4 (≈ 1,4 ms). Petit changement, localisé à
+`currentHeaps()`. Risque : vérifier que la comptabilité de l'allocateur (listes
+libres) vit bien sous la limite d'occupation ; un auto-test save → gribouillage de la
+queue → load doit le démontrer.
+
+**L2 — suivi des pages modifiées. C'est le levier décisif.** MEM1 est un bloc unique
+de 64 Mo alloué par le port (`config.mem1Size`, `src/port/portmain.cpp:478` ;
+`AllocMEM1`, `extern/aurora/lib/dolphin/os/OSMemory.cpp:96`). Sous Windows en debug
+c'est déjà un `VirtualAlloc` ; en release c'est `calloc(1, size)`. En réservant ce
+bloc avec `MEM_WRITE_WATCH`, `GetWriteWatch` rend à chaque checkpoint la liste exacte
+des pages de 4 Ko écrites depuis la remise à zéro, et l'instantané ne copie que
+celles-là. Le coût devient proportionnel à **ce qu'une frame a réellement écrit** —
+typiquement quelques dizaines à quelques centaines de kilooctets en mini-jeu, soit des
+**microsecondes**. C'est la technique standard des savestates d'émulateur. Une seule
+fonction à changer, plus un repli portable pour les autres plateformes.
+
+**L3 — anneau d'instantanés différentiels.** Le rollback a besoin d'environ 8
+instantanés (un par frame prédite). En l'état : 8 × 54 Mo = 430 Mo. Avec L2 : une base
+plus un anneau de deltas de pages, quelques mégaoctets au total.
+
+Cible à viser et à mesurer sur le banc existant : **moins de 0,5 ms par instantané et
+quelques mégaoctets résidents.**
+
+### 9.4 Le vrai blocage architectural : rejouer sans dessiner
+
+`PartyBoard_RollbackRenderCanReplayWithoutDraw()` (`src/game/hsfman.c:2335`) refuse le
+replay dès que **le moindre hook de rendu est installé** : un `layerHook`, un modèle
+portant `HU3D_ATTR_HOOKFUNC`, ou un sprite portant `HUSPR_ATTR_FUNC`. Ces hooks
+exécutent du code côté dessin dont la ré-exécution pendant un replay silencieux n'est
+pas sûre.
+
+Mario Party en installe en permanence : **30 sites de `layerHook`** et **15 sites de
+fonction de sprite** dans `src/`. Tant que ce point n'est pas traité, le rollback est
+désarmé la plupart du temps sur un plateau.
+
+Le travail est borné et énumérable : classer chacun de ces 45 sites en « fait avancer
+de l'état, rejouable » ou « émet du dessin, à sauter pendant le replay », et scinder
+ceux qui font les deux. Ce n'est pas ouvert, mais c'est le paquet de travail qui touche
+du code de gameplay dans les overlays, donc celui qui porte le vrai risque.
+
+### 9.5 C5/C6 cessent d'être optionnels
+
+Sous lockstep, C5/C6 (`msmMusGetStatus`, `HuAudFXStatusGet`, 10 attentes) peut ne pas
+mordre : les deux pairs peuvent se trouver d'accord par chance, et la session de
+référence ci-dessus le confirme sur 49 801 frames.
+
+Sous rollback, la propriété change de nature. Une frame rejouée relit
+`msmMusGetStatus()`, dont le thread audio a entre-temps déplacé la valeur : **la même
+machine obtient deux réponses différentes pour la même frame**. Ce n'est plus une
+divergence entre pairs, c'est une non-reproductibilité locale, et elle casse le replay
+par définition.
+
+Conséquence : le rollback exige de résoudre C5/C6, et dans ce cadre l'option A
+(séquenceur avancé sur le tick de simulation) devient la réponse naturelle — c'est-à-dire
+exactement la modification de l'architecture MusyX aujourd'hui interdite. Ce point doit
+être rouvert explicitement avant tout travail de rollback.
+
+### 9.6 Architecture recommandée : lockstep sur le plateau, rollback en mini-jeu
+
+Mario Party n'est pas un jeu de combat, et c'est un avantage.
+
+Sur le **plateau**, le jeu est au tour par tour. Personne ne perçoit 100 ms de latence
+en appuyant sur A pour lancer un dé. Un délai de 3 à 8 frames y est invisible : **le
+rollback n'y apporte rien**, et c'est justement là que le coût d'instantané et le
+problème des hooks de rendu sont les plus lourds.
+
+Dans les **mini-jeux**, la latence se ressent — et ce sont aussi les contextes dont
+l'état mutable est le plus petit, donc ceux où un instantané ciblé devient réellement
+bon marché.
+
+Le port prévoit déjà cette séparation : `PartyBoard_NetplayIsMinigame()`
+(`src/game/pad.c:170`) est consulté en quatre endroits de `netplay_runtime.cpp`.
+L'architecture viable est donc **lockstep sur le plateau, rollback dans les
+mini-jeux** : la réactivité là où elle se perçoit, pour une fraction du coût d'un
+rollback universel, et en contournant la majeure partie du paquet 9.4.
+
+### 9.7 Estimation
+
+Unité : **sessions de travail concentré** (pas du calendrier). Le paquet 0 est fait et
+mesuré ; les autres sont estimés.
+
+| # | Paquet | Effort | Incertitude |
+|---|---|---|---|
+| 0 | Déterminisme : C1–C4, H3, hash canonique v2, rapports, `netplay_compare` | **fait** | — |
+| A | Réduction du coût d'instantané (L1 + L2 + L3) | 4–6 | faible — technique connue, une fonction à patcher, banc de mesure déjà en place |
+| B | Rejouer sans dessiner : classer et scinder les 45 hooks de rendu | 3–6 | **élevée** — touche du gameplay dans les overlays |
+| C | C5/C6 sous rollback (option A, séquenceur sur tick de simulation) | 2–5 | **élevée** — peut exiger de modifier MusyX, aujourd'hui interdit |
+| D | Validation SAVE → prédiction → RESTORE → REPLAY provoquée sur plateau, mini-jeu, RNG, animation, transition | 2–3 | faible — méthode et outillage déjà écrits |
+| E | Couche réseau rollback : prédiction, réconciliation, régulation de l'avance de frame | 3–5 | moyenne — la machine à états `Session` existe déjà (`rollback.cpp:158-375`) |
+| | **Total rollback complet (plateau + mini-jeux)** | **14–25** | B et C portent le risque |
+| | **Total rollback limité aux mini-jeux (recommandé)** | **8–14** | contourne l'essentiel de B, réduit C |
+
+Ce qui rend l'estimation raisonnablement solide malgré tout : **l'état à sauvegarder
+est déjà inventorié.** Les dix-sept exportateurs de régions et les seize sous-systèmes
+du hash canonique ont fait le travail de taxonomie — savoir exactement quel état compte
+et lequel est de la présentation. Un instantané ciblé suit les mêmes frontières. C'est
+normalement la partie la plus longue et la plus risquée d'un portage rollback, et elle
+est derrière nous.
+
+### 9.8 Ordre imposé par les dépendances
+
+1. **Terminer le déterminisme** — étendre la matrice de validation aux huit plateaux,
+   aux boutiques, loteries, Boo, items, fin de partie, CPU, quatre joueurs. Tant que
+   le lockstep n'est pas éprouvé, le rollback amplifierait des défauts non encore vus.
+2. **Paquet A** — réduire l'instantané. Indépendant du reste, mesurable seul, sans
+   risque pour le lockstep.
+3. **Paquet C** — C5/C6, car il conditionne la reproductibilité locale du replay.
+4. **Paquet D** — prouver SAVE/RESTORE/REPLAY dans chaque contexte.
+5. **Paquet E** — brancher la prédiction sur le transport, limité aux mini-jeux.
+6. **Paquet B** — seulement si le rollback doit s'étendre au plateau, ce dont
+   l'analyse 9.6 met l'utilité en doute.
+
+### 9.9 Avertissement de méthode
+
+Aucun chiffre de cette section ne vaut preuve de faisabilité. `5,760 ms` et
+`53 765 310` octets sont mesurés ; toutes les réductions annoncées sont des cibles à
+démontrer sur le même banc, et la règle absolue s'applique intégralement : aucun paquet
+n'est terminé sans un test déterministe qui l'établit.
