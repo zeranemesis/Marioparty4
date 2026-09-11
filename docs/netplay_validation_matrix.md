@@ -93,7 +93,7 @@ l'enregistrement. Voici ce qu'un run complet de 53 525 frames signale reellement
 | gimmicks propres au plateau | **oui** | `W04_BIG_BOO@48312` |
 | mini-jeux | **oui** | quatre, joues en entier |
 | retour mini-jeu vers plateau | **oui** | quatre retours par l'overlay 84 |
-| plusieurs tours consecutifs | **oui, mais infere** | quatre mini-jeux ; voir la reserve ci-dessous |
+| plusieurs tours consecutifs | **oui, mesure** | `turn=5` sur `max_turn=20` |
 | fin de partie | **NON** | l'enregistrement s'arrete au cinquieme ecran d'instructions |
 
 Les quatre mini-jeux effectivement joues, nommes depuis la table du depot :
@@ -108,19 +108,27 @@ Les quatre mini-jeux effectivement joues, nommes depuis la table du depot :
 Sept mecaniques ne se declenchent jamais : `STAR`, `LOTTERY`, `BATTLE`,
 `FORTUNE`, `BOWSER`, `BLOCK`, `LAST5`.
 
-**Reserve sur le nombre de tours.** Quatre tours est *deduit* du nombre de
-mini-jeux, pas mesure. `GWSystem.turn` entre dans le hash canonique mais n'est
-publie nulle part en clair, donc rien dans un resultat de run ne dit combien de
-tours ont ete joues. C'est exactement le manque que `minTurns` doit combler
-(chantier W2) : sans lui, un run qui reste bloque dans un menu et un run qui joue
-douze tours se ressemblent.
+**Le nombre de tours est desormais mesure, et il dementait la deduction.**
+
+`GWSystem.turn` est maintenant publie dans l'etat vivant et relu par la campagne
+(`board=3 turn=5 max_turn=20`). L'enregistrement atteint donc **le tour 5 sur
+20**.
+
+La version precedente de ce paragraphe annoncait quatre tours, *deduits* du
+nombre de mini-jeux joues. C'etait faux d'une unite : un cinquieme tour commence
+— son ecran d'instructions apparait a la frame 52 530 — avant que
+l'enregistrement ne s'epuise. Une deduction raisonnable, verifiable en quinze
+minutes, et fausse. C'est exactement pour cela que la mesure existe.
+
+Consequence pratique : l'enregistrement couvre **un quart** d'une partie, pas un
+cinquieme.
 
 L'enregistrement pilote 49 877 frames ; le run en atteint 53 525. Les **3 648
 dernieres frames** — une minute — tournent donc sans entree scriptee.
 
 Le plateau reste `PARTIAL` pour deux raisons dures : **les etoiles ne sont jamais
 prises** et **la partie ne se termine jamais**. Sur une partie de 20 tours, cet
-enregistrement en couvre quatre, soit un cinquieme.
+enregistrement en couvre cinq.
 
 ### Ces lignes se cochent depuis le jeu, pas depuis un souvenir
 
