@@ -116,6 +116,12 @@ void PartyBoard_CrashSetPeer(s32 peerIndex, const char *role);
 // entries only, and this must never be called once per frame for routine work.
 void PartyBoard_CrashBreadcrumb(const char *category, const char *format, ...);
 
+/* The simulation frame the crash reporter last saw, for anything that wants to
+ * stamp an event with it without keeping its own copy. 0 before the first tick,
+ * and possibly one frame stale if the game thread holds the lock - which is the
+ * right trade for a marker that must never block the simulation. */
+u32 PartyBoard_CrashSimulationFrame(void);
+
 // Refresh the simulation/network snapshot. Called once per accepted tick.
 void PartyBoard_CrashUpdateSimState(const PartyBoardCrashSimState *state);
 

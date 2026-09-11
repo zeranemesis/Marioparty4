@@ -11,6 +11,7 @@
 #include "game/audio.h"
 #include "game/board/window.h"
 #include "game/objsub.h"
+#include "port/board_coverage.h"
 
 static Vec camTargetFortune;
 static Vec camPosFortune;
@@ -63,6 +64,7 @@ static void ComFortuneSwapStar(s32 player1, s32 player2);
 
 void BoardFortuneExec(s32 player, s32 space)
 {
+    PARTYBOARD_BOARD_COVERAGE("FORTUNE");
 	if(_CheckFlag(FLAG_ID_MAKE(1, 11))) {
 		HuAudFXPlay(842);
 		BoardCameraViewSet(2);

@@ -26,6 +26,7 @@
 #include "ext_math.h"
 
 #include "game/hsfex.h"
+#include "port/board_coverage.h"
 
 typedef struct {
     struct {
@@ -176,6 +177,7 @@ void BoardShopKill(void)
 
 void BoardShopExec(s32 player, s32 space)
 {
+    PARTYBOARD_BOARD_COVERAGE("SHOP");
     if (BoardPlayerSizeGet(GWSystem.player_curr) == 2) {
         return;
     }

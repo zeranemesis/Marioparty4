@@ -13,6 +13,7 @@
 #include "ext_math.h"
 
 #include "game/board/boo_house.h"
+#include "port/board_coverage.h"
 
 typedef BOOL (*UseCheckFunc)(s32 player, s32 item);
 
@@ -279,6 +280,7 @@ s32 BoardComItemWeightGet(s32 player, s32 item) {
 }
 
 s32 BoardComUseItemSlotGet(s32 player) {
+    PARTYBOARD_BOARD_COVERAGE("CPU");
     s32 slot;
     s32 item;
 

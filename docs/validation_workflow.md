@@ -84,18 +84,86 @@ tools\record_board_session.ps1 -DiscPath "<iso>"
 
 C'est la seule chose qu'aucun script ne peut produire : une partie jouée à la
 main jusqu'à ce que le joueur décide lui-même de quitter. Le superviseur conclut
-sur quatre lignes, et les quatre doivent être vertes :
+sur **cinq** lignes, et les cinq doivent être vertes :
 
 ```
 DETERMINISM: PASS
 STABILITY: PASS
 USER_TERMINATED: YES
+PLAYABILITY: PASS
 OVERALL: PASS
 ```
+
+`PLAYABILITY` existe parce que les quatre autres peuvent toutes être vertes sur
+une partie qu'aucun humain n'accepterait de terminer. Le modèle livré est le
+lockstep : un tick n'avance que lorsque l'entrée distante est arrivée. En boucle
+locale cette attente est nulle, et c'est pourquoi son absence est passée
+inaperçue si longtemps. Les seuils sont dans `docs/playability_thresholds.md`,
+fixés **avant** la première session à deux machines.
 
 Une session réussie devient un enregistrement, l'enregistrement devient un
 scénario, et le scénario rejoint la campagne. C'est ainsi que la couverture
 grandit.
+
+### 7. Humain, deux machines — la seule preuve qui compte
+
+Aucune exécution en boucle locale ne peut établir que deux machines sur deux
+réseaux restent synchronisées. Jusqu'ici l'outil ne savait pas l'enregistrer : il
+codait `127.0.0.1` en dur et supervisait les deux processus lui-même.
+
+**Machine A**, celle qui héberge :
+
+```bash
+tools\record_board_session.ps1 -DiscPath "<iso>" -Role Host
+```
+
+Elle affiche le port UDP et la ligne de commande à transmettre. Sur Internet,
+c'est l'adresse publique de A qu'il faut, avec ce port UDP redirigé vers elle.
+
+**Machine B**, celle qui rejoint :
+
+```bash
+tools\record_board_session.ps1 -DiscPath "<iso>" -Role Join -JoinAddress <A>:<port>
+```
+
+Chaque machine supervise **son** processus, classe **sa** terminaison, et écrit
+son propre dossier de session avec un `session.json` lisible par machine. Aucune
+des deux ne prétend savoir ce qui s'est passé sur l'autre : chacune conclut
+`DETERMINISM: DEFERRED` et `OVERALL: PENDING_MERGE`, parce que la question « les
+deux machines ont-elles calculé la même chose » exige les deux moitiés au même
+endroit.
+
+Ensuite, les deux dossiers réunis sur une seule machine :
+
+```bash
+tools\merge_session.ps1 -HostSession <dossier-A> -JoinSession <dossier-B> -ScenarioId <nom>
+```
+
+La fusion compare les deux enregistrements ligne par ligne et **nomme la première
+ligne divergente**, compare les chemins d'overlays frame par frame, compare les
+empreintes d'état finales quand les deux côtés se sont arrêtés à la même frame,
+et refuse deux moitiés issues de commits différents avant toute autre
+comparaison. Elle ne répare jamais, ne réconcilie jamais, ne désigne jamais un
+gagnant. Sur un succès elle écrit l'enregistrement fusionné et, si on le demande,
+un fragment de scénario marqué `coverage_source: HUMAN`.
+
+`tools\test_merge_session.ps1` exerce cette fusion sur seize cas de fixtures,
+parce que la manière naturelle de l'exercer coûte deux personnes, deux machines
+et deux heures, et qu'y découvrir un défaut de l'outil gâcherait la soirée sans
+rien produire.
+
+### Ce qu'un run a réellement touché
+
+Chaque mécanique de plateau se signale la première fois qu'elle s'exécute :
+
+```
+COVERAGE> SHOP first reached at frame 18422
+```
+
+La campagne et l'enregistreur relisent ces lignes et les inscrivent dans
+`run.json` et `session.json`. Une ligne de la matrice ne passe de `UNTESTED` à
+`PARTIAL` que si son marqueur apparaît dans un résultat. C'est ce qui empêche la
+matrice d'être mise à jour de mémoire.
 
 ## Les enregistrements
 
@@ -106,6 +174,12 @@ tools\verify_replays.ps1
 Les fichiers sont trop gros pour être versionnés ; leurs empreintes le sont.
 Un enregistrement dont le `sha256` a changé est un autre enregistrement, et tout
 résultat obtenu avec lui appartient à cet autre enregistrement.
+
+**La campagne appelle cette vérification elle-même**, avant son premier run, et
+refuse de démarrer si une empreinte ne correspond plus. La matrice promettait
+cette vérification depuis qu'elle est écrite ; rien ne l'appelait.
+`-SkipReplayVerification` la contourne, et l'inscrit dans chaque résultat de la
+campagne : le contournement ne peut pas être silencieux.
 
 ## Où lire un résultat
 
@@ -123,10 +197,16 @@ résultat obtenu avec lui appartient à cet autre enregistrement.
 |---|---|
 | `PARTYBOARD_AUDIO_DIAGNOSTICS` | `1` trace banques et violations, `2` ajoute chaque voix |
 | `PARTYBOARD_FORCE_ROLLBACK` | `<période>[:<distances>]` arme le probe de rollback local |
-| `PARTYBOARD_MEM_DIAGNOSTICS` | `1` arme la vérification d'intégrité des blocs HuMem |
+| `PARTYBOARD_MEM_DIAGNOSTICS` | `1` arme la vérification d'intégrité des blocs HuMem. **Armée par défaut** par la campagne et par l'enregistreur de session : S1 est morte de `STATUS_HEAP_CORRUPTION` et aucun script ne la posait |
 | `PARTYBOARD_CRASH_DIR` | dossier des rapports ; sa présence signifie « session supervisée » |
 | `PARTYBOARD_CRASH_QUEUE` | remplace la file locale des incidents, pour les tests |
 
-La campagne écrit les deux premières **explicitement** dans l'environnement des
+La campagne écrit les trois premières **explicitement** dans l'environnement des
 pairs plutôt que de les hériter : une variable oubliée dans un shell ne doit pas
 pouvoir changer en silence ce qu'une campagne a mesuré.
+
+Et la règle symétrique, appliquée aux deux détecteurs : **un détecteur demandé
+sans preuve qu'il a tourné vaut `HARNESS_FAILURE`, jamais `PASS`.** La preuve est
+ce que le détecteur dit lui-même — les libérations de banque pour l'audio, les
+enregistrements de tas pour la mémoire — et non le fait que la variable ait été
+posée.

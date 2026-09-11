@@ -14,6 +14,7 @@
 #include "game/wipe.h"
 
 #include "ext_math.h"
+#include "port/board_coverage.h"
 
 static s16 stopWin = -1;
 static s16 wheelMdl = -1;
@@ -342,6 +343,7 @@ static void UpdateTeamResult(omObjData *object);
 
 void BoardLast5Exec(void)
 {
+    PARTYBOARD_BOARD_COVERAGE("LAST5");
 	GWSystem.player_curr = -1;
 	last5Proc = HuPrcChildCreate(ExecLast5, 8200, 14336, 0, boardMainProc);
 	HuPrcDestructorSet2(last5Proc, DestroyLast5);

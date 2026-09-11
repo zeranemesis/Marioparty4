@@ -81,6 +81,7 @@ static Process *rollProc;
 
 #ifdef TARGET_PC
 #include "port/netplay_state.h"
+#include "port/board_coverage.h"
 void PartyBoard_NetplayDiceState(PartyBoardNetplayStateSink sink, void *context)
 {
     int i;
@@ -114,6 +115,7 @@ static s32 diceDigitMdlTbl[10] = { DATA_MAKE_NUM(DATADIR_BOARD, 0x0C), DATA_MAKE
 
 s32 BoardRollExec(s32 playerNo)
 {
+    PARTYBOARD_BOARD_COVERAGE("DICE");
     rollPlayer = playerNo;
     inputTimer = 0;
     numDice = 1;

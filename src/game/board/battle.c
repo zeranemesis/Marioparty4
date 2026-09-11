@@ -20,6 +20,7 @@
 #include "ext_math.h"
 
 #include "game/hsfex.h"
+#include "port/board_coverage.h"
 
 typedef struct {
     struct {
@@ -113,6 +114,7 @@ static s16 battleSprPrioTbl[] = {
 };
 
 void BoardBattleExec(s32 player, s32 space) {
+    PARTYBOARD_BOARD_COVERAGE("BATTLE");
     if (_CheckFlag(FLAG_ID_MAKE(1, 11))) {
         HuAudFXPlay(0x34A);
         BoardCameraViewSet(2);

@@ -76,6 +76,53 @@ Etat de Boo's Haunted Bash sur cette liste : *entree*, *deplacements*,
 *mini-jeux* et *retour mini-jeu vers plateau* sont exerces par l'enregistrement ;
 *evenements* l'est partiellement, par le seul evenement Big Boo. Les dix autres
 lignes sont `UNTESTED`, et c'est pourquoi le plateau reste `PARTIAL`.
+
+### Ces lignes se cochent depuis le jeu, pas depuis un souvenir
+
+Jusqu'ici, rien ne reliait cette liste a ce qu'un run avait reellement fait. Une
+partie de deux heures peut parfaitement ne jamais tomber sur une case Bowser, et
+personne ne s'en apercevrait : la case serait cochee parce que la session
+« a couvert le plateau ».
+
+Chaque mecanique se signale donc elle-meme, la premiere fois qu'elle s'execute.
+`src/game/board/` contient un fichier par mecanique, et chacun porte un marqueur
+a son point d'entree (`include/port/board_coverage.h`) :
+
+| ligne de la liste | marqueur | fichier |
+|---|---|---|
+| boutiques | `SHOP` | `shop.c` |
+| etoiles | `STAR` | `star.c` |
+| Boo | `BOO` | `boo.c` |
+| Boo (maison) | `BOO_HOUSE` | `boo_house.c` |
+| evenements — loterie | `LOTTERY` | `lottery.c` |
+| objets | `ITEM` | `item.c` |
+| mini-jeux — bataille | `BATTLE` | `battle.c` |
+| evenements — fortune | `FORTUNE` | `fortune.c` |
+| evenements — Bowser | `BOWSER` | `bowser.c` |
+| gimmicks — teleportation | `WARP` | `warp.c` |
+| gimmicks — champignon | `MUSHROOM` | `mushroom.c` |
+| cases — bloc | `BLOCK` | `block.c` |
+| fin de partie — cinq derniers tours | `LAST5` | `last5.c` |
+| premiers tours — des | `DICE` | `roll.c` |
+| adversaires CPU | `CPU` | `com.c` |
+| tutoriel | `TUTORIAL` | `tutorial.c` |
+
+Le jeu ecrit `COVERAGE> <marqueur> first reached at frame <n>` sur sa sortie
+standard ; `netplay_campaign.ps1` et `record_board_session.ps1` la relisent et
+l'inscrivent dans `run.json` et `session.json`. Le marqueur n'ecrit rien dans
+l'etat du jeu et ne peut donc pas affecter le determinisme, ce qui importe
+puisqu'il s'execute a l'interieur de la simulation synchronisee sur les deux
+pairs. Il n'est volontairement **pas** derriere un interrupteur de diagnostic :
+un marqueur qu'il faut penser a activer est un marqueur qui sera eteint le soir
+ou il aurait servi.
+
+Le meme marqueur part dans le fil d'Ariane du rapport de crash, de sorte qu'une
+session qui meurt au tour 14 dit quand meme quelles mecaniques elle avait
+atteintes — precisement la question qu'on se pose devant ce crash.
+
+Consequence sur cette matrice : une ligne ne passe de `UNTESTED` a `PARTIAL` que
+si le marqueur correspondant apparait dans un resultat de run. Aucune ligne ne se
+coche a la main.
 ## Mini-jeux
 
 Deux tables du depot, croisees : `src/REL/selmenuDll/main.c` donne les noms,

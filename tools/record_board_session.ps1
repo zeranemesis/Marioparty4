@@ -423,6 +423,22 @@ foreach ($peer in $peers) {
     $overlays[$side] = @([regex]::Matches($log, 'game context (-?\d+) at network frame (\d+)') |
         ForEach-Object { "$($_.Groups[1].Value)@$($_.Groups[2].Value)" })
 }
+# ---- which board mechanics this session actually reached ----
+# The 15-line checklist in the validation matrix IS the contents of
+# src/game/board/. Reading it back from the game's own output is what stops the
+# matrix being updated from someone's recollection of the evening.
+$coverage = @{}
+foreach ($side in $sides) {
+    $logPath = Join-Path $runPath "peer-$side-stdout.log"
+    if (-not (Test-Path -LiteralPath $logPath)) { continue }
+    foreach ($hit in Select-String -Path $logPath -Pattern '^COVERAGE> (\S+) first reached at frame (\d+)' -ErrorAction SilentlyContinue) {
+        $name = $hit.Matches[0].Groups[1].Value
+        $frame = [int]$hit.Matches[0].Groups[2].Value
+        if (-not $coverage.ContainsKey($name) -or $coverage[$name] -gt $frame) { $coverage[$name] = $frame }
+    }
+}
+$coverageList = @($coverage.Keys | Sort-Object | ForEach-Object { "$_@$($coverage[$_])" })
+
 if ($Role -eq 'Local' -and $overlays[0].Count -gt 0 -and $overlays[1].Count -gt 0) {
     if (Compare-Object $overlays[0] $overlays[1] -SyncWindow 0) {
         $determinismProblems += ("The two instances took different overlay paths. " +
@@ -596,6 +612,13 @@ if ($crashed.Count -eq 2) {
     $summary.Add('CONCLUSION: no abnormal termination detected.')
 }
 $summary.Add('')
+$summary.Add('[BOARD COVERAGE]')
+if ($coverageList.Count -gt 0) {
+    $summary.Add("mechanics_reached=$($coverageList -join ' ')")
+} else {
+    $summary.Add('mechanics_reached=NONE - this session exercised no board mechanic at all')
+}
+$summary.Add('')
 $summary.Add('[PLAYABILITY]')
 foreach ($note in $playabilityNotes) { $summary.Add($note) }
 $summary.Add(("thresholds: good <= $playabilityGoodPerMinute stalls/min and <= $playabilityGoodLongest frames; " +
@@ -629,6 +652,7 @@ $document = [ordered]@{
     playability = $playability
     overall = $overall
     determinism_problems = @($determinismProblems)
+    board_coverage = @($coverageList)
     playability_thresholds = [ordered]@{
         good_stalls_per_minute = $playabilityGoodPerMinute
         max_stalls_per_minute = $playabilityMaxPerMinute
@@ -678,6 +702,11 @@ foreach ($side in $sides) {
 foreach ($peer in $peers) {
     Write-Output ("peer-$($peer.Side) exit_code=$(Format-ExitCode $peer.ExitCode) " +
         "classification=$($peer.Classification) last_frame=$($peer.LastFrame)")
+}
+if ($coverageList.Count -gt 0) {
+    Write-Output "Board mechanics reached: $($coverageList -join ' ')"
+} else {
+    Write-Output 'Board mechanics reached: NONE'
 }
 foreach ($note in $playabilityNotes) { Write-Output $note }
 foreach ($problem in $determinismProblems) { Write-Output "DETERMINISM PROBLEM: $problem" }

@@ -779,6 +779,12 @@ extern "C" void PartyBoard_CrashSetPeer(s32 peerIndex, const char *role)
         static_cast<int>(gIdentity.peerIndex), gIdentity.role[0] ? gIdentity.role : "unknown");
 }
 
+extern "C" u32 PartyBoard_CrashSimulationFrame(void)
+{
+    std::unique_lock<std::mutex> lock(gSimMutex, std::try_to_lock);
+    return lock ? gSim.simulationFrame : 0;
+}
+
 extern "C" void PartyBoard_CrashBreadcrumb(const char *category, const char *format, ...)
 {
     if (!category || !format) return;

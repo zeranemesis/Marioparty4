@@ -37,6 +37,10 @@ param(
     # Verbosity of the audio lifetime trace: '' off, '1' banks and violations,
     # '2' every voice event as well.
     [string]$AudioDiagnostics = '1',
+    # Run even if a recording no longer matches its recorded hash. Off by
+    # default, and recorded in the results when used, because the whole point of
+    # the fingerprint is that it cannot be waved away silently.
+    [switch]$SkipReplayVerification,
     # HuMem heap integrity detector, '' off. On by default: session S1 died of
     # STATUS_HEAP_CORRUPTION and this is the only detector that can see inside
     # MEM1, yet no script had ever set it, so every campaign so far ran with the
@@ -141,6 +145,32 @@ $scenarios = Read-Manifest $Manifest
 if ($Scenario) { $scenarios = @($scenarios | Where-Object { $Scenario -contains $_.Id }) }
 if ($scenarios.Count -eq 0) { throw 'No scenario selected.' }
 
+# ---- the recordings this campaign is about ----
+#
+# A recording is evidence and it is large, so the file is not versioned and its
+# hash is. A campaign run against a recording whose hash has changed is a
+# campaign about a DIFFERENT recording, and calling the two by the same name
+# makes every past result unreadable. tests/replays/manifest.json has promised
+# this check since it was written; nothing called it. Now the campaign does,
+# before the first run rather than after the last.
+if ($SkipReplayVerification) {
+    Write-Warning ('Replay fingerprint verification skipped by request. Results from this ' +
+        'campaign cannot be compared with results from any other.')
+} else {
+    $verification = & (Join-Path $PSScriptRoot 'verify_replays.ps1') 2>&1
+    $verificationExit = $LASTEXITCODE
+    if ($verificationExit -ne 0) {
+        $verification | ForEach-Object { Write-Output "  $_" }
+        throw ("The recordings do not match tests/replays/manifest.json (verify_replays.ps1 " +
+            "exited $verificationExit). A campaign run on a changed recording is a campaign " +
+            "about a different recording. Restore the files, or re-record and run " +
+            "tools\verify_replays.ps1 -Update deliberately. -SkipReplayVerification bypasses " +
+            "this, and says so in the results.")
+    }
+    Write-Output ("Replay fingerprints verified: " +
+        (@($verification | Where-Object { $_ -match '^OK ' }).Count) + " recordings match the manifest.")
+}
+
 if ($null -eq $state) {
     $plan = @()
     foreach ($entry in $scenarios) {
@@ -200,6 +230,7 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         seed = $entry.Seed
         audio_diagnostics = $AudioDiagnostics
         mem_diagnostics = $MemDiagnostics
+        replay_fingerprints_verified = (-not $SkipReplayVerification)
         force_rollback = $ForceRollback
         target_frame_rate = $TargetFrameRate
         target_frame_rate_peer_1 = $(if ($TargetFrameRatePeer1 -gt 0) { $TargetFrameRatePeer1 } else { $TargetFrameRate })
@@ -224,6 +255,7 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         mem_diag_armed = $false
         mem_diag_heaps = 0
         mem_corruption_detected = $false
+        board_coverage = @()
         d6_batched_frames = 0
         d6_worst_batch = 0
         crash_fingerprint = ''
@@ -426,6 +458,23 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
     $record.mem_diag_heaps = $heaps
     $record.mem_diag_armed = ($MemDiagnostics -ne '') -and ($heaps -gt 0)
     $record.mem_corruption_detected = $corruption
+
+    # ---- which board mechanics this run actually reached ----
+    # Read from the game's own output rather than inferred from the scenario
+    # name. A scenario called "board replay" that never lands on a Bowser space
+    # has not covered Bowser, and the only way to know is to have the mechanic
+    # say so itself.
+    $coverage = @{}
+    foreach ($side in 0, 1) {
+        $logPath = Join-Path $runPath "peer-$side-stdout.log"
+        if (-not (Test-Path -LiteralPath $logPath)) { continue }
+        foreach ($hit in Select-String -Path $logPath -Pattern '^COVERAGE> (\S+) first reached at frame (\d+)' -ErrorAction SilentlyContinue) {
+            $name = $hit.Matches[0].Groups[1].Value
+            $frame = [int]$hit.Matches[0].Groups[2].Value
+            if (-not $coverage.ContainsKey($name) -or $coverage[$name] -gt $frame) { $coverage[$name] = $frame }
+        }
+    }
+    $record.board_coverage = @($coverage.Keys | Sort-Object | ForEach-Object { "$_@$($coverage[$_])" })
 
     # ---- overlay paths ----
     $overlays = @(, @(), @())

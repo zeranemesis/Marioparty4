@@ -19,6 +19,7 @@
 #include "game/board/tutorial.h"
 #include "game/chrman.h"
 #include "game/hsfex.h"
+#include "port/board_coverage.h"
 
 typedef struct bowser_event_data {
     s16 sprite[3];
@@ -106,6 +107,7 @@ static s32 ExecMiniBowserEvent(void);
 
 s32 BoardBowserExec(s32 player, s32 space)
 {
+    PARTYBOARD_BOARD_COVERAGE("BOWSER");
     if(_CheckFlag(FLAG_ID_MAKE(1, 11))) {
         HuAudFXPlay(841);
         BoardCameraViewSet(2);

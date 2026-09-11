@@ -16,6 +16,7 @@
 #include "game/board/tutorial.h"
 #include "game/board/window.h"
 #include "game/hsfex.h"
+#include "port/board_coverage.h"
 
 SHARED_SYM extern s32 boardTutorialData[4];
 
@@ -35,6 +36,7 @@ static omObjData* itemGiveObj;
 static Process* mushroomProc;
 
 void BoardMushroomExec(s32 arg0) {
+    PARTYBOARD_BOARD_COVERAGE("MUSHROOM");
     omVibrate(arg0, 0xC, 6, 6);
     mushroomProc = HuPrcChildCreate(MushroomMain, 0x2003U, 0x3800U, 0, boardMainProc);
     HuPrcDestructorSet2(mushroomProc, KillMushroom);

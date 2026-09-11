@@ -21,6 +21,7 @@
 
 #include "ext_math.h"
 #include <string.h>
+#include "port/board_coverage.h"
 
 typedef struct {
     struct {
@@ -397,6 +398,7 @@ static void ComSetStealPlayerInput(s32 arg0, s32 arg1) {
 }
 
 s32 BoardBooStealMain(void) {
+    PARTYBOARD_BOARD_COVERAGE("BOO");
     BooEventWork *sp8;
     s32 var_r31;
     s32 var_r30;

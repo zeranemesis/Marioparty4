@@ -32,6 +32,7 @@
 
 #ifndef __MWERKS__
 #include "game/hsfex.h"
+#include "port/board_coverage.h"
 extern s32 rand8(void);
 #endif
 
@@ -159,6 +160,7 @@ static s32 suitMotTbl[][2] = { { DATA_MAKE_NUM(DATADIR_BKOOPASUIT, 1), DATA_MAKE
 
 void BoardItemStart(s32 arg0, s32 arg1)
 {
+    PARTYBOARD_BOARD_COVERAGE("ITEM");
     currItemRestore = arg0;
     currItem = arg1;
     suitMdl = -1;
