@@ -321,3 +321,52 @@ C'est une limite de la sauvegarde, pas de l'outil.
 **Et `w10Dll`, la référence de tout l'audit, n'a pas été retrouvée.** Le chemin de
 menu que prend l'outil actuel n'y mène jamais ; l'ancienne séquence y arrivait.
 Quel écran c'est exactement reste inconnu.
+
+---
+
+# Balayage sur mini-jeux — 11 septembre 2026
+
+Six mini-jeux distincts, atteints par `-MinigameIndex`. Aucune erreur, aucun
+retrait de périphérique.
+
+| scène | triangles | tracé | masque 2D | draws 2D | projections | découpe | env. mappé |
+|---|---|---|---|---|---|---|---|
+| `m416Dll` | 25 620 | 1,53 ms | 7,4 % | 6 | 2 | 38,0 % | 0 % |
+| `m410Dll` | 29 975 | 2,16 ms | 7,4 % | 6 | 2 | 40,5 % | 0 % |
+| `m406Dll` | 21 947 | 2,70 ms | 0 % | 0 | 1 | **52,8 %** | 0 % |
+| `m401Dll` | 29 019 | 2,87 ms | 8,3 % | 20 | 2 | 35,2 % | 1,3 % |
+| `m403Dll` | 19 638 | 4,10 ms | 0 % | 0 | 2 | 32,2 % | 0,9 % |
+| `m414Dll` | 21 100 | 5,79 ms | 13,4 % | 28 | 1 | 17,0 % | 0 % |
+
+## Ce que ça change par rapport aux plateaux
+
+**Les mini-jeux coûtent moins cher.** Médiane 2,8 ms contre 5,85 ms sur les
+plateaux, pour un intervalle comparable (1,5–5,8 contre 1,8–6,6). Le réglage
+« High » y tient largement dans une frame.
+
+**La géométrie découpée y domine** : 17 à 53 % des draws, contre 6 à 31 % sur
+les plateaux. `m406Dll` pousse à **plus d'un draw sur deux**. C'est là que la
+pondération de l'occultation par la fraction solide compte le plus — et c'est
+une population que les mesures faites sur les menus n'avaient aucune chance de
+représenter.
+
+**Les réflexions n'existent pas en mini-jeu.** Entre 0 et 1,3 % de draws
+« environment mapped », contre 29 % sur `w01Dll`. Ajouté aux 1–4 % de pixels
+mesurés sur un plateau, le terme ne fait rien du tout ici. Cela confirme, sur
+une deuxième population, que la moitié chère du chantier des réflexions n'aurait
+rien rapporté.
+
+**Deux projections par frame sur quatre mini-jeux sur six**, contre une seule
+sur tous les plateaux mesurés. Le choix de la projection couvrant le plus de
+triangles, plutôt que celle du dernier draw, sert donc surtout ici.
+
+**Le masque 2D s'engage sur quatre des six**, avec 6 à 28 draws 2D bornés. Les
+deux à 0 % ont 0 draw borné : rien à protéger à cet instant, pas un défaut.
+
+## Portée
+
+Treize scènes distinctes mesurées en tout — trois plateaux, six mini-jeux plus
+`m405Dll` atteint séparément, et `w10Dll` d'où venaient toutes les mesures de
+l'audit. Sur soixante-et-un mini-jeux et neuf plateaux. Les plateaux restants
+sont verrouillés par la progression de la sauvegarde ; les mini-jeux, eux, sont
+tous accessibles, `-MinigameIndex` suffit.
