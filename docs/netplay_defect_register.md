@@ -166,10 +166,42 @@ salAudioThreadFunc            [hw_pc.c:1665]
 explicite : l'adresse n'appartient à aucune pile connue. Ce n'est donc pas le
 défaut D4 déguisé.
 
-**Ce que l'on ne sait pas.** Sa fréquence : il s'est produit une fois sur les
-quatre replays de vérification. Une seule occurrence ne permet pas de dire s'il
-s'agit d'une course entre le thread de jeu et le thread audio, d'un pointeur
-périmé après un changement d'overlay, ou d'un cas limite du décodeur.
+**Fréquence mesurée.** Deux occurrences sur sept replays après le correctif de
+pile, soit environ 30 %.
+
+**Quand, exactement.** Les deux fois à la même charnière : frames 27 744 et
+27 750. L'état capturé au crash est sans ambiguïté :
+
+```
+simulation_frame=27744   game_context=84   overlay=-1
+overlay_previous=84      overlay_transition_frame=27744
+frames_since_transition=0
+```
+
+**`frames_since_transition=0`** : la faute se produit sur la frame même du
+déchargement de l'overlay 84.
+
+**Mécanisme probable.** Ce n'est pas un dépassement d'indice : `srcPosHi` est
+comparé à `playbackEnd`, lui-même borné par `smp->length`, avant chaque appel à
+`sampleAtPos` (`hw_pc.c:823-840`). Le suspect est donc `smp` lui-même, c'est-à-
+dire `&vp->smp_info` : une structure à plusieurs champs écrite par le thread de
+jeu et lue par le thread audio **sans aucune synchronisation**. Au déchargement
+d'un overlay, sa banque audio est libérée ; une voix encore en cours de rendu
+garde alors un `addr` périmé, ou voit un `SAMPLE_INFO` déchiré, mi-ancien
+mi-nouveau.
+
+**Lien avec C3, qui m'oblige à une remarque sur mon propre travail.** C'est
+exactement la fenêtre que `HuAudSndGrpWait` est censé fermer, appelé au
+changement d'overlay depuis `objmain.c:95-96`. Ce drain attendait auparavant que
+l'audio se taise, borné à 500 ms de temps mur ; le correctif C3 l'a rendu
+déterministe en le fixant à un nombre d'itérations constant. Les deux versions
+peuvent rendre la main avant que l'audio ait réellement fini — la borne en temps
+mur le pouvait déjà — mais il faut le dire clairement : **le drain ne garantit
+pas que le thread audio a lâché la banque**, et c'est là qu'il faudra regarder.
+
+**Ce qui reste à prouver.** Que la banque libérée est bien celle que la voix
+lisait. Le montrer demande d'instrumenter la libération des banques et la durée
+de vie des voix, donc de toucher au périmètre MusyX/C3 gelé.
 
 **Pourquoi il compte.** C'est désormais le seul crash observé qui reste sur le
 chemin d'une partie en ligne. Il est indépendant de D4 et ne peut pas être
