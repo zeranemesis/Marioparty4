@@ -109,11 +109,11 @@ a son point d'entree (`include/port/board_coverage.h`) :
 | gimmicks — Big Boo (w04) | `W04_BIG_BOO` | `src/REL/w04Dll/boo_event.c` |
 
 Les gimmicks propres à un plateau ne sont **pas** dans `src/game/board/` : ils
-sont dans le module du plateau. C'est le premier run marqué qui l'a montré — un
-enregistrement de 48 671 frames de Boo's Haunted Bash n'a signalé **aucun** `BOO`
-tout en traversant l'événement Big Boo, parce que `board/boo.c` est le vol de
-pièces et d'étoile générique et non cet événement-là. Le marqueur `W04_BIG_BOO`
-est posé sur la ligne exacte où vivait le défaut D4.
+sont dans le module du plateau. `board/boo.c` est le vol de pièces et d'étoile
+générique ; l'événement Big Boo de `w04` est autre chose, dans
+`src/REL/w04Dll/boo_event.c`. Un run qui traverse l'événement Big Boo à la frame
+48 671 ne signale donc **pas** `BOO` pour autant. Le marqueur `W04_BIG_BOO` est
+posé sur la ligne exacte où vivait le défaut D4.
 
 Les huit autres plateaux n'ont pas encore de marqueur de gimmick. Ils en auront
 un quand un run y sera mené, pas avant : poser un marqueur dans un module qu'on
@@ -121,18 +121,31 @@ n'a pas lu reviendrait à inventer la ligne de la matrice qu'il est censé prouv
 
 #### Ce que l'enregistrement `board-replay.txt` couvre réellement
 
-Première mesure, le 2026-09-11, sur 48 671 frames de `w04Dll` :
+Mesuré le 2026-09-11, sur un run complet de 53 490 frames de `w04Dll` :
 
 ```
-TUTORIAL@5962  DICE@8665  SHOP@9086  MUSHROOM@11111  WARP@18439  CPU@20504  ITEM@20695
+TUTORIAL@5962   DICE@8665     SHOP@9086     MUSHROOM@11111  WARP@18439
+CPU@20504       ITEM@20695    BOO_HOUSE@50176               BOO@50780
 ```
 
-Sept mécaniques. **Ne sont donc pas couvertes par cet enregistrement** : `STAR`,
-`BOO`, `BOO_HOUSE`, `LOTTERY`, `BATTLE`, `FORTUNE`, `BOWSER`, `BLOCK`, `LAST5`.
+Neuf mécaniques. **Ne sont donc pas couvertes par cet enregistrement** : `STAR`,
+`LOTTERY`, `BATTLE`, `FORTUNE`, `BOWSER`, `BLOCK`, `LAST5`.
+
+> **Correction, même jour.** La première version de ce paragraphe annonçait sept
+> mécaniques et rangeait `BOO` et `BOO_HOUSE` parmi les absentes. Cette liste
+> venait d'un run **tronqué** — celui qui mourait à la frame 48 671, le correctif
+> D4 délibérément annulé — et non de l'enregistrement. Les deux mécaniques
+> manquantes arrivent aux frames 50 176 et 50 780, que ce run n'a jamais
+> atteintes.
+>
+> La leçon vaut d'être écrite, parce qu'elle est la raison d'être de ces
+> marqueurs : **une liste de couverture n'est valable que pour le run qui l'a
+> produite**, et un run qui s'arrête tôt sous-déclare sans rien signaler
+> d'anormal. Une cellule de la matrice ne doit être mise à jour qu'à partir d'un
+> run qui a atteint sa fin, ou en nommant la frame où il s'est arrêté.
 
 C'est la première fois que cette liste est établie à partir de ce que le jeu a
-fait plutôt qu'à partir d'un souvenir, et elle est plus courte que ce que la
-matrice laissait entendre.
+fait plutôt qu'à partir d'un souvenir.
 
 Le jeu ecrit `COVERAGE> <marqueur> first reached at frame <n>` sur sa sortie
 standard ; `netplay_campaign.ps1` et `record_board_session.ps1` la relisent et

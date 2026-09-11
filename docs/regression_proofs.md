@@ -101,10 +101,11 @@ l'événement Big Boo à la frame 48671.
 
 | | correctif absent | correctif présent |
 |---|---|---|
-| résultat | **CRASH** | *(en cours)* |
-| frame atteinte | **48671** | |
-| code de sortie, les deux pairs | `0xC0000005 EXCEPTION_ACCESS_VIOLATION` | |
-| classification | `PROCESS_CRASH` / `PROCESS_CRASH` | |
+| résultat | **CRASH** | **PASS** |
+| frame atteinte | **48671** | 53490, soit 4819 au-delà |
+| code de sortie, les deux pairs | `0xC0000005 EXCEPTION_ACCESS_VIOLATION` | `0x00000000` |
+| classification | `PROCESS_CRASH` / `PROCESS_CRASH` | terminaison normale |
+| mismatch / violations audio / corruption tas | — | 0 / 0 / aucune |
 
 **Frame 48671 exactement** — la frame documentée dans l'entrée D4, atteinte sans
 la chercher, sur les deux pairs, avec le code de sortie que le registre attribue
@@ -125,6 +126,18 @@ qui est exactement le banc d'essai dont le rapporteur a besoin.
 
 La campagne attribue désormais `NO_REPORT:<exception>:overlay<N>` à un plantage
 muet, pour pouvoir au moins compter les occurrences. Ce n'est pas un correctif.
+
+### Et une erreur de lecture, la mienne, qu'il vaut mieux écrire
+
+Les marqueurs de couverture du run **tronqué** annonçaient sept mécaniques et pas
+de `BOO`, ce que j'ai d'abord présenté comme une propriété de l'enregistrement.
+C'était faux : le run mourait à la frame 48 671 et `BOO_HOUSE` et `BOO` arrivent
+aux frames 50 176 et 50 780. Le run complet en signale neuf.
+
+**Une liste de couverture n'est valable que pour le run qui l'a produite.** Un run
+qui s'arrête tôt sous-déclare, et ne signale rien d'anormal en le faisant — il
+faut donc lire la frame finale avant de lire la couverture. C'est corrigé dans
+`docs/netplay_validation_matrix.md`, à l'endroit même où la règle s'applique.
 
 ---
 
