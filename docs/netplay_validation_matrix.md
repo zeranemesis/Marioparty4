@@ -64,90 +64,102 @@ enregistre ; *evenements* l'est partiellement (Big Boo). Les autres sont
 
 ## Mini-jeux
 
-La table de selection du menu developpeur (`src/REL/selmenuDll/main.c`) nomme
-**58 mini-jeux**, de 401 a 462. Les noms ci-dessous sont ceux du
-depot, pas des noms commerciaux : ceux-la vivent dans les donnees du disque et
-seront lus de la quand quelqu'un en aura besoin.
+Deux tables du depot, croisees : `src/REL/selmenuDll/main.c` donne les noms,
+`src/game/objsub.c` donne le **type** de chaque mini-jeu dans `mgInfoTbl`.
+Rien ici n'est inferé d'un souvenir.
 
-Quatre ont ete traverses par l'enregistrement existant. Les autres n'ont jamais
-tourne en ligne, dans aucun mode.
+### Ce que le type veut dire
 
-| id | overlay | dll | nom | statut |
-|---|---|---|---|---|
-| 401 | 9 | `m401dll` | WAKUGURI DIVING | `UNTESTED` |
-| 402 | 10 | `m402dll` | PURURUN! BIGSLIME | `UNTESTED` |
-| 403 | 11 | `m403dll` | TAORERUKABE! | `UNTESTED` |
-| 404 | 12 | `m404dll` | CRAYON RUNNER | `UNTESTED` |
-| 405 | 13 | `m405dll` | MEDREY RACE | `UNTESTED` |
-| 406 | 14 | `m406dll` | SKI RACE | `UNTESTED` |
-| 407 | 15 | `m407dll` | BATTANDOMINO | `UNTESTED` |
-| 408 | 16 | `m408dll` | SKY DIVE | `PARTIAL` |
-| 409 | 17 | `m409dll` | CRAY SHOT | `UNTESTED` |
-| 410 | 18 | `m410dll` | JANJAN FREE THROW | `UNTESTED` |
-| 411 | 19 | `m411dll` | PAZZLE DE PONG | `UNTESTED` |
-| 412 | 20 | `m412dll` | SNOW THROW | `UNTESTED` |
-| 413 | 21 | `m413dll` | BOMBHEI PAZZLE! | `UNTESTED` |
-| 414 | 22 | `m414dll` | NERATTE UTE! | `UNTESTED` |
-| 415 | 23 | `m415dll` | PYONPYON STAMP | `UNTESTED` |
-| 416 | 24 | `m416dll` | MAMORE FIRE | `PARTIAL` |
-| 417 | 25 | `m417dll` | MARIO SURFER | `PARTIAL` |
-| 418 | 26 | `m418dll` | TAIHOU KAKURENBO | `UNTESTED` |
-| 419 | 27 | `m419dll` | BANANA DE KOROBASE | `UNTESTED` |
-| 420 | 28 | `m420dll` | WATER BATTLE | `UNTESTED` |
-| 421 | 29 | `m421dll` | BODY BALOON | `UNTESTED` |
-| 422 | 30 | `m422dll` | BELCON COIN | `UNTESTED` |
-| 423 | 31 | `m423dll` | GOAL AND GOAL | `UNTESTED` |
-| 424 | 32 | `m424dll` | CLANE CATCH | `UNTESTED` |
-| 425 | 33 | `m425dll` | AIR DOSSUN | `UNTESTED` |
-| 426 | 34 | `m426dll` | KYOROKYORO PANIC | `UNTESTED` |
-| 427 | 35 | `m427dll` | BOAT RACE | `UNTESTED` |
-| 428 | 36 | `m428dll` | THE ROCK CLIME | `UNTESTED` |
-| 429 | 37 | `m429dll` | TREASURE FOREST | `UNTESTED` |
-| 430 | 38 | `m430dll` | PARASAILING GO | `UNTESTED` |
-| 431 | 39 | `m431dll` | GURUGURU BOX | `UNTESTED` |
-| 432 | 40 | `m432dll` | PAIR DE RACE | `UNTESTED` |
-| 434 | 42 | `m434dll` | KINGYOSUKUI | `UNTESTED` |
-| 435 | 43 | `m435dll` | KOOPA DARTS | `UNTESTED` |
-| 436 | 44 | `m436dll` | KOOPANO AREGA TABETAI! | `UNTESTED` |
-| 437 | 45 | `m437dll` | FUSEN RAKUGO | `UNTESTED` |
-| 438 | 46 | `m438dll` | SYAKUNETSU WANWAN ATTACK | `UNTESTED` |
-| 439 | 47 | `m439dll` | GURUGURU DANGEROUS | `UNTESTED` |
-| 440 | 48 | `m440dll` | NEO KOOPA BAKUDAN | `UNTESTED` |
-| 441 | 49 | `m441dll` | HIRAHIRA CHOUCHO | `UNTESTED` |
-| 442 | 50 | `m442dll` | SUIMYAKU HORE2 | `UNTESTED` |
-| 443 | 51 | `m443dll` | DRUG RACE | `PARTIAL` |
-| 444 | 52 | `m444dll` | MIRACLE PINBALL | `UNTESTED` |
-| 445 | 53 | `m445dll` | KINOPIO HAMMER | `UNTESTED` |
-| 446 | 54 | `m446dll` | 3MAI SOROERO! | `UNTESTED` |
-| 447 | 55 | `m447dll` | IQ BLOCK | `UNTESTED` |
-| 448 | 56 | `m448dll` | FUMIKURI | `UNTESTED` |
-| 449 | 57 | `m449dll` | NOKO2 KOURA PAZZLE | `UNTESTED` |
-| 450 | 58 | `m450dll` | LAST GAME | `UNTESTED` |
-| 451 | 59 | `m451dll` | PAZZLE | `UNTESTED` |
-| 455 | 61 | `m455dll` | BURUTTE 1BAN | `UNTESTED` |
-| 456 | 62 | `m456dll` | MOGUTTE 1BAN | `UNTESTED` |
-| 457 | 63 | `m457dll` | SUMOH | `UNTESTED` |
-| 458 | 64 | `m458dll` | PSYCOLO BATTLE | `UNTESTED` |
-| 459 | 65 | `m459dll` | Dr.WARIO | `UNTESTED` |
-| 460 | 66 | `m460dll` | _(sans nom dans la table)_ | `UNTESTED` |
-| 461 | 67 | `m461dll` | BOMBHEI SCRANBLE | `UNTESTED` |
-| 462 | 68 | `m462dll` | _(sans nom dans la table)_ | `UNTESTED` |
+`BoardMGSetupExec` tire `mgType` par `GetMGType()` (`board/mg_setup.c:722`)
+d'apres la repartition des couleurs d'equipe, puis ne retient que les entrees
+dont `mgInfoTbl[i].type == mgType` (`mg_setup.c:330`). Les trois valeurs qu'il
+peut produire sont donc les trois modes de plateau. Le type 4 est nomme par
+`board/battle.c:169`, qui ne selectionne que lui pour une case Battle.
 
-Les quatre `PARTIAL` le sont parce qu'ils ont ete joues une fois, par un seul
-chemin d'entree, dans un seul mode. Aucun n'a encore ete exerce en 1v3, en 2v2,
-en battle ni en duel.
+| type | signification | source | mini-jeux |
+|---|---|---|---|
+| 0 | 4 joueurs | `mg_setup.c:330` | 16 |
+| 1 | 1 contre 3 | `mg_setup.c:330` | 9 |
+| 2 | 2 contre 2 | `mg_setup.c:330` | 9 |
+| 3 | **non identifie** | aucun consommateur trouve dans le code decompile | 3 |
+| 4 | battle | `battle.c:169` | 6 |
+| 5 | **non identifie** | aucun consommateur trouve dans le code decompile | 1 |
+| 6 | **non identifie** | aucun consommateur trouve dans le code decompile | 5 |
+| 7 | **non identifie** | aucun consommateur trouve dans le code decompile | 7 |
+| 8 | **non identifie** | aucun consommateur trouve dans le code decompile | 2 |
 
-### Les modes ne sont pas encore enumerables
+Les types 3, 5, 6, 7 et 8 existent dans la table mais aucun chemin decompile
+consulte ici ne les nomme. `selmenuDll/main.c:723` traite 3, 5 et 6 a part au
+lancement direct, ce qui suggere des categories hors plateau (histoire, duel,
+salle de jeux), mais ce n'est pas etabli et ce document ne le prétendra pas.
 
-`GWSystem.mg_type` porte le mode, et `instDll/main.c:75` le tire au sort avec
-`frandmod(3)` quand le plateau ne l'impose pas. Mais **aucune table du depot ne
-dit quel mini-jeu accepte quel mode** : cette information vit dans les donnees
-du disque. Tant qu'elle n'en aura pas ete extraite, une ligne `mini-jeu x mode`
-serait inventee, et la matrice n'en contient pas.
+### La liste
 
-Ce qu'il faut pour la construire : lire la table des mini-jeux depuis l'image
-disque, comme `tools/extract_assets.py` le fait deja pour d'autres ressources,
-et croiser avec les 58 identifiants ci-dessus.
+**58 mini-jeux**, dont quatre traverses par l'enregistrement existant.
+
+| id | overlay | dll | nom | type | statut |
+|---|---|---|---|---|---|
+| 401 | 9 | `m401dll` | WAKUGURI DIVING | 0 (4 joueurs) | `UNTESTED` |
+| 402 | 10 | `m402dll` | PURURUN! BIGSLIME | 0 (4 joueurs) | `UNTESTED` |
+| 403 | 11 | `m403dll` | TAORERUKABE! | 0 (4 joueurs) | `UNTESTED` |
+| 404 | 12 | `m404dll` | CRAYON RUNNER | 4 (battle) | `UNTESTED` |
+| 405 | 13 | `m405dll` | MEDREY RACE | 0 (4 joueurs) | `UNTESTED` |
+| 406 | 14 | `m406dll` | SKI RACE | 0 (4 joueurs) | `UNTESTED` |
+| 407 | 15 | `m407dll` | BATTANDOMINO | 0 (4 joueurs) | `UNTESTED` |
+| 408 | 16 | `m408dll` | SKY DIVE | 0 (4 joueurs) | `PARTIAL` |
+| 409 | 17 | `m409dll` | CRAY SHOT | 0 (4 joueurs) | `UNTESTED` |
+| 410 | 18 | `m410dll` | JANJAN FREE THROW | 0 (4 joueurs) | `UNTESTED` |
+| 411 | 19 | `m411dll` | PAZZLE DE PONG | 0 (4 joueurs) | `UNTESTED` |
+| 412 | 20 | `m412dll` | SNOW THROW | 0 (4 joueurs) | `UNTESTED` |
+| 413 | 21 | `m413dll` | BOMBHEI PAZZLE! | 0 (4 joueurs) | `UNTESTED` |
+| 414 | 22 | `m414dll` | NERATTE UTE! | 0 (4 joueurs) | `UNTESTED` |
+| 415 | 23 | `m415dll` | PYONPYON STAMP | 0 (4 joueurs) | `UNTESTED` |
+| 416 | 24 | `m416dll` | MAMORE FIRE | 1 (1 contre 3) | `PARTIAL` |
+| 417 | 25 | `m417dll` | MARIO SURFER | 1 (1 contre 3) | `PARTIAL` |
+| 418 | 26 | `m418dll` | TAIHOU KAKURENBO | 1 (1 contre 3) | `UNTESTED` |
+| 419 | 27 | `m419dll` | BANANA DE KOROBASE | 1 (1 contre 3) | `UNTESTED` |
+| 420 | 28 | `m420dll` | WATER BATTLE | 1 (1 contre 3) | `UNTESTED` |
+| 421 | 29 | `m421dll` | BODY BALOON | 1 (1 contre 3) | `UNTESTED` |
+| 422 | 30 | `m422dll` | BELCON COIN | 1 (1 contre 3) | `UNTESTED` |
+| 423 | 31 | `m423dll` | GOAL AND GOAL | 1 (1 contre 3) | `UNTESTED` |
+| 424 | 32 | `m424dll` | CLANE CATCH | 1 (1 contre 3) | `UNTESTED` |
+| 425 | 33 | `m425dll` | AIR DOSSUN | 2 (2 contre 2) | `UNTESTED` |
+| 426 | 34 | `m426dll` | KYOROKYORO PANIC | 2 (2 contre 2) | `UNTESTED` |
+| 427 | 35 | `m427dll` | BOAT RACE | 2 (2 contre 2) | `UNTESTED` |
+| 428 | 36 | `m428dll` | THE ROCK CLIME | 2 (2 contre 2) | `UNTESTED` |
+| 429 | 37 | `m429dll` | TREASURE FOREST | 2 (2 contre 2) | `UNTESTED` |
+| 430 | 38 | `m430dll` | PARASAILING GO | 2 (2 contre 2) | `UNTESTED` |
+| 431 | 39 | `m431dll` | GURUGURU BOX | 2 (2 contre 2) | `UNTESTED` |
+| 432 | 40 | `m432dll` | PAIR DE RACE | 2 (2 contre 2) | `UNTESTED` |
+| 434 | 42 | `m434dll` | KINGYOSUKUI | 2 (2 contre 2) | `UNTESTED` |
+| 435 | 43 | `m435dll` | KOOPA DARTS | 3 | `UNTESTED` |
+| 436 | 44 | `m436dll` | KOOPANO AREGA TABETAI! | 3 | `UNTESTED` |
+| 437 | 45 | `m437dll` | FUSEN RAKUGO | 3 | `UNTESTED` |
+| 438 | 46 | `m438dll` | SYAKUNETSU WANWAN ATTACK | 4 (battle) | `UNTESTED` |
+| 439 | 47 | `m439dll` | GURUGURU DANGEROUS | 4 (battle) | `UNTESTED` |
+| 440 | 48 | `m440dll` | NEO KOOPA BAKUDAN | 4 (battle) | `UNTESTED` |
+| 441 | 49 | `m441dll` | HIRAHIRA CHOUCHO | 4 (battle) | `UNTESTED` |
+| 442 | 50 | `m442dll` | SUIMYAKU HORE2 | 7 | `UNTESTED` |
+| 443 | 51 | `m443dll` | DRUG RACE | 0 (4 joueurs) | `PARTIAL` |
+| 444 | 52 | `m444dll` | MIRACLE PINBALL | 5 | `UNTESTED` |
+| 445 | 53 | `m445dll` | KINOPIO HAMMER | 6 | `UNTESTED` |
+| 446 | 54 | `m446dll` | 3MAI SOROERO! | 6 | `UNTESTED` |
+| 447 | 55 | `m447dll` | IQ BLOCK | 6 | `UNTESTED` |
+| 448 | 56 | `m448dll` | FUMIKURI | 6 | `UNTESTED` |
+| 449 | 57 | `m449dll` | NOKO2 KOURA PAZZLE | 6 | `UNTESTED` |
+| 450 | 58 | `m450dll` | LAST GAME | 7 | `UNTESTED` |
+| 451 | 59 | `m451dll` | PAZZLE | 7 | `UNTESTED` |
+| 455 | 61 | `m455dll` | BURUTTE 1BAN | 4 (battle) | `UNTESTED` |
+| 456 | 62 | `m456dll` | MOGUTTE 1BAN | 0 (4 joueurs) | `UNTESTED` |
+| 457 | 63 | `m457dll` | SUMOH | 8 | `UNTESTED` |
+| 458 | 64 | `m458dll` | PSYCOLO BATTLE | 8 | `UNTESTED` |
+| 459 | 65 | `m459dll` | Dr.WARIO | 7 | `UNTESTED` |
+| 460 | 66 | `m460dll` | _(sans nom)_ | 7 | `UNTESTED` |
+| 461 | 67 | `m461dll` | BOMBHEI SCRANBLE | 7 | `UNTESTED` |
+| 462 | 68 | `m462dll` | _(sans nom)_ | 7 | `UNTESTED` |
+
+Les quatre `PARTIAL` ont ete joues une fois, par un seul chemin d'entree. Leur
+type dit dans quel mode ils *peuvent* tourner, pas dans lequel ils ont tourne.
 ## Comment une ligne change de statut
 
 Une seule route : `tools/netplay_campaign.ps1`. Les scenarios vivent dans
