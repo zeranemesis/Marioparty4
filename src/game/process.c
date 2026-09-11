@@ -110,7 +110,30 @@ Process *HuPrcCreate(void (*func)(void), u16 prio, u32 stack_size, s32 extra_siz
         stack_size = 2048;
     }
 #ifdef TARGET_PC
-    stack_size *= 2;
+    /* The sizes above are PowerPC constants, and they do not predict what the
+     * same code needs as x86-64 at /Od. Measured peaks over a full Big Boo
+     * session, with the original constant on the left:
+     *
+     *     2048 -> 280      4096 -> 8200     8192 -> 6552
+     *    14336 -> 6696    16384 -> 6312    24576 -> 8552
+     *
+     * The requirement is a property of the call chain, near 8.5 KB at its
+     * deepest, and is almost unrelated to the constant. Doubling therefore gave
+     * the 4096 processes 8192 bytes for a need of 8200: the Big Boo event
+     * process fn_1_30A4 (src/REL/w04Dll/boo_event.c:343) overflowed by exactly
+     * eight bytes, the return address of one call, and took the session with it
+     * every time.
+     *
+     * So a multiplier alone is the wrong model. The floor is what makes this
+     * safe: every coroutine gets at least 32 KB, which is 3.8 times the deepest
+     * depth ever measured, and the multiplier is kept so the relative ordering
+     * the original constants express still means something. A coroutine stack
+     * costs address space, not committed pages beyond what it touches, and the
+     * failure it prevents is silent and fatal. */
+    stack_size *= 4;
+    if (stack_size < 32768) {
+        stack_size = 32768;
+    }
     alloc_size = HuMemMemoryAllocSizeGet(sizeof(Process)) + HuMemMemoryAllocSizeGet(extra_size);
 #else
     alloc_size = HuMemMemoryAllocSizeGet(sizeof(Process)) + HuMemMemoryAllocSizeGet(stack_size) + HuMemMemoryAllocSizeGet(extra_size);
