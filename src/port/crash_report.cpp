@@ -75,6 +75,8 @@ std::mutex gBreadcrumbMutex;
 Identity gIdentity;
 PartyBoardCrashSimState gSim {};
 std::mutex gSimMutex;
+std::atomic<u32> gSimFrameFast { 0 };
+std::atomic<s32> gSimOverlayFast { -1 };
 
 std::atomic<bool> gInitialised { false };
 std::atomic<bool> gUserShutdown { false };
@@ -795,8 +797,25 @@ extern "C" void PartyBoard_CrashBreadcrumb(const char *category, const char *for
 extern "C" void PartyBoard_CrashUpdateSimState(const PartyBoardCrashSimState *state)
 {
     if (!state) return;
+    // Mirrored without the mutex so a diagnostic running on the audio thread can
+    // stamp its events with the current frame without ever blocking on the game
+    // thread. Two independent atomics can be read a frame apart; for stamping an
+    // event that is accurate enough, and it is the only property worth paying a
+    // lock for here.
+    gSimFrameFast.store(state->simulationFrame, std::memory_order_relaxed);
+    gSimOverlayFast.store(state->gameContext, std::memory_order_relaxed);
     std::lock_guard<std::mutex> guard(gSimMutex);
     gSim = *state;
+}
+
+extern "C" u32 PartyBoard_CrashCurrentFrame(void)
+{
+    return gSimFrameFast.load(std::memory_order_relaxed);
+}
+
+extern "C" s32 PartyBoard_CrashCurrentOverlay(void)
+{
+    return gSimOverlayFast.load(std::memory_order_relaxed);
 }
 
 extern "C" void PartyBoard_CrashHeartbeat(void)

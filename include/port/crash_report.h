@@ -119,6 +119,13 @@ void PartyBoard_CrashBreadcrumb(const char *category, const char *format, ...);
 // Refresh the simulation/network snapshot. Called once per accepted tick.
 void PartyBoard_CrashUpdateSimState(const PartyBoardCrashSimState *state);
 
+// Lock-free reads of the two fields a diagnostic needs to date an event. Safe
+// from any thread, including the MusyX audio thread, which must never block on
+// the game thread. Diagnostic only: never hash these, and never branch gameplay
+// on them.
+u32 PartyBoard_CrashCurrentFrame(void);
+s32 PartyBoard_CrashCurrentOverlay(void);
+
 // Rewrite the live state file if enough frames have passed. Called once per
 // accepted tick; the write itself is throttled internally.
 void PartyBoard_CrashHeartbeat(void);

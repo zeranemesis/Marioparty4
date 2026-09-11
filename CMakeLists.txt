@@ -174,6 +174,10 @@ endif ()
 
 add_subdirectory(extern/aurora EXCLUDE_FROM_ALL)
 add_subdirectory(extern/musyx EXCLUDE_FROM_ALL)
+# MusyX carries the bank lifetime diagnostic's hooks, so it needs the port
+# header that declares them. Added from here rather than inside the submodule so
+# the submodule keeps building on its own.
+target_include_directories(musyx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # The pinned Tracy dependency already provides stb_image, which is used by the
 # portable THP movie player for the JPEG video component.

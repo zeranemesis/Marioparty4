@@ -25,6 +25,10 @@ EXPORTS
     PartyBoard_CoroutineSymbolsReady
     PartyBoard_CoroutineStackWatch
     PartyBoard_CoroutineWatchdogEnabled
+    PartyBoard_AudioLifetimeRunSelfTest
+    PartyBoard_AudioLifetimeEnabled
+    PartyBoard_AudioLifetimeViolationDetected
+    PartyBoard_AudioLifetimeStats
     PartyBoard_MemDiagRunSelfTest
     PartyBoard_MemDiagEnabled
     PartyBoard_MemDiagCorruptionDetected

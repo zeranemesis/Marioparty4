@@ -81,6 +81,7 @@ set(GAME_FILES
 set(PORT_FILES
         src/port/achievements.cpp
         src/port/audio.c
+        src/port/audio_lifetime.cpp
         src/port/byteswap.cpp
         src/port/config.cpp
         src/port/coroutine_stack.cpp

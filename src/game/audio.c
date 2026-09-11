@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include "port/rollback_audio_bridge.h"
 #include "port/netplay_runtime.h"
+#include "port/audio_lifetime.h"
 #endif
 
 #define HUMSMHEAP_SIZE 0x13FC00
@@ -569,13 +570,16 @@ static void HuAudSndGrpWait(OSTick tickStart)
 #ifdef TARGET_PC
     if (PartyBoard_NetplayEnabled()) {
         s32 step;
+        PartyBoard_AudioDrainBegin(SNDGRP_DRAIN_STEPS);
         /* No early exit on the play counters: the audio thread influences
          * them, so testing them would put real time back into the loop. */
         for (step = 0; step < SNDGRP_DRAIN_STEPS; step++) {
             msmSysRegularProc();
         }
+        PartyBoard_AudioDrainEnd();
         return;
     }
+    PartyBoard_AudioDrainBegin(-1);
 #endif
     while ((msmMusGetNumPlay(TRUE) != 0 || msmSeGetNumPlay(TRUE) != 0)
         && OSTicksToMilliseconds(OSGetTick() - tickStart) < SNDGRP_TIMEOUT) {
@@ -585,6 +589,9 @@ static void HuAudSndGrpWait(OSTick tickStart)
         msmSysRegularProc();
 #endif
     }
+#ifdef TARGET_PC
+    PartyBoard_AudioDrainEnd();
+#endif
 }
 
 static s32 HuAudSndGrpSetLoad(s16 grpSet)
