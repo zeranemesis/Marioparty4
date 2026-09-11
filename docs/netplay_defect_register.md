@@ -140,72 +140,66 @@ Aucune preuve que ce cas se produise. Inscrit pour ne pas le redécouvrir.
 
 ---
 
-## D3 — Lecture invalide dans le décodeur ADPCM, sur le thread audio
+## D3 — Banque audio libérée sous une voix encore en lecture — **PROUVÉ**
 
-**Classification : invalid read on the MusyX audio thread, intermittent.**
+**Classification : use-after-free of a MusyX sample allocation, game thread frees
+while the audio thread still reads. Deterministic; its crash is not.**
 
-**Statut : non corrigé, non investigué. MusyX est hors périmètre par consigne.**
+**Statut : cause prouvée, correction en cours. Preuve complète dans
+[`docs/d3_audio_bank_lifetime.md`](d3_audio_bank_lifetime.md).**
 
-Apparu une fois pendant la vérification du correctif de pile, à la frame 27 750,
-capturé par le rapporteur de crash avec une trace complète :
+### Ce qui est établi
 
-```
-0xC0000005  read  0x2108b2741a0
-ensureADPCMBlockDecoded+0xa4  [extern/musyx/src/musyx/runtime/hw_pc.c:711]
-sampleAtPos                   [hw_pc.c:797]
-decodeSourceSamples           [hw_pc.c:840]
-fillSourceBuffer              [hw_pc.c:893]
-renderVoiceSegment            [hw_pc.c:1070]
-salCtrlDsp                    [hw_pc.c:1430]
-snd_handle_irq                [hardware.c:57]
-salAudioThreadFunc            [hw_pc.c:1665]
-```
+Au déchargement de l'overlay 84 — `resultDll`, l'écran de résultats de mini-jeu,
+d'après la table `include/ovl_table.h` — le jeu libère les banques audio du jeu
+d'overlays sortant alors que des voix DSP en lisent encore les échantillons.
 
-**Ce que l'on sait.** La faute est une **lecture** à une adresse invalide, sur le
-**thread audio**, pas sur le thread de jeu. Le verdict des piles de coroutine est
-explicite : l'adresse n'appartient à aucune pile connue. Ce n'est donc pas le
-défaut D4 déguisé.
-
-**Fréquence mesurée.** Deux occurrences sur sept replays après le correctif de
-pile, soit environ 30 %.
-
-**Quand, exactement.** Les deux fois à la même charnière : frames 27 744 et
-27 750. L'état capturé au crash est sans ambiguïté :
+Mesuré à la frame **18141** et à la frame **27744**, sur les deux pairs, avec les
+mêmes banques, les mêmes échantillons, les mêmes positions de lecture :
 
 ```
-simulation_frame=27744   game_context=84   overlay=-1
-overlay_previous=84      overlay_transition_frame=27744
-frames_since_transition=0
+BANK_RELEASE_REQUEST            frame=18141 bank=19 group=112 samples=22
+SAMPLE_STALE_REFERENCE_AT_FREE  frame=18141 sample=1300 voice=37 voice_state=2 pos=2680
+SAMPLE_STALE_REFERENCE_AT_FREE  frame=18141 sample=1300 voice=39 voice_state=2 pos=4867
+SAMPLE_STALE_REFERENCE_AT_FREE  frame=18141 sample=1191 voice=12 voice_state=2 pos=1534
+BANK_FREE                       frame=18141 bank=19
+AUDIO_STALE_SAMPLE_READ         frame=18142 voice=12 sample=1191 freed_frame=18141
 ```
 
-**`frames_since_transition=0`** : la faute se produit sur la frame même du
-déchargement de l'overlay 84.
+La frame 27744 est exactement celle des deux crashes historiques, et la lecture
+invalide `ensureADPCMBlockDecoded+0xa4` (`hw_pc.c:711`) en est la conséquence
+visible.
 
-**Mécanisme probable.** Ce n'est pas un dépassement d'indice : `srcPosHi` est
-comparé à `playbackEnd`, lui-même borné par `smp->length`, avant chaque appel à
-`sampleAtPos` (`hw_pc.c:823-840`). Le suspect est donc `smp` lui-même, c'est-à-
-dire `&vp->smp_info` : une structure à plusieurs champs écrite par le thread de
-jeu et lue par le thread audio **sans aucune synchronisation**. Au déchargement
-d'un overlay, sa banque audio est libérée ; une voix encore en cours de rendu
-garde alors un `addr` périmé, ou voit un `SAMPLE_INFO` déchiré, mi-ancien
-mi-nouveau.
+### Les deux causes, dans le code
 
-**Lien avec C3, qui m'oblige à une remarque sur mon propre travail.** C'est
-exactement la fenêtre que `HuAudSndGrpWait` est censé fermer, appelé au
-changement d'overlay depuis `objmain.c:95-96`. Ce drain attendait auparavant que
-l'audio se taise, borné à 500 ms de temps mur ; le correctif C3 l'a rendu
-déterministe en le fixant à un nombre d'itérations constant. Les deux versions
-peuvent rendre la main avant que l'audio ait réellement fini — la borne en temps
-mur le pouvait déjà — mais il faut le dire clairement : **le drain ne garantit
-pas que le thread audio a lâché la banque**, et c'est là qu'il faudra regarder.
+1. **`hwBreak` ne fait qu'une demande.** `sndPopGroup` tue les voix par
+   `synthKillVoicesByMacroReferences` → `voiceKill` → `hwBreak`, et `hwBreak`
+   (`hardware.c:215`) se contente de lever le bit `0x20` que le thread audio
+   lira à son prochain rendu. La voix continue de lire jusque-là.
+2. **La libération se fait hors du verrou audio.** `sndPopGroup` rend
+   `globalMutex` avant `RemoveSamples`, et le `free` réel — celui de
+   `hwRemoveSample` sur la copie ARAM par échantillon — n'est protégé par rien.
 
-**Ce qui reste à prouver.** Que la banque libérée est bien celle que la voix
-lisait. Le montrer demande d'instrumenter la libération des banques et la durée
-de vie des voix, donc de toucher au périmètre MusyX/C3 gelé.
+S'y ajoute que `synthKillVoicesBySampleReferences` est **exclue à la
+compilation** : `extern/musyx/CMakeLists.txt` fixe la version MusyX à 1.5.4 et le
+garde dans `s_data.c` demande 2.0.1 ou plus. Une voix référençant un échantillon
+du groupe sans macro correspondante n'est donc même pas prévenue.
 
-**Pourquoi il compte.** C'est désormais le seul crash observé qui reste sur le
-chemin d'une partie en ligne. Il est indépendant de D4 et ne peut pas être
-corrigé sans toucher MusyX, ce que la consigne interdit.
+### Ce que cela dit du correctif C3
+
+`HuAudSndGrpWait` a été rendu déterministe par un nombre fixe d'itérations. La
+trace montre `BANK_AUDIO_DRAIN_BEGIN irq=60725` et `BANK_AUDIO_DRAIN_END
+irq_total=60725` : **le compteur de callbacks audio n'a pas avancé d'une seule
+unité pendant le drain**. Le drain garantit le déterminisme et **rien** de la
+durée de vie. Augmenter le nombre d'itérations ne changerait pas ce zéro.
+
+### Correction retenue
+
+Une barrière au point exact de la libération : dans `hwRemoveSample`, sous
+`globalMutex`, détacher toute voix DSP pointant encore dans l'allocation, puis
+libérer. Sous le verrou le thread audio n'est pas dans `salCtrlDsp`, et après le
+détachement il ne peut plus y entrer sur cette adresse. Aucun délai, aucun
+`Sleep`, aucun nombre de frames arbitraire.
 
 ---
 
