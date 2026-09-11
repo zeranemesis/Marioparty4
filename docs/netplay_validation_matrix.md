@@ -142,6 +142,25 @@ Les quatre `PARTIAL` le sont parce qu'ils ont ete joues une fois, dans un
 seul mode, par un seul chemin d'entree. Aucun n'a encore ete exerce en 1v3,
 en 2v2, en battle ni en duel.
 
+## Comment une ligne change de statut
+
+Une seule route : `tools/netplay_campaign.ps1`. Les scenarios vivent dans
+`tests/scenarios/scenarios.json`, les enregistrements sont verifies par leur
+empreinte avec `tools/verify_replays.ps1`, et chaque run laisse dans
+`work/netplay-campaigns/<horodatage>/` de quoi comprendre deux semaines plus
+tard ce qui s'est passe.
+
+| scenario | ce qu'il couvre | duree |
+|---|---|---|
+| `w04-boot-smoke` | boot, selection de mode, entree sur le plateau | 120 s |
+| `w04-results-unload` | quatre mini-jeux et quatre retours par l'ecran de resultats | 800 s |
+| `w04-board-replay` | le meme enregistrement en entier | 900 s |
+
+Un resultat possible et un seul par run : `PASS`, `CRASH`, `DESYNC`, `TIMEOUT`,
+`ABNORMAL_EXIT`, `HARNESS_FAILURE`. Un echec n'est jamais efface parce que la
+boucle continue, et un run qui a echoue n'est pas rejoue jusqu'a obtenir un PASS
+par chance : il faut le demander avec `-RerunFailures`.
+
 ## Ce qui manque encore pour que cette matrice veuille dire quelque chose
 
 - Un enregistrement par plateau. Aujourd'hui il en existe un seul.

@@ -320,3 +320,79 @@ rejouer hors de la passe de dessin.
 `snapshot_bytes=53949214`, soit **51,5 Mo par point de sauvegarde**. Le probe en
 garde deux à la fois. C'est une mesure, pas une estimation, et elle appartient au
 dossier du rollback réseau.
+
+---
+
+## D6 — L'horloge d'animation avance par image rendue, pas par tick simulé
+
+**Classification : logical state driven by the render cadence, which is
+wall-clock dependent. Candidate — mécanisme établi par lecture, occurrence non
+observée.**
+
+**Statut : non corrigé, non observé. Trouvé en lisant le code autour de D5.**
+
+### Le mécanisme
+
+`src/game/hsfman.c:23` :
+
+```c
+#define PARTYBOARD_ADVANCE_FRAME PartyBoard_IsSimulationTick
+```
+
+et `src/game/main.c:276` :
+
+```c
+PartyBoard_IsSimulationTick = simulatedTicks != 0;
+```
+
+C'est un **booléen**, pas un compte. Or la boucle de `main.c:246` peut exécuter
+plusieurs ticks de simulation dans une seule image rendue, et `Hu3DExec()` —
+donc `PartyBoard_AnimationAdvance()` et le `data->tick++` de `hsfman.c:330` —
+n'est appelée **qu'une fois par image rendue**.
+
+Donc : deux ticks de simulation dans la même image rendue font avancer l'horloge
+d'animation **une seule fois**.
+
+### Quand cela peut arriver
+
+`frame_pacer_simulation_tick()` (`src/port/imgui.cpp:301`) retourne
+**exactement 1** tant que `video.targetFrameRate <= 60`. Au-dessus, il rattrape
+le temps réel et peut rendre 0, 1 ou plusieurs ticks, borné par
+`kMaxSimulationTicksPerFrame`.
+
+Tous les runs de campagne tournent à 60 (`tools/netplay_campaign.ps1` écrit
+`video.targetFrameRate = 60` dans le profil), ce qui explique que le
+sous-système `ANIMATION` n'ait jamais divergé entre pairs : le rapport a toujours
+été 1:1.
+
+### Pourquoi cela compte
+
+`ANIMATION` **fait partie du hash canonique**. Un à-coup chez un seul pair, qui
+regrouperait deux ticks dans une image, décalerait son horloge d'animation d'une
+frame **définitivement**, et la partie serait déclarée désynchronisée.
+
+Aggravant : `runtimeConfigSignature` (`src/port/netplay_runtime.cpp:800`) ne
+contient que le délai d'entrée, le contexte, le drapeau partie complète et le
+drapeau rollback. **La fréquence d'images n'y est pas.** Deux pairs peuvent donc
+se connecter avec des réglages différents, l'un à 60 et l'autre à 240, sans que
+rien ne le signale.
+
+### Ce qu'il reste à mesurer, avant toute correction
+
+Rien de tout cela n'a été observé. Il faut :
+
+1. instrumenter `simulatedTicks` et vérifier qu'une valeur `>= 2` se produit
+   réellement au-dessus de 60 images par seconde ;
+2. faire tourner une campagne avec un pair à 60 et l'autre à 240, et voir si
+   `ANIMATION` diverge.
+
+Tant que ces deux mesures n'existent pas, ceci est un mécanisme lu, pas un défaut
+constaté, et il est inscrit comme tel.
+
+### Lien avec D5
+
+Les deux défauts ont la même racine : **l'horloge d'animation est avancée par la
+passe de présentation.** D5 en est la conséquence pour le rejeu, qui n'a pas de
+passe de présentation ; D6 en est la conséquence pour deux machines dont les
+cadences d'affichage diffèrent. Une correction qui déplace l'avance d'animation
+dans le tick de simulation les fermerait toutes les deux.
