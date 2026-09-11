@@ -1214,6 +1214,9 @@ void publishCrashState(const StateDigest &stamp)
     }
     state.overlayPrevious = previousOverlay;
     state.overlayTransitionFrame = overlayTransitionFrame;
+    state.boardTurn = GWSystem.turn;
+    state.boardMaxTurn = GWSystem.max_turn;
+    state.boardId = GWSystem.board;
 
     state.lastStateHash = stamp.hash;
     state.lastStateHashFrame = stamp.frame;

@@ -66,6 +66,22 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# An unhandled error must not leave the caller reading a stale exit code.
+#
+# The explicit `exit` statements at the foot of this script only run if the
+# script reaches them; a throw anywhere above skips all of them, and
+# $LASTEXITCODE then still holds whatever the last native command set - usually
+# 0. A campaign that died of a missing scenario property reported "exit=0" and
+# looked like a clean run. Silence about a broken harness is the one thing the
+# HARNESS_FAILURE classification exists to prevent, so it is trapped here and
+# reported as one.
+trap {
+    Write-Output ''
+    Write-Output "HARNESS FAILURE: $_"
+    Write-Output $_.ScriptStackTrace
+    exit 3
+}
 . (Join-Path $PSScriptRoot 'netplay_session.ps1')
 
 $projectPath = Split-Path $PSScriptRoot -Parent
@@ -118,6 +134,14 @@ function Read-Manifest([string]$path) {
             Replay = if ($entry.PSObject.Properties.Name -contains 'replay') { [string]$entry.replay } else { '' }
             ExpectedOverlays = if ($entry.PSObject.Properties.Name -contains 'expectedOverlays') { [string]$entry.expectedOverlays } else { '' }
             DurationSeconds = [int]$entry.durationSeconds
+            # Progress, not activity. minFrames only asks whether the process
+            # kept running; minTurns asks whether the GAME moved. Absent or 0
+            # means the scenario makes no claim about turns, which is right for
+            # a boot smoke test and wrong for anything that says it plays.
+            # ConvertFrom-Json produces a PSCustomObject, and under Set-StrictMode
+            # reading a property it does not have THROWS rather than returning
+            # null - so an optional field has to be probed, not defaulted.
+            MinTurns = $(if ($entry.PSObject.Properties.Name -contains 'minTurns') { [int]$entry.minTurns } else { 0 })
             MinFrames = [int]$entry.minFrames
             Repeats = [int]$entry.repeats
             NetplayDelay = if ($entry.PSObject.Properties.Name -contains 'netplayDelay') { [int]$entry.netplayDelay } else { 3 }
@@ -260,6 +284,10 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         mem_diag_armed = $false
         mem_diag_heaps = 0
         mem_corruption_detected = $false
+        board_turn = -1
+        board_max_turn = -1
+        board_id = -1
+        min_turns = 0
         mem_sweep_blocks = 0
         mem_sweep_average_ms = 0
         mem_sweep_worst_ms = 0
@@ -520,6 +548,19 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
     }
     $record.board_coverage = @($coverage.Keys | Sort-Object | ForEach-Object { "$_@$($coverage[$_])" })
 
+    # ---- progress ----
+    # The furthest either peer got. They are in lockstep, so they should agree;
+    # taking the maximum means a peer that died a tick early cannot under-report
+    # what the session achieved.
+    $record.min_turns = $entry.MinTurns
+    foreach ($side in 0, 1) {
+        if ($peers[$side].LiveState) {
+            $record.board_turn = [Math]::Max($record.board_turn, [int]$peers[$side].LiveState.Turn)
+            $record.board_max_turn = [Math]::Max($record.board_max_turn, [int]$peers[$side].LiveState.MaxTurn)
+            $record.board_id = [Math]::Max($record.board_id, [int]$peers[$side].LiveState.Board)
+        }
+    }
+
     # ---- the capture gate, if this was a survey run ----
     if ($GateSurvey) {
         $armed = $false
@@ -654,6 +695,15 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
     } elseif ($record.last_frame -lt $entry.MinFrames) {
         $record.result = 'TIMEOUT'
         $record.notes += "reached frame $($record.last_frame), scenario needs $($entry.MinFrames)"
+    } elseif ($entry.MinTurns -gt 0 -and $record.board_turn -lt $entry.MinTurns) {
+        # Frames without turns. The process ran, the game did not advance - a
+        # monkey stuck in a menu, a scripted run whose prefix stopped matching.
+        # Counting that as a PASS is how a campaign convinces itself it has
+        # coverage it does not have.
+        $record.result = 'ABNORMAL_EXIT'
+        $record.notes += ("reached frame $($record.last_frame) but only turn " +
+            "$($record.board_turn); the scenario needs $($entry.MinTurns). " +
+            "Frames without turns means the process ran and the game did not.")
     } elseif ($overlays[0].Count -eq 0 -or (Compare-Object $overlays[0] $overlays[1] -SyncWindow 0)) {
         $record.result = 'DESYNC'
         $record.notes += 'the two peers took different overlay paths'

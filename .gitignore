@@ -42,3 +42,7 @@ compile_commands.json
 # on cannot be fetched back to reproduce the crash. Releases carry their own
 # immutable assets - see tools/test_update_channel.ps1.
 dist/*.zip
+
+# Generated input files. They are reproducible from a seed and a script, which
+# is the whole point: the seed is the artifact worth keeping, not the megabytes.
+work/gen/

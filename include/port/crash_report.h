@@ -56,6 +56,16 @@ typedef struct PartyBoardCrashSimState {
     s32 overlayPrevious;
     u32 overlayTransitionFrame;
 
+    // Progress, as opposed to activity. A run that reaches its frame budget
+    // while stuck in a menu and a run that plays twelve turns look identical
+    // from frame counts alone, and every scenario until now was gated on frames
+    // only. These two are what tell them apart. Both are already in the
+    // canonical hash, so they are agreed between peers; they were simply never
+    // published anywhere a harness could read them.
+    s32 boardTurn;      // GWSystem.turn
+    s32 boardMaxTurn;   // GWSystem.max_turn
+    s32 boardId;        // GWSystem.board
+
     u64 lastStateHash;
     u32 lastStateHashFrame;
 

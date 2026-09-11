@@ -264,6 +264,9 @@ void appendSimulation()
     reportLine("simulation_frame=%u network_frame=%u\n", sim.simulationFrame, sim.networkFrame);
     reportLine("game_context=%d overlay=%d minigame=%d\n", sim.gameContext, sim.overlay,
         sim.minigame);
+    // Progress. A harness reading only simulation_frame cannot distinguish a run
+    // that played from a run that sat in a menu.
+    reportLine("board=%d turn=%d max_turn=%d\n", sim.boardId, sim.boardTurn, sim.boardMaxTurn);
     reportLine("overlay_previous=%d overlay_transition_frame=%u frames_since_transition=%d\n",
         sim.overlayPrevious, sim.overlayTransitionFrame,
         static_cast<int>(sim.simulationFrame) - static_cast<int>(sim.overlayTransitionFrame));

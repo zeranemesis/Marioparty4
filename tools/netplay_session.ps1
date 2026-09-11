@@ -124,6 +124,9 @@ function Read-LiveState([string]$path) {
         ShutdownIntent = 'UNKNOWN'; Frame = 0; GameContext = 'unknown'; Overlay = 'unknown'
         Hash = 'unknown'; HashFrame = 0; Mismatch = 'unknown'; RngSync = 'unknown'
         Repaired = 'unknown'; SendErrors = 'unknown'
+        # -1, never 0: a run that never reached a board has no turn, and calling
+        # that "turn 0" would make it indistinguishable from a run on turn 0.
+        Turn = -1; MaxTurn = -1; Board = -1
     }
     if (-not (Test-Path -LiteralPath $path)) { return $state }
     $text = Get-Content -LiteralPath $path -Raw
@@ -137,6 +140,12 @@ function Read-LiveState([string]$path) {
     $m = [regex]::Match($text, 'rng_sync=(\d+)');                   if ($m.Success) { $state.RngSync = $m.Groups[1].Value }
     $m = [regex]::Match($text, 'repaired=(\d+)');                   if ($m.Success) { $state.Repaired = $m.Groups[1].Value }
     $m = [regex]::Match($text, 'send_errors=(\d+)');                if ($m.Success) { $state.SendErrors = $m.Groups[1].Value }
+    $m = [regex]::Match($text, 'board=(-?\d+) turn=(-?\d+) max_turn=(-?\d+)')
+    if ($m.Success) {
+        $state.Board = [int]$m.Groups[1].Value
+        $state.Turn = [int]$m.Groups[2].Value
+        $state.MaxTurn = [int]$m.Groups[3].Value
+    }
     return $state
 }
 
