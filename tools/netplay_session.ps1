@@ -43,18 +43,41 @@ function Test-IsNtStatus([int64]$code) {
     return ($unsigned -ge [int64]3221225472) -and ($unsigned -le [int64]3489660927)
 }
 
+# Named, so a result says STATUS_HEAP_CORRUPTION and not only 0xC0000374. The
+# recorder had this table and the campaign did not, so every campaign result so
+# far recorded a bare hex number - and the fingerprint built from it could not
+# name the exception either. Same table as src/port/crash_report.cpp.
+$script:ExceptionNames = @{
+    3221225477 = 'EXCEPTION_ACCESS_VIOLATION'      # 0xC0000005
+    3221225478 = 'EXCEPTION_IN_PAGE_ERROR'         # 0xC0000006
+    3221225501 = 'EXCEPTION_ILLEGAL_INSTRUCTION'   # 0xC000001D
+    3221225612 = 'EXCEPTION_ARRAY_BOUNDS_EXCEEDED' # 0xC000008C
+    3221225620 = 'EXCEPTION_INT_DIVIDE_BY_ZERO'    # 0xC0000094
+    3221225622 = 'EXCEPTION_PRIV_INSTRUCTION'      # 0xC0000096
+    3221225725 = 'EXCEPTION_STACK_OVERFLOW'        # 0xC00000FD
+    3221226356 = 'STATUS_HEAP_CORRUPTION'          # 0xC0000374
+    3221226505 = 'STATUS_STACK_BUFFER_OVERRUN'     # 0xC0000409
+    3221226994 = 'STATUS_FAIL_FAST_EXCEPTION'      # 0xC0000602
+    3221225786 = 'STATUS_CONTROL_C_EXIT'           # 0xC000013A
+}
+
 function Format-ExitCode([int64]$code) {
-    $unsigned = [uint32]([uint32]::MaxValue -band $code)
-    return ('0x{0:X8} ({1})' -f $unsigned, $code)
+    $unsigned = [int64]([uint32]::MaxValue -band $code)
+    $text = ('0x{0:X8} ({1})' -f $unsigned, $code)
+    # [int64], never [int]: these values are above 2^31 and PowerShell stores
+    # the table keys as Long, so an [int] cast both overflows and misses.
+    $name = $script:ExceptionNames[[int64]$unsigned]
+    if ($name) { return "$text $name" }
+    return $text
 }
 
 # Proven rather than assumed, because the bug above was invisible until a real
 # peer crashed. Runs on import: it costs microseconds and it is the difference
 # between a harness that records a crash and one that dies of it.
 foreach ($case in @(
-    @{ Code = -1073741819; Text = '0xC0000005'; Nt = $true },   # access violation
-    @{ Code = -1073740940; Text = '0xC0000374'; Nt = $true },   # heap corruption
-    @{ Code = -1073741571; Text = '0xC00000FD'; Nt = $true },   # stack overflow
+    @{ Code = -1073741819; Text = '0xC0000005'; Nt = $true; Name = 'EXCEPTION_ACCESS_VIOLATION' },
+    @{ Code = -1073740940; Text = '0xC0000374'; Nt = $true; Name = 'STATUS_HEAP_CORRUPTION' },
+    @{ Code = -1073741571; Text = '0xC00000FD'; Nt = $true; Name = 'EXCEPTION_STACK_OVERFLOW' },
     @{ Code = 0;           Text = '0x00000000'; Nt = $false },
     @{ Code = 1;           Text = '0x00000001'; Nt = $false },
     @{ Code = 2;           Text = '0x00000002'; Nt = $false })) {
@@ -64,6 +87,9 @@ foreach ($case in @(
     }
     if ((Test-IsNtStatus $case.Code) -ne $case.Nt) {
         throw "NTSTATUS detection is broken for $($case.Code) ($($case.Text))."
+    }
+    if ($case.ContainsKey('Name') -and $formatted -notmatch [regex]::Escape($case.Name)) {
+        throw "Exit code $($case.Text) did not come out named $($case.Name): '$formatted'. The table is wrong."
     }
 }
 

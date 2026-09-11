@@ -232,6 +232,7 @@ campagne : le contournement ne peut pas être silencieux.
 |---|---|
 | `PARTYBOARD_AUDIO_DIAGNOSTICS` | `1` trace banques et violations, `2` ajoute chaque voix |
 | `PARTYBOARD_FORCE_ROLLBACK` | `<période>[:<distances>]` arme le probe de rollback local |
+| `PARTYBOARD_ROLLBACK_GATE_SURVEY` | `1` évalue la porte de capture **à chaque frame** et histogramme les séries de frames ouvertes. Mesure, pas politique : ne change ni quand on tente une capture ni ce qu'on accepte. Coûteux ; un run de relevé est un run de relevé |
 | `PARTYBOARD_MEM_DIAGNOSTICS` | `1` arme la vérification d'intégrité des blocs HuMem. **Armée par défaut** par la campagne et par l'enregistreur de session : S1 est morte de `STATUS_HEAP_CORRUPTION` et aucun script ne la posait |
 | `PARTYBOARD_CRASH_DIR` | dossier des rapports ; sa présence signifie « session supervisée » |
 | `PARTYBOARD_CRASH_QUEUE` | remplace la file locale des incidents, pour les tests |

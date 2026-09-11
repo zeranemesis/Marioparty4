@@ -558,6 +558,34 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
             MemoryCorruption = $false
         }
         $record.notes += "crash report: $($crashReports[0])"
+    } else {
+        # A crash that produced no report at all still needs a signature, or it
+        # cannot be grouped with the next occurrence and every recurrence looks
+        # like a new defect. Observed for real: reverting the D4 fix kills both
+        # peers with 0xC0000005 at frame 48671 and writes no report, no minidump
+        # and no stack-usage file. See D9 in the defect register.
+        #
+        # The signature is built only from things that are stable across
+        # machines and runs - the exception name and the overlay the game was in
+        # - and never from a pid, an ASLR address, a timestamp or a handle. The
+        # ABSENCE of a report is part of it: two crashes that both silence the
+        # reporter in the same overlay are far more likely to be one defect than
+        # two.
+        $crashedPeers = @($peers | Where-Object { $_.Classification -eq 'PROCESS_CRASH' })
+        if ($crashedPeers.Count -gt 0) {
+            $exceptionName = 'unknown'
+            $formatted = Format-ExitCode $crashedPeers[0].ExitCode
+            $m = [regex]::Match($formatted, '(EXCEPTION_\w+|STATUS_\w+)')
+            if ($m.Success) { $exceptionName = $m.Groups[1].Value }
+            # game_context keeps its value across an unload, which is exactly
+            # what makes it usable as a grouping key - the same reasoning
+            # Get-CrashFingerprint uses when a report does exist.
+            $context = $crashedPeers[0].LiveState.GameContext
+            $overlay = if ($context -and $context -ne 'unknown') { "overlay$context" } else { 'overlay?' }
+            $record.crash_fingerprint = "NO_REPORT:$exceptionName`:$overlay"
+            $record.notes += ("the process died of $formatted and wrote no crash report, " +
+                "no minidump and no stack-usage file")
+        }
     }
     $desyncReports = @($peers[0].DesyncReports) + @($peers[1].DesyncReports)
     if ($desyncReports.Count -gt 0) {

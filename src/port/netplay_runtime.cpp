@@ -19,6 +19,7 @@
 #include "port/crash_report.h"
 #include "port/config.hpp"
 #include <filesystem> // port/main.h declares a std::filesystem::path global.
+#include <map>
 #include "port/main.h"
 #include "port/port_version.h"
 #include "partyboard_version.h"
@@ -885,6 +886,104 @@ void serviceStateRepair(bool force)
 //   frame seat buttons stickX stickY substickX substickY triggerL triggerR
 // The frame is the one the sample is APPLIED on, never the one it was captured
 // on, so a recording made at one input delay replays correctly at another.
+// ---------------------------------------------------------------------------
+// Rollback gate survey. PARTYBOARD_ROLLBACK_GATE_SURVEY=1.
+//
+// Why this exists, and what it corrects. The forced rollback probe only asks
+// whether a capture is possible at multiples of its period, and abandons the
+// opportunity until the next multiple when refused. Its numbers - 155 refusals
+// out of 159 - were read as "the gate is shut 97% of the time", which they do
+// not say: they say the gate was shut at those 159 chosen instants. The 47762
+// frames never asked said nothing either way, and the two possible readings call
+// for opposite remedies. See docs/ROLLBACK_READINESS.md.
+//
+// So this asks every frame, and histograms the runs of open and shut frames
+// rather than only counting them: "open 4% of frames" means something quite
+// different when the open frames come in usable stretches than when they are
+// isolated singles.
+//
+// It is OFF by default and it is a measurement, not a policy: it changes nothing
+// about when a capture is attempted or what is accepted.
+// PartyBoard_RollbackCheckpointSize() touches no game state - it walks the
+// region set and writes a diagnostic string - but it is not free, so a survey
+// run is a survey run and not a normal one.
+struct GateSurvey {
+    bool enabled = false;
+    bool initialized = false;
+    std::uint32_t frames = 0;
+    std::uint32_t open = 0;
+    std::uint32_t openRun = 0;      // current consecutive open frames
+    std::uint32_t longestOpenRun = 0;
+    std::uint32_t firstOpenFrame = 0;
+    bool everOpen = false;
+    // Runs bucketed by length: 1, 2-3, 4-7, 8-15, 16-31, 32-63, 64+.
+    std::uint32_t openBuckets[7] {};
+    std::map<std::string, std::uint32_t> refusals;
+};
+GateSurvey gGateSurvey;
+
+unsigned gateSurveyBucket(std::uint32_t length)
+{
+    if (length <= 1) return 0;
+    if (length <= 3) return 1;
+    if (length <= 7) return 2;
+    if (length <= 15) return 3;
+    if (length <= 31) return 4;
+    if (length <= 63) return 5;
+    return 6;
+}
+
+void gateSurveyReport(std::uint32_t frame, const char *why)
+{
+    const GateSurvey &g = gGateSurvey;
+    char firstOpen[32];
+    if (g.everOpen) std::snprintf(firstOpen, sizeof(firstOpen), "%u", g.firstOpenFrame);
+    else std::snprintf(firstOpen, sizeof(firstOpen), "never");
+    std::printf("GATE SURVEY %s frame=%u asked=%u open=%u (%.2f%%) longest_open_run=%u first_open=%s\n",
+        why, frame, g.frames, g.open,
+        g.frames ? 100.0 * static_cast<double>(g.open) / static_cast<double>(g.frames) : 0.0,
+        g.longestOpenRun, firstOpen);
+    static const char *names[7] = {"1", "2-3", "4-7", "8-15", "16-31", "32-63", "64+"};
+    for (unsigned i = 0; i < 7; ++i) {
+        if (g.openBuckets[i]) std::printf("GATE SURVEY   open runs of %-6s : %u\n", names[i], g.openBuckets[i]);
+    }
+    for (const auto &entry : g.refusals) {
+        std::printf("GATE SURVEY   refused %-28s : %u\n", entry.first.c_str(), entry.second);
+    }
+    std::fflush(stdout);
+}
+
+void gateSurveyTick(std::uint32_t frame)
+{
+    GateSurvey &g = gGateSurvey;
+    if (!g.initialized) {
+        g.initialized = true;
+        const char *value = std::getenv("PARTYBOARD_ROLLBACK_GATE_SURVEY");
+        g.enabled = value && value[0] && value[0] != '0';
+        if (g.enabled) {
+            std::printf("GATE SURVEY armed: evaluating the capture gate on EVERY frame. "
+                        "This measures the engine, not the probe's sampling stride.\n");
+            std::fflush(stdout);
+        }
+    }
+    if (!g.enabled) return;
+
+    ++g.frames;
+    const bool open = PartyBoard_RollbackCheckpointSize() != 0;
+    if (open) {
+        ++g.open;
+        if (!g.everOpen) { g.everOpen = true; g.firstOpenFrame = frame; }
+        ++g.openRun;
+        if (g.openRun > g.longestOpenRun) g.longestOpenRun = g.openRun;
+    } else {
+        if (g.openRun) { ++g.openBuckets[gateSurveyBucket(g.openRun)]; g.openRun = 0; }
+        const char *refusal = PartyBoard_RollbackCheckpointRefusal();
+        ++g.refusals[refusal ? refusal : "unknown"];
+    }
+    // Periodic, so a run that is killed still leaves a measurement behind.
+    if (g.frames % 3000 == 0) gateSurveyReport(frame, "progress");
+}
+
 bool loadReplaySamples()
 {
     std::FILE *file = std::fopen(gRuntime.replayPath.c_str(), "rb");
@@ -1073,6 +1172,7 @@ bool captureCommittedState()
     }
     // After the state for this frame exists and has been published, so the probe
     // compares against exactly what the peer was told.
+    gateSurveyTick(frame);
     forceRollbackTick(frame);
     return checkStateFailure();
 }

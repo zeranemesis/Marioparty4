@@ -590,3 +590,82 @@ elle se tranche par lecture ou par une trace, sans temps machine.
 Deux humains sur deux machines auront des réglages de pause différents, parce
 que rien ne les harmonise. C'est donc un candidat que la première vraie session
 peut déclencher, et il vaut mieux savoir avant qu'après.
+
+---
+
+## D9 — Un plantage réel n'a produit aucun rapport
+
+**Classification : crash reporter produced no artifact for a real
+EXCEPTION_ACCESS_VIOLATION. Observé, reproductible, cause non établie.**
+
+**Statut : non corrigé. Recette de reproduction disponible.**
+
+### Ce qui a été observé
+
+Le 2026-09-11, en annulant délibérément le correctif D4 pour prouver que son
+scénario de non-régression rougit bien (`docs/regression_proofs.md`), les deux
+pairs sont morts à la frame 48671 :
+
+```
+exit_peer_0 = 0xC0000005 (-1073741819)   EXCEPTION_ACCESS_VIOLATION
+exit_peer_1 = 0xC0000005 (-1073741819)   EXCEPTION_ACCESS_VIOLATION
+classification = PROCESS_CRASH / PROCESS_CRASH
+```
+
+C'est exactement la signature D4 attendue avec page de garde. Mais le dossier du
+run ne contient **ni rapport de plantage, ni minidump, ni fichier
+`stack-usage-*`** — seulement les journaux, l'état vivant et la trace audio. Le
+répertoire de travail du binaire n'en contient pas davantage.
+
+### Pourquoi cela compte, indépendamment de D4
+
+D4 est corrigé : ce plantage précis ne peut pas se produire dans un binaire livré.
+Ce qui reste, et qui n'est pas corrigé, c'est que **le rapporteur a été muet sur
+un plantage réel**. Tout le circuit de télémétrie — empreintes stables,
+déduplication, file d'incidents, consentement, export — suppose qu'un plantage
+produit un rapport. Ici il n'en a pas produit, et personne ne l'aurait su : le run
+était classé `CRASH`, ce qui est correct, mais **sans empreinte**, donc
+impossible à regrouper avec une récidive. Chaque occurrence aurait ressemblé à un
+défaut neuf.
+
+L'entrée D4 dit elle-même que ce mode de défaillance détruit ses propres preuves,
+et que la sortie fut la sémantique `PAGE_GUARD`, qui lève une exception *et*
+débloque la page en un seul geste. Le code de sortie `0xC0000005` indique que la
+page de garde **a bien fauté**. Le rapporteur aurait donc dû disposer de pile.
+Pourquoi il n'a rien écrit reste à établir.
+
+### Ce qui n'est pas établi
+
+Trois hypothèses, aucune vérifiée :
+
+1. le gestionnaire n'était pas installé sur le fil qui a fauté ;
+2. il s'est exécuté et a échoué à écrire (chemin, droits, fil d'écriture non
+   démarré) ;
+3. la faute s'est produite dans un état où le dispatch vers le fil d'écriture ne
+   pouvait pas aboutir.
+
+**Ne pas corriger sur l'une de ces hypothèses.** Instrumenter d'abord.
+
+### Recette de reproduction
+
+Elle existe, elle est déterministe, et elle coûte quatorze minutes :
+
+1. `src/game/process.c` : remplacer `stack_size *= 4;` et le plancher 32768 par
+   `stack_size *= 2;`
+2. reconstruire
+3. `tools\netplay_campaign.ps1 -DiscPath <iso> -Manifest tests/scenarios/regression-proofs.json -Scenario d4-big-boo -Repeat 1`
+4. le plantage tombe à la frame 48671, sur les deux pairs
+
+C'est la première fois du projet qu'un plantage du moteur est reproductible **à
+la frame près et à volonté**. C'est le banc d'essai dont le rapporteur a besoin,
+et il faut s'en servir avant d'y toucher.
+
+### Atténuation déjà en place
+
+La campagne attribue désormais une empreinte à un plantage muet :
+`NO_REPORT:<nom d'exception>:overlay<N>`, construite uniquement à partir du nom
+de l'exception et du contexte de jeu — jamais d'un PID, d'une adresse ASLR, d'un
+horodatage ni d'un handle. L'**absence** de rapport fait partie de la signature :
+deux plantages qui rendent le rapporteur muet dans le même overlay sont bien plus
+probablement un seul défaut que deux. Ce n'est pas un correctif, c'est ce qui
+permet de compter les occurrences en attendant.
