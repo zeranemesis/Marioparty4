@@ -4,6 +4,7 @@
 
 #ifdef TARGET_PC
 #include <string.h>
+#include "port/coroutine_stack.h"
 #endif
 
 #ifdef __MWERKS__
@@ -127,6 +128,10 @@ Process *HuPrcCreate(void (*func)(void), u16 prio, u32 stack_size, s32 extra_siz
 #ifdef TARGET_PC
     process->thread = co_create(stack_size, func);
     process->thread_size = stack_size;
+    // The stack libco just allocated is guarded and measurable; tell the meter
+    // which process owns it so a guard-page fault can name the culprit and the
+    // peak depth can be attributed. See include/port/coroutine_stack.h.
+    PartyBoard_CoroutineStackArm(process->thread, stack_size, (const void *)func);
 #else
     process->base_sp = ((uintptr_t)HuMemMemoryAlloc(heap, stack_size, FAKE_RETADDR)) + stack_size - 8;
     gcsetjmp(&process->jump);
@@ -312,6 +317,9 @@ void HuPrcCall(s32 tick)
         ret = thread_arg;
         switch (ret) {
             case 2:
+                // Fold this stack's high-water mark into the worst case for its
+                // process before libco hands the memory back.
+                PartyBoard_CoroutineStackRetire(processcur->thread);
                 co_delete(processcur->thread);
 #else
     ret = gcsetjmp(&processjmpbuf);

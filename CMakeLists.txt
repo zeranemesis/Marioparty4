@@ -156,6 +156,22 @@ endif()
 target_link_libraries(dol PUBLIC aurora::core aurora::card aurora::dvd aurora::gx aurora::mtx aurora::os aurora::si aurora::vi aurora::pad musyx absl::flat_hash_map nlohmann_json::nlohmann_json fmt::fmt rmlui_debugger)
 if (WIN32)
     target_link_libraries(dol PUBLIC ws2_32)
+    # StackWalk64 and the symbol helpers used to name a coroutine stack owner.
+    target_link_libraries(dol PUBLIC dbghelp)
+    # Give every libco coroutine stack its own guarded reservation instead of a
+    # bare malloc block. libco falls back to malloc only when these are
+    # undefined (extern/libco/settings.h), so overriding them here needs no
+    # change inside libco itself. See include/port/coroutine_stack.h.
+    # libco.c is C and would otherwise have no prototype for the replacements,
+    # so the declarations are force-included into that one translation unit.
+    if (MSVC)
+        set(PARTY_BOARD_LIBCO_FORCE_INCLUDE "/FIport/coroutine_stack_alloc.h")
+    else ()
+        set(PARTY_BOARD_LIBCO_FORCE_INCLUDE "-include" "port/coroutine_stack_alloc.h")
+    endif ()
+    set_source_files_properties(extern/libco/libco.c PROPERTIES
+            COMPILE_DEFINITIONS "LIBCO_MALLOC=PartyBoard_CoroutineStackAlloc;LIBCO_FREE=PartyBoard_CoroutineStackFree"
+            COMPILE_OPTIONS "${PARTY_BOARD_LIBCO_FORCE_INCLUDE}")
 endif ()
 # TODO it doesn't work on Linux yet
 if (WIN32)

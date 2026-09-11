@@ -2,52 +2,13 @@
 #include "port/netplay_transport.hpp"
 #include "port/netplay_runtime.h"
 #include "port/rollback.h"
+#include "port/coroutine_stack.h"
 
 #include <cstring>
 
 #if defined(_WIN32)
 #include <cstdio>
 #include <windows.h>
-#include <DbgHelp.h>
-
-#pragma comment(lib, "Dbghelp.lib")
-
-namespace
-{
-LONG WINAPI write_crash_dump(EXCEPTION_POINTERS *exceptionPointers)
-{
-    const DWORD threadId = GetCurrentThreadId();
-    const DWORD exceptionCode = exceptionPointers != nullptr && exceptionPointers->ExceptionRecord != nullptr
-        ? exceptionPointers->ExceptionRecord->ExceptionCode
-        : 0;
-    const void *exceptionAddress = exceptionPointers != nullptr && exceptionPointers->ExceptionRecord != nullptr
-        ? exceptionPointers->ExceptionRecord->ExceptionAddress
-        : nullptr;
-
-    if (FILE *summary = std::fopen("partyboard_crash.txt", "w"))
-    {
-        std::fprintf(summary, "PartyBoard unhandled exception\ncode=0x%08lX\naddress=%p\nthread=%lu\n",
-            exceptionCode, exceptionAddress, threadId);
-        std::fclose(summary);
-    }
-
-    HANDLE dump = CreateFileW(L"partyboard_crash.dmp", GENERIC_WRITE, FILE_SHARE_READ, nullptr,
-        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (dump != INVALID_HANDLE_VALUE)
-    {
-        MINIDUMP_EXCEPTION_INFORMATION exceptionInfo {};
-        exceptionInfo.ThreadId = threadId;
-        exceptionInfo.ExceptionPointers = exceptionPointers;
-        exceptionInfo.ClientPointers = FALSE;
-        const MINIDUMP_TYPE dumpType = static_cast<MINIDUMP_TYPE>(
-            MiniDumpWithDataSegs | MiniDumpWithHandleData | MiniDumpWithThreadInfo);
-        MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), dump, dumpType,
-            exceptionPointers != nullptr ? &exceptionInfo : nullptr, nullptr, nullptr);
-        CloseHandle(dump);
-    }
-    return EXCEPTION_EXECUTE_HANDLER;
-}
-}
 #endif
 
 extern "C" int port_main(int argc, char* argv[]);
@@ -56,6 +17,8 @@ extern "C" bool PartyBoard_OnlineBarrierProbe(void);
 
 int main(int argc, char *argv[])
 {
+    if (argc == 2 && std::strcmp(argv[1], "--coroutine-stack-self-test") == 0)
+        return PartyBoard_CoroutineStackRunSelfTest() ? 0 : 1;
     if (argc == 2 && std::strcmp(argv[1], "--online-disc-check") == 0)
         return PartyBoard_OnlineCheckDisc() ? 0 : 3;
     if (argc == 2 && std::strcmp(argv[1], "--rollback-self-test") == 0)
@@ -63,6 +26,7 @@ int main(int argc, char *argv[])
     if (argc == 2 && std::strcmp(argv[1], "--netplay-self-test") == 0)
         return PartyBoard_RollbackRunSelfTest() && PartyBoard_NetTransportRunSelfTest()
                 && PartyBoard_NetplayRuntimeRunSelfTest()
+                && PartyBoard_CoroutineStackRunSelfTest()
             ? 0
             : 1;
 
@@ -81,7 +45,6 @@ int main(int argc, char *argv[])
     }
 
 #if defined(_WIN32)
-    SetUnhandledExceptionFilter(write_crash_dump);
     HANDLE singleInstance = nullptr;
     if (!PartyBoard_NetplayAllowsMultipleInstances())
     {
