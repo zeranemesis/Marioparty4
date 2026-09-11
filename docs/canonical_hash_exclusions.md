@@ -208,16 +208,80 @@ C'est l'entrée la plus urgente de ce document après `create_time`.
 
 ---
 
-## Ce que ce document n'a pas couvert
+## L'audio — **relu, et sain**
 
-Il ne traite que `GameStat`. Les autres sous-systèmes ont leurs propres
-exclusions — pointeurs, poignées, tampons de présentation, état audio physique —
-dont le préambule dit qu'ils ne sont « jamais exportés ». Cette affirmation est
-juste pour un pointeur, dont la valeur est une adresse. Elle mérite d'être relue
-pour l'audio : `PartyBoard_RollbackAudioSelfTest` existe, mais la question « quel
-état audio logique influence la simulation » n'a pas été posée dans ce sens.
+`PartyBoard_NetplayAudioState` (`src/game/audio.c:857`) exporte l'état audio que
+le jeu peut lui-même observer : `sndGroupBak`, les volumes, `fadeStat`,
+`musicOffF`, les huit `msmStreamGetStatus` et les huit `charVoiceGroupStat`.
 
-À faire, toujours sans temps machine.
+Il **exclut** volontairement `msmMusGetNumPlay` et `msmSeGetNumPlay`, avec sa
+raison écrite sur place : ces compteurs sont avancés par le fil audio MusyX à la
+cadence du périphérique, et les hacher signalerait une désynchronisation sur
+**toute** paire de machines. L'exclusion est donc nécessaire, pas commode.
+
+### La question à poser : le jeu bloque-t-il sur ce qu'il n'exporte pas ?
+
+C'est la seule qui compte, et la réponse est non.
+
+Le seul endroit qui lisait ces compteurs pour décider quelque chose est
+`HuAudSndGrpWait` (`src/game/audio.c:568`), et sous netplay il ne les lit plus
+du tout :
+
+```c
+if (PartyBoard_NetplayEnabled()) {
+    PartyBoard_AudioDrainBegin(SNDGRP_DRAIN_STEPS);
+    /* No early exit on the play counters: the audio thread influences
+     * them, so testing them would put real time back into the loop. */
+    for (step = 0; step < SNDGRP_DRAIN_STEPS; step++) {
+        msmSysRegularProc();
+    }
+    ...
+}
+```
+
+Un nombre fixe d'itérations, sans sortie anticipée. C'est le correctif C3, et il
+fait exactement ce qu'il faut : il retire le compteur exclu du chemin de
+décision au lieu de tenter de le synchroniser.
+
+### Une alerte levée puis écartée
+
+`HuAudSndGrpSetSet` (`src/game/audio.c:629`) branche juste après le drain sur du
+**temps réel** :
+
+```c
+if (OSTicksToMilliseconds(OSGetTick() - tickStart) >= 500) {
+    numPlay = msmSeGetNumPlay(1);
+    OSReport("Timed Out! Mus %d:SE %d
+", msmMusGetNumPlay(TRUE), numPlay);
+}
+```
+
+Deux pairs dont le drain ne prend pas la même durée réelle prendront des
+branches différentes — ce qui serait grave si la branche faisait quelque chose.
+Elle ne fait qu'un `OSReport`. `numPlay` n'est assigné que là et n'est lu que par
+cette trace ; aucun état de jeu n'en dépend.
+
+**Verdict : observationnellement pure.** La seule conséquence est que la sortie
+standard des deux pairs peut différer d'une ligne, ce qui n'affecte aucun des
+motifs que le harnais y cherche (transitions d'overlay, marqueurs de
+couverture).
+
+### Ce qui reste couvert par le hash, et c'est voulu
+
+`sndGroupBak` **est** haché. La boucle de rechargement à deux tentatives qui la
+suit peut échouer sur un pair et réussir sur l'autre ; dans ce cas les deux
+valeurs divergent et **le hash le signale**. C'est le bon comportement : un
+échec de chargement de banque est une divergence réelle, pas un détail à
+absorber.
+
+## Ce que ce document n'a toujours pas couvert
+
+Les pointeurs, poignées et tampons de présentation. Le préambule dit qu'ils ne
+sont jamais exportés, et c'est juste pour un pointeur — sa valeur est une
+adresse, qui n'a aucun sens partagé. Il n'y a rien à auditer là : deux machines
+ne peuvent pas avoir la même, et aucune logique ne devrait en dépendre. Si une
+logique en dépendait, ce serait un défaut de cette logique et pas une lacune du
+hash.
 
 ## Règle qui découle de tout ceci
 
