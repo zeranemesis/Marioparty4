@@ -87,6 +87,12 @@ try {
         $start.EnvironmentVariables['PARTYBOARD_NETPLAY_TEST_PROFILE']=$profile
         $diagnostic=Join-Path $runPath "peer-$side-native.log"
         $start.EnvironmentVariables['PARTYBOARD_NET_DIAGNOSTIC']=$diagnostic
+        # Crash reports, minidumps and the live state file go beside the run's
+        # other evidence, named per seat. Without this the reporter falls back to
+        # the diagnostic's directory, which works but cannot name the seat.
+        $start.EnvironmentVariables['PARTYBOARD_CRASH_DIR']=$runPath
+        $start.EnvironmentVariables['PARTYBOARD_CRASH_PEER']="$side"
+        $start.EnvironmentVariables['PARTYBOARD_CRASH_ROLE']=$(if ($side -eq 0) { 'host' } else { 'client' })
         $process=[Diagnostics.Process]::Start($start)
         $testPeers+=@{Process=$process;Out=$process.StandardOutput.ReadToEndAsync();Err=$process.StandardError.ReadToEndAsync();Ready=$ready;Go=$go;Cancel=$cancel;Side=$side;Diagnostic=$diagnostic}
     }
