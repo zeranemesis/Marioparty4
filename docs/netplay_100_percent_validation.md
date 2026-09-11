@@ -141,14 +141,26 @@ est indépendant de D4 et hors périmètre tant que MusyX est gelé.
 | Plateau Big Boo (`w04Dll`) — déplacement, dés, tours | PASS (S1) | **FAIL (S1)** |
 | Événement Big Boo (`boo_event.c`) | PASS (S1) | **FAIL (S1)** |
 | Mini-jeux (4 exercés) | PASS (S1) | PASS (S1) |
-| Écran de résultats de mini-jeu | PASS (S1) | PASS (S1) |
+| Écran de résultats de mini-jeu | PASS (S1) | PASS (S1), **D3 corrigé ici** |
 | Sept autres plateaux | UNTESTED | UNTESTED |
 | Boutique, loterie, items, étoiles | UNTESTED | UNTESTED |
 | Fin de partie, classement final | UNTESTED | UNTESTED |
 | Joueurs CPU | UNTESTED | UNTESTED |
 | Quatre joueurs | UNTESTED | UNTESTED |
 | Deux machines, réseau réel | UNTESTED | UNTESTED |
-| Rollback SAVE/RESTORE/REPLAY | UNTESTED | UNTESTED |
+| Rollback SAVE/RESTORE/REPLAY | **FAIL (D5)** | UNTESTED |
+
+### Note sur la ligne rollback
+
+Elle n'est plus `UNTESTED` : elle a été testée et elle échoue. Le probe
+`PARTYBOARD_FORCE_ROLLBACK` a mesuré, à son premier essai, qu'un retour arrière
+d'**une seule frame** ne se reproduit pas — quinze sous-systèmes canoniques
+reviennent identiques, `ANIMATION` non. C'est le défaut D5 du registre, et il
+s'applique aussi au chemin de rollback réseau réel, qui rejoue ses ticks de la
+même façon.
+
+Le verdict `STABILITY` de cette ligne reste `UNTESTED` : le probe s'arrête sur la
+divergence avant d'avoir pu exercer quoi que ce soit de long.
 
 ## Condition pour qu'une session Big Boo soit réellement PASS
 
