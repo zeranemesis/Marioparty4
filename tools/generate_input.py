@@ -70,6 +70,19 @@ minutes each.
 
 Find the frame to cut at in the .overlays file beside the recording - it is the
 frame the board overlay first appears on.
+
+REACHING A BOARD NOBODY RECORDED
+--------------------------------
+``inject`` overwrites a frame range of an existing recording with one chosen
+input. That is how a known-good approach becomes an approach to a DIFFERENT
+board: the menu runs between two known frames, the board list is a cursor, and a
+stick pulse dropped inside that window moves the cursor before the confirm that
+follows. The run then reports which board it actually loaded, so the mapping is
+measured rather than guessed.
+
+It is also how a run leaves a board it has finished with - a START pulse opens
+the pause menu, and quitting there returns to the menu that called the board
+rather than to the title screen.
 """
 
 import argparse
@@ -407,6 +420,16 @@ def main(argv=None):
     show = sub.add_parser("describe", help="report what a file contains")
     show.add_argument("input")
 
+    inject = sub.add_parser("inject", help="overwrite a frame range with one input")
+    inject.add_argument("input")
+    inject.add_argument("--at", type=int, required=True, help="first frame to overwrite")
+    inject.add_argument("--frames", type=int, default=6, help="how many frames to hold it")
+    inject.add_argument("--stick-x", type=int, default=0)
+    inject.add_argument("--stick-y", type=int, default=0)
+    inject.add_argument("--button", default="NONE", help="a name from NAMED_BUTTONS")
+    inject.add_argument("--seat", type=int, default=-1, help="-1 for both seats")
+    inject.add_argument("-o", "--output", required=True)
+
     cut = sub.add_parser("slice", help="take a frame range out of a recording")
     cut.add_argument("input")
     cut.add_argument("--start", type=int, default=0)
@@ -445,6 +468,27 @@ def main(argv=None):
             frames.extend(part)
         count = write_frames(frames, args.output)
         print("concat frames=%d -> %s" % (count, args.output))
+        return 0
+
+    if args.command == "inject":
+        frames = read_frames(args.input)
+        if not frames:
+            raise SystemExit("%s produced no frames" % args.input)
+        if args.at < 0 or args.at >= len(frames):
+            raise SystemExit("--at %d is outside 0..%d" % (args.at, len(frames) - 1))
+        if args.button.upper() not in NAMED_BUTTONS:
+            raise SystemExit("unknown button %r" % args.button)
+        button = NAMED_BUTTONS[args.button.upper()]
+        sx = max(-STICK_MAX, min(STICK_MAX, args.stick_x))
+        sy = max(-STICK_MAX, min(STICK_MAX, args.stick_y))
+        seats = range(SEATS) if args.seat < 0 else [args.seat]
+        end = min(len(frames), args.at + max(1, args.frames))
+        for index in range(args.at, end):
+            for seat in seats:
+                frames[index].seats[seat].update(buttons=button, sx=sx, sy=sy)
+        count = write_frames(frames, args.output)
+        print("inject %s at %d for %d frames (buttons=%s stick=%d,%d) -> %s"
+              % (args.input, args.at, end - args.at, args.button.upper(), sx, sy, args.output))
         return 0
 
     if args.command == "slice":
