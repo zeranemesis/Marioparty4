@@ -729,6 +729,15 @@ extern "C" void PartyBoard_CrashUpdateSimState(const PartyBoardCrashSimState *st
 extern "C" void PartyBoard_CrashHeartbeat(void)
 {
 #ifdef _WIN32
+    // Kill switch for bisection. The live state file is the one thing this
+    // reporter writes while the game is running, so it is also the one thing
+    // that could make the reporter a suspect in a crash. Being able to turn it
+    // off is how that suspicion gets tested rather than argued about.
+    static const bool enabled = [] {
+        const char *value = std::getenv("PARTYBOARD_CRASH_HEARTBEAT");
+        return !(value && (value[0] == '0' || value[0] == 'n' || value[0] == 'N'));
+    }();
+    if (!enabled) return;
     if (!gInitialised.load(std::memory_order_acquire) || !gIdentity.sessionDir[0]) return;
     if (gHeartbeatCountdown.load(std::memory_order_relaxed) > 0) {
         gHeartbeatCountdown.fetch_sub(1, std::memory_order_relaxed);
