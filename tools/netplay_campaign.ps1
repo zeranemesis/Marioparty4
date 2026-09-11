@@ -48,6 +48,10 @@ param(
     [string]$MemDiagnostics = '1',
     # Forced local rollback probe, '' off. See PARTYBOARD_FORCE_ROLLBACK.
     [string]$ForceRollback = '',
+    # Evaluate the rollback capture gate on EVERY frame and histogram the runs of
+    # open frames. A measurement run, not a normal one: it is expensive, and it
+    # is recorded in the results so a survey run can never be mistaken for one.
+    [switch]$GateSurvey,
     # Suffix for the campaign directory, so several campaigns started in the
     # same second do not collide.
     [string]$Label = '',
@@ -232,6 +236,7 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         mem_diagnostics = $MemDiagnostics
         replay_fingerprints_verified = (-not $SkipReplayVerification)
         force_rollback = $ForceRollback
+        gate_survey = [bool]$GateSurvey
         target_frame_rate = $TargetFrameRate
         target_frame_rate_peer_1 = $(if ($TargetFrameRatePeer1 -gt 0) { $TargetFrameRatePeer1 } else { $TargetFrameRate })
         replay = $entry.Replay
@@ -326,6 +331,10 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
             $start.EnvironmentVariables['PARTYBOARD_AUDIO_DIAGNOSTICS'] = $AudioDiagnostics
             $start.EnvironmentVariables['PARTYBOARD_MEM_DIAGNOSTICS'] = $MemDiagnostics
             $start.EnvironmentVariables['PARTYBOARD_FORCE_ROLLBACK'] = $ForceRollback
+            # Explicit in both directions, like the two detectors above: a
+            # variable left in the launching shell must not be able to turn a
+            # measurement on, or off, without the result saying so.
+            $start.EnvironmentVariables['PARTYBOARD_ROLLBACK_GATE_SURVEY'] = $(if ($GateSurvey) { '1' } else { '' })
 
             $process = [Diagnostics.Process]::Start($start)
             $peers += @{
@@ -510,6 +519,23 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         }
     }
     $record.board_coverage = @($coverage.Keys | Sort-Object | ForEach-Object { "$_@$($coverage[$_])" })
+
+    # ---- the capture gate, if this was a survey run ----
+    if ($GateSurvey) {
+        $armed = $false
+        foreach ($side in 0, 1) {
+            $logPath = Join-Path $runPath "peer-$side-stdout.log"
+            if (-not (Test-Path -LiteralPath $logPath)) { continue }
+            if (@(Select-String -Path $logPath -Pattern '^GATE SURVEY armed' -ErrorAction SilentlyContinue).Count -gt 0) { $armed = $true }
+        }
+        if (-not $armed) {
+            # Same rule as the two detectors: asked for, with no evidence it ran.
+            $record.result = 'HARNESS_FAILURE'
+            $record.notes += 'the rollback gate survey was requested but never armed'
+        }
+        $lines = @(Select-String -Path (Join-Path $runPath 'peer-0-stdout.log') -Pattern '^GATE SURVEY ' -ErrorAction SilentlyContinue)
+        foreach ($line in $lines | Select-Object -Last 12) { $record.notes += $line.Line }
+    }
 
     # ---- overlay paths ----
     $overlays = @(, @(), @())
