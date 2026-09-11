@@ -1,8 +1,8 @@
 diff --git a/cmake/aurora_gx.cmake b/cmake/aurora_gx.cmake
-index e81b621..26b0b7a 100644
+index e81b621..3c6b3bf 100644
 --- a/cmake/aurora_gx.cmake
 +++ b/cmake/aurora_gx.cmake
-@@ -46,6 +46,77 @@ target_link_libraries(aurora_gx PUBLIC aurora::core dawn::webgpu_dawn xxhash)
+@@ -46,6 +46,79 @@ target_link_libraries(aurora_gx PUBLIC aurora::core dawn::webgpu_dawn xxhash)
  target_link_libraries(aurora_gx PRIVATE absl::btree absl::flat_hash_map sqlite3 TracyClient PNG::PNG)
  target_compile_definitions(aurora_gx PRIVATE WEBGPU_DAWN)
  
@@ -15,6 +15,8 @@ index e81b621..26b0b7a 100644
 +        lib/rt/rt_device.hpp
 +        lib/rt/rt_capture.cpp
 +        lib/rt/rt_capture.hpp
++        lib/rt/rt_textures.cpp
++        lib/rt/rt_textures.hpp
 +        lib/rt/rt_accel.cpp
 +        lib/rt/rt_accel.hpp
 +        lib/rt/rt_trace.cpp
@@ -306,10 +308,19 @@ index eff0c65..241a395 100644
    ASSERT(g_currentRenderPass == UINT32_MAX, "end_frame called before finish finalized the current render pass");
    auto& frame = current_frame_packet();
 diff --git a/lib/gfx/texture.cpp b/lib/gfx/texture.cpp
-index 013afc0..81c02ff 100644
+index 013afc0..0d27c2c 100644
 --- a/lib/gfx/texture.cpp
 +++ b/lib/gfx/texture.cpp
-@@ -75,6 +75,35 @@ TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mi
+@@ -4,6 +4,8 @@
+ #include "../webgpu/gpu.hpp"
+ #include "aurora/aurora.h"
+ #include "texture.hpp"
++
++#include "../rt/rt_textures.hpp"
+ #include "texture_convert.hpp"
+ #include "../gx/gx_fmt.hpp"
+ 
+@@ -75,6 +77,39 @@ TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mi
      }
    }
  
@@ -338,6 +349,10 @@ index 013afc0..81c02ff 100644
 +        }
 +        ref.averageAlpha = static_cast<float>(alphaSum) / (255.f * static_cast<float>(texels));
 +        ref.cutoutFraction = static_cast<float>(cutout) / static_cast<float>(texels);
++        // Same decoded texels, same place: a thumbnail for ray traced
++        // reflections, which otherwise have only the average above to work with.
++        ref.rtThumbnail = rt::textures::add(ref.size.width, ref.size.height, data.data(),
++                                            data.size());
 +      }
 +    }
 +  }
@@ -346,10 +361,10 @@ index 013afc0..81c02ff 100644
    for (uint32_t mip = 0; mip < mips; ++mip) {
      const wgpu::Extent3D mipSize{
 diff --git a/lib/gfx/texture.hpp b/lib/gfx/texture.hpp
-index ac7c91c..b0142d0 100644
+index ac7c91c..025214c 100644
 --- a/lib/gfx/texture.hpp
 +++ b/lib/gfx/texture.hpp
-@@ -43,6 +43,17 @@ struct TextureRef {
+@@ -43,6 +43,20 @@ struct TextureRef {
    u32 gxFormat;
    bool hasArbitraryMips = false;
    bool isReplacement = false;
@@ -364,6 +379,9 @@ index ac7c91c..b0142d0 100644
 +  // because the game leaves alpha blending enabled for opaque geometry too.
 +  float averageAlpha = 1.f;
 +  float cutoutFraction = 0.f;
++  // Index into the ray tracing thumbnail registry, 0 when there is none. Lets a
++  // reflection vary across a surface instead of blending one average colour.
++  uint32_t rtThumbnail = 0;
  
    TextureRef(wgpu::Texture texture, wgpu::TextureView sampleTextureView, wgpu::TextureView attachmentTextureView,
               wgpu::Extent3D size, wgpu::TextureFormat format, uint32_t mipCount, u32 gxFormat)
@@ -1282,10 +1300,10 @@ index 0000000..6859eeb
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_accel.hpp b/lib/rt/rt_accel.hpp
 new file mode 100644
-index 0000000..ca1df2c
+index 0000000..d901137
 --- /dev/null
 +++ b/lib/rt/rt_accel.hpp
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,103 @@
 +#pragma once
 +
 +#include <cstddef>
@@ -1347,6 +1365,10 @@ index 0000000..ca1df2c
 +enum : uint32_t {
 +  MaterialOpacityShift = 8u,
 +  MaterialOpacityMask = 0xffu,
++  // Top half of the word: which thumbnail in the ray tracing texture registry
++  // this surface uses, 0 for none. See rt_textures.hpp.
++  MaterialThumbnailShift = 16u,
++  MaterialThumbnailMask = 0xffffu,
 +};
 +
 +// `materials` holds one MaterialFlag set per triangle, so vertexCount / 3.
@@ -1387,15 +1409,16 @@ index 0000000..ca1df2c
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_capture.cpp b/lib/rt/rt_capture.cpp
 new file mode 100644
-index 0000000..b0dce2a
+index 0000000..0a64803
 --- /dev/null
 +++ b/lib/rt/rt_capture.cpp
-@@ -0,0 +1,1656 @@
+@@ -0,0 +1,1660 @@
 +#include "rt_capture.hpp"
 +
 +#include "rt_accel.hpp"
 +#include "rt_device.hpp"
 +#include "rt_trace.hpp"
++#include "rt_textures.hpp"
 +#include "rt_interop.hpp"
 +#include "../gx/gx.hpp"
 +#include "../webgpu/gpu.hpp"
@@ -2205,6 +2228,8 @@ index 0000000..b0dce2a
 +  Vec3 albedo{1.f, 1.f, 1.f};
 +  const auto& boundTexture = g_gxState.textures[0];
 +  if (boundTexture.ref && !ortho) {
++    material |= (boundTexture.ref->rtThumbnail & accel::MaterialThumbnailMask)
++                << accel::MaterialThumbnailShift;
 +    albedo = Vec3{boundTexture.ref->averageColour[0], boundTexture.ref->averageColour[1],
 +                  boundTexture.ref->averageColour[2]};
 +    ++g_drawsWithTexture;
@@ -2983,8 +3008,9 @@ index 0000000..b0dce2a
 +             : g_light[3] > 0.f       ? std::to_string(g_shadowSamples) + " samples"
 +                                      : std::string("no light"),
 +             (g_features & trace::FeatureReflections) != 0u ? "on" : "off");
-+    Log.info("Texture coordinates on {} of {} draws; range {:.2f}..{:.2f}", g_drawsWithTexcoords,
-+             g_drawsTotal, g_uvMin, g_uvMax);
++    Log.info("Texture coordinates on {} of {} draws; range {:.2f}..{:.2f}; {} thumbnails "
++             "registered",
++             g_drawsWithTexcoords, g_drawsTotal, g_uvMin, g_uvMax, textures::count() - 1);
 +    Log.info("Albedo sources: {} textured, {} vertex-coloured, of {} draws; mean saturation {:.3f}",
 +             g_drawsWithTexture, g_drawsWithColour, g_drawsTotal,
 +             g_drawsWithTexture > 0 ? g_albedoSaturation / g_drawsWithTexture : 0.0);
@@ -3625,16 +3651,168 @@ index 0000000..f6dffd4
 +void shutdown() noexcept;
 +
 +} // namespace aurora::rt::interop
+diff --git a/lib/rt/rt_textures.cpp b/lib/rt/rt_textures.cpp
+new file mode 100644
+index 0000000..abdc778
+--- /dev/null
++++ b/lib/rt/rt_textures.cpp
+@@ -0,0 +1,96 @@
++#include "rt_textures.hpp"
++
++#include "../logging.hpp"
++
++#include <vector>
++
++namespace aurora::rt::textures {
++static Module Log("aurora::rt");
++
++namespace {
++// 4096 thumbnails is 4 MB at 16x16 RGBA. Indices are never reused: a board's
++// textures are freed when it unloads, but tracking that would mean reaching
++// into the texture cache's lifetime for a buffer this small. The cap is what
++// stops a long session growing without bound, and reaching it degrades to the
++// average colour rather than failing.
++constexpr size_t kMaxTextures = 4096;
++
++std::vector<uint32_t> g_texels; // kTexels per entry, entry 0 left blank
++size_t g_count = 1;             // index 0 is "none"
++bool g_dirty = false;
++bool g_warnedFull = false;
++} // namespace
++
++uint32_t add(const uint32_t width, const uint32_t height, const uint8_t* rgba,
++             const size_t bytes) noexcept {
++  if (rgba == nullptr || width == 0 || height == 0) {
++    return 0;
++  }
++  // Only plain 8-bit RGBA reaches here; the caller checks the format.
++  if (bytes < static_cast<size_t>(width) * height * 4) {
++    return 0;
++  }
++  if (g_count >= kMaxTextures) {
++    if (!g_warnedFull) {
++      g_warnedFull = true;
++      Log.warn("Ray tracing thumbnail registry full at {}; further textures use their average "
++               "colour",
++               kMaxTextures);
++    }
++    return 0;
++  }
++
++  if (g_texels.empty()) {
++    g_texels.resize(kTexels, 0u); // entry 0
++  }
++  const size_t base = g_texels.size();
++  g_texels.resize(base + kTexels, 0u);
++
++  // Box filter down to kEdge x kEdge. Averaging rather than point sampling
++  // because a reflection of a checkerboard should be its mean, not whichever
++  // square the nearest texel happened to land on.
++  for (uint32_t ty = 0; ty < kEdge; ++ty) {
++    const uint32_t y0 = ty * height / kEdge;
++    const uint32_t y1 = (ty + 1) * height / kEdge > y0 ? (ty + 1) * height / kEdge : y0 + 1;
++    for (uint32_t tx = 0; tx < kEdge; ++tx) {
++      const uint32_t x0 = tx * width / kEdge;
++      const uint32_t x1 = (tx + 1) * width / kEdge > x0 ? (tx + 1) * width / kEdge : x0 + 1;
++      uint32_t sums[4] = {0, 0, 0, 0};
++      uint32_t n = 0;
++      for (uint32_t y = y0; y < y1 && y < height; ++y) {
++        for (uint32_t x = x0; x < x1 && x < width; ++x) {
++          const uint8_t* p = rgba + (static_cast<size_t>(y) * width + x) * 4;
++          sums[0] += p[0];
++          sums[1] += p[1];
++          sums[2] += p[2];
++          sums[3] += p[3];
++          ++n;
++        }
++      }
++      if (n == 0) {
++        continue;
++      }
++      const uint32_t packed = ((sums[3] / n) << 24) | ((sums[2] / n) << 16) |
++                              ((sums[1] / n) << 8) | (sums[0] / n);
++      g_texels[base + static_cast<size_t>(ty) * kEdge + tx] = packed;
++    }
++  }
++
++  g_dirty = true;
++  return static_cast<uint32_t>(g_count++);
++}
++
++bool dirty() noexcept { return g_dirty; }
++void mark_uploaded() noexcept { g_dirty = false; }
++const uint32_t* data() noexcept { return g_texels.empty() ? nullptr : g_texels.data(); }
++size_t count() noexcept { return g_count; }
++
++void shutdown() noexcept {
++  g_texels.clear();
++  g_texels.shrink_to_fit();
++  g_count = 1;
++  g_dirty = false;
++  g_warnedFull = false;
++}
++
++} // namespace aurora::rt::textures
+diff --git a/lib/rt/rt_textures.hpp b/lib/rt/rt_textures.hpp
+new file mode 100644
+index 0000000..b805129
+--- /dev/null
++++ b/lib/rt/rt_textures.hpp
+@@ -0,0 +1,43 @@
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++
++namespace aurora::rt::textures {
++
++// A small thumbnail of every texture the ray tracing can reach, all in one
++// buffer.
++//
++// Reflections currently blend the hit surface's *whole-texture average*, which
++// is why the term measures a 0.0% difference on screen: a flat colour close to
++// what is already there. Sampling the real texture at the hit needs each one on
++// the private D3D12 device, behind a bindless descriptor table, with the upload
++// and lifetime that implies.
++//
++// This is the cheap half of that, done first to find out whether the expensive
++// half is worth building: each texture is reduced to kEdge x kEdge and packed
++// into a single structured buffer, indexed arithmetically. No descriptor heap,
++// no per-texture resource, no lifetime beyond an index. It cannot resolve
++// detail, but it gives a reflection spatial variation instead of one colour,
++// which is the difference between the term doing something and doing nothing.
++//
++// If a thumbnail makes reflections worth having, the full path is justified. If
++// it does not, the full path would not have helped either.
++constexpr uint32_t kEdge = 16;
++constexpr uint32_t kTexels = kEdge * kEdge;
++
++// Registers a decoded RGBA8 image. Returns a 1-based index for the material
++// word, or 0 when the registry is full or ray tracing is unavailable -- 0 means
++// "no thumbnail", and the shader falls back to the average colour.
++uint32_t add(uint32_t width, uint32_t height, const uint8_t* rgba, size_t bytes) noexcept;
++
++// Number of registered thumbnails, and whether any changed since the last
++// upload. The trace uploads on demand rather than every frame.
++bool dirty() noexcept;
++void mark_uploaded() noexcept;
++const uint32_t* data() noexcept; // kTexels packed RGBA8 per entry, index 0 unused
++size_t count() noexcept;         // entries, including the unused index 0
++
++void shutdown() noexcept;
++
++} // namespace aurora::rt::textures
 diff --git a/lib/rt/rt_trace.cpp b/lib/rt/rt_trace.cpp
 new file mode 100644
-index 0000000..1a6a7f6
+index 0000000..ff3c59f
 --- /dev/null
 +++ b/lib/rt/rt_trace.cpp
-@@ -0,0 +1,898 @@
+@@ -0,0 +1,967 @@
 +#include "rt_trace.hpp"
 +
 +#include "rt_accel.hpp"
 +#include "rt_device.hpp"
++#include "rt_textures.hpp"
 +#include "../logging.hpp"
 +
 +#include <chrono>
@@ -3681,6 +3859,10 @@ index 0000000..1a6a7f6
 +// buffer is enough: wait_idle() has already retired the dispatch that read it.
 +ComPtr<ID3D12Resource> g_maskBuffer;
 +uint32_t g_maskCapacity = 0;
++// Texture thumbnails, uploaded only when the registry grows rather than every
++// frame: the game registers them as a board loads and then stops.
++ComPtr<ID3D12Resource> g_thumbnailBuffer;
++size_t g_thumbnailCapacity = 0;
 +// GPU timestamps around the dispatch. Without them traceMs measured the time to
 +// record and submit the command list -- microseconds of CPU work -- and called
 +// it the cost of tracing, which is how a 1920x1440 pass with 48 rays a pixel
@@ -3725,7 +3907,9 @@ index 0000000..1a6a7f6
 +  // Dimensions of the orthographic coverage grid; 0 means no mask was supplied.
 +  uint32_t maskCols;
 +  uint32_t maskRows;
-+  uint32_t pad[3];
++  // Entries in the thumbnail registry; 0 means none is bound.
++  uint32_t thumbnailCount;
++  uint32_t pad[2];
 +};
 +// HLSL packs a cbuffer in float4 rows, so the size has to stay a multiple of 16.
 +static_assert(sizeof(Constants) == 96, "constants must stay 24 DWORDs");
@@ -3757,7 +3941,7 @@ index 0000000..1a6a7f6
 +
 +  // b0 as root constants, t0/t1 as root SRVs, u0 through a descriptor table
 +  // because textures cannot be root descriptors.
-+  D3D12_ROOT_PARAMETER params[9]{};
++  D3D12_ROOT_PARAMETER params[10]{};
 +  params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
 +  params[0].Constants.ShaderRegister = 0;
 +  params[0].Constants.Num32BitValues = sizeof(Constants) / 4;
@@ -3777,6 +3961,8 @@ index 0000000..1a6a7f6
 +  params[7].Descriptor.ShaderRegister = 5; // t5: orthographic coverage grid
 +  params[8].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
 +  params[8].Descriptor.ShaderRegister = 6; // t6: vertex texture coordinates
++  params[9].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
++  params[9].Descriptor.ShaderRegister = 7; // t7: texture thumbnails
 +
 +  D3D12_DESCRIPTOR_RANGE uavRange{};
 +  uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
@@ -3787,7 +3973,7 @@ index 0000000..1a6a7f6
 +  params[3].DescriptorTable.pDescriptorRanges = &uavRange;
 +
 +  D3D12_ROOT_SIGNATURE_DESC rootDesc{};
-+  rootDesc.NumParameters = 9;
++  rootDesc.NumParameters = 10;
 +  rootDesc.pParameters = params;
 +
 +  ComPtr<ID3DBlob> blob;
@@ -4066,6 +4252,9 @@ index 0000000..1a6a7f6
 +    desc.SampleDesc.Count = 1;
 +    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 +    g_maskBuffer.Reset();
++  g_thumbnailBuffer.Reset();
++  g_thumbnailCapacity = 0;
++  textures::shutdown();
 +    if (FAILED(device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
 +                                                 D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
 +                                                 IID_PPV_ARGS(&g_maskBuffer)))) {
@@ -4088,6 +4277,56 @@ index 0000000..1a6a7f6
 +  D3D12_RANGE written{0, static_cast<SIZE_T>(needed) * sizeof(uint32_t)};
 +  g_maskBuffer->Unmap(0, &written);
 +  return g_maskBuffer->GetGPUVirtualAddress();
++}
++
++// Uploads the thumbnail registry when it has grown. Returns its address, or the
++// mask's when there is nothing to bind -- a root SRV still has to point at
++// something, and the shader is told the count is zero.
++D3D12_GPU_VIRTUAL_ADDRESS upload_thumbnails() noexcept {
++  const size_t entries = textures::count();
++  const uint32_t* src = textures::data();
++  if (src == nullptr || entries == 0) {
++    return 0;
++  }
++  const size_t needed = entries * textures::kTexels;
++  if (needed > g_thumbnailCapacity || !g_thumbnailBuffer) {
++    D3D12_HEAP_PROPERTIES heap{};
++    heap.Type = D3D12_HEAP_TYPE_UPLOAD;
++    D3D12_RESOURCE_DESC desc{};
++    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++    desc.Width = static_cast<uint64_t>(needed) * sizeof(uint32_t);
++    desc.Height = 1;
++    desc.DepthOrArraySize = 1;
++    desc.MipLevels = 1;
++    desc.Format = DXGI_FORMAT_UNKNOWN;
++    desc.SampleDesc.Count = 1;
++    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++    g_thumbnailBuffer.Reset();
++    if (FAILED(device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
++                                                 D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
++                                                 IID_PPV_ARGS(&g_thumbnailBuffer)))) {
++      Log.error("Failed to create the texture thumbnail buffer");
++      g_thumbnailCapacity = 0;
++      return 0;
++    }
++    g_thumbnailCapacity = needed;
++    textures::mark_uploaded();
++    void* mapped = nullptr;
++    D3D12_RANGE noRead{0, 0};
++    if (SUCCEEDED(g_thumbnailBuffer->Map(0, &noRead, &mapped))) {
++      std::memcpy(mapped, src, needed * sizeof(uint32_t));
++      g_thumbnailBuffer->Unmap(0, nullptr);
++    }
++  } else if (textures::dirty()) {
++    textures::mark_uploaded();
++    void* mapped = nullptr;
++    D3D12_RANGE noRead{0, 0};
++    if (SUCCEEDED(g_thumbnailBuffer->Map(0, &noRead, &mapped))) {
++      std::memcpy(mapped, src, needed * sizeof(uint32_t));
++      g_thumbnailBuffer->Unmap(0, nullptr);
++    }
++  }
++  return g_thumbnailBuffer->GetGPUVirtualAddress();
 +}
 +
 +bool wait_for_gpu() noexcept {
@@ -4294,6 +4533,8 @@ index 0000000..1a6a7f6
 +  constants.rayLength = params.aoRadius;
 +  const uint32_t maskCount = params.orthoMask != nullptr ? params.maskCols * params.maskRows : 0u;
 +  const D3D12_GPU_VIRTUAL_ADDRESS maskAddress = upload_mask(params.orthoMask, maskCount);
++  const D3D12_GPU_VIRTUAL_ADDRESS thumbAddress = upload_thumbnails();
++  constants.thumbnailCount = thumbAddress != 0 ? static_cast<uint32_t>(textures::count()) : 0u;
 +  constants.maskCols = maskAddress != 0 ? params.maskCols : 0u;
 +  constants.maskRows = maskAddress != 0 ? params.maskRows : 0u;
 +
@@ -4309,6 +4550,8 @@ index 0000000..1a6a7f6
 +  g_cmdList->SetComputeRootShaderResourceView(7, maskAddress != 0 ? maskAddress
 +                                                                 : mats->GetGPUVirtualAddress());
 +  g_cmdList->SetComputeRootShaderResourceView(8, uvs->GetGPUVirtualAddress());
++  g_cmdList->SetComputeRootShaderResourceView(
++      9, thumbAddress != 0 ? thumbAddress : mats->GetGPUVirtualAddress());
 +  g_cmdList->SetComputeRootDescriptorTable(3, g_uavHeap->GetGPUDescriptorHandleForHeapStart());
 +
 +  if (g_timestampHeap) {
@@ -4507,6 +4750,9 @@ index 0000000..1a6a7f6
 +  g_timestampFrequency = 0;
 +  g_timestampPending = false;
 +  g_maskBuffer.Reset();
++  g_thumbnailBuffer.Reset();
++  g_thumbnailCapacity = 0;
++  textures::shutdown();
 +  g_maskCapacity = 0;
 +  g_output.Reset();
 +  g_reflection.Reset();
@@ -4637,10 +4883,10 @@ index 0000000..98c8d55
 +} // namespace aurora::rt::trace
 diff --git a/lib/rt/shaders/rt_ao.hlsl b/lib/rt/shaders/rt_ao.hlsl
 new file mode 100644
-index 0000000..a3a876e
+index 0000000..e6eb67c
 --- /dev/null
 +++ b/lib/rt/shaders/rt_ao.hlsl
-@@ -0,0 +1,506 @@
+@@ -0,0 +1,545 @@
 +// Ray traced ambient occlusion for PartyBoard.
 +//
 +// Primary visibility is traced rather than rasterised: with inline RayQuery the
@@ -4683,6 +4929,9 @@ index 0000000..a3a876e
 +// Texture coordinates, u and v in xy. Zero where the draw carried none, which
 +// is what tells the reflection to fall back to the surface's average colour.
 +StructuredBuffer<float3> gTexcoords : register(t6);
++// 16x16 thumbnail of every texture the capture saw, one after another. See
++// rt_textures.hpp for why a thumbnail rather than the texture itself.
++StructuredBuffer<uint> gThumbnails : register(t7);
 +// RGB rather than a single channel: the bounce carries colour, which is what
 +// reads as ray tracing instead of a grey darkening.
 +RWTexture2D<float4> gOutput : register(u0);
@@ -4726,7 +4975,10 @@ index 0000000..a3a876e
 +  // Dimensions of gOrthoMask. 0 means no mask was supplied for this frame.
 +  uint gMaskCols;
 +  uint gMaskRows;
-+  uint3 gPad2;
++  // Entries in gThumbnails; 0 means none is bound and reflections fall back to
++  // the surface's average colour.
++  uint gThumbnailCount;
++  uint2 gPad2;
 +};
 +
 +#define FEATURE_AO 1u
@@ -4759,6 +5011,29 @@ index 0000000..a3a876e
 +#define MATERIAL_TRANSLUCENT 4u
 +#define MATERIAL_OPACITY_SHIFT 8u
 +#define MATERIAL_OPACITY_MASK 0xffu
++#define MATERIAL_THUMBNAIL_SHIFT 16u
++#define MATERIAL_THUMBNAIL_MASK 0xffffu
++#define THUMBNAIL_EDGE 16u
++
++// The hit surface's own colour at the point the ray landed, rather than the
++// average of its whole texture. Wraps, because GX coordinates tile and the
++// capture measures them well outside 0..1. Returns false when the surface has
++// no thumbnail, which leaves the caller on the average.
++bool thumbnail_colour(uint material, float2 uv, out float3 colour) {
++  colour = float3(0.0f, 0.0f, 0.0f);
++  const uint index = (material >> MATERIAL_THUMBNAIL_SHIFT) & MATERIAL_THUMBNAIL_MASK;
++  if (index == 0u || index >= gThumbnailCount) {
++    return false;
++  }
++  const float2 wrapped = frac(frac(uv) + 1.0f);
++  const uint tx = min(uint(wrapped.x * float(THUMBNAIL_EDGE)), THUMBNAIL_EDGE - 1u);
++  const uint ty = min(uint(wrapped.y * float(THUMBNAIL_EDGE)), THUMBNAIL_EDGE - 1u);
++  const uint packed =
++      gThumbnails[index * THUMBNAIL_EDGE * THUMBNAIL_EDGE + ty * THUMBNAIL_EDGE + tx];
++  colour = float3(float(packed & 0xffu), float((packed >> 8) & 0xffu),
++                  float((packed >> 16) & 0xffu)) * (1.0f / 255.0f);
++  return true;
++}
 +
 +// How much of a hit surface actually blocks. Cut-out geometry is traced as
 +// opaque, so without this a canopy of leaves occludes like a wall; the capture
@@ -5080,8 +5355,18 @@ index 0000000..a3a876e
 +    if (reflQuery.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
 +      const uint rp = reflQuery.CommittedInstanceID() + reflQuery.CommittedPrimitiveIndex();
 +      const float2 rb = reflQuery.CommittedTriangleBarycentrics();
-+      const float3 rc = gColours[rp * 3u + 0u] * (1.0f - rb.x - rb.y) +
-+                        gColours[rp * 3u + 1u] * rb.x + gColours[rp * 3u + 2u] * rb.y;
++      float3 rc = gColours[rp * 3u + 0u] * (1.0f - rb.x - rb.y) +
++                  gColours[rp * 3u + 1u] * rb.x + gColours[rp * 3u + 2u] * rb.y;
++      // What the reflected surface looks like where the ray actually hit it.
++      // Without this the reflection blends that surface's whole-texture
++      // average, which is close to the colour already on screen -- which is why
++      // the term measured no difference at all.
++      const float3 ruv = gTexcoords[rp * 3u + 0u] * (1.0f - rb.x - rb.y) +
++                         gTexcoords[rp * 3u + 1u] * rb.x + gTexcoords[rp * 3u + 2u] * rb.y;
++      float3 sampled;
++      if (thumbnail_colour(gMaterials[rp], ruv.xy, sampled)) {
++        rc = sampled;
++      }
 +      // Fresnel, Schlick's approximation: a glancing view reflects far more
 +      // than a head-on one, which is what stops the whole surface reading as
 +      // uniformly shiny.
