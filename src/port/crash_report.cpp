@@ -46,6 +46,9 @@ constexpr std::size_t kPathChars = 1024;
 // enough to be invisible.
 constexpr std::uint32_t kHeartbeatFrames = 30;
 
+// Events kept in the live state file. A crash report keeps all 512.
+constexpr std::size_t kHeartbeatEvents = 96;
+
 struct Breadcrumb {
     std::uint32_t frame = 0;
     std::uint64_t monotonicMs = 0;
@@ -291,11 +294,12 @@ void appendSimulation()
     reportLine("\n");
 }
 
-void appendBreadcrumbs()
+void appendBreadcrumbs(std::size_t limit = kBreadcrumbs)
 {
     reportLine("\n[RECENT EVENTS - newest last]\n");
     const auto total = gBreadcrumbCount.load(std::memory_order_acquire);
-    const auto kept = total < kBreadcrumbs ? total : kBreadcrumbs;
+    auto kept = total < kBreadcrumbs ? total : kBreadcrumbs;
+    if (kept > limit) kept = limit;
     reportLine("events_recorded=%llu events_kept=%llu\n",
         static_cast<unsigned long long>(total), static_cast<unsigned long long>(kept));
     for (std::uint64_t offset = kept; offset > 0; --offset) {
@@ -741,7 +745,10 @@ extern "C" void PartyBoard_CrashHeartbeat(void)
     reportReset();
     appendIdentity();
     appendSimulation();
-    appendBreadcrumbs();
+    // Only the newest events here: the live file is rewritten twice a
+    // second and is size-capped, and events are emitted oldest first, so a
+    // full history would truncate away exactly the entries that matter.
+    appendBreadcrumbs(kHeartbeatEvents);
     reportLine("\nEND\n");
     if (gReportUsed >= sizeof(buffer)) gReportUsed = sizeof(buffer) - 1;
     std::memcpy(buffer, gReport, gReportUsed);
@@ -758,6 +765,20 @@ extern "C" void PartyBoard_CrashHeartbeat(void)
 #endif
 }
 
+// Stack usage is the evidence for sizing the HuPrc stacks later, so it must not
+// depend on crashing to be collected. Written on any orderly shutdown too.
+void writeStackUsageReport()
+{
+#ifdef _WIN32
+    if (!gIdentity.sessionDir[0]) return;
+    char stamp[32];
+    timestampNow(stamp, sizeof(stamp), true);
+    char path[kPathChars];
+    buildPath(path, sizeof(path), "stack-usage", stamp, "txt");
+    PartyBoard_CoroutineStackWriteReport(path);
+#endif
+}
+
 extern "C" void PartyBoard_CrashNoteUserShutdown(const char *how)
 {
     copyString(gShutdownHow, sizeof(gShutdownHow), how ? how : "unspecified");
@@ -768,6 +789,7 @@ extern "C" void PartyBoard_CrashNoteUserShutdown(const char *how)
     // the live state file is how the supervisor knows this was intended.
     gHeartbeatCountdown.store(0, std::memory_order_relaxed);
     PartyBoard_CrashHeartbeat();
+    writeStackUsageReport();
 }
 
 extern "C" void PartyBoard_CrashNoteSupervisorShutdown(void)
@@ -776,6 +798,7 @@ extern "C" void PartyBoard_CrashNoteSupervisorShutdown(void)
     PartyBoard_CrashBreadcrumb(PARTYBOARD_CRASH_CAT_CONTEXT, "supervisor requested shutdown");
     gHeartbeatCountdown.store(0, std::memory_order_relaxed);
     PartyBoard_CrashHeartbeat();
+    writeStackUsageReport();
 }
 
 extern "C" void PartyBoard_CrashNoteNormalExit(void)
@@ -784,6 +807,7 @@ extern "C" void PartyBoard_CrashNoteNormalExit(void)
     PartyBoard_CrashBreadcrumb(PARTYBOARD_CRASH_CAT_CONTEXT, "normal game exit reached");
     gHeartbeatCountdown.store(0, std::memory_order_relaxed);
     PartyBoard_CrashHeartbeat();
+    writeStackUsageReport();
 }
 
 extern "C" bool PartyBoard_CrashShutdownExpected(void)
