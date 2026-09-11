@@ -1,0 +1,367 @@
+#!/usr/bin/env python3
+"""Generate replay input files for PartyBoard, so coverage can be bought in
+machine-nights instead of human hours.
+
+WHY THIS WORKS AT ALL
+---------------------
+The replay format is nine integers per player per frame, and
+``--netplay-replay-input`` already consumes it. A generated file is
+indistinguishable from a recorded one, so driving the game unattended needs no
+engine work whatsoever.
+
+And for the properties a campaign validates, playing *well* is irrelevant:
+DETERMINISM asks whether the two peers computed the same state, STABILITY
+whether a process disappeared. A crash found by random input is a real crash -
+the game must not crash on any input - and it arrives with a replayable
+recording attached.
+
+WHAT IT DOES NOT PROVE
+----------------------
+That anybody enjoyed it. A generated run can move a matrix cell to PARTIAL and
+never to PASS; only a human game does that. tools/merge_session.ps1 stamps
+``coverage_source`` for exactly this reason, and so does this file's manifest
+fragment.
+
+THE TWO GENERATORS
+------------------
+*navigator* replays a timed button script. Menus are deterministic state
+machines: "wait 120 frames, press A, wait 30, press A" reaches the same screen
+every time. Used for the approach prefix that gets from boot to a board.
+
+*monkey* presses buttons from a seeded PRNG over a mask that excludes anything
+able to leave the game. Same seed, same file, forever - which is what makes a
+crash it finds reproducible rather than an anecdote.
+
+SAFETY
+------
+START is never generated. It opens the pause menu, from which a run can quit to
+the title screen, and a monkey that quits the game is a monkey that reports a
+clean exit having tested nothing. The mask is a deny-list checked in one place,
+``SAFE_BUTTONS``, rather than remembered at each call site.
+
+USAGE
+-----
+    tools/generate_input.py monkey --frames 60000 --seed 1 -o work/gen/m1.txt
+    tools/generate_input.py navigator --script tools/scripts/boot-to-w04.txt -o work/gen/prefix.txt
+    tools/generate_input.py concat prefix.txt monkey.txt -o work/gen/full.txt
+    tools/generate_input.py describe work/netplay-recordings/walk.txt
+"""
+
+import argparse
+import os
+import random
+import sys
+
+# --- the wire format -------------------------------------------------------
+# frame seat buttons stickX stickY substickX substickY triggerL triggerR
+# Two rows per frame, seat 0 then seat 1. Parsed by loadReplaySamples() in
+# src/port/netplay_runtime.cpp, which ignores rows with seat > 1 or an
+# implausible frame, so a malformed row is dropped rather than fatal.
+SEATS = 2
+
+# Button bits, from extern/aurora/include/dolphin/pad.h. Read from the header
+# rather than remembered: these are the values the engine actually compares.
+PAD_BUTTON_LEFT = 0x0001
+PAD_BUTTON_RIGHT = 0x0002
+PAD_BUTTON_DOWN = 0x0004
+PAD_BUTTON_UP = 0x0008
+PAD_TRIGGER_Z = 0x0010
+PAD_TRIGGER_R = 0x0020
+PAD_TRIGGER_L = 0x0040
+PAD_BUTTON_A = 0x0100
+PAD_BUTTON_B = 0x0200
+PAD_BUTTON_X = 0x0400
+PAD_BUTTON_Y = 0x0800
+PAD_BUTTON_START = 0x1000
+
+NAMED_BUTTONS = {
+    "A": PAD_BUTTON_A, "B": PAD_BUTTON_B, "X": PAD_BUTTON_X, "Y": PAD_BUTTON_Y,
+    "Z": PAD_TRIGGER_Z, "L": PAD_TRIGGER_L, "R": PAD_TRIGGER_R,
+    "UP": PAD_BUTTON_UP, "DOWN": PAD_BUTTON_DOWN,
+    "LEFT": PAD_BUTTON_LEFT, "RIGHT": PAD_BUTTON_RIGHT,
+    "START": PAD_BUTTON_START,
+    "NONE": 0,
+}
+
+# Everything a monkey is allowed to press. START is deliberately absent: it
+# opens the pause menu, which can quit to the title screen, and a run that
+# quits itself reports a clean exit having tested nothing.
+SAFE_BUTTONS = [
+    PAD_BUTTON_A, PAD_BUTTON_B, PAD_BUTTON_X, PAD_BUTTON_Y,
+    PAD_BUTTON_UP, PAD_BUTTON_DOWN, PAD_BUTTON_LEFT, PAD_BUTTON_RIGHT,
+    PAD_TRIGGER_Z,
+]
+
+STICK_MAX = 72  # what the game clamps an analog stick to; see PADClamp.
+
+
+class Frame:
+    """One frame's input for both seats."""
+
+    __slots__ = ("seats",)
+
+    def __init__(self):
+        self.seats = [dict(buttons=0, sx=0, sy=0, cx=0, cy=0, tl=0, tr=0)
+                      for _ in range(SEATS)]
+
+
+def write_frames(frames, path):
+    """Write frames in the engine's format. Directories are created."""
+    directory = os.path.dirname(os.path.abspath(path))
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="ascii", newline="\n") as handle:
+        for index, frame in enumerate(frames):
+            for seat in range(SEATS):
+                s = frame.seats[seat]
+                handle.write("%d %d %d %d %d %d %d %d %d\n" % (
+                    index, seat, s["buttons"], s["sx"], s["sy"],
+                    s["cx"], s["cy"], s["tl"], s["tr"]))
+    return len(frames)
+
+
+def read_frames(path):
+    """Read a recording back. Tolerates the engine's own tolerances."""
+    frames = {}
+    with open(path, "r", encoding="ascii", errors="replace") as handle:
+        for line in handle:
+            parts = line.split()
+            if len(parts) != 9:
+                continue
+            try:
+                values = [int(p) for p in parts]
+            except ValueError:
+                continue
+            frame_index, seat = values[0], values[1]
+            if seat > 1:
+                continue
+            frame = frames.setdefault(frame_index, Frame())
+            frame.seats[seat] = dict(
+                buttons=values[2], sx=values[3], sy=values[4],
+                cx=values[5], cy=values[6], tl=values[7], tr=values[8])
+    if not frames:
+        return []
+    return [frames.get(i, Frame()) for i in range(max(frames) + 1)]
+
+
+# --- navigator -------------------------------------------------------------
+
+def parse_script(path):
+    """A navigator script: one directive per line, '#' comments.
+
+        wait 120           hold nothing for 120 frames
+        press A 4 30       press A for 4 frames, then wait 30
+        hold LEFT 90       hold LEFT for 90 frames
+        stick 0 -72 60     hold the stick at (0,-72) for 60 frames
+        seat 1             everything after this applies to seat 1
+        both               everything after this applies to both seats
+
+    Timed button sequences, because menus are deterministic state machines:
+    the same waits reach the same screen every time.
+    """
+    steps = []
+    with open(path, "r", encoding="utf-8") as handle:
+        for number, raw in enumerate(handle, 1):
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            parts = line.split()
+            verb = parts[0].lower()
+            try:
+                if verb == "seat":
+                    steps.append(("seat", int(parts[1])))
+                elif verb == "both":
+                    steps.append(("seat", -1))
+                elif verb == "wait":
+                    steps.append(("wait", int(parts[1])))
+                elif verb == "press":
+                    button = NAMED_BUTTONS[parts[1].upper()]
+                    steps.append(("press", button, int(parts[2]), int(parts[3])))
+                elif verb == "hold":
+                    button = NAMED_BUTTONS[parts[1].upper()]
+                    steps.append(("hold", button, int(parts[2])))
+                elif verb == "stick":
+                    steps.append(("stick", int(parts[1]), int(parts[2]), int(parts[3])))
+                else:
+                    raise ValueError("unknown directive %r" % verb)
+            except (IndexError, KeyError, ValueError) as error:
+                raise SystemExit("%s:%d: %s" % (path, number, error))
+    return steps
+
+
+def run_navigator(steps):
+    frames = []
+    seat_selector = -1  # -1 means both
+
+    def targets():
+        return range(SEATS) if seat_selector < 0 else [seat_selector]
+
+    def emit(count, buttons=0, sx=0, sy=0):
+        for _ in range(max(0, count)):
+            frame = Frame()
+            for seat in targets():
+                frame.seats[seat].update(buttons=buttons, sx=sx, sy=sy)
+            frames.append(frame)
+
+    for step in steps:
+        kind = step[0]
+        if kind == "seat":
+            seat_selector = step[1]
+        elif kind == "wait":
+            emit(step[1])
+        elif kind == "press":
+            _, button, held, after = step
+            emit(held, buttons=button)
+            emit(after)
+        elif kind == "hold":
+            emit(step[2], buttons=step[1])
+        elif kind == "stick":
+            _, sx, sy, count = step
+            emit(count, sx=max(-STICK_MAX, min(STICK_MAX, sx)),
+                 sy=max(-STICK_MAX, min(STICK_MAX, sy)))
+    return frames
+
+
+# --- monkey ----------------------------------------------------------------
+
+def run_monkey(frames_wanted, seed, hold_min, hold_max, idle_bias):
+    """Seeded random input over the safe mask.
+
+    Inputs are held for a run of frames rather than re-rolled every frame: a
+    button that flickers for one frame is often swallowed by the game's own
+    edge detection, so per-frame randomness presses far less than it appears
+    to. Holding for 4-20 frames is roughly what a person does.
+
+    `idle_bias` is the share of runs that press nothing. Some idle time is what
+    lets animations finish and turns advance; a monkey that mashes constantly
+    can sit in a confirmation dialog forever.
+    """
+    rng = random.Random(seed)
+    frames = []
+    # Independent streams per seat, so one seat's timing does not shadow the
+    # other's. Derived from the one seed, so the file stays reproducible.
+    seat_rngs = [random.Random(rng.getrandbits(64)) for _ in range(SEATS)]
+    seat_state = [dict(remaining=0, buttons=0, sx=0, sy=0) for _ in range(SEATS)]
+
+    while len(frames) < frames_wanted:
+        frame = Frame()
+        for seat in range(SEATS):
+            state = seat_state[seat]
+            if state["remaining"] <= 0:
+                seat_rng = seat_rngs[seat]
+                state["remaining"] = seat_rng.randint(hold_min, hold_max)
+                if seat_rng.random() < idle_bias:
+                    state["buttons"] = 0
+                    state["sx"] = state["sy"] = 0
+                else:
+                    state["buttons"] = seat_rng.choice(SAFE_BUTTONS)
+                    # A stick position more often than not: board movement and
+                    # most minigames are analog, and a button-only monkey never
+                    # walks anywhere.
+                    if seat_rng.random() < 0.6:
+                        angle = seat_rng.uniform(0, 6.283185307179586)
+                        magnitude = seat_rng.randint(STICK_MAX // 2, STICK_MAX)
+                        import math
+                        state["sx"] = int(magnitude * math.cos(angle))
+                        state["sy"] = int(magnitude * math.sin(angle))
+                    else:
+                        state["sx"] = state["sy"] = 0
+            state["remaining"] -= 1
+            frame.seats[seat].update(
+                buttons=state["buttons"], sx=state["sx"], sy=state["sy"])
+        frames.append(frame)
+    return frames[:frames_wanted]
+
+
+# --- describe --------------------------------------------------------------
+
+def describe(path):
+    frames = read_frames(path)
+    if not frames:
+        print("%s: no usable rows" % path)
+        return 2
+    print("%s" % path)
+    print("  frames        : %d  (%.1f s at 60 Hz)" % (len(frames), len(frames) / 60.0))
+    for seat in range(SEATS):
+        pressed = sum(1 for f in frames if f.seats[seat]["buttons"])
+        moved = sum(1 for f in frames if f.seats[seat]["sx"] or f.seats[seat]["sy"])
+        mask = 0
+        for f in frames:
+            mask |= f.seats[seat]["buttons"]
+        names = sorted(n for n, b in NAMED_BUTTONS.items() if b and (mask & b))
+        print("  seat %d        : buttons on %d frames (%.1f%%), stick on %d (%.1f%%)"
+              % (seat, pressed, 100.0 * pressed / len(frames),
+                 moved, 100.0 * moved / len(frames)))
+        print("                  buttons seen: %s" % (", ".join(names) or "none"))
+        if mask & PAD_BUTTON_START:
+            print("                  WARNING: START appears; this file can pause and quit")
+    return 0
+
+
+# --- entry point -----------------------------------------------------------
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    monkey = sub.add_parser("monkey", help="seeded random input over the safe mask")
+    monkey.add_argument("--frames", type=int, required=True)
+    monkey.add_argument("--seed", type=int, required=True)
+    monkey.add_argument("--hold-min", type=int, default=4)
+    monkey.add_argument("--hold-max", type=int, default=20)
+    monkey.add_argument("--idle-bias", type=float, default=0.25)
+    monkey.add_argument("-o", "--output", required=True)
+
+    navigator = sub.add_parser("navigator", help="replay a timed button script")
+    navigator.add_argument("--script", required=True)
+    navigator.add_argument("-o", "--output", required=True)
+
+    concat = sub.add_parser("concat", help="join files end to end, renumbering frames")
+    concat.add_argument("inputs", nargs="+")
+    concat.add_argument("-o", "--output", required=True)
+
+    show = sub.add_parser("describe", help="report what a file contains")
+    show.add_argument("input")
+
+    args = parser.parse_args(argv)
+
+    if args.command == "monkey":
+        if args.hold_min < 1 or args.hold_max < args.hold_min:
+            raise SystemExit("--hold-min must be >= 1 and <= --hold-max")
+        if not 0.0 <= args.idle_bias <= 1.0:
+            raise SystemExit("--idle-bias must be between 0 and 1")
+        frames = run_monkey(args.frames, args.seed, args.hold_min, args.hold_max,
+                            args.idle_bias)
+        count = write_frames(frames, args.output)
+        print("monkey seed=%d frames=%d -> %s" % (args.seed, count, args.output))
+        return 0
+
+    if args.command == "navigator":
+        frames = run_navigator(parse_script(args.script))
+        if not frames:
+            raise SystemExit("the script produced no frames")
+        count = write_frames(frames, args.output)
+        print("navigator script=%s frames=%d -> %s" % (args.script, count, args.output))
+        return 0
+
+    if args.command == "concat":
+        frames = []
+        for path in args.inputs:
+            part = read_frames(path)
+            if not part:
+                raise SystemExit("%s produced no frames" % path)
+            print("  + %-50s %d frames" % (path, len(part)))
+            frames.extend(part)
+        count = write_frames(frames, args.output)
+        print("concat frames=%d -> %s" % (count, args.output))
+        return 0
+
+    if args.command == "describe":
+        return describe(args.input)
+
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
