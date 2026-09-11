@@ -8,8 +8,16 @@
 # answered by trying, not by reasoning.
 #
 # Each attempt is one seed, driven from BOOT with no approach prefix, given a
-# short budget. The run's own board_id says which board it landed on, or -1 for
-# none. Nothing is inferred from the overlay path.
+# short budget.
+#
+# WHICH BOARD IT REACHED comes from the OVERLAY PATH, not from board_id, and the
+# difference nearly produced a false headline on the very first seed.
+# GWSystem.board is 0 before any board has been chosen, and 0 is also the id of
+# Toad's Midway Madness - so a run that never left the boot screen reported
+# "reached Toad's Midway Madness". The overlay path cannot be ambiguous that
+# way: a board overlay appears in it only if the board was actually loaded.
+# board_id is still read, and a disagreement between the two is reported rather
+# than resolved.
 #
 #   tools\survey_boards.ps1 -DiscPath "<iso>" -Seeds 3001..3020
 #   tools\survey_boards.ps1 -DiscPath "<iso>" -Seeds 3001,3002 -Seconds 600
@@ -80,8 +88,13 @@ foreach ($seed in $Seeds) {
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
+        # The audio lifetime detector is switched OFF for a survey. It reports
+        # HARNESS_FAILURE when it never sees a bank released, which is correct
+        # for a campaign and wrong here: a run that never leaves the boot screen
+        # had no chance to free one, and that is the ANSWER, not a broken
+        # harness. The heap and stack detectors stay on - they arm at startup.
         & $campaign -DiscPath $DiscPath -Manifest 'work/survey-scenarios.json' `
-            -Scenario "survey-$seed" -Label "survey-$seed" 2>&1 |
+            -Scenario "survey-$seed" -Label "survey-$seed" -AudioDiagnostics '' 2>&1 |
             Where-Object { $_ -match 'run 1:|HARNESS' } | ForEach-Object { Write-Output ("    " + $_) }
     } catch {
         Write-Output ("    exception: " + $_.Exception.Message)
@@ -92,17 +105,34 @@ foreach ($seed in $Seeds) {
     # The answer comes from the run record, never from the log.
     $dir = Get-ChildItem (Resolve-SurveyPath 'work/netplay-campaigns') -Directory -Filter "*-survey-$seed" -ErrorAction SilentlyContinue |
         Select-Object -Last 1
-    $entry = @{ Seed = $seed; Board = -1; Name = '(aucun)'; Turn = -1; Frames = 0; Result = 'NO RUN'; Minigames = @() }
+    $entry = @{ Seed = $seed; Board = -1; Name = '(aucun)'; Turn = -1; Frames = 0
+                Result = 'NO RUN'; Minigames = @(); Overlays = 0; Note = '' }
     if ($dir) {
         $runFile = Get-ChildItem $dir.FullName -Recurse -Filter 'run.json' -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($runFile) {
             $run = Get-Content $runFile.FullName -Raw | ConvertFrom-Json
-            $entry.Board = [int]$run.board_id
             $entry.Turn = [int]$run.board_turn
             $entry.Frames = [int]$run.last_frame
             $entry.Result = [string]$run.result
             if ($run.PSObject.Properties.Name -contains 'minigames_played') { $entry.Minigames = @($run.minigames_played) }
-            if ($boardNames.ContainsKey($entry.Board)) { $entry.Name = $boardNames[$entry.Board] }
+
+            # A board overlay in the path is the evidence. 89-97 are the boards.
+            $path = @()
+            if ($run.PSObject.Properties.Name -contains 'overlays') { $path = @($run.overlays) }
+            $entry.Overlays = $path.Count
+            $boardOverlay = -1
+            foreach ($entryText in $path) {
+                $id = [int](($entryText -split '@')[0])
+                if ($id -ge 89 -and $id -le 97) { $boardOverlay = $id }
+            }
+            if ($boardOverlay -ge 0) {
+                $entry.Board = [int]$run.board_id
+                if ($boardNames.ContainsKey($entry.Board)) { $entry.Name = $boardNames[$entry.Board] }
+                $entry.Note = "overlay $boardOverlay"
+            } else {
+                # No board overlay: whatever board_id says, no board was loaded.
+                $entry.Note = "aucun overlay de plateau (board_id=$($run.board_id), non concluant)"
+            }
         }
     }
     $results += $entry
@@ -120,11 +150,12 @@ Emit ("{0} graines, {1} s chacune, lancees le {2}. Aucun prefixe d'approche : le
     $Seeds.Count, $Seconds, $started.ToString('yyyy-MM-dd HH:mm'))
 Emit "singe part du demarrage et doit traverser les menus lui-meme."
 Emit ''
-Emit '| graine | plateau | nom | tour | frames | resultat | mini-jeux |'
-Emit '|---|---|---|---|---|---|---|'
+Emit '| graine | plateau | nom | tour | frames | transitions | resultat | mini-jeux | preuve |'
+Emit '|---|---|---|---|---|---|---|---|---|'
 foreach ($r in $results) {
-    Emit ('| {0} | {1} | {2} | {3} | {4} | {5} | {6} |' -f
-        $r.Seed, $r.Board, $r.Name, $r.Turn, $r.Frames, $r.Result, ($r.Minigames -join ' '))
+    Emit ('| {0} | {1} | {2} | {3} | {4} | {5} | {6} | {7} | {8} |' -f
+        $r.Seed, $r.Board, $r.Name, $r.Turn, $r.Frames, $r.Overlays, $r.Result,
+        ($r.Minigames -join ' '), $r.Note)
 }
 $reached = @($results | Where-Object { $_.Board -ge 0 })
 $distinct = @($reached | ForEach-Object { $_.Board } | Sort-Object -Unique)
