@@ -64,84 +64,90 @@ enregistre ; *evenements* l'est partiellement (Big Boo). Les autres sont
 
 ## Mini-jeux
 
-La table contient **66 overlays de mini-jeu**, de `m300Dll`
-(overlay 4) a `m463Dll` (overlay 69).
-Quatre d'entre eux ont ete traverses par le replay enregistre ; les autres
-n'ont jamais tourne en ligne.
+La table de selection du menu developpeur (`src/REL/selmenuDll/main.c`) nomme
+**58 mini-jeux**, de 401 a 462. Les noms ci-dessous sont ceux du
+depot, pas des noms commerciaux : ceux-la vivent dans les donnees du disque et
+seront lus de la quand quelqu'un en aura besoin.
 
-| overlay | dll | statut |
-|---|---|---|
-| 4 | `m300Dll` | `UNTESTED` |
-| 5 | `m302Dll` | `UNTESTED` |
-| 6 | `m303Dll` | `UNTESTED` |
-| 7 | `m330Dll` | `UNTESTED` |
-| 8 | `m333Dll` | `UNTESTED` |
-| 9 | `m401Dll` | `UNTESTED` |
-| 10 | `m402Dll` | `UNTESTED` |
-| 11 | `m403Dll` | `UNTESTED` |
-| 12 | `m404Dll` | `UNTESTED` |
-| 13 | `m405Dll` | `UNTESTED` |
-| 14 | `m406Dll` | `UNTESTED` |
-| 15 | `m407dll` | `UNTESTED` |
-| 16 | `m408Dll` | `PARTIAL` |
-| 17 | `m409Dll` | `UNTESTED` |
-| 18 | `m410Dll` | `UNTESTED` |
-| 19 | `m411Dll` | `UNTESTED` |
-| 20 | `m412Dll` | `UNTESTED` |
-| 21 | `m413Dll` | `UNTESTED` |
-| 22 | `m414Dll` | `UNTESTED` |
-| 23 | `m415Dll` | `UNTESTED` |
-| 24 | `m416Dll` | `PARTIAL` |
-| 25 | `m417Dll` | `PARTIAL` |
-| 26 | `m418Dll` | `UNTESTED` |
-| 27 | `m419Dll` | `UNTESTED` |
-| 28 | `m420dll` | `UNTESTED` |
-| 29 | `m421Dll` | `UNTESTED` |
-| 30 | `m422Dll` | `UNTESTED` |
-| 31 | `m423Dll` | `UNTESTED` |
-| 32 | `m424Dll` | `UNTESTED` |
-| 33 | `m425Dll` | `UNTESTED` |
-| 34 | `m426Dll` | `UNTESTED` |
-| 35 | `m427Dll` | `UNTESTED` |
-| 36 | `m428Dll` | `UNTESTED` |
-| 37 | `m429Dll` | `UNTESTED` |
-| 38 | `m430Dll` | `UNTESTED` |
-| 39 | `m431Dll` | `UNTESTED` |
-| 40 | `m432Dll` | `UNTESTED` |
-| 41 | `m433Dll` | `UNTESTED` |
-| 42 | `m434Dll` | `UNTESTED` |
-| 43 | `m435Dll` | `UNTESTED` |
-| 44 | `m436Dll` | `UNTESTED` |
-| 45 | `m437Dll` | `UNTESTED` |
-| 46 | `m438Dll` | `UNTESTED` |
-| 47 | `m439Dll` | `UNTESTED` |
-| 48 | `m440Dll` | `UNTESTED` |
-| 49 | `m441Dll` | `UNTESTED` |
-| 50 | `m442Dll` | `UNTESTED` |
-| 51 | `m443Dll` | `PARTIAL` |
-| 52 | `m444dll` | `UNTESTED` |
-| 53 | `m445Dll` | `UNTESTED` |
-| 54 | `m446Dll` | `UNTESTED` |
-| 55 | `m447dll` | `UNTESTED` |
-| 56 | `m448Dll` | `UNTESTED` |
-| 57 | `m449Dll` | `UNTESTED` |
-| 58 | `m450Dll` | `UNTESTED` |
-| 59 | `m451Dll` | `UNTESTED` |
-| 60 | `m453Dll` | `UNTESTED` |
-| 61 | `m455Dll` | `UNTESTED` |
-| 62 | `m456Dll` | `UNTESTED` |
-| 63 | `m457Dll` | `UNTESTED` |
-| 64 | `m458Dll` | `UNTESTED` |
-| 65 | `m459dll` | `UNTESTED` |
-| 66 | `m460Dll` | `UNTESTED` |
-| 67 | `m461Dll` | `UNTESTED` |
-| 68 | `m462Dll` | `UNTESTED` |
-| 69 | `m463Dll` | `UNTESTED` |
+Quatre ont ete traverses par l'enregistrement existant. Les autres n'ont jamais
+tourne en ligne, dans aucun mode.
 
-Les quatre `PARTIAL` le sont parce qu'ils ont ete joues une fois, dans un
-seul mode, par un seul chemin d'entree. Aucun n'a encore ete exerce en 1v3,
-en 2v2, en battle ni en duel.
+| id | overlay | dll | nom | statut |
+|---|---|---|---|---|
+| 401 | 9 | `m401dll` | WAKUGURI DIVING | `UNTESTED` |
+| 402 | 10 | `m402dll` | PURURUN! BIGSLIME | `UNTESTED` |
+| 403 | 11 | `m403dll` | TAORERUKABE! | `UNTESTED` |
+| 404 | 12 | `m404dll` | CRAYON RUNNER | `UNTESTED` |
+| 405 | 13 | `m405dll` | MEDREY RACE | `UNTESTED` |
+| 406 | 14 | `m406dll` | SKI RACE | `UNTESTED` |
+| 407 | 15 | `m407dll` | BATTANDOMINO | `UNTESTED` |
+| 408 | 16 | `m408dll` | SKY DIVE | `PARTIAL` |
+| 409 | 17 | `m409dll` | CRAY SHOT | `UNTESTED` |
+| 410 | 18 | `m410dll` | JANJAN FREE THROW | `UNTESTED` |
+| 411 | 19 | `m411dll` | PAZZLE DE PONG | `UNTESTED` |
+| 412 | 20 | `m412dll` | SNOW THROW | `UNTESTED` |
+| 413 | 21 | `m413dll` | BOMBHEI PAZZLE! | `UNTESTED` |
+| 414 | 22 | `m414dll` | NERATTE UTE! | `UNTESTED` |
+| 415 | 23 | `m415dll` | PYONPYON STAMP | `UNTESTED` |
+| 416 | 24 | `m416dll` | MAMORE FIRE | `PARTIAL` |
+| 417 | 25 | `m417dll` | MARIO SURFER | `PARTIAL` |
+| 418 | 26 | `m418dll` | TAIHOU KAKURENBO | `UNTESTED` |
+| 419 | 27 | `m419dll` | BANANA DE KOROBASE | `UNTESTED` |
+| 420 | 28 | `m420dll` | WATER BATTLE | `UNTESTED` |
+| 421 | 29 | `m421dll` | BODY BALOON | `UNTESTED` |
+| 422 | 30 | `m422dll` | BELCON COIN | `UNTESTED` |
+| 423 | 31 | `m423dll` | GOAL AND GOAL | `UNTESTED` |
+| 424 | 32 | `m424dll` | CLANE CATCH | `UNTESTED` |
+| 425 | 33 | `m425dll` | AIR DOSSUN | `UNTESTED` |
+| 426 | 34 | `m426dll` | KYOROKYORO PANIC | `UNTESTED` |
+| 427 | 35 | `m427dll` | BOAT RACE | `UNTESTED` |
+| 428 | 36 | `m428dll` | THE ROCK CLIME | `UNTESTED` |
+| 429 | 37 | `m429dll` | TREASURE FOREST | `UNTESTED` |
+| 430 | 38 | `m430dll` | PARASAILING GO | `UNTESTED` |
+| 431 | 39 | `m431dll` | GURUGURU BOX | `UNTESTED` |
+| 432 | 40 | `m432dll` | PAIR DE RACE | `UNTESTED` |
+| 434 | 42 | `m434dll` | KINGYOSUKUI | `UNTESTED` |
+| 435 | 43 | `m435dll` | KOOPA DARTS | `UNTESTED` |
+| 436 | 44 | `m436dll` | KOOPANO AREGA TABETAI! | `UNTESTED` |
+| 437 | 45 | `m437dll` | FUSEN RAKUGO | `UNTESTED` |
+| 438 | 46 | `m438dll` | SYAKUNETSU WANWAN ATTACK | `UNTESTED` |
+| 439 | 47 | `m439dll` | GURUGURU DANGEROUS | `UNTESTED` |
+| 440 | 48 | `m440dll` | NEO KOOPA BAKUDAN | `UNTESTED` |
+| 441 | 49 | `m441dll` | HIRAHIRA CHOUCHO | `UNTESTED` |
+| 442 | 50 | `m442dll` | SUIMYAKU HORE2 | `UNTESTED` |
+| 443 | 51 | `m443dll` | DRUG RACE | `PARTIAL` |
+| 444 | 52 | `m444dll` | MIRACLE PINBALL | `UNTESTED` |
+| 445 | 53 | `m445dll` | KINOPIO HAMMER | `UNTESTED` |
+| 446 | 54 | `m446dll` | 3MAI SOROERO! | `UNTESTED` |
+| 447 | 55 | `m447dll` | IQ BLOCK | `UNTESTED` |
+| 448 | 56 | `m448dll` | FUMIKURI | `UNTESTED` |
+| 449 | 57 | `m449dll` | NOKO2 KOURA PAZZLE | `UNTESTED` |
+| 450 | 58 | `m450dll` | LAST GAME | `UNTESTED` |
+| 451 | 59 | `m451dll` | PAZZLE | `UNTESTED` |
+| 455 | 61 | `m455dll` | BURUTTE 1BAN | `UNTESTED` |
+| 456 | 62 | `m456dll` | MOGUTTE 1BAN | `UNTESTED` |
+| 457 | 63 | `m457dll` | SUMOH | `UNTESTED` |
+| 458 | 64 | `m458dll` | PSYCOLO BATTLE | `UNTESTED` |
+| 459 | 65 | `m459dll` | Dr.WARIO | `UNTESTED` |
+| 460 | 66 | `m460dll` | _(sans nom dans la table)_ | `UNTESTED` |
+| 461 | 67 | `m461dll` | BOMBHEI SCRANBLE | `UNTESTED` |
+| 462 | 68 | `m462dll` | _(sans nom dans la table)_ | `UNTESTED` |
 
+Les quatre `PARTIAL` le sont parce qu'ils ont ete joues une fois, par un seul
+chemin d'entree, dans un seul mode. Aucun n'a encore ete exerce en 1v3, en 2v2,
+en battle ni en duel.
+
+### Les modes ne sont pas encore enumerables
+
+`GWSystem.mg_type` porte le mode, et `instDll/main.c:75` le tire au sort avec
+`frandmod(3)` quand le plateau ne l'impose pas. Mais **aucune table du depot ne
+dit quel mini-jeu accepte quel mode** : cette information vit dans les donnees
+du disque. Tant qu'elle n'en aura pas ete extraite, une ligne `mini-jeu x mode`
+serait inventee, et la matrice n'en contient pas.
+
+Ce qu'il faut pour la construire : lire la table des mini-jeux depuis l'image
+disque, comme `tools/extract_assets.py` le fait deja pour d'autres ressources,
+et croiser avec les 58 identifiants ci-dessus.
 ## Comment une ligne change de statut
 
 Une seule route : `tools/netplay_campaign.ps1`. Les scenarios vivent dans
