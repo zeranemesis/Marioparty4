@@ -469,3 +469,124 @@ passe de présentation.** D5 en est la conséquence pour le rejeu, qui n'a pas d
 passe de présentation ; D6 en est la conséquence pour deux machines dont les
 cadences d'affichage diffèrent. Une correction qui déplace l'avance d'animation
 dans le tick de simulation les fermerait toutes les deux.
+
+---
+
+## D7 — La préférence de vibration sauvegardée atteint un champ par joueur
+
+**Classification : per-machine saved preference reaching per-player minigame
+state, outside the canonical hash. Candidat — chemin établi par lecture,
+occurrence non observée.**
+
+**Statut : non corrigé, non observé. Trouvé en auditant les exclusions du hash
+(`docs/canonical_hash_exclusions.md`).**
+
+### Distinguer deux choses qui portent le même nom
+
+**`RumbleBit`, l'état matériel, est neutralisé.** `src/port/netplay_runtime.cpp`
+force, dans `PartyBoard_NetplayPreparePads` :
+
+```cpp
+*rumble = PAD_CHAN0_BIT | PAD_CHAN1_BIT;
+```
+
+une constante identique sur les deux pairs quelles que soient les manettes
+branchées. `RumbleBit` fait partie de l'instantané de rollback
+(`padSnapshotRegions`, `src/game/pad.c:106`) sans être haché, et **c'est ce
+bridage qui rend cette absence inoffensive** — même structure que D6. Il est
+désormais épinglé par la sonde PAD, qui vérifie la valeur produite par le chemin
+en ligne réel, avec le netplay actif.
+
+**`GWGameStat.rumble`, la préférence sauvegardée, ne l'est pas.** Elle est
+locale à chaque machine, n'est pas hachée, et six modules la lisent :
+`m428Dll:122`, `m442Dll:2282`, `m455Dll:817`, `m456Dll:471`, `m459dll:282`,
+`option/rumble.c:51`.
+
+### Ce qui est établi
+
+Dans `m442Dll`, `fn_1_90FC()` retourne `GWGameStat.rumble` après avoir consulté
+`HuPadRumbleGet()`, et `main.c:517` écrit ce retour dans un champ **par
+joueur** :
+
+```c
+var_r30->unk_0C = fn_1_90FC();
+```
+
+Ce n'est donc pas seulement « faut-il appeler le moteur ». La valeur entre dans
+une structure de joueur.
+
+### Ce qui n'est pas établi
+
+Si ce champ change le résultat du mini-jeu. Le dire exigerait de lire beaucoup
+plus de ce module décompilé, ou de le mesurer. Tant que ce n'est pas fait, c'est
+un chemin lu, pas un défaut constaté.
+
+### Comment le mesurer, sans supposition
+
+Aucun de ces six mini-jeux n'est dans la matrice, donc aucun n'a jamais tourné à
+deux pairs. Le balayage des 58 mini-jeux de W2 les atteindra. **La mesure utile
+n'est pas de les lancer, c'est de les lancer avec les deux pairs réglés
+différemment** : un `GWGameStat.rumble` à 0 d'un côté, à 1 de l'autre. Si le
+hash du sous-système du mini-jeu diverge, D7 est confirmé ; s'il ne diverge pas,
+D7 est fermé sur ces six modules et sur eux seuls.
+
+Lancer les deux pairs avec le même réglage produirait un vert qui ne prouve
+rien — le piège exact de l'expérience D6 abandonnée.
+
+---
+
+## D8 — Les réglages de pause repartent d'un champ non haché vers des champs hachés
+
+**Classification : unhashed field feeding hashed fields through a documented
+code path. Candidat — chemin établi par lecture dans les deux sens, contexte
+d'exécution non établi.**
+
+**Statut : non corrigé, non observé. Trouvé au même endroit que D7.**
+
+### Le chemin, dans les deux sens
+
+`src/game/board/pause.c:154-165` recopie cinq réglages depuis `GWSystem` vers
+`GWGameStat` :
+
+```c
+GWGameStat.story_pause.explain_mg = GWMGExplainGet();
+GWGameStat.story_pause.show_com_mg = GWMGShowComGet();
+GWGameStat.story_pause.mg_list = GWMGListGet();
+GWGameStat.story_pause.mess_speed = GWMessSpeedGet();
+GWGameStat.story_pause.save_mode = GWSaveModeGet();
+```
+
+et `src/REL/modeseldll/main.c:212-221` les réinjecte :
+
+```c
+GWMGExplainSet(GWGameStat.party_pause.explain_mg);
+```
+
+Or `GWSystem.explain_mg`, `show_com_mg`, `mg_list`, `mess_speed` et `save_mode`
+**sont hachés** (`include/port/netplay_canonical.hpp`). `GWGameStat.story_pause`
+et `party_pause` ne le sont pas.
+
+Le chemin complet est donc : réglage local → champ non haché → retour dans un
+champ haché.
+
+### Pourquoi cela compte plus que les autres candidats
+
+C'est le seul champ exclu du hash dont un chemin **vers le hash** soit établi par
+lecture. Les autres candidats de `docs/canonical_hash_exclusions.md` divergent
+dans leur coin ; celui-ci peut faire diverger le hash lui-même.
+
+Et il le ferait de la pire manière : deux joueurs dont les réglages de pause
+diffèrent produiraient un `mismatch` sur le sous-système `Gamework` **sans
+qu'aucune action de jeu ne l'explique**. Le rapport de divergence nommerait le
+bon champ et la cause serait dans un menu visité avant la partie.
+
+### Ce qui n'est pas établi
+
+Si `modeseldll` s'exécute dans un contexte en ligne. C'est la seule question, et
+elle se tranche par lecture ou par une trace, sans temps machine.
+
+### À faire avant W3
+
+Deux humains sur deux machines auront des réglages de pause différents, parce
+que rien ne les harmonise. C'est donc un candidat que la première vraie session
+peut déclencher, et il vaut mieux savoir avant qu'après.
