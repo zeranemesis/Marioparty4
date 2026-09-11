@@ -186,7 +186,8 @@ seule une session jouée à la main le peut.
 | Événement Big Boo (`boo_event.c`) | PASS (S1) | PASS (S2, S3) — D4 corrigé |
 | Mini-jeux (4 exercés) | PASS (S1) | PASS (S1) |
 | Écran de résultats de mini-jeu | PASS (S1) | PASS (S3) — D3 corrigé, 21 runs |
-| Sept autres plateaux | UNTESTED | UNTESTED |
+| `w01Dll` Toad's Midway Madness | PASS (S4) | PASS (S4) — entrée + 1 mini-jeu seulement |
+| Six autres plateaux | UNTESTED | UNTESTED |
 | Boutique, loterie, items, étoiles | UNTESTED | UNTESTED |
 | Fin de partie, classement final | UNTESTED | UNTESTED |
 | Joueurs CPU | UNTESTED | UNTESTED |
@@ -205,6 +206,38 @@ même façon.
 
 Le verdict `STABILITY` de cette ligne reste `UNTESTED` : le probe s'arrête sur la
 divergence avant d'avoir pu exercer quoi que ce soit de long.
+
+### S4 — Deuxième plateau, replay `walk.txt` — 2026-09-11
+
+Build `3ed62d21`. Premier plateau autre que Boo's Haunted Bash à tourner en
+ligne, à partir d'un enregistrement qui dormait dans l'arbre depuis avant ce
+travail.
+
+```
+result=PASS  frame=35961  transitions=13  mismatch=0  rng_sync=1
+bank frees=16  audio lifetime violations=0  exits=0/0  durée=603 s
+```
+
+Chemin d'overlays reproduit **à la frame près** :
+
+```
+1@2 → 74@1058 → 74@1376 → 70@2161 → 89@5385 → 3@13704 → 16@14090
+```
+
+soit boot, deux passages par la sélection de mode, le menu d'entrée, **le
+plateau `w01Dll` à la frame 5 385**, les instructions, puis **`m408Dll`
+SKY DIVE à 14 090**.
+
+| Verdict | Valeur |
+|---|---|
+| `DETERMINISM` | **PASS** — treize transitions identiques, `mismatch=0` |
+| `STABILITY` | **PASS** — deux sorties en 0, aucun rapport de crash |
+| `USER_TERMINATED` | **NO** — replay supervisé |
+| `OVERALL` | **FAIL** — même raison que S3 |
+
+Ce que cette session **ne** prouve pas : plusieurs tours, événements, étoiles,
+boutiques, Boo, objets, fin de partie. Le plateau passe de `UNTESTED` à
+`PARTIAL`, pas à `PASS`.
 
 ## Condition pour qu'une session Big Boo soit réellement PASS
 

@@ -26,7 +26,7 @@ commentaire de chaque `BOARD_ID_`.
 
 | overlay | dll | `GWSystem.board` | nom | role | statut |
 |---|---|---|---|---|---|
-| 89 | `w01dll` | 0 | Toads Midway Madness | plateau principal | `UNTESTED` |
+| 89 | `w01dll` | 0 | Toads Midway Madness | plateau principal | `PARTIAL` |
 | 90 | `w02dll` | 1 | Goombas Greedy Gala | plateau principal | `UNTESTED` |
 | 91 | `w03dll` | 2 | Shy Guys Jungle Jam | plateau principal | `UNTESTED` |
 | 92 | `w04dll` | 3 | Boos Haunted Bash | plateau principal | `PARTIAL` |
@@ -36,8 +36,20 @@ commentaire de chaque `BOARD_ID_`.
 | 96 | `w20dll` | 7 | Mega Board Mayhem | plateau supplementaire | `UNTESTED` |
 | 97 | `w21dll` | 8 | Mini Board Mad Dash | plateau supplementaire | `UNTESTED` |
 
-**Six plateaux principaux, un tutoriel, deux plateaux supplementaires.** Seul
-`w04Dll`, Boo's Haunted Bash, a ete exerce en ligne, et seulement en partie.
+**Six plateaux principaux, un tutoriel, deux plateaux supplementaires.** Deux
+ont ete exerces en ligne, tous les deux partiellement.
+
+`w04Dll`, Boo's Haunted Bash : enregistrement de 99 755 frames, quatre
+mini-jeux, quatre retours par l'ecran de resultats, l'evenement Big Boo, et
+21 replays de stress apres la correction de D3.
+
+`w01Dll`, Toad's Midway Madness : enregistrement `walk.txt`, rejoue jusqu'a la
+frame 35 961, treize transitions d'overlay reproduites a la frame pres,
+`mismatch=0`, `rng_sync=1`, les deux pairs sortis proprement. Ce que cela
+couvre : le boot, les deux menus, l'entree sur le plateau a la frame 5 385, un
+peu plus de deux minutes de jeu de plateau, puis un mini-jeu (`m408Dll`,
+SKY DIVE) a la frame 14 090. Ce que cela ne couvre pas : plusieurs tours,
+evenements, etoiles, boutiques, Boo, objets, fin de partie. D'ou `PARTIAL`.
 
 ### Liste de controle par plateau
 
