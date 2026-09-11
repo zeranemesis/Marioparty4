@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "note": "Scenarios driven by generated input. They carry a recipe - the recording to cut an approach prefix from, the frame to cut at, a seed, a frame count - and never the input file itself: the seed is what deserves versioning, not the megabytes, and the campaign rebuilds the file before every run so a stale file from an older seed cannot be mistaken for this one. Every cell these move carries coverage_source SCRIPTED, which can reach PARTIAL and never PASS.",
+  "scenarios": [
+    {
+      "id": "w04-monkey-1001",
+      "description": "Boo's Haunted Bash approached through the recorded prefix, then driven by seed 1001. Looks for anything the recorded session never touched: star, lottery, battle, fortune, Bowser, block, last five turns.",
+      "board": "w04Dll",
+      "kind": "replay",
+      "replay": "work/gen/w04-monkey-1001.txt",
+      "durationSeconds": 900,
+      "minFrames": 40000,
+      "minTurns": 2,
+      "repeats": 1,
+      "netplayDelay": 3,
+      "seed": "generated",
+      "coverageSource": "SCRIPTED",
+      "generated": {
+        "prefixFrom": "work/netplay-recordings/board-replay.txt",
+        "prefixEnd": 5961,
+        "seed": 1001,
+        "frames": 48000
+      }
+    },
+    {
+      "id": "w01-monkey-2001",
+      "description": "Toad's Midway Madness through walk.txt's own approach, then seed 2001. w01 has only ever been reached once, by a replay that walked and stopped.",
+      "board": "w01Dll",
+      "kind": "replay",
+      "replay": "work/gen/w01-monkey-2001.txt",
+      "durationSeconds": 900,
+      "minFrames": 40000,
+      "minTurns": 2,
+      "repeats": 1,
+      "netplayDelay": 3,
+      "seed": "generated",
+      "coverageSource": "SCRIPTED",
+      "generated": {
+        "prefixFrom": "work/netplay-recordings/walk.txt",
+        "prefixEnd": 5385,
+        "seed": 2001,
+        "frames": 48000
+      }
+    }
+  ]
+}

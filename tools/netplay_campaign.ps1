@@ -152,6 +152,13 @@ function Read-Manifest([string]$path) {
             # reading a property it does not have THROWS rather than returning
             # null - so an optional field has to be probed, not defaulted.
             MinTurns = $(if ($entry.PSObject.Properties.Name -contains 'minTurns') { [int]$entry.minTurns } else { 0 })
+            # A generated scenario carries its recipe, not its megabytes: an
+            # approach prefix sliced from a real recording, a seed, and a frame
+            # count. The input file is rebuilt from those before the run, so the
+            # seed is the artifact that gets versioned and the file never has to
+            # be.
+            Generated = $(if ($entry.PSObject.Properties.Name -contains 'generated') { $entry.generated } else { $null })
+            CoverageSource = $(if ($entry.PSObject.Properties.Name -contains 'coverageSource') { [string]$entry.coverageSource } else { '' })
             MinFrames = [int]$entry.minFrames
             Repeats = [int]$entry.repeats
             NetplayDelay = if ($entry.PSObject.Properties.Name -contains 'netplayDelay') { [int]$entry.netplayDelay } else { 3 }
@@ -276,6 +283,10 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         target_frame_rate_peer_1 = $(if ($TargetFrameRatePeer1 -gt 0) { $TargetFrameRatePeer1 } else { $TargetFrameRate })
         replay = $entry.Replay
         netplay_delay = $entry.NetplayDelay
+        # SCRIPTED coverage can carry a matrix cell to PARTIAL and never to
+        # PASS. Recorded per run so a result can never be mistaken for a human
+        # session, and defaulted from the scenario rather than remembered.
+        coverage_source = $(if ($entry.CoverageSource) { $entry.CoverageSource } elseif ($entry.Generated) { 'SCRIPTED' } else { 'RECORDED' })
         started_at = (Get-Date).ToString('o')
         duration_seconds = 0
         last_frame = 0
@@ -301,6 +312,8 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         board_max_turn = -1
         board_id = -1
         min_turns = 0
+        generated_seed = -1
+        generated_frames = 0
         mem_sweep_blocks = 0
         mem_sweep_average_ms = 0
         mem_sweep_worst_ms = 0
@@ -311,6 +324,58 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         desync_fingerprint = ''
         result = 'HARNESS_FAILURE'
         notes = @()
+    }
+
+    # ---- rebuild a generated input file from its recipe ----
+    # Always rebuilt, never reused: a file left over from a previous seed would
+    # make the campaign report results for input nobody chose, and the rebuild
+    # costs a second.
+    if ($entry.Generated) {
+        $recipe = $entry.Generated
+        $python = $null
+        foreach ($candidate in 'python3', 'python', 'py') {
+            $found = Get-Command $candidate -ErrorAction SilentlyContinue
+            if ($found) { $python = $found.Source; break }
+        }
+        if (-not $python) { throw "Scenario $($entry.Id) is generated but no python interpreter was found." }
+        $generator = Join-Path $PSScriptRoot 'generate_input.py'
+        $target = Resolve-CampaignPath $entry.Replay
+        New-Item -ItemType Directory -Path (Split-Path $target -Parent) -Force | Out-Null
+        $monkeyOnly = "$target.monkey"
+
+        $previousPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & $python $generator monkey --frames ([int]$recipe.frames) --seed ([int]$recipe.seed) -o $monkeyOnly 2>&1 |
+                ForEach-Object { Write-Verbose "$_" }
+            if ($LASTEXITCODE -ne 0) { throw "generate_input.py monkey failed with exit code $LASTEXITCODE." }
+            # The approach prefix is CUT from a real recording rather than kept
+            # as a file of its own: the recording is already fingerprinted in
+            # tests/replays/manifest.json and verified before this campaign
+            # started, so the cut inherits that guarantee and nothing new has to
+            # be versioned. The knowledge worth keeping is the frame to cut at,
+            # and that lives here in the scenario.
+            if ($recipe.PSObject.Properties.Name -contains 'prefixFrom' -and $recipe.prefixFrom) {
+                $source = Resolve-CampaignPath $recipe.prefixFrom
+                if (-not (Test-Path -LiteralPath $source)) {
+                    throw "Scenario $($entry.Id) cuts its approach from $source, which is missing."
+                }
+                $prefix = "$target.prefix"
+                & $python $generator slice $source --end ([int]$recipe.prefixEnd) -o $prefix 2>&1 |
+                    ForEach-Object { Write-Verbose "$_" }
+                if ($LASTEXITCODE -ne 0) { throw "generate_input.py slice failed with exit code $LASTEXITCODE." }
+                & $python $generator concat $prefix $monkeyOnly -o $target 2>&1 | ForEach-Object { Write-Verbose "$_" }
+                if ($LASTEXITCODE -ne 0) { throw "generate_input.py concat failed with exit code $LASTEXITCODE." }
+                Remove-Item -LiteralPath $prefix -Force -ErrorAction SilentlyContinue
+            } else {
+                Copy-Item -LiteralPath $monkeyOnly -Destination $target -Force
+            }
+        } finally {
+            $ErrorActionPreference = $previousPreference
+        }
+        Remove-Item -LiteralPath $monkeyOnly -Force -ErrorAction SilentlyContinue
+        $record.generated_seed = [int]$recipe.seed
+        $record.generated_frames = [int]$recipe.frames
     }
 
     $timer = [Diagnostics.Stopwatch]::StartNew()
