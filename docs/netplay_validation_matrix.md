@@ -72,10 +72,55 @@ pairs, sans crash et sans divergence :
 - [ ] plusieurs tours consecutifs
 - [ ] fin de partie
 
-Etat de Boo's Haunted Bash sur cette liste : *entree*, *deplacements*,
-*mini-jeux* et *retour mini-jeu vers plateau* sont exerces par l'enregistrement ;
-*evenements* l'est partiellement, par le seul evenement Big Boo. Les dix autres
-lignes sont `UNTESTED`, et c'est pourquoi le plateau reste `PARTIAL`.
+### Etat de Boo's Haunted Bash, mesure le 2026-09-11
+
+Le paragraphe qui figurait ici annoncait quatre lignes exercees et dix
+`UNTESTED`. Il datait d'avant les marqueurs de couverture et sous-estimait
+l'enregistrement. Voici ce qu'un run complet de 53 525 frames signale reellement.
+
+| ligne | etat | preuve |
+|---|---|---|
+| boot et entree sur le plateau | **oui** | `1@2 -> 74@840 -> 70@2989 -> 92@5961` |
+| premiers tours | **oui** | `DICE@8665` |
+| deplacements | **oui** | chemin d'overlays et `WARP@18439` |
+| embranchements | **inconnu** | aucun marqueur ; `com_path.c` n'en a pas |
+| cases | **partiel** | boutique, teleporteur, champignon ; `BLOCK` jamais |
+| evenements | **oui** | `BOO@50780`, `BOO_HOUSE@50176`, `W04_BIG_BOO@48312` |
+| etoiles | **NON** | `STAR` ne se declenche jamais |
+| boutiques | **oui** | `SHOP@9086` |
+| Boo | **oui** | `BOO@50780` |
+| objets | **oui** | `ITEM@20695` |
+| gimmicks propres au plateau | **oui** | `W04_BIG_BOO@48312` |
+| mini-jeux | **oui** | quatre, joues en entier |
+| retour mini-jeu vers plateau | **oui** | quatre retours par l'overlay 84 |
+| plusieurs tours consecutifs | **oui, mais infere** | quatre mini-jeux ; voir la reserve ci-dessous |
+| fin de partie | **NON** | l'enregistrement s'arrete au cinquieme ecran d'instructions |
+
+Les quatre mini-jeux effectivement joues, nommes depuis la table du depot :
+
+| overlay | module | nom | type |
+|---|---|---|---|
+| 16 | `m408dll` | SKY DIVE | 0 (4 joueurs) |
+| 24 | `m416dll` | MAMORE FIRE | 1 (1 contre 3) |
+| 25 | `m417dll` | MARIO SURFER | 1 (1 contre 3) |
+| 51 | `m443dll` | DRUG RACE | 0 (4 joueurs) |
+
+Sept mecaniques ne se declenchent jamais : `STAR`, `LOTTERY`, `BATTLE`,
+`FORTUNE`, `BOWSER`, `BLOCK`, `LAST5`.
+
+**Reserve sur le nombre de tours.** Quatre tours est *deduit* du nombre de
+mini-jeux, pas mesure. `GWSystem.turn` entre dans le hash canonique mais n'est
+publie nulle part en clair, donc rien dans un resultat de run ne dit combien de
+tours ont ete joues. C'est exactement le manque que `minTurns` doit combler
+(chantier W2) : sans lui, un run qui reste bloque dans un menu et un run qui joue
+douze tours se ressemblent.
+
+L'enregistrement pilote 49 877 frames ; le run en atteint 53 525. Les **3 648
+dernieres frames** — une minute — tournent donc sans entree scriptee.
+
+Le plateau reste `PARTIAL` pour deux raisons dures : **les etoiles ne sont jamais
+prises** et **la partie ne se termine jamais**. Sur une partie de 20 tours, cet
+enregistrement en couvre quatre, soit un cinquieme.
 
 ### Ces lignes se cochent depuis le jeu, pas depuis un souvenir
 
