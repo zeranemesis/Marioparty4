@@ -26,6 +26,41 @@ binaires et tournent même pendant qu'une campagne verrouille `dol.dll`. Le
 premier couvre la confidentialité et le consentement des rapports de crash, le
 second l'arithmétique du défaut D1.
 
+### 1bis. Cinq minutes — toute la suite
+
+```bash
+tools\run_all_tests.ps1 -DiscPath "<iso>"
+```
+
+Treize scripts `test_*.ps1` existent. `validate_netplay.ps1` en appelait trois ;
+`test_audio_wait.ps1` et `test_rollback_effects.ps1` n'étaient référencés par
+rien du tout. Un test que personne n'exécute est un commentaire qui prend du
+temps à compiler.
+
+La découverte se fait par glob, jamais depuis une liste tenue à l'intérieur du
+lanceur : un nouveau test est pris en compte le jour où il est ajouté. Un script
+que l'invocation ne peut pas faire tourner est rapporté `SKIPPED` avec sa
+raison, jamais omis — « douze réussis » ne veut rien dire si on ignore que le
+treizième n'a pas tourné.
+
+Chaque script tourne dans **son propre processus**, et le code de sortie de ce
+processus est le résultat. L'écriture évidente — `& $script; $LASTEXITCODE` —
+est fausse, et fausse dans le sens qui cache les échecs : `$LASTEXITCODE` n'est
+écrit que par une commande native ou un `exit` explicite, et neuf des treize
+scripts se terminent simplement. Un tel script laisse ce que le **précédent** y
+avait mis.
+
+État au 2026-09-11 : **12 réussis, 0 échec, 1 non applicable, 317 s.** Le non
+applicable est `test_direct_connection`, qui sort en 2 quand un VPN détient la
+route prioritaire — il refuse alors de sonder la box ou d'ouvrir un port, ce qui
+est le bon comportement et ne doit pas compter comme un échec.
+
+La CI exécute cette suite entre les auto-tests du moteur et l'empaquetage.
+`test_netplay_boot` en est exclu faute de disque sur un runner ;
+`test_direct_connection` en est exclu **délibérément et définitivement**, parce
+qu'il sonde le routeur et peut ouvrir un port, ce qui ne doit jamais arriver sans
+surveillance sur une machine partagée.
+
 ### 2. Une minute — les auto-tests du binaire
 
 ```bash
