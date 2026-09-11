@@ -1149,6 +1149,14 @@ extern "C" bool PartyBoard_NetplayConfigureFromArgs(int argc, char **argv)
     return true;
 }
 
+// The simulation frame, for instrumentation that needs to date an event. Zero
+// when netplay is not running, which is the honest answer: there is no shared
+// timeline to refer to.
+extern "C" u32 PartyBoard_NetplayFrameForDiagnostics(void)
+{
+    return partyboard::netplay::gRuntime.enabled ? partyboard::netplay::gRuntime.frame : 0;
+}
+
 extern "C" bool PartyBoard_NetplayEnabled(void)
 {
     return partyboard::netplay::gRuntime.enabled;

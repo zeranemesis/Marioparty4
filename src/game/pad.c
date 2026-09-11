@@ -9,6 +9,7 @@
 #include <string.h>
 #ifdef TARGET_PC
 #include "port/netplay_runtime.h"
+#include "port/mem_diagnostics.h"
 #define PadGameControlMotor PartyBoard_NetplayControlMotor
 #else
 #define PadGameControlMotor PADControlMotor
@@ -382,6 +383,11 @@ static BOOL PadReadSimulationTick(u32 retraceCount)
     /* Same reasoning for movie playback: gameplay blocks on the movie ending,
      * so its position must come from accepted ticks, not from the device. */
     PartyBoard_ThpLogicalTick();
+    /* One integrity sweep per accepted simulation tick, at the same point every
+     * time, so a violation can be dated to a frame. Off unless
+     * PARTYBOARD_MEM_DIAGNOSTICS=1, and the sweep itself stops the run on the
+     * first violation rather than letting the damage spread. */
+    PartyBoard_MemDiagTick();
 #endif
     VCounter++;
     return TRUE;

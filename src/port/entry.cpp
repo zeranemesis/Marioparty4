@@ -3,6 +3,7 @@
 #include "port/netplay_runtime.h"
 #include "port/rollback.h"
 #include "port/crash_report.h"
+#include "port/mem_diagnostics.h"
 
 #include <cstring>
 
@@ -25,6 +26,8 @@ int main(int argc, char *argv[])
 
     if (argc == 2 && std::strcmp(argv[1], "--crash-report-self-test") == 0)
         return PartyBoard_CrashReportRunSelfTest() ? 0 : 1;
+    if (argc == 2 && std::strcmp(argv[1], "--mem-diagnostics-self-test") == 0)
+        return PartyBoard_MemDiagRunSelfTest() ? 0 : 1;
     if (argc == 3 && std::strcmp(argv[1], "--crash-report-provoke") == 0) {
         // Raises a real exception on purpose; the process is expected to die of
         // it so the reporter can be verified end to end.
@@ -39,6 +42,7 @@ int main(int argc, char *argv[])
         return PartyBoard_RollbackRunSelfTest() && PartyBoard_NetTransportRunSelfTest()
                 && PartyBoard_NetplayRuntimeRunSelfTest()
                 && PartyBoard_CrashReportRunSelfTest()
+                && PartyBoard_MemDiagRunSelfTest()
             ? 0
             : 1;
 

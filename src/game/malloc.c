@@ -1,6 +1,9 @@
 #include "game/memory.h"
 #include "game/init.h"
 #include "dolphin/os.h"
+#ifdef TARGET_PC
+#include "port/mem_diagnostics.h"
+#endif
 
 static u32 HeapSizeTbl[HEAP_MAX] = { 0x240000, 0x140000, 0xA80000, 0x580000, 0 };
 static void *HeapTbl[HEAP_MAX];
@@ -20,6 +23,11 @@ void HuMemInitAll(void)
             return;
         }
         HeapTbl[i] = HuMemInit(ptr, HeapSizeTbl[i]);
+#ifdef TARGET_PC
+        /* Bounds for the integrity sweep: a block has to be provably inside
+         * its own heap, and the sweep needs to know what to walk. */
+        PartyBoard_MemDiagRegisterHeap(i, HeapTbl[i], HeapSizeTbl[i]);
+#endif
     }
     free_size = OSCheckHeap(currentHeapHandle);
     OSReport("HuMem> left memory space %dKB(%d)\n", free_size/1024, free_size);
@@ -29,6 +37,9 @@ void HuMemInitAll(void)
         return;
     }
     HeapTbl[4] = HuMemInit(ptr, free_size);
+#ifdef TARGET_PC
+    PartyBoard_MemDiagRegisterHeap(4, HeapTbl[4], free_size);
+#endif
     HeapSizeTbl[4] = free_size;
 }
 

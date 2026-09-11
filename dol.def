@@ -23,6 +23,11 @@ EXPORTS
     PartyBoard_CrashReportAbnormal
     PartyBoard_CoroutineStackRunSelfTest
     PartyBoard_CoroutineSymbolsReady
+    PartyBoard_MemDiagRunSelfTest
+    PartyBoard_MemDiagEnabled
+    PartyBoard_MemDiagCorruptionDetected
+    PartyBoard_MemDiagLastGoodFrame
+    PartyBoard_MemDiagFirstBadFrame
     BoardArcCos
     BoardArcSin
     BoardAudFXPlay

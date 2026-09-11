@@ -1,5 +1,8 @@
 #include "game/memory.h"
 #include "dolphin/os.h"
+#ifdef TARGET_PC
+#include "port/mem_diagnostics.h"
+#endif
 
 #ifdef SKIP_HU_ALLOC
 #include <stdlib.h>
@@ -67,6 +70,9 @@ static void *HuMemMemoryAlloc2(void *heap_ptr, size_t size, uintptr_t num, uintp
 #else
                 struct memory_block *new_block = (struct memory_block *)(((u32)block) + alloc_size);
 #endif
+#ifdef TARGET_PC
+                PartyBoard_MemDiagOnRetire(new_block);
+#endif
                 new_block->size = block->size - alloc_size;
                 new_block->magic = 205;
                 new_block->flag = 0;
@@ -81,6 +87,12 @@ static void *HuMemMemoryAlloc2(void *heap_ptr, size_t size, uintptr_t num, uintp
             block->magic = 165;
             block->num = num;
             block->retaddr = retaddr;
+#ifdef TARGET_PC
+            /* Arms the head redzone in the dead bytes between the header and
+             * the payload, and records the allocation in the table that lives
+             * outside MEM1. No layout change: see docs/humem_layout.md. */
+            PartyBoard_MemDiagOnAlloc(block, size, (size_t)block->size, retaddr);
+#endif
             return BLOCK_GET_DATA(block);
         }
         block = block->next;
@@ -122,7 +134,16 @@ void HuMemMemoryFree(void *ptr, uintptr_t retaddr)
         OSReport("HuMem>memory free error. %08x( call %08x)\n", ptr, retaddr);
         return;
     }
+#ifdef TARGET_PC
+    /* Only for a free the allocator accepts, so a rejected double free
+     * never touches memory. */
+    PartyBoard_MemDiagOnFree(block, retaddr);
+#endif
     if (block->prev < block && !block->prev->flag) {
+#ifdef TARGET_PC
+        /* Absorbed by its predecessor; the record must not outlive it. */
+        PartyBoard_MemDiagOnRetire(block);
+#endif
         block->flag = 0;
         block->magic = 205;
         block->next->prev = block->prev;
@@ -131,6 +152,9 @@ void HuMemMemoryFree(void *ptr, uintptr_t retaddr)
         block = block->prev;
     }
     if (block->next > block && !block->next->flag) {
+#ifdef TARGET_PC
+        PartyBoard_MemDiagOnRetire(block->next);
+#endif
         block->next->next->prev = block;
         block->size += block->next->size;
         block->next = block->next->next;
@@ -251,5 +275,60 @@ void PartyBoard_NetplayHeapState(PartyBoardNetplayStateSink sink, void *context)
         WORD(HuMemUsedMallocBlockGet(heap));
     }
 #undef WORD
+}
+#endif
+
+#ifdef TARGET_PC
+/* Reported rather than assumed, so a change to the block structure cannot
+ * silently invalidate the diagnostics module's idea of the layout. */
+size_t PartyBoard_MemBlockHeaderSize(void)
+{
+    return sizeof(struct memory_block);
+}
+
+size_t PartyBoard_MemBlockPayloadOffset(void)
+{
+    return (size_t)(BLOCK_GET_DATA((struct memory_block *)0));
+}
+
+/* Walks one heap's circular list and hands each block to the sink as plain
+ * values. Living here keeps the block layout in exactly one place.
+ *
+ * The walk is defensive by necessity: it is used to find corruption, so it
+ * cannot trust the links it follows. It refuses a next pointer outside the
+ * heap or misaligned, and it bounds the iteration count. Returning false means
+ * the list itself could not be walked, which is already a corruption. */
+bool PartyBoard_MemWalkHeap(void *heapBase, size_t heapSize,
+    PartyBoardMemBlockSink sink, void *context)
+{
+    struct memory_block *block = heapBase;
+    struct memory_block *start = heapBase;
+    u32 guard = 0;
+    if (!heapBase || !sink) {
+        return FALSE;
+    }
+    do {
+        struct memory_block *next = block->next;
+        if (!sink(context, block, block->size, block->magic, block->flag, block->prev, next,
+                block->num, block->retaddr)) {
+            return TRUE;
+        }
+        /* The walk is used to FIND corruption, so it must never trust a link it
+         * is about to follow. A next pointer outside the heap, misaligned or
+         * too close to the end to hold a header is a corruption in itself, and
+         * following it would fault instead of reporting. */
+        if (!next || ((uintptr_t)next & 7u) != 0) {
+            return FALSE;
+        }
+        if ((uintptr_t)next < (uintptr_t)heapBase
+            || (uintptr_t)next + sizeof(struct memory_block) > (uintptr_t)heapBase + heapSize) {
+            return FALSE;
+        }
+        block = next;
+        if (++guard > 4000000u) {
+            return FALSE;
+        }
+    } while (block != start);
+    return TRUE;
 }
 #endif
