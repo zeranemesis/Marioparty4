@@ -32,12 +32,24 @@ every time. Used for the approach prefix that gets from boot to a board.
 able to leave the game. Same seed, same file, forever - which is what makes a
 crash it finds reproducible rather than an anecdote.
 
-SAFETY
-------
-START is never generated. It opens the pause menu, from which a run can quit to
-the title screen, and a monkey that quits the game is a monkey that reports a
-clean exit having tested nothing. The mask is a deny-list checked in one place,
-``SAFE_BUTTONS``, rather than remembered at each call site.
+SAFETY, AND A CORRECTION TO IT
+------------------------------
+START used to be excluded outright, on the reasoning that it opens the pause
+menu and a monkey that quits reports a clean exit having tested nothing.
+
+That reasoning was wrong, and the code says so. Quitting a board goes
+pause.c:197 -> BoardKill() -> main.c:229 -> omOvlReturnEx(), which pops back up
+the overlay stack to the MENU that called the board. There is no path from the
+board pause menu to the title screen, and none at all to leaving the program.
+
+So quitting is not an escape, it is a MOVE:
+
+    menu -> board A -> pause -> quit -> menu -> board B
+
+It is the cheapest way for an unattended run to see more than one board, and
+banning it removed the only exit a monkey had from a board it was done with.
+START is allowed at a low weight: often enough to leave a board eventually,
+rarely enough not to spend the whole run in menus.
 
 USAGE
 -----
@@ -130,6 +142,9 @@ WEIGHTED_BUTTONS = [
     (PAD_BUTTON_X, 7),
     (PAD_BUTTON_Y, 7),
     (PAD_TRIGGER_Z, 8),
+    # Low, and deliberately non-zero. See the correction at the top of the file:
+    # this is how a run leaves a board it is done with and reaches another.
+    (PAD_BUTTON_START, 3),
 ]
 
 # How often an active period also moves the stick. Menus and the board are

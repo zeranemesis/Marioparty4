@@ -93,14 +93,28 @@ Check 'a different seed gives a different file' ((ContentHash $a) -ne (ContentHa
 
 # 3. The safety mask, asserted against every generated row rather than sampled.
 $startSeen = $false
+$startFrames = 0
 $rows = 0
 foreach ($line in [IO.File]::ReadAllLines($a)) {
     $parts = $line.Split(' ')
     if ($parts.Count -ne 9) { continue }
     $rows++
-    if (([int]$parts[2] -band 0x1000) -ne 0) { $startSeen = $true; break }
+    if (([int]$parts[2] -band 0x1000) -ne 0) { $startSeen = $true; $startFrames++ }
 }
-Check 'the monkey never presses START' (-not $startSeen) 'a generated run can pause and quit itself'
+# START is now ALLOWED, and the earlier assertion that it never appears was
+# based on reasoning the code contradicts: quitting a board returns to the menu
+# that called it (pause.c -> BoardKill -> omOvlReturnEx), never to the title and
+# never out of the program. Banning it removed the only way an unattended run
+# could leave a board and reach another one.
+#
+# What still has to hold is that it stays RARE. A monkey that pauses constantly
+# spends the run in menus instead of playing, so the bound is checked rather
+# than the presence.
+$startFraction = if ($rows -gt 0) { $startFrames / ($rows / 2.0) } else { 0 }
+Check 'START is present, so a run can leave a board' ($startSeen) `
+    'without it an unattended run can never reach a second board'
+Check 'and stays rare enough not to live in menus' ($startFraction -lt 0.10) `
+    ("START on {0:p1} of frames" -f $startFraction)
 Check 'the monkey wrote two rows per frame' ($rows -eq 6000) "wrote $rows rows for 3000 frames"
 
 # 3b. And the mask is a real constraint, not a coincidence: the reference
