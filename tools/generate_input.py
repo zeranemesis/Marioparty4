@@ -114,17 +114,28 @@ NAMED_BUTTONS = {
 # B is second because it cancels and backs out, which is how a monkey escapes a
 # submenu it wandered into. The d-pad and Z are kept low but non-zero: they
 # reach things A never will, and a monkey that only presses A is a script.
+# NO D-PAD. Not a preference - the engine discards it. src/game/pad.c:272:
+#
+#   HuPadBtn[i] = _PadBtn[i] & ~(PAD_BUTTON_LEFT | PAD_BUTTON_RIGHT
+#                                | PAD_BUTTON_UP | PAD_BUTTON_DOWN);
+#
+# The game never sees a d-pad press at all. Weighting the four of them at 5%
+# each meant a fifth of everything this monkey pressed was thrown away before
+# any game code looked at it. Direction comes from the analog stick, which
+# PadADConv turns into HuPadDStk - which is why STICK_PROBABILITY below is high
+# rather than incidental.
 WEIGHTED_BUTTONS = [
-    (PAD_BUTTON_A, 50),
-    (PAD_BUTTON_B, 15),
-    (PAD_BUTTON_UP, 5),
-    (PAD_BUTTON_DOWN, 5),
-    (PAD_BUTTON_LEFT, 5),
-    (PAD_BUTTON_RIGHT, 5),
-    (PAD_BUTTON_X, 5),
-    (PAD_BUTTON_Y, 5),
-    (PAD_TRIGGER_Z, 5),
+    (PAD_BUTTON_A, 60),
+    (PAD_BUTTON_B, 18),
+    (PAD_BUTTON_X, 7),
+    (PAD_BUTTON_Y, 7),
+    (PAD_TRIGGER_Z, 8),
 ]
+
+# How often an active period also moves the stick. Menus and the board are
+# navigated with it and with nothing else, so this is the monkey's only way to
+# choose anything - a board, a character, a direction at a junction.
+STICK_PROBABILITY = 0.75
 # The safety mask stays a plain list, derived from the weights so the two can
 # never drift apart: what may be pressed is defined in exactly one place.
 SAFE_BUTTONS = [button for button, _ in WEIGHTED_BUTTONS]
@@ -308,7 +319,7 @@ def run_monkey(frames_wanted, seed, hold_min, hold_max, idle_bias):
                     # A stick position more often than not: board movement and
                     # most minigames are analog, and a button-only monkey never
                     # walks anywhere.
-                    if seat_rng.random() < 0.6:
+                    if seat_rng.random() < STICK_PROBABILITY:
                         angle = seat_rng.uniform(0, 6.283185307179586)
                         magnitude = seat_rng.randint(STICK_MAX // 2, STICK_MAX)
                         import math
