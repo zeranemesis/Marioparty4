@@ -196,6 +196,32 @@ La boucle de réessai l.612-618 dépend en plus du résultat d'allocation
 
 **Classement : CRITICAL (contributeur direct de C1). P0.**
 
+##### Réévaluation après mesure — deux propriétés, pas une
+
+Le correctif C3 a été jugé une seconde fois, avec un compteur plutôt qu'un
+raisonnement. Le drain est encadré par les deux lignes suivantes, où `irq` est le
+nombre de callbacks audio réellement exécutés :
+
+```
+BANK_AUDIO_DRAIN_BEGIN  frame=18141  irq=60725  steps=30
+BANK_AUDIO_DRAIN_END    frame=18141  irq_total=60725
+```
+
+**Zéro callback audio pendant les trente itérations.** C'était prévisible une
+fois posé : le thread audio est un thread SDL cadencé par le périphérique, et
+`msmSysRegularProc()` ne le fait pas avancer. Il faut donc distinguer :
+
+| propriété | définition | le drain C3 |
+|---|---|---|
+| **Déterminisme** | les deux pairs décident la transition à la même frame de simulation | **oui**, et la borne en temps mur ne le faisait pas |
+| **Sûreté de durée de vie** | la banque n'est libérée que lorsqu'aucun thread audio ne peut encore déréférencer une voix qui lui appartient | **non**, et aucun nombre d'itérations ne l'obtiendrait |
+
+Une solution n'est correcte que si elle satisfait les deux. C3 en satisfait une ;
+la seconde a demandé une barrière au point exact de la libération, documentée
+dans [`d3_audio_bank_lifetime.md`](d3_audio_bank_lifetime.md) et inscrite au
+registre sous D3. Augmenter `SNDGRP_DRAIN_STEPS` aurait eu l'apparence d'un
+correctif et l'effet d'aucun.
+
 ### HIGH — divergence possible ou détection défaillante
 
 #### H1. Le hash canonique ne couvre pas l'état de jeu privé des overlays
@@ -358,7 +384,7 @@ correction fonctionne, seulement qu'elle compile.
 |---|---|---|---|
 | C1 | Attente sur l'audio temps réel | **corrigé** | Horloge logique de flux dérivée des données du disque (`src/msm/msmstream.c`), avancée une fois par tick accepté depuis `PadReadSimulationTick`. Seule la transition de fin de flux — celle que pilote le thread audio — est corrigée ; pause, arrêt explicite et chargement restent inchangés. |
 | C2 | Attentes en temps mur du boot | **corrigé** | `BootWaitMs` dans `src/REL/bootDll/main.c` : 180 ticks pour 3 s, 60 pour 1 s, exactement ce que comptent déjà à la main les branches voisines du même fichier. |
-| C3 | Drain de banque audio | **corrigé** | `SNDGRP_DRAIN_STEPS` itérations fixes dans `HuAudSndGrpWait`, sans sortie anticipée sur des compteurs influencés par le thread audio. |
+| C3 | Drain de banque audio | **déterminisme corrigé, durée de vie non — voir ci-dessous** | `SNDGRP_DRAIN_STEPS` itérations fixes dans `HuAudSndGrpWait`, sans sortie anticipée sur des compteurs influencés par le thread audio. Le déterminisme est acquis ; la sûreté de durée de vie ne l'était pas et a demandé un mécanisme distinct (D3). |
 | H3 | `VIGetRetraceCount` figé | **corrigé** | Compteur incrémenté par `VIWaitForRetrace` (`src/port/stubs.c`), ce qui borne la boucle de `init.c:226`. Volontairement absent du hash canonique : il avance par image présentée, pas par tick simulé. |
 | — | Sous-système AUDIO du hash | **corrigé** | `msmMusGetNumPlay` / `msmSeGetNumPlay` retirés : influencés par le thread audio, ils auraient produit de faux positifs sur toute paire de machines. |
 
