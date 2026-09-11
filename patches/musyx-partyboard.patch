@@ -65,12 +65,20 @@ index f14cddc..c645044 100644
  
  typedef struct SND_HOOKS {
 diff --git a/include/musyx/sal.h b/include/musyx/sal.h
-index 4fe62a9..dbd7dc4 100644
+index 4fe62a9..56f3348 100644
 --- a/include/musyx/sal.h
 +++ b/include/musyx/sal.h
-@@ -77,6 +77,9 @@ void salStartDsp(u16* cmdList);
+@@ -76,7 +76,17 @@ void salBuildCommandList(s16* dest, u32 nsDelay);
+ void salStartDsp(u16* cmdList);
  void salCtrlDsp(s16* dest);
  u32 salSynthSendMessage(DSPvoice* dsp_vptr, u32 mesg);
++
++#if MUSY_TARGET == MUSY_TARGET_PC
++/* Detaches every DSP voice still reading inside [base, base+length) and ends
++ * it, under the audio lock, so the caller may then free that memory. See the
++ * definition in hw_pc.c for why a barrier is used rather than a wait. */
++void salDetachVoicesFromSample(const void* base, u32 length);
++#endif
  void salHandleAuxProcessing();
 +#if MUSY_TARGET == MUSY_TARGET_PC
 +void salPCDepopVoice(DSPvoice* dsp_vptr);
@@ -121,10 +129,19 @@ index 63ca437..3ec156a 100644
  bool dataInsertMacro(u16 mid, void* macroaddr);
  bool dataRemoveMacro(u16 mid);
 diff --git a/src/musyx/runtime/hardware.c b/src/musyx/runtime/hardware.c
-index 5f136db..c07af91 100644
+index 5f136db..f5c2dce 100644
 --- a/src/musyx/runtime/hardware.c
 +++ b/src/musyx/runtime/hardware.c
-@@ -16,6 +16,8 @@
+@@ -1,5 +1,8 @@
+ #include "musyx/platform.h"
+ 
++/* Diagnostic only. See include/port/audio_lifetime.h. */
++#include "port/audio_lifetime.h"
++
+ #if MUSY_TARGET == MUSY_TARGET_DOLPHIN
+ #include "dolphin/os/OSCache.h"
+ #endif
+@@ -16,6 +19,8 @@
  #include "musyx/stream.h"
  #include "musyx/synth.h"
  
@@ -133,7 +150,18 @@ index 5f136db..c07af91 100644
  static volatile const u16 itdOffTab[128] = {
      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  1,  1,  1,  1,  1,  1,  1,  2,  2,  2,  2,
      2,  3,  3,  3,  3,  3,  4,  4,  4,  4,  5,  5,  5,  6,  6,  6,  7,  7,  7,  8,  8,  8,
-@@ -173,6 +175,15 @@ void hwInitSamplePlayback(u32 v, u16 smpID, void* newsmp, u32 set_defadsr, u32 p
+@@ -47,6 +52,10 @@ static void snd_handle_irq() {
+     return;
+   }
+ 
++  /* Stamps every lifetime event with an audio callback number, so a game thread
++   * event and an audio thread event can be ordered against each other. */
++  PartyBoard_AudioIrqTick();
++
+   streamCorrectLoops();
+   hwIRQEnterCritical();
+   // sndProfStartPCM(&prof.dspCtrl);
+@@ -173,6 +182,15 @@ void hwInitSamplePlayback(u32 v, u16 smpID, void* newsmp, u32 set_defadsr, u32 p
      dspVoice[v].changed[i] = 0;
    }
  
@@ -149,7 +177,19 @@ index 5f136db..c07af91 100644
    dspVoice[v].changed[0] = bf;
    dspVoice[v].prio = prio;
    dspVoice[v].mesgCallBackUserValue = callbackUserValue;
-@@ -268,7 +279,15 @@ u16 hwGetSampleID(u32 voice) { return dspVoice[voice].smp_id; }
+@@ -202,6 +220,11 @@ void hwInitSamplePlayback(u32 v, u16 smpID, void* newsmp, u32 set_defadsr, u32 p
+ }
+ 
+ void hwBreak(s32 vid) {
++  /* This is a REQUEST, not a stop: it raises a flag the audio thread acts on
++   * when it next renders. The voice keeps reading its sample until then, which
++   * is exactly what the lifetime diagnostic needs to be able to see. */
++  PartyBoard_AudioVoiceStopRequest((u32)vid);
++
+   if (dspVoice[vid].state == 1 && salTimeOffset == 0) {
+     dspVoice[vid].startupBreak = 1;
+   }
+@@ -268,7 +291,15 @@ u16 hwGetSampleID(u32 voice) { return dspVoice[voice].smp_id; }
  void* hwGetSampleExtraData(u32 voice) { return dspVoice[voice].smp_info.extraData; }
  #endif
  
@@ -166,7 +206,7 @@ index 5f136db..c07af91 100644
  
  void hwStart(u32 v, u8 studio) {
    dspVoice[v].singleOffset = salTimeOffset;
-@@ -467,20 +486,20 @@ u32 hwGetPos(u32 v) {
+@@ -467,20 +498,20 @@ u32 hwGetPos(u32 v) {
    case 1:
    case 4:
    case 5:
@@ -190,7 +230,7 @@ index 5f136db..c07af91 100644
      break;
    }
  
-@@ -493,10 +512,17 @@ void hwFlushStream(void* base, u32 offset, u32 bytes, u8 hwStreamHandle, void (*
+@@ -493,10 +524,17 @@ void hwFlushStream(void* base, u32 offset, u32 bytes, u8 hwStreamHandle, void (*
    size_t mram; // r29
    size_t len;
    aram = aramGetStreamBufferAddress(hwStreamHandle, &len);
@@ -209,7 +249,7 @@ index 5f136db..c07af91 100644
  #if MUSY_TARGET == MUSY_TARGET_DOLPHIN
    DCStoreRange((void*)mram, bytes);
  #endif
-@@ -517,7 +543,7 @@ void hwExitStream(u8 id) {
+@@ -517,7 +555,7 @@ void hwExitStream(u8 id) {
  
  void* hwGetStreamPlayBuffer(u8 hwStreamHandle) {
    // TODO: Platform specific audio memory handling
@@ -218,7 +258,7 @@ index 5f136db..c07af91 100644
  }
  
  #if MUSY_VERSION >= MUSY_VERSION_CHECK(2, 0, 2)
-@@ -575,6 +601,18 @@ void hwSaveSample(void* header, void* data
+@@ -575,6 +613,21 @@ void hwSaveSample(void* header, void* data
                                       aramInfo
  #endif
    );
@@ -233,25 +273,41 @@ index 5f136db..c07af91 100644
 +  MUSY_ASSERT_MSG(copy != NULL, "Could not allocate host memory for sample data");
 +  if (copy != NULL) {
 +    *(void**)data = copy;
++    /* This copy, not the staging blob, is what sdir->addr and then
++     * vp->smp_info.addr point at. Diagnostic only. */
++    PartyBoard_AudioSampleStore(copy, len);
 +  }
  #endif
  }
  
-@@ -595,6 +633,13 @@ void hwRemoveSample(void* header, void* data
+@@ -595,6 +648,26 @@ void hwRemoveSample(void* header, void* data
                      ARAMInfo* aramInfo
  #endif
  ) {
 +#if MUSY_TARGET == MUSY_TARGET_PC
-+  (void)header;
 +#if MUSY_VERSION >= MUSY_VERSION_CHECK(2, 0, 1)
 +  (void)aramInfo;
 +#endif
++  {
++    /* The voices are detached BEFORE the free, under the audio lock, because
++     * nothing else in this path guarantees that one has stopped reading: the
++     * kill that led here only raised a flag for the audio thread, and the
++     * caller released the audio lock before getting here. */
++    const SAMPLE_HEADER* sampleHeader = (const SAMPLE_HEADER*)header;
++    const u32 length =
++        convert_length(sampleHeader->length & 0xFFFFFF, (u8)(sampleHeader->length >> 24));
++    salDetachVoicesFromSample(data, length);
++  }
++  /* Detector 1 runs after the barrier and immediately before the free, so what
++   * it reports is the state at the instant the memory goes away. It must find
++   * nothing; if it ever does, the barrier is not doing its job. */
++  PartyBoard_AudioSampleFree(data);
 +  free(data);
 +#else
  #if MUSY_VERSION <= MUSY_VERSION_CHECK(1, 5, 3)
    u32 len = (((u32*)header))[1] & 0xFFFFFF;
    u8 type = (((u32*)header))[1] >> 0x18;
-@@ -608,6 +653,7 @@ void hwRemoveSample(void* header, void* data
+@@ -608,6 +681,7 @@ void hwRemoveSample(void* header, void* data
  #else
    aramRemoveData(data, len, aramInfo);
  #endif
@@ -480,10 +536,10 @@ index eb79ec8..e37ab4b 100644
    }
  
 diff --git a/src/musyx/runtime/hw_pc.c b/src/musyx/runtime/hw_pc.c
-index d7197a9..50f76a6 100644
+index d7197a9..0ca3493 100644
 --- a/src/musyx/runtime/hw_pc.c
 +++ b/src/musyx/runtime/hw_pc.c
-@@ -5,6 +5,10 @@
+@@ -5,15 +5,27 @@
  #include <SDL3/SDL_mutex.h>
  #include <SDL3/SDL_timer.h>
  
@@ -494,7 +550,13 @@ index d7197a9..50f76a6 100644
  #include <string.h>
  
  #include "musyx/adsr.h"
-@@ -14,6 +18,10 @@
+ #include "musyx/assert.h"
+ #include "musyx/hardware.h"
++
++/* Diagnostic only, compiled to nothing when the switch is off. See
++ * include/port/audio_lifetime.h. */
++#include "port/audio_lifetime.h"
+ #include "musyx/musyx.h"
  #include "musyx/sal.h"
  #include "musyx/synth.h"
  
@@ -505,7 +567,7 @@ index d7197a9..50f76a6 100644
  // Audio parameters
  #define SAL_SAMPLES_PER_FRAME 160
  #define SAL_SUBFRAMES 5
-@@ -22,7 +30,10 @@
+@@ -22,7 +34,10 @@
  #define SAL_BUFFER_BYTES (SAL_STEREO_SAMPLES * sizeof(s16))
  #define SAL_PREFILL_FRAMES 8
  #define SAL_MAX_QUEUED_FRAMES 12
@@ -516,7 +578,7 @@ index d7197a9..50f76a6 100644
  #define POLYPHASE_PHASES 128
  #define POLYPHASE_TAPS 4
  #define SINC_PHASES 512
-@@ -47,6 +58,69 @@ static SDL_AudioStream* salAudioStream = NULL;
+@@ -47,6 +62,69 @@ static SDL_AudioStream* salAudioStream = NULL;
  static SDL_Thread* salAudioThread = NULL;
  static SDL_AtomicInt salAudioThreadRunning;
  static SDL_Mutex* globalMutex;
@@ -586,7 +648,7 @@ index d7197a9..50f76a6 100644
  
  static SND_SOME_CALLBACK userCallback = NULL;
  
-@@ -68,18 +142,94 @@ typedef struct VoiceResamplerState {
+@@ -68,18 +146,94 @@ typedef struct VoiceResamplerState {
  } VoiceResamplerState;
  
  static VoiceResamplerState voiceResampler[SYNTH_MAX_VOICES];
@@ -683,7 +745,7 @@ index d7197a9..50f76a6 100644
  
  static inline s16 clamp16(s32 v) {
    if (v > 32767)
-@@ -97,6 +247,88 @@ static inline s16 clampCoeff(s32 v) {
+@@ -97,6 +251,88 @@ static inline s16 clampCoeff(s32 v) {
    return (s16)v;
  }
  
@@ -772,21 +834,21 @@ index d7197a9..50f76a6 100644
  static inline double sincUnit(double x) {
    if (SDL_fabs(x) < 1e-12)
      return 1.0;
-@@ -105,42 +337,64 @@ static inline double sincUnit(double x) {
+@@ -105,42 +341,64 @@ static inline double sincUnit(double x) {
    return SDL_sin(pix) / pix;
  }
  
 -static void initResampleTables(void) {
 -  if (resampleTablesInitialized)
 -    return;
--
--  double rawPolyphase[POLYPHASE_PHASES * POLYPHASE_TAPS];
--  double maxPolyphaseSum = 0.0;
 +static double besselI0(double x) {
 +  const double halfSquared = (x * x) * 0.25;
 +  double sum = 1.0;
 +  double term = 1.0;
  
+-  double rawPolyphase[POLYPHASE_PHASES * POLYPHASE_TAPS];
+-  double maxPolyphaseSum = 0.0;
+-
 -  for (u32 i = 0; i < SDL_arraysize(rawPolyphase); ++i) {
 -    const double phase = (double)i / (double)(SDL_arraysize(rawPolyphase) - 1);
 -    const double x = -2.0 + 4.0 * phase;
@@ -843,6 +905,10 @@ index d7197a9..50f76a6 100644
 +  fprintf(stderr, "[MusyX] Loaded GameCube DSP resampling coefficients.\n");
 +  return TRUE;
 +}
++
++static void initResampleTables(void) {
++  if (resampleTablesInitialized)
++    return;
  
 -  for (u32 phase = 0; phase < POLYPHASE_PHASES; ++phase) {
 -    polyphaseTable[phase][0] = clampCoeff(
@@ -853,10 +919,6 @@ index d7197a9..50f76a6 100644
 -        (rawPolyphase[POLYPHASE_PHASES * 3 - 1 - phase] / maxPolyphaseSum) * 32767.0));
 -    polyphaseTable[phase][3] = clampCoeff((s32)SDL_lround(
 -        (rawPolyphase[POLYPHASE_PHASES * 4 - 1 - phase] / maxPolyphaseSum) * 32767.0));
-+static void initResampleTables(void) {
-+  if (resampleTablesInitialized)
-+    return;
-+
 +  dspPolyphaseAvailable = loadDspPolyphaseTable();
 +  if (!dspPolyphaseAvailable) {
 +    /* Dolphin deliberately falls back from AX polyphase to AX linear when the
@@ -867,7 +929,7 @@ index d7197a9..50f76a6 100644
    }
  
    for (u32 phase = 0; phase < SINC_PHASES; ++phase) {
-@@ -179,23 +433,205 @@ static void initResampleTables(void) {
+@@ -179,23 +437,208 @@ static void initResampleTables(void) {
    resampleTablesInitialized = 1;
  }
  
@@ -1074,6 +1136,9 @@ index d7197a9..50f76a6 100644
 +}
 +
 +static void deactivateVoiceAtOffset(DSPvoice* vp, int offset) {
++  if (vp != NULL && dspVoice != NULL && vp >= dspVoice) {
++    PartyBoard_AudioVoiceStopped((u32)(vp - dspVoice), "deactivated");
++  }
 +  depopRenderOffset = offset;
 +  salDeactivateVoice(vp);
 +  depopRenderOffset = -1;
@@ -1082,7 +1147,7 @@ index d7197a9..50f76a6 100644
  static inline void addThreeChannelBuffer(s32* dst, const s32* src, u16 vol) {
    if (dst == NULL || src == NULL || vol == 0)
      return;
-@@ -204,38 +640,42 @@ static inline void addThreeChannelBuffer(s32* dst, const s32* src, u16 vol) {
+@@ -204,38 +647,42 @@ static inline void addThreeChannelBuffer(s32* dst, const s32* src, u16 vol) {
      dst[i] += (src[i] * vol) >> 15;
  }
  
@@ -1137,7 +1202,7 @@ index d7197a9..50f76a6 100644
      int nibble;
      if (s % 2 == 0) {
        nibble = (blockData[1 + s / 2] >> 4) & 0xF;
-@@ -244,7 +684,10 @@ static void decodeADPCMBlockFull(const u8* blockData, const s16 coefTab[8][2], s
+@@ -244,7 +691,10 @@ static void decodeADPCMBlockFull(const u8* blockData, const s16 coefTab[8][2], s
      }
      if (nibble >= 8)
        nibble -= 16;
@@ -1149,8 +1214,16 @@ index d7197a9..50f76a6 100644
      decoded = clamp16(decoded);
      y2 = y1;
      y1 = (s16)decoded;
-@@ -265,8 +708,8 @@ static void ensureADPCMBlockDecoded(SAMPLE_INFO* smp, u32 voiceIdx, u32 blockIdx
+@@ -263,10 +713,16 @@ static void ensureADPCMBlockDecoded(SAMPLE_INFO* smp, u32 voiceIdx, u32 blockIdx
+   if (adpcmCachedBlock[voiceIdx] != ~0u && adpcmCachedBlock[voiceIdx] < blockIdx)
+     startBlock = adpcmCachedBlock[voiceIdx] + 1;
  
++  /* Detector 2. This is the instruction D3 faults on. Checking the bank the
++   * address belongs to BEFORE dereferencing turns an access violation at an
++   * arbitrary address into a named event. Costs one cached compare when the
++   * switch is off. */
++  PartyBoard_AudioNoteSampleRead(voiceIdx, smp->addr);
++
    for (u32 b = startBlock; b <= blockIdx; ++b) {
      const u8* blockData = (const u8*)smp->addr + b * 8;
 -    decodeADPCMBlockFull(blockData, coefTab, &adpcmYn1[voiceIdx], &adpcmYn2[voiceIdx],
@@ -1160,7 +1233,7 @@ index d7197a9..50f76a6 100644
    }
  
    adpcmCachedBlock[voiceIdx] = blockIdx;
-@@ -286,19 +729,37 @@ static const s16 (*getVoiceCoefTab(SAMPLE_INFO* smp))[2] {
+@@ -286,19 +742,37 @@ static const s16 (*getVoiceCoefTab(SAMPLE_INFO* smp))[2] {
    return adpcmInfo ? adpcmInfo->coefTab : zeroCoefTab;
  }
  
@@ -1206,7 +1279,7 @@ index d7197a9..50f76a6 100644
  }
  
  static void updateCurrentAddr(DSPvoice* vp, u32 srcPosHi) {
-@@ -359,10 +820,16 @@ static int decodeSourceSamples(DSPvoice* vp, u32 voiceIdx, s32* out, int maxSamp
+@@ -359,10 +833,16 @@ static int decodeSourceSamples(DSPvoice* vp, u32 voiceIdx, s32* out, int maxSamp
    *hitEnd = 0;
  
    for (; count < maxSamples; ++count) {
@@ -1227,7 +1300,7 @@ index d7197a9..50f76a6 100644
        } else {
          *hitEnd = 1;
          state->ended = 1;
-@@ -380,13 +847,32 @@ static int decodeSourceSamples(DSPvoice* vp, u32 voiceIdx, s32* out, int maxSamp
+@@ -380,13 +860,32 @@ static int decodeSourceSamples(DSPvoice* vp, u32 voiceIdx, s32* out, int maxSamp
    return count;
  }
  
@@ -1263,7 +1336,7 @@ index d7197a9..50f76a6 100644
    if (available >= needed || state->ended)
      return state->ended;
  
-@@ -419,12 +905,19 @@ static inline s32 readSourceBufferSample(const VoiceResamplerState* state, s32 i
+@@ -419,12 +918,19 @@ static inline s32 readSourceBufferSample(const VoiceResamplerState* state, s32 i
    return state->srcBuf[idx];
  }
  
@@ -1284,7 +1357,7 @@ index d7197a9..50f76a6 100644
  
    temp[idx++ & 3] = state->lastSamples[0];
    temp[idx++ & 3] = state->lastSamples[1];
-@@ -443,7 +936,7 @@ static int resampleVoice(u32 voiceIdx, s32* out, int numSamples, u32 pitch) {
+@@ -443,7 +949,7 @@ static int resampleVoice(u32 voiceIdx, s32* out, int numSamples, u32 pitch) {
      }
  
      const u32 phase = (state->curPos & 0xFFFF) >> 9;
@@ -1293,7 +1366,7 @@ index d7197a9..50f76a6 100644
      const long long t0 = temp[idx++ & 3];
      const long long t1 = temp[idx++ & 3];
      const long long t2 = temp[idx++ & 3];
-@@ -457,22 +950,81 @@ static int resampleVoice(u32 voiceIdx, s32* out, int numSamples, u32 pitch) {
+@@ -457,22 +963,81 @@ static int resampleVoice(u32 voiceIdx, s32* out, int numSamples, u32 pitch) {
    state->lastSamples[2] = temp[--idx & 3];
    state->lastSamples[1] = temp[--idx & 3];
    state->lastSamples[0] = temp[--idx & 3];
@@ -1387,7 +1460,7 @@ index d7197a9..50f76a6 100644
    }
  #endif
  
-@@ -489,8 +1041,7 @@ static s32 voiceDecodeBuf[SAL_SAMPLES_PER_FRAME];
+@@ -489,8 +1054,7 @@ static s32 voiceDecodeBuf[SAL_SAMPLES_PER_FRAME];
  static int renderVoiceSegment(DSPvoice* vp, s32* mainL, s32* mainR, s32* mainS, s32* auxAL,
                                s32* auxAR, s32* auxAS, s32* auxBL, s32* auxBR, s32* auxBS,
                                u32 voiceIdx, int frameOffset, int frameSamples, u16 adsrStart,
@@ -1397,7 +1470,7 @@ index d7197a9..50f76a6 100644
    if (vp->state == 0)
      return 0;
  
-@@ -506,41 +1057,121 @@ static int renderVoiceSegment(DSPvoice* vp, s32* mainL, s32* mainR, s32* mainS,
+@@ -506,41 +1070,121 @@ static int renderVoiceSegment(DSPvoice* vp, s32* mainL, s32* mainR, s32* mainS,
  
    /* Decode samples into temp buffer */
    VoiceResamplerState* state = &voiceResampler[voiceIdx];
@@ -1531,7 +1604,7 @@ index d7197a9..50f76a6 100644
  
    return voiceDone;
  }
-@@ -549,8 +1180,13 @@ void salCtrlDsp(s16* dest) {
+@@ -549,8 +1193,13 @@ void salCtrlDsp(s16* dest) {
    u8 st;
    DSPstudioinfo* stp;
  
@@ -1547,7 +1620,7 @@ index d7197a9..50f76a6 100644
  
    for (st = 0, stp = dspStudio; st < salMaxStudioNum; ++st, ++stp) {
      if (stp->state != 1)
-@@ -573,16 +1209,54 @@ void salCtrlDsp(s16* dest) {
+@@ -573,16 +1222,54 @@ void salCtrlDsp(s16* dest) {
        if (vp->state != 0) {
          u32 voiceIdx = (u32)(vp - dspVoice);
          u8 mixStart = 0;
@@ -1603,7 +1676,7 @@ index d7197a9..50f76a6 100644
            vp->lastVolL = vp->volL;
            vp->lastVolR = vp->volR;
            vp->lastVolS = vp->volS;
-@@ -625,14 +1299,34 @@ void salCtrlDsp(s16* dest) {
+@@ -625,14 +1312,34 @@ void salCtrlDsp(s16* dest) {
  #endif
  
            mixStart = vp->singleOffset;
@@ -1643,7 +1716,16 @@ index d7197a9..50f76a6 100644
            }
  
            voiceResampler[voiceIdx].srcCount = 0;
-@@ -664,37 +1358,70 @@ void salCtrlDsp(s16* dest) {
+@@ -643,6 +1350,8 @@ void salCtrlDsp(s16* dest) {
+                  sizeof(voiceResampler[voiceIdx].lastSamples));
+           voiceResampler[voiceIdx].ended = 0;
+           updateCurrentAddr(vp, voiceResampler[voiceIdx].srcPosHi);
++          PartyBoard_AudioVoiceStart(voiceIdx, vp->smp_info.addr, vp->smp_id,
++                                     vp->smp_info.compType, vp->smp_info.length);
+ 
+           vp->state = 2;
+         }
+@@ -664,37 +1373,70 @@ void salCtrlDsp(s16* dest) {
          s32* auxBS = auxBCur ? auxBCur + SAL_SAMPLES_PER_FRAME * 2 : NULL;
  
          if (studioMain != NULL) {
@@ -1726,7 +1808,7 @@ index d7197a9..50f76a6 100644
              u16 adsrStart = 0;
              u16 adsrDelta = 0;
              u32 adsrDone = adsrHandle(&vp->adsr, &adsrStart, &adsrDelta);
-@@ -702,31 +1429,36 @@ void salCtrlDsp(s16* dest) {
+@@ -702,31 +1444,36 @@ void salCtrlDsp(s16* dest) {
  
              if (renderVoiceSegment(vp, studioL, studioR, studioS, auxAL, auxAR, auxAS, auxBL, auxBR,
                                     auxBS, voiceIdx, sampleOffset, SAL_SAMPLES_PER_SUBFRAME,
@@ -1776,7 +1858,7 @@ index d7197a9..50f76a6 100644
  
            if (finished) {
              vp = nextVp;
-@@ -737,6 +1469,10 @@ void salCtrlDsp(s16* dest) {
+@@ -737,6 +1484,10 @@ void salCtrlDsp(s16* dest) {
        vp = nextVp;
      }
  
@@ -1787,7 +1869,7 @@ index d7197a9..50f76a6 100644
      if (stp->main[salFrame] != NULL) {
        s32* studioMain = stp->main[salFrame];
        s32* auxACur = stp->auxA[salAuxFrame];
-@@ -783,16 +1519,18 @@ void salCtrlDsp(s16* dest) {
+@@ -783,16 +1534,18 @@ void salCtrlDsp(s16* dest) {
          s32* studioL = studioMain;
          s32* studioR = studioMain + SAL_SAMPLES_PER_FRAME;
          s32* studioS = studioMain + SAL_SAMPLES_PER_FRAME * 2;
@@ -1809,7 +1891,7 @@ index d7197a9..50f76a6 100644
        }
  
        if (stp->type == SND_STUDIO_TYPE_DPL2) {
-@@ -801,44 +1539,155 @@ void salCtrlDsp(s16* dest) {
+@@ -801,44 +1554,155 @@ void salCtrlDsp(s16* dest) {
            foldStereoToOutput(dpl2Rear, dpl2Rear + SAL_SAMPLES_PER_FRAME);
        } else {
          /* Add processed AUX B to mix for standard studios only. */
@@ -1971,7 +2053,7 @@ index d7197a9..50f76a6 100644
      }
  
      if (salAudioStream == NULL)
-@@ -853,11 +1702,91 @@ bool salInitAi(SND_SOME_CALLBACK callback, u32 flags, u32* outFreq) {
+@@ -853,11 +1717,91 @@ bool salInitAi(SND_SOME_CALLBACK callback, u32 flags, u32* outFreq) {
    salOutputIndex = 0;
    userCallback = callback;
  
@@ -2063,7 +2145,7 @@ index d7197a9..50f76a6 100644
    initResampleTables();
  
    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
-@@ -908,6 +1837,22 @@ bool salExitAi() {
+@@ -908,6 +1852,22 @@ bool salExitAi() {
      SDL_DestroyAudioStream(salAudioStream);
      salAudioStream = NULL;
    }
@@ -2086,11 +2168,114 @@ index d7197a9..50f76a6 100644
    SDL_QuitSubSystem(SDL_INIT_AUDIO);
    return true;
  }
+@@ -950,3 +1910,94 @@ void hwDisableIrq() { SDL_LockMutex(globalMutex); }
+ void hwIRQEnterCritical() { SDL_LockMutex(globalMutex); }
+ 
+ void hwIRQLeaveCritical() { SDL_UnlockMutex(globalMutex); }
++
++/*
++ * Voice enumeration for the bank lifetime diagnostic. It lives here because
++ * dspVoice, salNumVoices and globalMutex are all local to this backend, and the
++ * diagnostic must not carry its own copy of the voice layout.
++ *
++ * The walk holds globalMutex, which is the same lock the audio thread holds
++ * while it renders. A voice therefore cannot change state underneath the scan,
++ * so what the caller reports is a fact and not a torn read. The caller (a bank
++ * being freed) holds no MusyX lock at that point, so taking this one here
++ * introduces no new ordering.
++ */
++/*
++ * Lifetime barrier for one sample allocation that is about to be freed.
++ *
++ * Why this is needed at all. hwBreak does not stop a voice; it raises a flag
++ * that the audio thread reads the next time it renders, and until then the
++ * voice keeps reading its sample. And sndPopGroup releases the audio lock
++ * before RemoveSamples, so the free runs concurrently with the mixer. Measured
++ * consequence: at an overlay teardown, three live voices were still reading
++ * inside a bank at the instant it was released, and the audio thread read one
++ * of those samples one frame after the free.
++ *
++ * Why it is a barrier and not a wait. Holding globalMutex means the audio
++ * thread is not inside salCtrlDsp right now; detaching every voice that points
++ * into the range means it cannot enter it afterwards either. That is a
++ * decision, taken on facts, at the only instant that matters. Draining for
++ * longer would not be one: the audio thread is driven by the device, so no
++ * amount of msmSysRegularProc iterations makes it release anything.
++ *
++ * A detached voice is ended the same way the audio thread ends one that
++ * finishes on its own, message to the synthesiser included, so the two layers
++ * stay in agreement.
++ */
++void salDetachVoicesFromSample(const void* base, u32 length) {
++  const u8* first;
++  const u8* last;
++  u32 i;
++
++  if (base == NULL || dspVoice == NULL || globalMutex == NULL) {
++    return;
++  }
++
++  first = (const u8*)base;
++  last = first + length;
++
++  SDL_LockMutex(globalMutex);
++  for (i = 0; i < salNumVoices; ++i) {
++    DSPvoice* vp = &dspVoice[i];
++    const u8* addr = (const u8*)vp->smp_info.addr;
++
++    if (addr == NULL) {
++      continue;
++    }
++    /* An exact base match counts on its own. smp_info.addr is always the base
++     * of one of these allocations, so a length computed differently from the
++     * one the allocation was made with must not be able to hide it. */
++    if (addr != first && (addr < first || addr >= last)) {
++      continue;
++    }
++
++    if (vp->state != 0) {
++      PartyBoard_AudioVoiceDetachedForFree(i, addr);
++      salSynthSendMessage(vp, 0);
++      deactivateVoiceAtOffset(vp, 0);
++    }
++
++    vp->smp_info.addr = NULL;
++    vp->smp_info.length = 0;
++    vp->currentAddr = 0;
++    voiceResampler[i].ended = 1;
++    adpcmCachedBlock[i] = (u32)~0u;
++  }
++  SDL_UnlockMutex(globalMutex);
++}
++
++void PartyBoard_AudioWalkVoices(PartyBoardAudioVoiceSink sink, void* context) {
++  u32 i;
++
++  if (sink == NULL || dspVoice == NULL) {
++    return;
++  }
++
++  SDL_LockMutex(globalMutex);
++  for (i = 0; i < salNumVoices; ++i) {
++    const DSPvoice* vp = &dspVoice[i];
++    sink(context, i, vp->state, vp->smp_info.addr, vp->smp_id, vp->smp_info.compType,
++         vp->smp_info.length, vp->playInfo.posHi);
++  }
++  SDL_UnlockMutex(globalMutex);
++}
 diff --git a/src/musyx/runtime/s_data.c b/src/musyx/runtime/s_data.c
-index c525653..b7a0aeb 100644
+index c525653..b095009 100644
 --- a/src/musyx/runtime/s_data.c
 +++ b/src/musyx/runtime/s_data.c
-@@ -6,6 +6,9 @@
+@@ -1,11 +1,17 @@
+ 
+ #include "musyx/assert.h"
++
++/* Diagnostic only. See include/port/audio_lifetime.h. */
++#include "port/audio_lifetime.h"
+ #include "musyx/hardware.h"
+ #include "musyx/s3d.h"
+ #include "musyx/seq.h"
  #include "musyx/synth.h"
  #include "musyx/synthdata.h"
  
@@ -2100,7 +2285,7 @@ index c525653..b7a0aeb 100644
  #if MUSY_VERSION <= MUSY_VERSION_CHECK(2, 0, 0)
  static GSTACK gs[128];
  #define GS_CURRENT gs
-@@ -219,11 +222,16 @@ static void RemoveKeymaps(unsigned short* ref) { ScanIDList(ref, NULL, 2, 1); }
+@@ -219,11 +225,16 @@ static void RemoveKeymaps(unsigned short* ref) { ScanIDList(ref, NULL, 2, 1); }
  
  static void RemoveLayers(unsigned short* ref) { ScanIDList(ref, NULL, 3, 1); }
  
@@ -2119,7 +2304,7 @@ index c525653..b7a0aeb 100644
  }
  
  static void RemoveSamples(unsigned short* ref, void* sdir) {
-@@ -235,24 +243,414 @@ static void InsertFXTab(unsigned short gid, FX_DATA* fd) { dataInsertFX(gid, fd-
+@@ -235,24 +246,419 @@ static void InsertFXTab(unsigned short gid, FX_DATA* fd) { dataInsertFX(gid, fd-
  
  static void RemoveFXTab(unsigned short gid) { dataRemoveFX(gid); }
  
@@ -2516,6 +2701,11 @@ index c525653..b7a0aeb 100644
 +          return FALSE;
 +        }
 +#endif
++#if MUSY_TARGET == MUSY_TARGET_PC
++        /* The sample blob was copied above, so its extent is known exactly here
++         * and nowhere later: SDIR_TAB records the base but not the size. */
++        PartyBoard_AudioBankLoad(sdir, sampleCopy, sampleDataSize, gid);
++#endif
          GS_CURRENT[SP_CURRENT].gAddr = g;
          GS_CURRENT[SP_CURRENT].prjAddr = prj_data;
          GS_CURRENT[SP_CURRENT].sdirAddr = sdir;
@@ -2535,6 +2725,22 @@ index c525653..b7a0aeb 100644
          InsertMacros((u16*)((u8*)prj_data + g->macroOff), pool);
          InsertCurves((u16*)((u8*)prj_data + g->curveOff), pool);
          InsertKeymaps((u16*)((u8*)prj_data + g->keymapOff), pool);
+@@ -262,6 +668,7 @@ bool sndPushGroup(void* prj_data, u16 gid, void* samples, void* sdir, void* pool
+         }
+         hwSyncSampleMem();
+         ++SP_CURRENT;
++        PartyBoard_AudioBankVisible(sdir);
+         return TRUE;
+       }
+ 
+@@ -298,6 +705,7 @@ bool sndPopGroup() {
+   g = GS_CURRENT[--SP_CURRENT].gAddr;
+   prj = GS_CURRENT[SP_CURRENT].prjAddr;
+   sdir = GS_CURRENT[SP_CURRENT].sdirAddr;
++  PartyBoard_AudioBankReleaseRequest(sdir, g != NULL ? (s32)g->id : -1);
+   hwDisableIrq();
+ 
+   if (g->type == 1) {
 diff --git a/src/musyx/runtime/seq.c b/src/musyx/runtime/seq.c
 index 35e4383..42ba530 100644
 --- a/src/musyx/runtime/seq.c
@@ -3515,10 +3721,14 @@ index a86f4ac..6412166 100644
      }
      break;
 diff --git a/src/musyx/runtime/synthdata.c b/src/musyx/runtime/synthdata.c
-index 00badf6..66a4e8b 100644
+index 00badf6..96f56ca 100644
 --- a/src/musyx/runtime/synthdata.c
 +++ b/src/musyx/runtime/synthdata.c
-@@ -2,10 +2,14 @@
+@@ -1,11 +1,18 @@
+ #include "musyx/synthdata.h"
++
++/* Diagnostic only. See include/port/audio_lifetime.h. */
++#include "port/audio_lifetime.h"
  #include "musyx/assert.h"
  #include "musyx/hardware.h"
  #include "musyx/snd.h"
@@ -3533,7 +3743,7 @@ index 00badf6..66a4e8b 100644
  #if MUSY_VERSION >= MUSY_VERSION_CHECK(2, 0, 2)
  static struct SDIR_DATA* dataSmpSDirCurrent;
  #endif
-@@ -21,6 +25,8 @@ static u16 dataMacTotal;
+@@ -21,6 +28,8 @@ static u16 dataMacTotal;
  static FX_GROUP dataFXGroups[128];
  static u16 dataFXGroupNum;
  
@@ -3542,7 +3752,7 @@ index 00badf6..66a4e8b 100644
  bool dataInsertKeymap(u16 cid, void* keymapdata) {
    long i; // r31
    long j; // r29
-@@ -222,7 +228,8 @@ bool dataRemoveCurve(u16 sid) {
+@@ -222,7 +231,8 @@ bool dataRemoveCurve(u16 sid) {
    return 0;
  }
  
@@ -3552,7 +3762,7 @@ index 00badf6..66a4e8b 100644
    s32 i;        // r31
    SDIR_DATA* s; // r25
    u16 n;        // r27
-@@ -270,6 +277,8 @@ bool dataInsertSDir(SDIR_DATA* sdir, void* smp_data) {
+@@ -270,6 +280,8 @@ bool dataInsertSDir(SDIR_DATA* sdir, void* smp_data) {
        dataSmpSDirs[dataSmpSDirNum].data = sdir;
        dataSmpSDirs[dataSmpSDirNum].numSmp = n;
        dataSmpSDirs[dataSmpSDirNum].base = smp_data;
@@ -3561,7 +3771,7 @@ index 00badf6..66a4e8b 100644
        ++dataSmpSDirNum;
        hwEnableIrq();
        return 1;
-@@ -281,11 +290,26 @@ bool dataInsertSDir(SDIR_DATA* sdir, void* smp_data) {
+@@ -281,11 +293,26 @@ bool dataInsertSDir(SDIR_DATA* sdir, void* smp_data) {
    return 1;
  }
  
@@ -3588,7 +3798,7 @@ index 00badf6..66a4e8b 100644
  
    index = 0;
    for (; index < dataSmpSDirNum && dataSmpSDirs[index].data != sdir; ++index) {
-@@ -303,6 +327,9 @@ bool dataRemoveSDir(struct SDIR_DATA* sdir) {
+@@ -303,6 +330,9 @@ bool dataRemoveSDir(struct SDIR_DATA* sdir) {
      }
  
      if (data->id == 0xFFFF) {
@@ -3598,10 +3808,14 @@ index 00badf6..66a4e8b 100644
  #if MUSY_VERSION <= MUSY_VERSION_CHECK(2, 0, 1)
        data = sdir;
  
-@@ -337,6 +364,12 @@ bool dataRemoveSDir(struct SDIR_DATA* sdir) {
+@@ -337,6 +367,16 @@ bool dataRemoveSDir(struct SDIR_DATA* sdir) {
  
        --dataSmpSDirNum;
        hwEnableIrq();
++      /* Detector 1, at the last moment the bank is still mapped. Deliberately
++       * placed after hwEnableIrq() so it observes the same window the free
++       * below runs in, rather than a quieter one of its own making. */
++      PartyBoard_AudioBankFree(sdir, sampleData);
 +      if (ownsData) {
 +        free(sdir);
 +      }
@@ -3611,7 +3825,7 @@ index 00badf6..66a4e8b 100644
        return TRUE;
      }
  
-@@ -355,10 +388,14 @@ bool dataAddSampleReference(u16 sid
+@@ -355,10 +395,14 @@ bool dataAddSampleReference(u16 sid
    SAMPLE_HEADER* header; // r1+0xC
    SDIR_DATA* data;       // r30
    SDIR_DATA* sdir;       // r31
@@ -3626,7 +3840,7 @@ index 00badf6..66a4e8b 100644
  #if MUSY_VERSION <= MUSY_VERSION_CHECK(2, 0, 1)
    data = NULL;
  #endif
-@@ -386,6 +423,17 @@ bool dataAddSampleReference(u16 sid
+@@ -386,6 +430,17 @@ bool dataAddSampleReference(u16 sid
    }
  done:
  
@@ -3644,7 +3858,15 @@ index 00badf6..66a4e8b 100644
    MUSY_ASSERT_MSG(sdir != NULL,
                    "Sample ID to be inserted could not be found in any sample directory.\n");
  
-@@ -644,7 +692,11 @@ s32 dataGetSample(u16 sid, SAMPLE_INFO* newsmp) {
+@@ -402,6 +457,7 @@ done:
+                  aramInfo
+ #endif
+     );
++    PartyBoard_AudioSampleIdentify(sdir->addr, sid);
+   }
+ 
+ #if MUSY_VERSION <= MUSY_VERSION_CHECK(2, 0, 1)
+@@ -644,7 +700,11 @@ s32 dataGetSample(u16 sid, SAMPLE_INFO* newsmp) {
          newsmp->compType = sheader->length >> 24;
  
          if (result->extraData) {
@@ -3656,7 +3878,7 @@ index 00badf6..66a4e8b 100644
          }
  #if MUSY_VERSION >= MUSY_VERSION_CHECK(2, 0, 2)
          else {
-@@ -736,12 +788,11 @@ void dataInit(u32 smpBase, u32 smpLength) {
+@@ -736,12 +796,11 @@ void dataInit(u32 smpBase, u32 smpLength) {
  
  void dataExit() { hwExitSampleMem(); }
  
@@ -3670,7 +3892,7 @@ index 00badf6..66a4e8b 100644
    SDIR_DATA_INTER* s2 = NULL;
    u16 n = 0;
  
-@@ -752,18 +803,32 @@ void* sndConvert32BitSDIRTo64BitSDIR(void* sdir_int) {
+@@ -752,18 +811,32 @@ void* sndConvert32BitSDIRTo64BitSDIR(void* sdir_int) {
    ++n;
  
    sdir = malloc(n * sizeof(SDIR_DATA));
@@ -4140,91 +4362,3 @@ index 98f9465..67feb67 100644
    return -1;
  #endif
  }
-diff --git a/src/musyx/runtime/synth_wait.h b/src/musyx/runtime/synth_wait.h
-new file mode 100644
-index 0000000..995c683
---- /dev/null
-+++ b/src/musyx/runtime/synth_wait.h
-@@ -0,0 +1,82 @@
-+/* Private macro wait implementation, shared with the focused regression test. */
-+static u32 mcmdWait(SYNTH_VOICE* svoice, MSTEP* cstep) {
-+  u32 w;  // r1+0x10
-+  u32 ms; // r29
-+
-+  if ((ms = (u16)(cstep->para[1] >> 0x10))) {
-+    if (((u8)(cstep->para[0] >> 8) & 1)) {
-+      if (svoice->cFlags & 8) {
-+        if (!(svoice->cFlags & 0x10000000000)) {
-+          return 0;
-+        }
-+        svoice->cFlags |= 0x40000000000;
-+      }
-+      svoice->cFlags |= 4;
-+    } else {
-+      svoice->cFlags &= ~4;
-+    }
-+
-+    if (((u8)(cstep->para[0] >> 0x18) & 1)) {
-+      if (!(svoice->cFlags & 0x20) && !hwIsActive(svoice->id & 0xFF)) {
-+        return 0;
-+      }
-+      svoice->cFlags |= 0x40000;
-+    } else {
-+      svoice->cFlags &= ~0x40000;
-+    }
-+
-+    if (((u8)(cstep->para[0] >> 0x10)) & 1) {
-+      ms = sndRand() % ms;
-+    }
-+
-+    if (ms != 0xFFFF) {
-+      if ((w = ((u8)(cstep->para[1] >> 0x8) & 1) != 0)) {
-+        sndConvertMs(&ms);
-+      } else {
-+        sndConvertTicks(&ms, svoice);
-+      }
-+
-+      if (w != 0) {
-+        if ((u8)cstep->para[1] & 1) {
-+          svoice->wait = svoice->macStartTime + ms;
-+        } else {
-+          svoice->wait = macRealTime + ms;
-+        }
-+      } else {
-+        if ((u8)cstep->para[1] & 1) {
-+          svoice->wait = ms;
-+        } else {
-+          svoice->wait = svoice->waitTime + ms;
-+        }
-+      }
-+
-+      if (!(svoice->wait > macRealTime)) {
-+        svoice->waitTime = svoice->wait;
-+        svoice->wait = 0;
-+      }
-+    } else {
-+      svoice->wait = -1;
-+    }
-+
-+    if (svoice->wait != 0) {
-+      if (svoice->wait != -1) {
-+        TimeQueueAdd(svoice);
-+      }
-+      macMakeInactive(svoice, 1);
-+      return 1;
-+    }
-+  }
-+
-+  return 0;
-+}
-+
-+static u32 mcmdWaitMs(SYNTH_VOICE* svoice, MSTEP* cstep) {
-+  /* The original PPC byte write at offset 6 selects milliseconds (bits
-+   * 8..15 of para[1]). On little-endian hosts that byte is part of the
-+   * duration instead: 333 becomes 257, and 0xffff loses its infinite-wait
-+   * meaning. An absolute wait then uses the tick/global-time path and
-+   * eventually expires immediately for every newly started instrument.
-+   * Select the field by value, preserving duration and absolute mode. */
-+  cstep->para[1] = (cstep->para[1] & ~0x0000ff00u) | 0x00000100u;
-+  return mcmdWait(svoice, cstep);
-+}
