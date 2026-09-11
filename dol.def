@@ -23,6 +23,8 @@ EXPORTS
     PartyBoard_CrashReportAbnormal
     PartyBoard_CoroutineStackRunSelfTest
     PartyBoard_CoroutineSymbolsReady
+    PartyBoard_CoroutineStackWatch
+    PartyBoard_CoroutineWatchdogEnabled
     PartyBoard_MemDiagRunSelfTest
     PartyBoard_MemDiagEnabled
     PartyBoard_MemDiagCorruptionDetected

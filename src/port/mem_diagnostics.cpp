@@ -4,6 +4,7 @@
 #include "port/mem_diagnostics.h"
 
 #include "port/crash_report.h"
+#include "port/coroutine_stack.h"
 
 #include <atomic>
 #include <chrono>
@@ -568,6 +569,31 @@ extern "C" void PartyBoard_MemDiagWriteReportFile(void)
     CloseHandle(file);
     std::fprintf(stderr, "HuMem corruption report: %s\n", path);
 #endif
+}
+
+// Stop the run while a coroutine stack still has room, because once it runs out
+// nothing can report: the kernel cannot push an exception frame onto an
+// exhausted stack, so no handler of ours ever sees the fault. This is the only
+// point at which the offending process can still be named.
+extern "C" void PartyBoard_CoroutineWatchdogTick(void)
+{
+    if (!PartyBoard_CoroutineWatchdogEnabled()) return;
+    static bool tripped = false;
+    if (tripped) return;
+
+    // 2 KB of remaining room. Deep enough to be alarming, shallow enough that a
+    // healthy process never reaches it: the measured survivors peak below 30%.
+    char detail[512];
+    if (PartyBoard_CoroutineStackWatch(2048, detail, sizeof(detail))) return;
+
+    tripped = true;
+    char message[768];
+    std::snprintf(message, sizeof(message), "coroutine stack nearly exhausted at frame %u: %s",
+        PartyBoard_NetplayFrameForDiagnostics(), detail);
+    std::fprintf(stderr, "[STACK WATCHDOG] %s\n", message);
+    PartyBoard_CrashBreadcrumb("STACK", "%s", message);
+    PartyBoard_CrashReportAbnormal("COROUTINE_STACK_EXHAUSTION", message);
+    PartyBoard_IsRunning = false;
 }
 
 extern "C" void PartyBoard_MemDiagTick(void)

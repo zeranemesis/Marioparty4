@@ -388,6 +388,7 @@ static BOOL PadReadSimulationTick(u32 retraceCount)
      * PARTYBOARD_MEM_DIAGNOSTICS=1, and the sweep itself stops the run on the
      * first violation rather than letting the damage spread. */
     PartyBoard_MemDiagTick();
+    PartyBoard_CoroutineWatchdogTick();
 #endif
     VCounter++;
     return TRUE;

@@ -66,6 +66,9 @@ bool PartyBoard_MemDiagSweep(void);
    heap stopped being intact is the frame the session ends on. */
 void PartyBoard_MemDiagTick(void);
 
+/* Coroutine stack headroom watchdog, called from the same tick point. */
+void PartyBoard_CoroutineWatchdogTick(void);
+
 /* Frames the sweep has certified, for the report and for the supervisor. */
 u32 PartyBoard_MemDiagLastGoodFrame(void);
 s32 PartyBoard_MemDiagFirstBadFrame(void); /* -1 while intact */

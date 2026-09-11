@@ -81,6 +81,26 @@ u32 PartyBoard_CoroutineStackSummary(char *out, size_t outSize);
 // leaves usage data even when it never crashes.
 void PartyBoard_CoroutineStackWriteReport(const char *path);
 
+// Headroom watchdog.
+//
+// A coroutine stack that actually overflows cannot be measured after the fact:
+// the overflow kills the process at that instant, so the stack is never retired
+// and never appears in the usage table. Every peak reported by the meter is
+// therefore a survivor, which is how an overflow hid behind a comfortable
+// maximum of 27 per cent for a whole investigation.
+//
+// This catches it before it happens. Once per accepted simulation tick it looks
+// at the bottom `threshold` bytes of every live armed stack: if the pattern
+// there has been overwritten, that stack has less than `threshold` bytes left
+// and is about to run out. Only the bottom of each stack is scanned, so the cost
+// is bounded by the threshold rather than by the stack size.
+//
+// Returns false when a stack is below the threshold, having filled `out` with a
+// description naming the owning process. Off unless
+// PARTYBOARD_STACK_WATCHDOG=1.
+bool PartyBoard_CoroutineStackWatch(u32 threshold, char *out, size_t outSize);
+bool PartyBoard_CoroutineWatchdogEnabled(void);
+
 bool PartyBoard_CoroutineStackRunSelfTest(void);
 
 #ifdef __cplusplus

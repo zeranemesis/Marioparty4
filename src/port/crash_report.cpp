@@ -20,6 +20,8 @@
 #include "port/coroutine_stack.h"
 #include "partyboard_version.h"
 
+extern "C" bool PartyBoard_IsRunning;
+
 #include <atomic>
 #include <cstdarg>
 #include <cstdint>
@@ -537,6 +539,9 @@ struct PendingCrash {
 };
 
 PendingCrash gPending;
+// Set by the guard-page handler, consumed by the writer thread.
+std::atomic<std::uintptr_t> gGuardPageAddress { 0 };
+std::atomic<bool> gGuardPageReported { false };
 HANDLE gWriterThread = nullptr;
 HANDLE gWriterWake = nullptr;
 HANDLE gWriterDone = nullptr;
@@ -600,6 +605,30 @@ DWORD WINAPI writerThread(LPVOID)
     for (;;) {
         WaitForSingleObject(gWriterWake, INFINITE);
         if (gWriterShouldExit.load(std::memory_order_acquire)) return 0;
+        // A guard-page overflow has no exception context to dump: the handler
+        // only left an address. Describing it needs symbols and a real stack,
+        // which is exactly what this thread has and the faulting one does not.
+        const auto guard = gGuardPageAddress.exchange(0, std::memory_order_acq_rel);
+        if (guard != 0) {
+            static char description[1024];
+            const bool known = PartyBoard_CoroutineStackDescribe(
+                reinterpret_cast<const void *>(guard), description, sizeof(description));
+            static char message[1536];
+            std::snprintf(message, sizeof(message),
+                "COROUTINE STACK OVERFLOW at frame %u, faulting address 0x%llx: %s",
+                gSim.simulationFrame, static_cast<unsigned long long>(guard),
+                known ? description : "address is not in any known coroutine stack");
+            std::fprintf(stderr, "[STACK OVERFLOW] %s\n", message);
+            std::fflush(stderr);
+            PartyBoard_CrashBreadcrumb(PARTYBOARD_CRASH_CAT_STACK, "%s", message);
+            gPending.pointers = nullptr;
+            gPending.threadId = GetCurrentThreadId();
+            gPending.reason = "COROUTINE_STACK_OVERFLOW";
+            gPending.detail = message;
+            writeCrashArtifacts();
+            SetEvent(gWriterDone);
+            continue;
+        }
         writeCrashArtifacts();
         SetEvent(gWriterDone);
     }
@@ -626,8 +655,41 @@ void dispatchToWriter(EXCEPTION_POINTERS *pointers, const char *reason, const ch
     }
 }
 
+// STATUS_GUARD_PAGE_VIOLATION on one of our coroutine guard pages is the only
+// chance to report a stack overflow. Windows clears the guard bit before
+// dispatching, so by the time this runs the thread has a fresh page of stack and
+// the retry would succeed. That is exactly the breathing room a report needs,
+// and it is why the guard page is committed with PAGE_GUARD rather than left
+// reserved: a reserved page gives a plain access violation on the push of a
+// return address, and the kernel then cannot push an exception frame either, so
+// nothing is ever reported.
+bool handleCoroutineGuardPage(EXCEPTION_POINTERS *pointers)
+{
+    if (!pointers || !pointers->ExceptionRecord) return false;
+    const auto *record = pointers->ExceptionRecord;
+    if (record->ExceptionCode != STATUS_GUARD_PAGE_VIOLATION) return false;
+    if (record->NumberParameters < 2) return false;
+
+    // Everything here runs on the stack that just overflowed. The guard bit is
+    // cleared by now, so a few pages are available, but symbol resolution or
+    // report formatting would consume them and fault again, this time fatally.
+    // So this does the minimum: remember the address, stop the run, and hand the
+    // work to the writer thread, which has a stack of its own.
+    gGuardPageAddress.store(record->ExceptionInformation[1], std::memory_order_release);
+    bool expected = false;
+    if (gGuardPageReported.compare_exchange_strong(expected, true)) {
+        PartyBoard_IsRunning = false;
+        if (gWriterWake) SetEvent(gWriterWake);
+    }
+    return true;
+}
+
 LONG CALLBACK vectoredHandler(EXCEPTION_POINTERS *pointers)
 {
+    // Handled and resumed: the guard bit is already cleared, so continuing lets
+    // the run stop cleanly instead of dying where nothing can be recorded.
+    if (handleCoroutineGuardPage(pointers)) return EXCEPTION_CONTINUE_EXECUTION;
+
     if (pointers && pointers->ExceptionRecord
         && isFatalCode(static_cast<unsigned long>(pointers->ExceptionRecord->ExceptionCode))) {
         dispatchToWriter(pointers, nullptr, nullptr);

@@ -282,18 +282,59 @@ extern "C" void *PartyBoard_CoroutineStackAlloc(size_t size)
         // One guard page below catches an overflow, one above catches a write
         // past the top. Both stay reserved but uncommitted, so they cost address
         // space only and still fault on any access.
-        const std::size_t total = page + usableBytes + page;
+        // The low guard is several pages, not one. When a guard page fires, its
+        // bit is cleared and execution resumes on that page: the exception
+        // dispatch alone pushes a CONTEXT of about 1.2 KB, so a single 4 KB page
+        // leaves a handler almost nothing and it faults again, fatally. Four
+        // pages is enough for dispatch plus a handler that does very little.
+        const std::size_t guardPages = PartyBoard_CoroutineWatchdogEnabled() ? 4u : 1u;
+        const std::size_t lowGuard = page * guardPages;
+        const std::size_t total = lowGuard + usableBytes + page;
         auto *reservation = static_cast<unsigned char *>(
             VirtualAlloc(nullptr, total, MEM_RESERVE, PAGE_NOACCESS));
         if (reservation) {
-            if (VirtualAlloc(reservation + page, usableBytes, MEM_COMMIT, PAGE_READWRITE)) {
-                PARTYBOARD_ASAN_UNPOISON(reservation + page, usableBytes);
+            if (VirtualAlloc(reservation + lowGuard, usableBytes, MEM_COMMIT, PAGE_READWRITE)) {
+                PARTYBOARD_ASAN_UNPOISON(reservation + lowGuard, usableBytes);
+                // With the watchdog armed the low guard is COMMITTED with
+                // PAGE_GUARD instead of left reserved. The difference decides
+                // whether an overflow can be reported at all.
+                //
+                // A reserved page gives a plain access violation, and the
+                // faulting instruction is the push of a return address: the
+                // kernel then cannot push an exception frame either, so no
+                // handler ever runs and the process dies silently. A guard page
+                // raises STATUS_GUARD_PAGE_VIOLATION and, in the same step,
+                // clears its own guard bit. The retry succeeds, the thread has
+                // a fresh page of stack, and a handler can finally name the
+                // process that overflowed.
+                if (PartyBoard_CoroutineWatchdogEnabled()) {
+                    DWORD previous = 0;
+                    const bool committed =
+                        VirtualAlloc(reservation, lowGuard, MEM_COMMIT, PAGE_READWRITE) != nullptr;
+                    const bool guarded = committed
+                        && VirtualProtect(reservation, lowGuard, PAGE_READWRITE | PAGE_GUARD, &previous);
+                    // Proof of life, and proof of coverage: without the address
+                    // ranges there is no way to tell "no overflow happened" from
+                    // "the overflow was on a stack this allocator never saw".
+                    static std::atomic<std::uint32_t> announced { 0 };
+                    if (announced.fetch_add(1, std::memory_order_relaxed) < 8) {
+                        std::fprintf(stderr,
+                            "[STACK GUARD] armed stack 0x%llx-0x%llx guard 0x%llx-0x%llx "
+                            "size %llu committed=%d guarded=%d\n",
+                            
+                            (unsigned long long)(std::uintptr_t)(reservation + lowGuard),
+                            (unsigned long long)((std::uintptr_t)(reservation + lowGuard) + usableBytes),
+                            (unsigned long long)(std::uintptr_t)reservation,
+                            (unsigned long long)((std::uintptr_t)reservation + lowGuard),
+                            (unsigned long long)usableBytes, committed ? 1 : 0, guarded ? 1 : 0);
+                    }
+                }
                 std::lock_guard<std::mutex> guard(gMutex);
                 for (std::uint32_t index = 0; index < kMaxTracked; ++index) {
                     Entry &entry = gEntries[index];
                     if (entry.live.load(std::memory_order_relaxed)) continue;
                     entry.reservation = reservation;
-                    entry.usable = reservation + page;
+                    entry.usable = reservation + lowGuard;
                     entry.reservationBytes = total;
                     entry.usableBytes = usableBytes;
                     entry.requestedBytes = size;
@@ -510,6 +551,67 @@ extern "C" void PartyBoard_CoroutineStackWriteReport(const char *path)
     if (!file) return;
     std::fputs(buffer, file);
     std::fclose(file);
+}
+
+extern "C" bool PartyBoard_CoroutineWatchdogEnabled(void)
+{
+    static const bool enabled = [] {
+        const char *value = std::getenv("PARTYBOARD_STACK_WATCHDOG");
+        return value && value[0] != '\0' && value[0] != '0' && value[0] != 'n'
+            && value[0] != 'N';
+    }();
+    return enabled;
+}
+
+extern "C" bool PartyBoard_CoroutineStackWatch(u32 threshold, char *out, size_t outSize)
+{
+    if (!PartyBoard_CoroutineWatchdogEnabled()) return true;
+    if (out && outSize) out[0] = 0;
+
+    std::lock_guard<std::mutex> guard(gMutex);
+    const auto highest = gHighestSlot.load(std::memory_order_acquire);
+    for (std::uint32_t index = 0; index < highest && index < kMaxTracked; ++index) {
+        const Entry &entry = gEntries[index];
+        if (!entry.live.load(std::memory_order_acquire) || !entry.armed) continue;
+        if (entry.usableBytes <= kReservedAtBase + kReservedAtTop) continue;
+
+        // Only the bottom of the stack matters here. If the pattern is intact
+        // across the whole threshold window, this stack still has at least that
+        // much room and needs no further work.
+        const std::size_t window = entry.usableBytes - kReservedAtTop - kReservedAtBase;
+        const std::size_t limit = threshold < window ? threshold : window;
+        const unsigned char *base = entry.usable;
+        std::size_t dirtyOffset = 0;
+        bool critical = false;
+        for (std::size_t offset = kReservedAtBase; offset < kReservedAtBase + limit;
+             offset += sizeof(std::uint64_t)) {
+            std::uint64_t word = 0;
+            std::memcpy(&word, base + offset, sizeof(word));
+            if (word != kPattern) { dirtyOffset = offset; critical = true; break; }
+        }
+        if (!critical) continue;
+
+        char name[kNameChars];
+        describeEntryPoint(entry.entryPoint, name, sizeof(name));
+        const std::size_t used = entry.usableBytes - dirtyOffset;
+        const std::size_t left = entry.usableBytes - used;
+        if (out && outSize) {
+            std::snprintf(out, outSize,
+                "process=%s stack_base=0x%llx pc_size=%llu game_constant=%llu used=%llu "
+                "headroom=%llu usage=%.1f%% deepest_touched=0x%llx",
+                name, static_cast<unsigned long long>(
+                    reinterpret_cast<std::uintptr_t>(entry.usable)),
+                static_cast<unsigned long long>(entry.usableBytes),
+                static_cast<unsigned long long>(entry.requestedBytes / 2),
+                static_cast<unsigned long long>(used),
+                static_cast<unsigned long long>(left),
+                entry.usableBytes ? 100.0 * double(used) / double(entry.usableBytes) : 0.0,
+                static_cast<unsigned long long>(
+                    reinterpret_cast<std::uintptr_t>(entry.usable) + dirtyOffset));
+        }
+        return false;
+    }
+    return true;
 }
 
 extern "C" bool PartyBoard_CoroutineStackRunSelfTest(void)
