@@ -2045,6 +2045,35 @@ static bool runNativePadRollbackSelfTest()
 
 #include "netplay_state_test.inc"
 
+extern "C" int PartyBoard_TargetFrameRateFor(bool netplayEnabled, int configured);
+
+// Defect D6 - several simulation ticks batched into one rendered frame - can
+// only occur above 60 fps, and online the pacer is clamped to 60 on both peers
+// whatever the video setting says. That clamp is therefore the only thing
+// keeping the frame rate's absence from `runtimeConfigSignature` safe: without
+// it two peers on different rates would batch differently and diverge, with no
+// signature mismatch to explain it.
+//
+// So the clamp is pinned here. If someone removes it to let netplay run at 144,
+// this goes red at once instead of producing a desync a year later that nobody
+// can trace back to a video setting.
+static bool netplayFrameRateClampHolds()
+{
+    bool ok = true;
+    for (const int configured : {30, 59, 60, 61, 120, 144, 240, 1000}) {
+        ok &= PartyBoard_TargetFrameRateFor(true, configured) == 60;
+    }
+    // Offline the setting is honoured, within its own bounds. Checked too, so a
+    // change that clamps everything to 60 - which would also make this pass -
+    // is not mistaken for the property above.
+    ok &= PartyBoard_TargetFrameRateFor(false, 144) == 144;
+    ok &= PartyBoard_TargetFrameRateFor(false, 30) == 60;
+    ok &= PartyBoard_TargetFrameRateFor(false, 1000) == 240;
+    OSReport("Netplay frame rate clamp: %s (online forced to 60 for 8 settings; offline honours 144, floors 30, caps 1000 at 240).\n",
+        ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 extern "C" bool PartyBoard_NetplayRuntimeRunSelfTest(void)
 {
     // Exercise the actual availability check used by free_play.c, with both
@@ -2094,12 +2123,47 @@ extern "C" bool PartyBoard_NetplayRuntimeRunSelfTest(void)
     const bool gamePassed = PartyBoard_RollbackGameSelfTest();
     OSReport("Rollback process generation: %s\n", topologyPassed ? "PASS" : "FAIL");
     OSReport("Rollback central game state: %s\n", gamePassed ? "PASS" : "FAIL");
-    const bool passed = runCanonicalStateSelfTest() && partyboard::netplay::timelineSelfTest()
-        && partyboard::netplay::progressSelfTest() && HuPadSnapshotSelfTest()
-        && PartyBoard_RollbackClockSelfTest() && availabilityPassed
-        && runNativePadRollbackSelfTest() && topologyPassed && gamePassed
-        && PartyBoard_AnimationRollbackSelfTest() && PartyBoard_RollbackIOSelfTest() && PartyBoard_RollbackSequenceSelfTest() && HuPrcSnapshotExecutionSelfTest() && PartyBoard_RollbackSceneSelfTest() && PartyBoard_RollbackResourcesSelfTest() && PartyBoard_RollbackCheckpointSelfTest() && PartyBoard_RollbackWipeSafetySelfTest() && PartyBoard_RollbackRenderSafetySelfTest() && PartyBoard_RollbackAudioSelfTest() && msmStreamLogicalSelfTest() && PartyBoard_RetraceCounterSelfTest() && PartyBoard_ThpLogicalSelfTest();
-    OSReport("Netplay runtime self-test: %s\n", passed ? "PASS" : "FAIL");
+    // Every sub-test runs and every sub-test is named. This used to be a chain
+    // of twenty-two `&&`, which stopped at the first failure: a single red
+    // component hid every one after it, and a component became silently
+    // untested the day anything ahead of it started failing. The cost of
+    // running them all is a few milliseconds; the cost of not knowing which
+    // ones ran is a release gate that cannot say what it checked.
+    int total = 0;
+    int failed = 0;
+    const auto check = [&](const char *name, bool ok) {
+        ++total;
+        if (!ok) {
+            ++failed;
+            OSReport("  netplay sub-test FAIL: %s\n", name);
+        }
+    };
+    check("canonical-state", runCanonicalStateSelfTest());
+    check("timeline", partyboard::netplay::timelineSelfTest());
+    check("progress", partyboard::netplay::progressSelfTest());
+    check("pad-snapshot", HuPadSnapshotSelfTest());
+    check("rollback-clock", PartyBoard_RollbackClockSelfTest());
+    check("minigame-availability", availabilityPassed);
+    check("native-pad-rollback", runNativePadRollbackSelfTest());
+    check("process-topology", topologyPassed);
+    check("central-game-state", gamePassed);
+    check("frame-rate-clamp", netplayFrameRateClampHolds());
+    check("animation-rollback", PartyBoard_AnimationRollbackSelfTest());
+    check("rollback-io", PartyBoard_RollbackIOSelfTest());
+    check("rollback-sequence", PartyBoard_RollbackSequenceSelfTest());
+    check("process-execution", HuPrcSnapshotExecutionSelfTest());
+    check("rollback-scene", PartyBoard_RollbackSceneSelfTest());
+    check("rollback-resources", PartyBoard_RollbackResourcesSelfTest());
+    check("rollback-checkpoint", PartyBoard_RollbackCheckpointSelfTest());
+    check("wipe-safety", PartyBoard_RollbackWipeSafetySelfTest());
+    check("render-safety", PartyBoard_RollbackRenderSafetySelfTest());
+    check("rollback-audio", PartyBoard_RollbackAudioSelfTest());
+    check("msm-stream-logical", msmStreamLogicalSelfTest());
+    check("retrace-counter", PartyBoard_RetraceCounterSelfTest());
+    check("thp-logical", PartyBoard_ThpLogicalSelfTest());
+    const bool passed = failed == 0;
+    OSReport("Netplay runtime self-test: %s (%d sub-tests, %d failed)\n",
+        passed ? "PASS" : "FAIL", total, failed);
     return passed;
 }
 
@@ -2159,6 +2223,21 @@ extern "C" bool PartyBoard_NetplayPadRunProbe(void)
         if (PartyBoard_NetplayPreparePads(pads, &rumble, false)) {
             if (gRuntime.frame != frame + 1) {
                 std::fprintf(stderr, "[NET TEST] FAIL: timeline reset or uncommitted transition at frame %u\n", frame);
+                return false;
+            }
+            // The online rumble mask is a constant, never the physical one.
+            // HuPadRumbleGet() feeds RumbleBit, which is part of the rollback
+            // snapshot and is NOT part of the canonical hash - so if this ever
+            // started reflecting the controllers actually plugged in, two peers
+            // would carry different pad state with nothing to report it. The
+            // constant is what makes that exclusion safe, which makes it a
+            // safety property rather than a detail, and safety properties get
+            // pinned. See docs/canonical_hash_exclusions.md.
+            if (rumble != static_cast<u32>(PAD_CHAN0_BIT | PAD_CHAN1_BIT)) {
+                std::fprintf(stderr,
+                    "[NET TEST] FAIL: online rumble mask is 0x%08x, expected the constant 0x%08x. "
+                    "A physical-dependent mask diverges between machines and is not hashed.\n",
+                    rumble, static_cast<u32>(PAD_CHAN0_BIT | PAD_CHAN1_BIT));
                 return false;
             }
             for (unsigned player = 0; player < 2; ++player) {

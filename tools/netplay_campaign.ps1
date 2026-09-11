@@ -255,6 +255,9 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         mem_diag_armed = $false
         mem_diag_heaps = 0
         mem_corruption_detected = $false
+        mem_sweep_blocks = 0
+        mem_sweep_average_ms = 0
+        mem_sweep_worst_ms = 0
         board_coverage = @()
         d6_batched_frames = 0
         d6_worst_batch = 0
@@ -458,6 +461,38 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
     $record.mem_diag_heaps = $heaps
     $record.mem_diag_armed = ($MemDiagnostics -ne '') -and ($heaps -gt 0)
     $record.mem_corruption_detected = $corruption
+
+    # What the sweep cost, from its own last report.
+    #
+    # The detector walks every block of every registered heap once per accepted
+    # simulation tick, so its cost grows with the live block count. Measured on a
+    # 53468-frame board replay: 7 blocks and 0.004 ms at frame 0, 4908 blocks and
+    # 6.695 ms average with a 23.102 ms worst case at frame 52197. The frame
+    # budget at 60 Hz is 16.67 ms, so the worst sweep already exceeds a frame
+    # while the average does not - and the run still held 59.3 fps.
+    #
+    # That is affordable today and it is a trend, not a constant. Recording it
+    # per run is what turns "the campaign started timing out last week" into "the
+    # sweep crossed the frame budget at this block count", which is a diagnosis
+    # rather than a mystery.
+    foreach ($side in 0, 1) {
+        $logPath = Join-Path $runPath "peer-$side-stderr.log"
+        if (-not (Test-Path -LiteralPath $logPath)) { continue }
+        $sweeps = @(Select-String -Path $logPath -Pattern 'clean: (\d+) blocks, \d+ sweeps, avg ([\d.]+) ms, worst ([\d.]+) ms' -ErrorAction SilentlyContinue)
+        if ($sweeps.Count -eq 0) { continue }
+        $last = $sweeps[-1].Matches[0]
+        $record.mem_sweep_blocks = [Math]::Max($record.mem_sweep_blocks, [int]$last.Groups[1].Value)
+        $record.mem_sweep_average_ms = [Math]::Max($record.mem_sweep_average_ms, [double]$last.Groups[2].Value)
+        $record.mem_sweep_worst_ms = [Math]::Max($record.mem_sweep_worst_ms, [double]$last.Groups[3].Value)
+    }
+    if ($record.mem_sweep_average_ms -gt 8.0) {
+        # Half the 60 Hz frame budget spent inside the detector. Not a failure -
+        # the run is still judged on what it did - but it is the point at which
+        # the next campaign should be read with this in mind.
+        $record.notes += ("the heap sweep averaged $($record.mem_sweep_average_ms) ms over " +
+            "$($record.mem_sweep_blocks) blocks, worst $($record.mem_sweep_worst_ms) ms, " +
+            "against a 16.67 ms frame budget")
+    }
 
     # ---- which board mechanics this run actually reached ----
     # Read from the game's own output rather than inferred from the scenario
