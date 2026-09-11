@@ -568,12 +568,23 @@ void writeCrashArtifacts()
     reportLine("minidump=%s\n", dumpWritten ? dumpPath : "<not written>");
     appendSimulation();
     appendCoroutineStacks();
+    // Flush what we have before attempting the stack walk. StackWalk64 can die
+    // on a thread running on a libco coroutine stack, and losing the whole
+    // report because the last section failed would throw away the faulting
+    // address, the module offset and the frame, which are the parts that matter
+    // most. The file is rewritten complete if the walk survives.
+    char reportPath[kPathChars] = {};
+    buildPath(reportPath, sizeof(reportPath), "crash-report", stamp, "txt");
+    const std::size_t beforeStackWalk = gReportUsed;
+    reportLine("\n[PARTIAL] stack trace and recent events not appended yet\n");
+    if (writeWholeFile(reportPath, gReport, gReportUsed)) {
+        copyString(gLastReportPath, sizeof(gLastReportPath), reportPath);
+    }
+    gReportUsed = beforeStackWalk;
+
     appendStackTrace(gPending.pointers);
     appendBreadcrumbs();
     reportLine("\nEND\n");
-
-    char reportPath[kPathChars] = {};
-    buildPath(reportPath, sizeof(reportPath), "crash-report", stamp, "txt");
     if (writeWholeFile(reportPath, gReport, gReportUsed)) {
         copyString(gLastReportPath, sizeof(gLastReportPath), reportPath);
     }

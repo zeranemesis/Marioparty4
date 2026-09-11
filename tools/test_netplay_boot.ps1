@@ -22,7 +22,9 @@ if (-not (Test-Path -LiteralPath $disc -PathType Leaf)) { throw 'Disc file missi
 # replay a real recorded session: the Big Boo recording alone is 49877 frames,
 # about 831 seconds of game time. An hour is the new ceiling, still bounded so a
 # hung run cannot sit forever.
-if ($DurationSeconds -lt 1 -or $DurationSeconds -gt 3600) { throw 'Duration must be 1..3600 seconds.' }
+# A sanitized build runs roughly nine times slower, so replaying the recording
+# as far as frame 48671 takes about two hours. Three is the ceiling.
+if ($DurationSeconds -lt 1 -or $DurationSeconds -gt 10800) { throw 'Duration must be 1..10800 seconds.' }
 $runPath=Join-Path (Resolve-TestPath $OutputDirectory) ([Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $runPath -Force | Out-Null
 $reservation=[Net.Sockets.UdpClient]::new([Net.IPEndPoint]::new([Net.IPAddress]::Loopback,0))

@@ -139,6 +139,21 @@ if (USE_ASAN AND MSVC)
     # Set before any add_subdirectory or FetchContent call, so the dependencies
     # built from source pick it up too.
     add_compile_definitions(_DISABLE_STL_ANNOTATION=1)
+
+    # Instrument everything that is built from source, not just our own code.
+    # abseil changes the layout of raw_hash_set under
+    # ABSL_HAVE_ADDRESS_SANITIZER, so an instrumented translation unit that
+    # inlines the header and an uninstrumented library that defines the
+    # out-of-line parts disagree about the object. That is an ODR violation,
+    # and it showed up as a null dereference inside find_non_soo the moment
+    # partyboard::config::Register touched the map at start-up. The same hazard
+    # exists for any header-heavy dependency, so the flag goes on globally
+    # before the subdirectories rather than target by target.
+    #
+    # Prebuilt packages (nod) and anything shipped as a binary cannot be
+    # instrumented; that residual inconsistency is documented rather than
+    # hidden, and it does not involve shared C++ templates.
+    add_compile_options("/fsanitize=address")
 endif ()
 set(AURORA_ENABLE_DVD ON)
 set(AURORA_ENABLE_RMLUI ON CACHE BOOL "Enable RmlUi UI support" FORCE)
@@ -204,12 +219,9 @@ endif ()
 if (WIN32)
     if(USE_ASAN)
         target_compile_definitions(dol PRIVATE USE_ASAN)
-        # Both halves, not just the game: instrumenting GAME_FILES alone leaves
-        # the whole port unchecked, and a partially instrumented build must not
-        # be mistaken for an ASan build. libco is deliberately excluded, because
-        # it switches stacks under the sanitizer's feet.
-        set_source_files_properties(${GAME_FILES} ${PORT_FILES} PROPERTIES
-                COMPILE_OPTIONS "/fsanitize=address")
+        # The instrumentation flag itself is applied globally above, so the
+        # game, the port, the overlays and every dependency built from source
+        # are consistent. Only the USE_ASAN define is target-scoped.
     endif()
     if(SKIP_HU_ALLOC)
         target_compile_definitions(dol PRIVATE SKIP_HU_ALLOC)
@@ -255,7 +267,6 @@ if (USE_ASAN AND MSVC)
     # The launcher itself is instrumented too, so the sanitizer runtime is
     # initialised before any game module loads rather than by whichever DLL
     # happens to come first.
-    target_compile_options(partyboard PRIVATE "/fsanitize=address")
     # ASan cannot coexist with incremental linking, and CMake turns that on by
     # default for RelWithDebInfo. Without this the link fails outright.
     foreach (asan_target dol partyboard)
@@ -297,7 +308,6 @@ foreach (dir ${REL_TARGETS})
             add_library(${dir} SHARED ${REL_SOURCE_FILES})
             list(APPEND BINARY_TARGETS ${dir})
             if (USE_ASAN)
-                set_source_files_properties(${REL_SOURCE_FILES} PROPERTIES COMPILE_OPTIONS "/fsanitize=address")
                 target_compile_definitions(${dir} PRIVATE USE_ASAN)
                 if (MSVC)
                     # Same incompatibility as the main targets: ASan and

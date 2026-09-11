@@ -16,6 +16,19 @@
 #include <dbghelp.h>
 #endif
 
+// A coroutine stack comes from VirtualAlloc, which AddressSanitizer does not
+// track. The address space it returns can still carry shadow left poisoned by
+// whatever lived there before, and the pattern fill below then writes into it
+// from instrumented code, which ASan reports as a stack-buffer-underflow that
+// has nothing to do with the game. Telling ASan the region is addressable ends
+// that, and the call is a no-op in a build without the sanitizer.
+#if defined(__SANITIZE_ADDRESS__) || defined(USE_ASAN)
+extern "C" void __asan_unpoison_memory_region(void const volatile *addr, size_t size);
+#define PARTYBOARD_ASAN_UNPOISON(addr, size) __asan_unpoison_memory_region((addr), (size))
+#else
+#define PARTYBOARD_ASAN_UNPOISON(addr, size) ((void)0)
+#endif
+
 namespace {
 
 // Distinctive enough that a live stack word is very unlikely to match it, which
@@ -226,6 +239,15 @@ extern "C" bool PartyBoard_CoroutineSymbolsReady(void)
 {
 #ifdef _WIN32
     static const bool ready = [] {
+        // AddressSanitizer symbolizes through DbgHelp as well, and DbgHelp is a
+        // single-owner API: with both of us initialised it warns that the app is
+        // already using it and its report dies during symbolization, leaving only
+        // the error header. PARTYBOARD_CRASH_SYMBOLS=0 hands DbgHelp to ASan.
+        // Our own reports then carry module+offset instead of names, which is
+        // the right trade while ASan is the one doing the reporting. This
+        // disables OUR symbolization only; the sanitizer keeps every check.
+        const char *value = std::getenv("PARTYBOARD_CRASH_SYMBOLS");
+        if (value && (value[0] == '0' || value[0] == 'n' || value[0] == 'N')) return false;
         SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES | SYMOPT_UNDNAME);
         return SymInitialize(GetCurrentProcess(), nullptr, TRUE) != FALSE;
     }();
@@ -265,6 +287,7 @@ extern "C" void *PartyBoard_CoroutineStackAlloc(size_t size)
             VirtualAlloc(nullptr, total, MEM_RESERVE, PAGE_NOACCESS));
         if (reservation) {
             if (VirtualAlloc(reservation + page, usableBytes, MEM_COMMIT, PAGE_READWRITE)) {
+                PARTYBOARD_ASAN_UNPOISON(reservation + page, usableBytes);
                 std::lock_guard<std::mutex> guard(gMutex);
                 for (std::uint32_t index = 0; index < kMaxTracked; ++index) {
                     Entry &entry = gEntries[index];
