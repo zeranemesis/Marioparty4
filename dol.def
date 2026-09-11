@@ -25,6 +25,20 @@ EXPORTS
     PartyBoard_CoroutineSymbolsReady
     PartyBoard_CoroutineStackWatch
     PartyBoard_CoroutineWatchdogEnabled
+    PartyBoard_CrashUploaderRunSelfTest
+    PartyBoard_CrashUploader
+    PartyBoard_CrashSetUploader
+    PartyBoard_CrashSubmitReady
+    PartyBoard_CrashExportSubmission
+    PartyBoard_CrashManifestRunSelfTest
+    PartyBoard_CrashSanitizeText
+    PartyBoard_CrashBuildFingerprint
+    PartyBoard_CrashWriteManifest
+    PartyBoard_CrashQueueAdd
+    PartyBoard_CrashQueueSetState
+    PartyBoard_CrashQueueSetConsent
+    PartyBoard_CrashQueuePendingCount
+    PartyBoard_CrashQueuePrune
     PartyBoard_AudioLifetimeRunSelfTest
     PartyBoard_AudioLifetimeEnabled
     PartyBoard_AudioLifetimeViolationDetected

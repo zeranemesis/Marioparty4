@@ -5,6 +5,8 @@
 #include "port/crash_report.h"
 #include "port/mem_diagnostics.h"
 #include "port/audio_lifetime.h"
+#include "port/crash_manifest.h"
+#include "port/crash_uploader.h"
 
 #include <cstring>
 
@@ -31,6 +33,10 @@ int main(int argc, char *argv[])
         return PartyBoard_MemDiagRunSelfTest() ? 0 : 1;
     if (argc == 2 && std::strcmp(argv[1], "--audio-lifetime-self-test") == 0)
         return PartyBoard_AudioLifetimeRunSelfTest() ? 0 : 1;
+    if (argc == 2 && std::strcmp(argv[1], "--crash-manifest-self-test") == 0)
+        return PartyBoard_CrashManifestRunSelfTest() ? 0 : 1;
+    if (argc == 2 && std::strcmp(argv[1], "--crash-uploader-self-test") == 0)
+        return PartyBoard_CrashUploaderRunSelfTest() ? 0 : 1;
     if (argc == 3 && std::strcmp(argv[1], "--crash-report-provoke") == 0) {
         // Raises a real exception on purpose; the process is expected to die of
         // it so the reporter can be verified end to end.
@@ -47,6 +53,8 @@ int main(int argc, char *argv[])
                 && PartyBoard_CrashReportRunSelfTest()
                 && PartyBoard_MemDiagRunSelfTest()
                 && PartyBoard_AudioLifetimeRunSelfTest()
+                && PartyBoard_CrashManifestRunSelfTest()
+                && PartyBoard_CrashUploaderRunSelfTest()
             ? 0
             : 1;
 
