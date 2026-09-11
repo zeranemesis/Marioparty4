@@ -35,3 +35,9 @@ compile_commands.json
 # Miscellaneous
 /*.txt
 *.exe
+
+# Local artefacts that sit in the repository root: a portable build extracted
+# here, and a backup written by an external DLSS tool. Neither belongs to the
+# project, and both have been swept into a commit by `git add -A` twice.
+/partyboard/
+/_DLSS5_Backup/
