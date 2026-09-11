@@ -167,13 +167,34 @@ Aucune preuve que ce cas se produise. Inscrit pour ne pas le redécouvrir.
 
 ---
 
-## D3 — Banque audio libérée sous une voix encore en lecture — **PROUVÉ**
+## D3 — Banque audio libérée sous une voix encore en lecture — **CORRIGÉ**
 
 **Classification : use-after-free of a MusyX sample allocation, game thread frees
 while the audio thread still reads. Deterministic; its crash is not.**
 
-**Statut : cause prouvée, correction en cours. Preuve complète dans
+**Statut : corrigé, vérifié sur 21 replays. Preuve complète dans
 [`docs/d3_audio_bank_lifetime.md`](d3_audio_bank_lifetime.md).**
+
+### Vérification
+
+Barrière en place dans `hwRemoveSample`, scénario `w04-results-unload`,
+21 replays en trois campagnes parallèles :
+
+| | avant | après |
+|---|---|---|
+| déchargements de l'écran de résultats produisant des références obsolètes | 4 sur 4 | 0 |
+| références obsolètes par déchargement | 3 | 0 |
+| lectures après libération sur le thread audio | 1 par déchargement | 0 |
+| runs | 7 (2 crashes) | **21 (0 crash)** |
+
+Et la preuve que le zéro a été mesuré : sur les 42 traces, **1260 libérations de
+banque observées** et **509 voix vivantes détachées** par la barrière — chacune
+aurait été une référence obsolète. Un détecteur éteint aurait rendu le même zéro
+de violations mais zéro libération observée aussi.
+
+Le test de non-régression est le scénario `w04-results-unload` lui-même : il
+traverse les quatre déchargements, et la campagne classe toute violation en
+`CRASH` même sans faute levée. **Ne pas le retirer de la campagne.**
 
 ### Ce qui est établi
 

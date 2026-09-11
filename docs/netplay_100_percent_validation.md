@@ -133,15 +133,59 @@ est indépendant de D4 et hors périmètre tant que MusyX est gelé.
 
 ---
 
+### S3 — Stress-test du correctif D3, 21 replays — 2026-09-11
+
+Build `bb0976b4` (binaire du 2026-09-11 12:16:31 UTC), scénario
+`w04-results-unload`, trois campagnes parallèles de sept runs chacune, lancées
+par `tools/netplay_campaign.ps1`.
+
+```
+runs           : 21
+pass           : 21
+crash          : 0
+desync         : 0
+timeout        : 0
+abnormal_exit  : 0
+harness_failure: 0
+max frames     : 47932
+audio lifetime violations : 0
+total runtime  : 16 846 s (4,7 h)
+```
+
+Aucune signature de crash, aucune signature de désynchronisation.
+
+**Le zéro est mesuré, pas absent.** Sur les 42 traces produites — 21 runs, deux
+pairs — le détecteur a observé **1260 libérations de banque**, et la barrière a
+détaché **509 voix vivantes** qui auraient chacune été une référence obsolète au
+moment du `free`. Avant le correctif, ces mêmes transitions produisaient trois
+références obsolètes et une lecture après libération à chacun des quatre
+déchargements de l'écran de résultats.
+
+C'était la condition posée pour un défaut probabiliste : un `PASS` unique ne
+suffisait pas, D3 apparaissant dans environ deux runs sur sept. Vingt-et-un runs
+sans une seule occurrence, avec la preuve que le détecteur tournait, est un
+résultat d'une autre nature qu'un run chanceux.
+
+| Verdict | Valeur |
+|---|---|
+| `DETERMINISM` | **PASS** — `mismatch=0` et `rng_sync=1` sur les 21 runs |
+| `STABILITY` | **PASS** — aucune terminaison anormale, aucun minidump |
+| `USER_TERMINATED` | **NO** — ce sont des replays supervisés, pas une session humaine |
+| `OVERALL` | **FAIL** — et c'est correct : le critère d'acceptation exige que la fermeture vienne de l'utilisateur |
+
+Le `OVERALL: FAIL` n'est pas un échec technique. C'est la règle de notation qui
+fonctionne : un replay supervisé ne peut pas produire `USER_TERMINATED: YES`, et
+seule une session jouée à la main le peut.
+
 ## Matrice des mécaniques
 
 | Mécanique | DETERMINISM | STABILITY |
 |---|---|---|
 | Démarrage, menu de mode, menu d'entrée | PASS (S1) | PASS (S1) |
-| Plateau Big Boo (`w04Dll`) — déplacement, dés, tours | PASS (S1) | **FAIL (S1)** |
-| Événement Big Boo (`boo_event.c`) | PASS (S1) | **FAIL (S1)** |
+| Plateau Big Boo (`w04Dll`) — déplacement, dés, tours | PASS (S1) | PASS (S2, S3) |
+| Événement Big Boo (`boo_event.c`) | PASS (S1) | PASS (S2, S3) — D4 corrigé |
 | Mini-jeux (4 exercés) | PASS (S1) | PASS (S1) |
-| Écran de résultats de mini-jeu | PASS (S1) | PASS (S1), **D3 corrigé ici** |
+| Écran de résultats de mini-jeu | PASS (S1) | PASS (S3) — D3 corrigé, 21 runs |
 | Sept autres plateaux | UNTESTED | UNTESTED |
 | Boutique, loterie, items, étoiles | UNTESTED | UNTESTED |
 | Fin de partie, classement final | UNTESTED | UNTESTED |
