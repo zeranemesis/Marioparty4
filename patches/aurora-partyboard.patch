@@ -612,10 +612,10 @@ index 7ec451d..4eb8f1c 100644
  enum class DrawKind : uint32_t {
 diff --git a/lib/rt/rt_accel.cpp b/lib/rt/rt_accel.cpp
 new file mode 100644
-index 0000000..8e13a19
+index 0000000..6859eeb
 --- /dev/null
 +++ b/lib/rt/rt_accel.cpp
-@@ -0,0 +1,639 @@
+@@ -0,0 +1,664 @@
 +#include "rt_accel.hpp"
 +
 +#include "rt_device.hpp"
@@ -650,6 +650,7 @@ index 0000000..8e13a19
 +ComPtr<ID3D12Resource> g_vertexBuffer;
 +ComPtr<ID3D12Resource> g_colourBuffer;
 +ComPtr<ID3D12Resource> g_normalBuffer;
++ComPtr<ID3D12Resource> g_texcoordBuffer;
 +ComPtr<ID3D12Resource> g_materialBuffer;
 +// What the build and the trace actually read. An upload heap is write-combined
 +// system memory reached across PCIe, and the trace shader reads these buffers
@@ -658,6 +659,7 @@ index 0000000..8e13a19
 +ComPtr<ID3D12Resource> g_vertexGpu;
 +ComPtr<ID3D12Resource> g_colourGpu;
 +ComPtr<ID3D12Resource> g_normalGpu;
++ComPtr<ID3D12Resource> g_texcoordGpu;
 +ComPtr<ID3D12Resource> g_materialGpu;
 +uint64_t g_geometryBytes = 0;
 +uint64_t g_materialBytes = 0;
@@ -834,6 +836,7 @@ index 0000000..8e13a19
 +void* vertex_resource() noexcept { return nullptr; }
 +void* colour_resource() noexcept { return nullptr; }
 +void* normal_resource() noexcept { return nullptr; }
++void* texcoord_resource() noexcept { return nullptr; }
 +void* material_resource() noexcept { return nullptr; }
 +uint32_t vertex_count() noexcept { return 0; }
 +#else
@@ -842,14 +845,17 @@ index 0000000..8e13a19
 +void* vertex_resource() noexcept { return g_stats.built ? g_vertexGpu.Get() : nullptr; }
 +void* colour_resource() noexcept { return g_stats.built ? g_colourGpu.Get() : nullptr; }
 +void* normal_resource() noexcept { return g_stats.built ? g_normalGpu.Get() : nullptr; }
++void* texcoord_resource() noexcept { return g_stats.built ? g_texcoordGpu.Get() : nullptr; }
 +void* material_resource() noexcept { return g_stats.built ? g_materialGpu.Get() : nullptr; }
 +uint32_t vertex_count() noexcept { return g_stats.triangleCount * 3; }
 +
 +bool build(const float* positions, const float* colours, const float* normals,
-+           const uint32_t* materials, size_t vertexCount, uint64_t contentHash,
++           const float* texcoords, const uint32_t* materials, size_t vertexCount,
++           uint64_t contentHash,
 +           const DrawGroup* groups, size_t groupCount) noexcept {
 +  if (!caps().available || positions == nullptr || colours == nullptr || normals == nullptr ||
-+      materials == nullptr || groups == nullptr || groupCount == 0 || vertexCount < 3) {
++      texcoords == nullptr || materials == nullptr || groups == nullptr || groupCount == 0 ||
++      vertexCount < 3) {
 +    return false;
 +  }
 +  // Triangles only; a trailing partial triangle would read out of bounds.
@@ -903,6 +909,11 @@ index 0000000..8e13a19
 +                       g_normalBuffer)) {
 +      return false;
 +    }
++    if (!create_buffer(static_cast<uint64_t>(capacity) * 3 * sizeof(float), D3D12_HEAP_TYPE_UPLOAD,
++                       D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ,
++                       g_texcoordBuffer)) {
++      return false;
++    }
 +    // One uint per triangle rather than per vertex, hence the /3.
 +    if (!create_buffer(static_cast<uint64_t>(capacity / 3 + 1) * sizeof(uint32_t),
 +                       D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE,
@@ -917,6 +928,8 @@ index 0000000..8e13a19
 +                       D3D12_RESOURCE_STATE_COMMON, g_colourGpu) ||
 +        !create_buffer(geometryBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_NONE,
 +                       D3D12_RESOURCE_STATE_COMMON, g_normalGpu) ||
++        !create_buffer(geometryBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_NONE,
++                       D3D12_RESOURCE_STATE_COMMON, g_texcoordGpu) ||
 +        !create_buffer(materialBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_NONE,
 +                       D3D12_RESOURCE_STATE_COMMON, g_materialGpu)) {
 +      return false;
@@ -951,6 +964,14 @@ index 0000000..8e13a19
 +    }
 +    std::memcpy(mapped, normals, vertexBytes);
 +    g_normalBuffer->Unmap(0, &written);
++
++    mapped = nullptr;
++    if (FAILED(g_texcoordBuffer->Map(0, &noRead, &mapped))) {
++      Log.error("Failed to map ray tracing texture coordinate buffer");
++      return false;
++    }
++    std::memcpy(mapped, texcoords, vertexBytes);
++    g_texcoordBuffer->Unmap(0, &written);
 +
 +    mapped = nullptr;
 +    if (FAILED(g_materialBuffer->Map(0, &noRead, &mapped))) {
@@ -1145,12 +1166,15 @@ index 0000000..8e13a19
 +    g_cmdList->CopyBufferRegion(g_vertexGpu.Get(), 0, g_vertexBuffer.Get(), 0, vertexBytes);
 +    g_cmdList->CopyBufferRegion(g_colourGpu.Get(), 0, g_colourBuffer.Get(), 0, vertexBytes);
 +    g_cmdList->CopyBufferRegion(g_normalGpu.Get(), 0, g_normalBuffer.Get(), 0, vertexBytes);
++    g_cmdList->CopyBufferRegion(g_texcoordGpu.Get(), 0, g_texcoordBuffer.Get(), 0, vertexBytes);
 +    g_cmdList->CopyBufferRegion(g_materialGpu.Get(), 0, g_materialBuffer.Get(), 0, materialBytes);
 +    transition(g_vertexGpu.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
 +               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 +    transition(g_colourGpu.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
 +               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 +    transition(g_normalGpu.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
++               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
++    transition(g_texcoordGpu.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
 +               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 +    transition(g_materialGpu.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
 +               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -1229,6 +1253,7 @@ index 0000000..8e13a19
 +  }
 +  g_colourBuffer.Reset();
 +  g_normalBuffer.Reset();
++  g_texcoordBuffer.Reset();
 +  g_materialBuffer.Reset();
 +  g_geometries.clear();
 +  g_blasOffsets.clear();
@@ -1257,10 +1282,10 @@ index 0000000..8e13a19
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_accel.hpp b/lib/rt/rt_accel.hpp
 new file mode 100644
-index 0000000..a439f0a
+index 0000000..b4a896f
 --- /dev/null
 +++ b/lib/rt/rt_accel.hpp
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,88 @@
 +#pragma once
 +
 +#include <cstddef>
@@ -1331,7 +1356,7 @@ index 0000000..a439f0a
 +};
 +
 +bool build(const float* positions, const float* colours, const float* normals,
-+           const uint32_t* materials, size_t vertexCount, uint64_t contentHash,
++           const float* texcoords, const uint32_t* materials, size_t vertexCount, uint64_t contentHash,
 +           const DrawGroup* groups, size_t groupCount) noexcept;
 +
 +const AccelStats& stats() noexcept;
@@ -1342,6 +1367,7 @@ index 0000000..a439f0a
 +void* vertex_resource() noexcept;
 +void* colour_resource() noexcept;
 +void* normal_resource() noexcept;
++void* texcoord_resource() noexcept;
 +void* material_resource() noexcept;
 +uint32_t vertex_count() noexcept;
 +
@@ -1350,10 +1376,10 @@ index 0000000..a439f0a
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_capture.cpp b/lib/rt/rt_capture.cpp
 new file mode 100644
-index 0000000..b6c43d4
+index 0000000..ca724eb
 --- /dev/null
 +++ b/lib/rt/rt_capture.cpp
-@@ -0,0 +1,1508 @@
+@@ -0,0 +1,1630 @@
 +#include "rt_capture.hpp"
 +
 +#include "rt_accel.hpp"
@@ -1391,6 +1417,10 @@ index 0000000..b6c43d4
 +// is what removes the faceting: a geometric normal is constant across a
 +// triangle, so the whole polygon flips between lit and shadowed at once.
 +std::vector<Vec3> g_normals;
++// Texture coordinates, u and v in x and y with z unused. Carried as three
++// floats so they ride the same staging and upload path as the other three
++// streams rather than needing a fifth of their own.
++std::vector<Vec3> g_texcoords;
 +// One entry per triangle, not per vertex: a material is a property of the draw
 +// it came from. See MaterialFlag in rt_accel.hpp.
 +std::vector<uint32_t> g_materials;
@@ -1597,6 +1627,14 @@ index 0000000..b6c43d4
 +// bounce has nothing to tint with.
 +uint32_t g_drawsWithColour = 0;
 +uint32_t g_drawsWithTexture = 0;
++// Draws that actually carried texture coordinates, and the range they span.
++// A reflection can only sample a surface's own texture where these exist, and a
++// coordinate decoded with the wrong fixed-point shift shows up as a range that
++// is orders of magnitude off rather than roughly 0..1.
++uint32_t g_drawsWithTexcoords = 0;
++float g_uvMin = 0.f;
++float g_uvMax = 0.f;
++bool g_haveUv = false;
 +// Mean saturation of the albedos actually used: averaging a whole texture pulls
 +// it towards grey, and grey cannot bleed colour however strong the bounce.
 +double g_albedoSaturation = 0.0;
@@ -1646,7 +1684,7 @@ index 0000000..b6c43d4
 +// Mirrors calculate_last_vtx_size in command_processor.cpp, which computes the
 +// same walk but keeps only the total.
 +void compute_layout(GXVtxFmt fmt, AttrLayout& pos, AttrLayout& pnMtxIdx, AttrLayout& colour,
-+                    AttrLayout& normal) noexcept {
++                    AttrLayout& normal, AttrLayout& texcoord) noexcept {
 +  const auto& vtxFmt = g_gxState.vtxFmts[fmt];
 +  uint32_t offset = 0;
 +  for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
@@ -1664,6 +1702,8 @@ index 0000000..b6c43d4
 +      target = &colour;
 +    } else if (i == GX_VA_NRM) {
 +      target = &normal;
++    } else if (i == GX_VA_TEX0) {
++      target = &texcoord;
 +    }
 +    if (target != nullptr) {
 +      target->type = desc;
@@ -1736,6 +1776,53 @@ index 0000000..b6c43d4
 +  }
 +
 +  out = Vec3{v[0], v[1], v[2]};
++  return true;
++}
++
++// Texture coordinates use the same fixed-point conventions as positions, but
++// GX_TEX_S carries one component and GX_TEX_ST two, where the position decoder
++// only ever reads two or three. Reading one component too many would run past
++// the vertex, so the count comes from the texture enum rather than being
++// borrowed.
++bool decode_texcoord(const uint8_t* p, const gx::VtxAttrFmt& fmt, bool le, float& u,
++                     float& v) noexcept {
++  const uint32_t count = (fmt.cnt == GX_TEX_ST) ? 2u : 1u;
++  float out[2] = {0.f, 0.f};
++  const float scale = 1.f / static_cast<float>(1u << fmt.frac);
++
++  switch (fmt.type) {
++  case GX_F32:
++    for (uint32_t i = 0; i < count; ++i) {
++      out[i] = read_f32(p + i * 4, le);
++    }
++    break;
++  case GX_S16:
++    for (uint32_t i = 0; i < count; ++i) {
++      const uint16_t raw = le ? read_u16_le(p + i * 2) : read_u16_be(p + i * 2);
++      out[i] = static_cast<float>(static_cast<int16_t>(raw)) * scale;
++    }
++    break;
++  case GX_U16:
++    for (uint32_t i = 0; i < count; ++i) {
++      const uint16_t raw = le ? read_u16_le(p + i * 2) : read_u16_be(p + i * 2);
++      out[i] = static_cast<float>(raw) * scale;
++    }
++    break;
++  case GX_S8:
++    for (uint32_t i = 0; i < count; ++i) {
++      out[i] = static_cast<float>(static_cast<int8_t>(p[i])) * scale;
++    }
++    break;
++  case GX_U8:
++    for (uint32_t i = 0; i < count; ++i) {
++      out[i] = static_cast<float>(p[i]) * scale;
++    }
++    break;
++  default:
++    return false;
++  }
++  u = out[0];
++  v = out[1];
 +  return true;
 +}
 +
@@ -2001,7 +2088,8 @@ index 0000000..b6c43d4
 +  AttrLayout mtxLayout;
 +  AttrLayout colourLayout;
 +  AttrLayout normalLayout;
-+  compute_layout(fmt, posLayout, mtxLayout, colourLayout, normalLayout);
++  AttrLayout texLayout;
++  compute_layout(fmt, posLayout, mtxLayout, colourLayout, normalLayout, texLayout);
 +  if (!posLayout.present) {
 +    ++g_skippedDraws;
 +    return;
@@ -2069,6 +2157,9 @@ index 0000000..b6c43d4
 +  if (colourLayout.present && !ortho) {
 +    ++g_drawsWithColour;
 +  }
++  if (texLayout.present && !ortho) {
++    ++g_drawsWithTexcoords;
++  }
 +
 +  // Albedo for the bounce. Vertex colours exist on barely one draw in a hundred
 +  // here — the models are textured — so the surface's mean texture colour is
@@ -2107,6 +2198,17 @@ index 0000000..b6c43d4
 +          ? static_cast<size_t>(gx::comp_type_size(GX_VA_NRM, normalFmt.type)) * 3u
 +          : 0;
 +
++  // Texture coordinates, for sampling the surface's own texture at a hit rather
++  // than its whole-texture average.
++  const auto& texFmt = g_gxState.vtxFmts[fmt].attrs[GX_VA_TEX0];
++  const auto& texArray = g_gxState.arrays[GX_VA_TEX0];
++  const bool texIndexed = texLayout.type == GX_INDEX8 || texLayout.type == GX_INDEX16;
++  const size_t texBytes =
++      texLayout.present
++          ? static_cast<size_t>(gx::comp_type_size(GX_VA_TEX0, texFmt.type)) *
++                ((texFmt.cnt == GX_TEX_ST) ? 2u : 1u)
++          : 0;
++
 +  const bool measureCamera = rt_debug_logging();
 +  // Hash of the raw decoded positions, before any matrix. Stable means the mesh
 +  // is not being re-streamed, so only its transform moves -- which is the
@@ -2125,6 +2227,8 @@ index 0000000..b6c43d4
 +  std::vector<Vec3> cols;
 +  std::vector<Vec3> nrmsView;
 +  std::vector<Vec3> nrmsLocal;
++  std::vector<Vec3> uvs;
++  uvs.reserve(vtxCount);
 +  locals.reserve(vtxCount);
 +  verts.reserve(vtxCount);
 +  cols.reserve(vtxCount);
@@ -2238,6 +2342,43 @@ index 0000000..b6c43d4
 +    nrmsLocal.push_back(normal);
 +    const bool haveNormal = normal.x != 0.f || normal.y != 0.f || normal.z != 0.f;
 +    nrmsView.push_back(haveNormal ? rotate_normal(normal, g_gxState.pnMtx[mtxIdx]) : normal);
++
++    // Zero when the draw carries none, which the shader reads as "no usable
++    // coordinate" and falls back to the average colour for.
++    float u = 0.f;
++    float v = 0.f;
++    if (!ortho && texLayout.present && texBytes != 0) {
++      const uint8_t* tsrc = nullptr;
++      bool tle = false;
++      if (texIndexed) {
++        const uint32_t tindex = (texLayout.type == GX_INDEX8)
++                                    ? vtx[texLayout.offset]
++                                    : read_u16_be(vtx + texLayout.offset);
++        const size_t toff = static_cast<size_t>(tindex) * texArray.stride;
++        if (texArray.data != nullptr && toff + texBytes <= texArray.size) {
++          tsrc = static_cast<const uint8_t*>(texArray.data) + toff;
++          tle = texArray.le;
++        }
++      } else if (texLayout.offset + texBytes <= vtxSize) {
++        tsrc = vtx + texLayout.offset;
++      }
++      if (tsrc != nullptr && !decode_texcoord(tsrc, texFmt, tle, u, v)) {
++        u = 0.f;
++        v = 0.f;
++      }
++    }
++    uvs.push_back(Vec3{u, v, 0.f});
++    if (!ortho && texLayout.present) {
++      for (const float c : {u, v}) {
++        if (!g_haveUv) {
++          g_uvMin = g_uvMax = c;
++          g_haveUv = true;
++        } else {
++          g_uvMin = c < g_uvMin ? c : g_uvMin;
++          g_uvMax = c > g_uvMax ? c : g_uvMax;
++        }
++      }
++    }
 +  }
 +
 +  // An orthographic draw stops here: its only contribution is the region of the
@@ -2301,6 +2442,7 @@ index 0000000..b6c43d4
 +      g_triangles.push_back(outPositions[idx]);
 +      g_colours.push_back(cols[idx]);
 +      g_normals.push_back(outNormals[idx]);
++      g_texcoords.push_back(uvs[idx]);
 +      g_contentHash = mix64(mix64(mix64(g_contentHash, outPositions[idx].x),
 +                                  outPositions[idx].y),
 +                            outPositions[idx].z);
@@ -2523,6 +2665,7 @@ index 0000000..b6c43d4
 +  if (g_armed) {
 +    g_triangles.clear();
 +    g_normals.clear();
++    g_texcoords.clear();
 +    g_materials.clear();
 +    g_groups.clear();
 +    g_contentHash = 0xcbf29ce484222325ull; // FNV-1a offset basis
@@ -2545,6 +2688,8 @@ index 0000000..b6c43d4
 +    g_orthoBoundedArea = 0.0;
 +    g_drawsWithColour = 0;
 +    g_drawsWithTexture = 0;
++    g_drawsWithTexcoords = 0;
++    g_haveUv = false;
 +    g_albedoSaturation = 0.0;
 +    g_drawsTotal = 0;
 +    g_haveProj = false;
@@ -2629,7 +2774,8 @@ index 0000000..b6c43d4
 +  ++g_buildCalls;
 +  if (!accel::build(reinterpret_cast<const float*>(g_triangles.data()),
 +                    reinterpret_cast<const float*>(g_colours.data()),
-+                    reinterpret_cast<const float*>(g_normals.data()), g_materials.data(),
++                    reinterpret_cast<const float*>(g_normals.data()),
++                    reinterpret_cast<const float*>(g_texcoords.data()), g_materials.data(),
 +                    g_triangles.size(), g_contentHash, g_groups.data(), g_groups.size())) {
 +    Log.error("Acceleration structure build failed");
 +    report_device_removal();
@@ -2800,6 +2946,8 @@ index 0000000..b6c43d4
 +             : g_light[3] > 0.f       ? std::to_string(g_shadowSamples) + " samples"
 +                                      : std::string("no light"),
 +             (g_features & trace::FeatureReflections) != 0u ? "on" : "off");
++    Log.info("Texture coordinates on {} of {} draws; range {:.2f}..{:.2f}", g_drawsWithTexcoords,
++             g_drawsTotal, g_uvMin, g_uvMax);
 +    Log.info("Albedo sources: {} textured, {} vertex-coloured, of {} draws; mean saturation {:.3f}",
 +             g_drawsWithTexture, g_drawsWithColour, g_drawsTotal,
 +             g_drawsWithTexture > 0 ? g_albedoSaturation / g_drawsWithTexture : 0.0);
@@ -3442,10 +3590,10 @@ index 0000000..f6dffd4
 +} // namespace aurora::rt::interop
 diff --git a/lib/rt/rt_trace.cpp b/lib/rt/rt_trace.cpp
 new file mode 100644
-index 0000000..038d164
+index 0000000..1a6a7f6
 --- /dev/null
 +++ b/lib/rt/rt_trace.cpp
-@@ -0,0 +1,894 @@
+@@ -0,0 +1,898 @@
 +#include "rt_trace.hpp"
 +
 +#include "rt_accel.hpp"
@@ -3572,7 +3720,7 @@ index 0000000..038d164
 +
 +  // b0 as root constants, t0/t1 as root SRVs, u0 through a descriptor table
 +  // because textures cannot be root descriptors.
-+  D3D12_ROOT_PARAMETER params[8]{};
++  D3D12_ROOT_PARAMETER params[9]{};
 +  params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
 +  params[0].Constants.ShaderRegister = 0;
 +  params[0].Constants.Num32BitValues = sizeof(Constants) / 4;
@@ -3590,6 +3738,8 @@ index 0000000..038d164
 +  params[6].Descriptor.ShaderRegister = 4; // t4: per-triangle materials
 +  params[7].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
 +  params[7].Descriptor.ShaderRegister = 5; // t5: orthographic coverage grid
++  params[8].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
++  params[8].Descriptor.ShaderRegister = 6; // t6: vertex texture coordinates
 +
 +  D3D12_DESCRIPTOR_RANGE uavRange{};
 +  uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
@@ -3600,7 +3750,7 @@ index 0000000..038d164
 +  params[3].DescriptorTable.pDescriptorRanges = &uavRange;
 +
 +  D3D12_ROOT_SIGNATURE_DESC rootDesc{};
-+  rootDesc.NumParameters = 8;
++  rootDesc.NumParameters = 9;
 +  rootDesc.pParameters = params;
 +
 +  ComPtr<ID3DBlob> blob;
@@ -4053,8 +4203,9 @@ index 0000000..038d164
 +  auto* cols = static_cast<ID3D12Resource*>(accel::colour_resource());
 +  auto* nrms = static_cast<ID3D12Resource*>(accel::normal_resource());
 +  auto* mats = static_cast<ID3D12Resource*>(accel::material_resource());
++  auto* uvs = static_cast<ID3D12Resource*>(accel::texcoord_resource());
 +  if (!caps().available || tlas == nullptr || verts == nullptr || cols == nullptr ||
-+      nrms == nullptr || mats == nullptr) {
++      nrms == nullptr || mats == nullptr || uvs == nullptr) {
 +    return false;
 +  }
 +  // The previous frame's dispatch was left running. Everything below can pull
@@ -4120,6 +4271,7 @@ index 0000000..038d164
 +  g_cmdList->SetComputeRootShaderResourceView(6, mats->GetGPUVirtualAddress());
 +  g_cmdList->SetComputeRootShaderResourceView(7, maskAddress != 0 ? maskAddress
 +                                                                 : mats->GetGPUVirtualAddress());
++  g_cmdList->SetComputeRootShaderResourceView(8, uvs->GetGPUVirtualAddress());
 +  g_cmdList->SetComputeRootDescriptorTable(3, g_uavHeap->GetGPUDescriptorHandleForHeapStart());
 +
 +  if (g_timestampHeap) {
@@ -4448,10 +4600,10 @@ index 0000000..98c8d55
 +} // namespace aurora::rt::trace
 diff --git a/lib/rt/shaders/rt_ao.hlsl b/lib/rt/shaders/rt_ao.hlsl
 new file mode 100644
-index 0000000..020983c
+index 0000000..93f576c
 --- /dev/null
 +++ b/lib/rt/shaders/rt_ao.hlsl
-@@ -0,0 +1,469 @@
+@@ -0,0 +1,483 @@
 +// Ray traced ambient occlusion for PartyBoard.
 +//
 +// Primary visibility is traced rather than rasterised: with inline RayQuery the
@@ -4491,6 +4643,9 @@ index 0000000..020983c
 +// by what this shader writes, so a pixel the HUD covers must be left neutral or
 +// the interface gets shaded by whatever happens to sit behind it.
 +StructuredBuffer<uint> gOrthoMask : register(t5);
++// Texture coordinates, u and v in xy. Zero where the draw carried none, which
++// is what tells the reflection to fall back to the surface's average colour.
++StructuredBuffer<float3> gTexcoords : register(t6);
 +// RGB rather than a single channel: the bounce carries colour, which is what
 +// reads as ray tracing instead of a grey darkening.
 +RWTexture2D<float4> gOutput : register(u0);
@@ -4555,6 +4710,7 @@ index 0000000..020983c
 +#define DEBUG_PRIMITIVE 5u // primitive index hashed to a colour
 +#define DEBUG_MATERIAL 6u   // material flags as colour
 +#define DEBUG_REFLECTION 7u // reflected colour, scaled by its blend weight
++#define DEBUG_TEXCOORD 8u   // interpolated uv, to check the capture decodes it
 +
 +#define MATERIAL_REFLECTIVE 1u
 +#define MATERIAL_CUTOUT 2u
@@ -4908,6 +5064,16 @@ index 0000000..020983c
 +      if (m == 0u) {
 +        debugColour = float3(0.35f, 0.35f, 0.35f);
 +      }
++    } else if (gDebugMode == DEBUG_TEXCOORD) {
++      // frac so a wrapped coordinate still reads as a gradient rather than
++      // saturating, and blue marks a draw that carried no coordinates at all.
++      const float2 bary2 = primary.CommittedTriangleBarycentrics();
++      const float3 uv = gTexcoords[prim * 3u + 0u] * (1.0f - bary2.x - bary2.y) +
++                        gTexcoords[prim * 3u + 1u] * bary2.x +
++                        gTexcoords[prim * 3u + 2u] * bary2.y;
++      const bool none = all(gTexcoords[prim * 3u + 0u].xy == 0.0f) &&
++                        all(gTexcoords[prim * 3u + 1u].xy == 0.0f);
++      debugColour = none ? float3(0.0f, 0.0f, 1.0f) : float3(frac(uv.x), frac(uv.y), 0.0f);
 +    } else if (gDebugMode == DEBUG_PRIMITIVE) {
 +      // One triangle, one colour: adjacent primitives land far apart, which is
 +      // what makes a mis-indexed vertex buffer obvious at a glance.
