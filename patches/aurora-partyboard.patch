@@ -1409,10 +1409,10 @@ index 0000000..d901137
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_capture.cpp b/lib/rt/rt_capture.cpp
 new file mode 100644
-index 0000000..0a64803
+index 0000000..2675799
 --- /dev/null
 +++ b/lib/rt/rt_capture.cpp
-@@ -0,0 +1,1660 @@
+@@ -0,0 +1,1664 @@
 +#include "rt_capture.hpp"
 +
 +#include "rt_accel.hpp"
@@ -1524,7 +1524,7 @@ index 0000000..0a64803
 +bool g_composited = false; // the copy bind group holds the imported texture
 +// Measuring showed ray count is nearly free once the per-frame readback was
 +// removed, so the budget goes into samples rather than into denoising work.
-+uint32_t g_samples = 48;   // AO rays per pixel
++uint32_t g_samples = 8;    // AO rays per pixel; see kQualityLevels
 +// Radii were fixed constants in view-space units, tuned on one screen. Scene
 +// scale varies enormously between a title screen and a game board, so a constant
 +// is either invisible or swallows everything. They are derived from the captured
@@ -1549,7 +1549,7 @@ index 0000000..0a64803
 +// Which terms the trace computes. Both on by default; the game's video settings
 +// drive them independently.
 +uint32_t g_features = trace::FeatureAmbientOcclusion | trace::FeatureShadows;
-+uint32_t g_shadowSamples = 16;
++uint32_t g_shadowSamples = 4;
 +constexpr float kAoRadiusFraction = 0.026f;
 +// Angular half-width of the light, as a tangent: about 6.8 degrees. The sun is
 +// nearer 0.25, but these are stylised shadows on a board game, and a penumbra
@@ -1598,15 +1598,19 @@ index 0000000..0a64803
 +  uint32_t aoSamples;
 +  uint32_t shadowSamples;
 +};
++// These counts are what they are because the trace accumulates across frames.
++// Before that, a frame had to look settled on its own and High cast 48 ambient
++// occlusion and 16 shadow rays for about 5 ms; with accumulation, 8 and 4 give
++// the same converged result for 0.84 ms in play and 1.27 ms through a moving
++// camera. Turning accumulation off with AURORA_RT_TEMPORAL=1 makes these look
++// as noisy as their counts suggest -- raise them with AURORA_RT_AO_SAMPLES if
++// you do.
 +constexpr QualityLevel kQualityLevels[] = {
-+    {0.25f, 16u, 8u},  // 0, roughly a quarter of the cost
-+    {0.35f, 24u, 12u}, // 1
-+    {0.50f, 48u, 16u}, // 2, the previous fixed behaviour
-+    // 3 trades rays for resolution rather than asking for more of both: 1.00
-+    // with 64 and 24 measured at 19.21 ms on w01Dll, past a whole 16.7 ms frame,
-+    // which is not a quality level but a trap. The denoiser can clean noise; it
-+    // cannot invent resolution, so the sharper buffer is the better half to buy.
-+    {1.00f, 24u, 12u}, // 3, full resolution, fewer rays
++    {0.25f, 4u, 2u},  // 0
++    {0.35f, 6u, 3u},  // 1
++    {0.50f, 8u, 4u},  // 2, the default
++    // 3 can afford full resolution now that the counts are small.
++    {1.00f, 16u, 8u}, // 3, full resolution
 +};
 +constexpr int kQualityCount = static_cast<int>(sizeof(kQualityLevels) / sizeof(kQualityLevels[0]));
 +int g_quality = 2;
@@ -3804,10 +3808,10 @@ index 0000000..b805129
 +} // namespace aurora::rt::textures
 diff --git a/lib/rt/rt_trace.cpp b/lib/rt/rt_trace.cpp
 new file mode 100644
-index 0000000..ff3c59f
+index 0000000..822db62
 --- /dev/null
 +++ b/lib/rt/rt_trace.cpp
-@@ -0,0 +1,967 @@
+@@ -0,0 +1,1022 @@
 +#include "rt_trace.hpp"
 +
 +#include "rt_accel.hpp"
@@ -3879,9 +3883,17 @@ index 0000000..ff3c59f
 +// scratch texture is the other half of the a-trous ping-pong.
 +ComPtr<ID3D12RootSignature> g_denoiseRootSig;
 +ComPtr<ID3D12PipelineState> g_denoisePso;
-+ComPtr<ID3D12Resource> g_guide;
++// Two guides and two histories, alternating by frame parity: temporal
++// accumulation reads the previous frame's while writing this one's, and a
++// single texture cannot be both.
++ComPtr<ID3D12Resource> g_guide[2];
++ComPtr<ID3D12Resource> g_history[2];
 +ComPtr<ID3D12Resource> g_scratch;
 +uint32_t g_denoisePasses = 4;
++uint32_t g_frameParity = 0;
++// Weight given to this frame's estimate when the history is usable. 1 disables
++// accumulation. AURORA_RT_TEMPORAL overrides it.
++float g_temporalAlpha = 0.15f;
 +
 +// Interop: the output texture and a fence are exported as NT handles so Dawn can
 +// import them and wait on the GPU rather than on the CPU.
@@ -3909,7 +3921,9 @@ index 0000000..ff3c59f
 +  uint32_t maskRows;
 +  // Entries in the thumbnail registry; 0 means none is bound.
 +  uint32_t thumbnailCount;
-+  uint32_t pad[2];
++  // Weight of this frame's estimate when the history is usable; 1 disables.
++  float temporalAlpha;
++  uint32_t pad;
 +};
 +// HLSL packs a cbuffer in float4 rows, so the size has to stay a multiple of 16.
 +static_assert(sizeof(Constants) == 96, "constants must stay 24 DWORDs");
@@ -3934,6 +3948,14 @@ index 0000000..ff3c59f
 +  // AURORA_RT_DENOISE overrides the a-trous pass count, so the filter can be
 +  // measured against itself. 0 disables it; odd counts are rounded up because
 +  // the ping-pong has to finish in the texture Dawn imports.
++  if (const char* env = std::getenv("AURORA_RT_TEMPORAL")) {
++    g_temporalAlpha = static_cast<float>(std::atof(env));
++    if (g_temporalAlpha <= 0.f || g_temporalAlpha > 1.f) {
++      g_temporalAlpha = 1.f;
++    }
++    Log.info("Temporal accumulation alpha {:.2f}{}", g_temporalAlpha,
++             g_temporalAlpha >= 1.f ? " (off)" : "");
++  }
 +  if (const char* env = std::getenv("AURORA_RT_DENOISE")) {
 +    const int requested = std::atoi(env);
 +    g_denoisePasses = requested <= 0 ? 0u : static_cast<uint32_t>((requested + 1) & ~1);
@@ -3966,7 +3988,9 @@ index 0000000..ff3c59f
 +
 +  D3D12_DESCRIPTOR_RANGE uavRange{};
 +  uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-+  uavRange.NumDescriptors = 3; // u0 output, u1 guide, u2 reflection
++  // u0 output, u1 guide, u2 reflection, u3 history out, u4 history in,
++  // u5 previous guide.
++  uavRange.NumDescriptors = 6;
 +  uavRange.BaseShaderRegister = 0;
 +  params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
 +  params[3].DescriptorTable.NumDescriptorRanges = 1;
@@ -4049,7 +4073,7 @@ index 0000000..ff3c59f
 +  // 0..2  AO pass:            output, guide, reflection
 +  // 3..5  denoise, forward:   output -> scratch, guide
 +  // 6..8  denoise, backward:  scratch -> output, guide
-+  heapDesc.NumDescriptors = 9;
++  heapDesc.NumDescriptors = 24;
 +  heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 +  if (FAILED(device()->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&g_uavHeap)))) {
 +    Log.error("CreateDescriptorHeap failed");
@@ -4161,11 +4185,23 @@ index 0000000..ff3c59f
 +  // need no shared handle and no simultaneous access.
 +  D3D12_RESOURCE_DESC localDesc = desc;
 +  localDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-+  g_guide.Reset();
++  g_guide[0].Reset();
++  g_guide[1].Reset();
++  g_history[0].Reset();
++  g_history[1].Reset();
 +  g_scratch.Reset();
 +  if (FAILED(device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &localDesc,
 +                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
-+                                               IID_PPV_ARGS(&g_guide))) ||
++                                               IID_PPV_ARGS(&g_guide[0]))) ||
++      FAILED(device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &localDesc,
++                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
++                                               IID_PPV_ARGS(&g_guide[1]))) ||
++      FAILED(device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &localDesc,
++                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
++                                               IID_PPV_ARGS(&g_history[0]))) ||
++      FAILED(device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &localDesc,
++                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
++                                               IID_PPV_ARGS(&g_history[1]))) ||
 +      FAILED(device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &localDesc,
 +                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
 +                                               IID_PPV_ARGS(&g_scratch)))) {
@@ -4197,13 +4233,23 @@ index 0000000..ff3c59f
 +    handle.ptr += static_cast<SIZE_T>(index) * stride;
 +    return handle;
 +  };
-+  // Laid out so each denoise pass can bind one contiguous run of three.
-+  ID3D12Resource* const layout[9] = {
-+      g_output.Get(),  g_guide.Get(),   g_reflection.Get(), // AO pass
-+      g_output.Get(),  g_scratch.Get(), g_guide.Get(),      // forward
-+      g_scratch.Get(), g_output.Get(),  g_guide.Get(),      // backward
++  // Each pass binds one contiguous run: six for the trace, three per denoise
++  // pass, and the whole thing twice because the guide and history alternate.
++  ID3D12Resource* const layout[24] = {
++      // trace, parity 0: writes guide 0 and history 0, reads history 1, guide 1
++      g_output.Get(), g_guide[0].Get(), g_reflection.Get(),
++      g_history[0].Get(), g_history[1].Get(), g_guide[1].Get(),
++      // trace, parity 1
++      g_output.Get(), g_guide[1].Get(), g_reflection.Get(),
++      g_history[1].Get(), g_history[0].Get(), g_guide[0].Get(),
++      // denoise, parity 0: forward then backward
++      g_output.Get(), g_scratch.Get(), g_guide[0].Get(),
++      g_scratch.Get(), g_output.Get(), g_guide[0].Get(),
++      // denoise, parity 1
++      g_output.Get(), g_scratch.Get(), g_guide[1].Get(),
++      g_scratch.Get(), g_output.Get(), g_guide[1].Get(),
 +  };
-+  for (uint32_t i = 0; i < 9; ++i) {
++  for (uint32_t i = 0; i < 24; ++i) {
 +    device()->CreateUnorderedAccessView(layout[i], nullptr, &uav, slot(i));
 +  }
 +
@@ -4535,6 +4581,7 @@ index 0000000..ff3c59f
 +  const D3D12_GPU_VIRTUAL_ADDRESS maskAddress = upload_mask(params.orthoMask, maskCount);
 +  const D3D12_GPU_VIRTUAL_ADDRESS thumbAddress = upload_thumbnails();
 +  constants.thumbnailCount = thumbAddress != 0 ? static_cast<uint32_t>(textures::count()) : 0u;
++  constants.temporalAlpha = params.debugMode == 0 ? g_temporalAlpha : 1.0f;
 +  constants.maskCols = maskAddress != 0 ? params.maskCols : 0u;
 +  constants.maskRows = maskAddress != 0 ? params.maskRows : 0u;
 +
@@ -4552,7 +4599,13 @@ index 0000000..ff3c59f
 +  g_cmdList->SetComputeRootShaderResourceView(8, uvs->GetGPUVirtualAddress());
 +  g_cmdList->SetComputeRootShaderResourceView(
 +      9, thumbAddress != 0 ? thumbAddress : mats->GetGPUVirtualAddress());
-+  g_cmdList->SetComputeRootDescriptorTable(3, g_uavHeap->GetGPUDescriptorHandleForHeapStart());
++  {
++    const uint32_t descStride =
++        device()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
++    D3D12_GPU_DESCRIPTOR_HANDLE traceTable = g_uavHeap->GetGPUDescriptorHandleForHeapStart();
++    traceTable.ptr += static_cast<UINT64>(g_frameParity * 6u) * descStride;
++    g_cmdList->SetComputeRootDescriptorTable(3, traceTable);
++  }
 +
 +  if (g_timestampHeap) {
 +    g_cmdList->EndQuery(g_timestampHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
@@ -4594,7 +4647,9 @@ index 0000000..ff3c59f
 +      dc.depthTolerance = 0.04f;
 +
 +      D3D12_GPU_DESCRIPTOR_HANDLE table = heapBase;
-+      table.ptr += static_cast<UINT64>((pass % 2 == 0) ? 3 : 6) * stride;
++      // 12 and 15 for parity 0, 18 and 21 for parity 1.
++      table.ptr += static_cast<UINT64>(12u + g_frameParity * 6u + ((pass % 2 == 0) ? 0u : 3u)) *
++                   stride;
 +
 +      g_cmdList->SetComputeRoot32BitConstants(0, sizeof(DenoiseConstants) / 4, &dc, 0);
 +      g_cmdList->SetComputeRootDescriptorTable(1, table);
@@ -4683,6 +4738,7 @@ index 0000000..ff3c59f
 +
 +  const auto end = std::chrono::steady_clock::now();
 +
++  g_frameParity ^= 1u;
 +  if (!readback) {
 +    g_stats.traced = true;
 +    g_stats.width = width;
@@ -4756,7 +4812,10 @@ index 0000000..ff3c59f
 +  g_maskCapacity = 0;
 +  g_output.Reset();
 +  g_reflection.Reset();
-+  g_guide.Reset();
++  g_guide[0].Reset();
++  g_guide[1].Reset();
++  g_history[0].Reset();
++  g_history[1].Reset();
 +  g_scratch.Reset();
 +  g_uavHeap.Reset();
 +  g_denoisePso.Reset();
@@ -4883,10 +4942,10 @@ index 0000000..98c8d55
 +} // namespace aurora::rt::trace
 diff --git a/lib/rt/shaders/rt_ao.hlsl b/lib/rt/shaders/rt_ao.hlsl
 new file mode 100644
-index 0000000..e6eb67c
+index 0000000..2a84390
 --- /dev/null
 +++ b/lib/rt/shaders/rt_ao.hlsl
-@@ -0,0 +1,545 @@
+@@ -0,0 +1,576 @@
 +// Ray traced ambient occlusion for PartyBoard.
 +//
 +// Primary visibility is traced rather than rasterised: with inline RayQuery the
@@ -4943,6 +5002,18 @@ index 0000000..e6eb67c
 +// composition needs both a multiplicative term and a replacing one, which is
 +// six channels; zero here leaves the frame untouched.
 +RWTexture2D<float4> gReflection : register(u2);
++// Temporal accumulation. 64 rays a pixel is what a single frame needs to look
++// settled; a shipping renderer casts one or two and converges over time
++// instead. These three make that possible: this frame's estimate is blended
++// into the last one wherever the surface at a pixel has not changed.
++//
++// There are no motion vectors here, so the test is the guide itself -- same
++// normal, same distance, same pixel. A still camera accumulates; anything that
++// moves fails the test at that pixel and falls back to this frame alone, which
++// is no worse than before. Mario Party spends most of its time still.
++RWTexture2D<float4> gHistoryOut : register(u3);
++RWTexture2D<float4> gHistoryIn : register(u4);
++RWTexture2D<float4> gGuidePrev : register(u5);
 +
 +cbuffer Constants : register(b0) {
 +  // GX perspective parameters (p0, p1, p2, p3) straight from the XF registers,
@@ -4978,7 +5049,9 @@ index 0000000..e6eb67c
 +  // Entries in gThumbnails; 0 means none is bound and reflections fall back to
 +  // the surface's average colour.
 +  uint gThumbnailCount;
-+  uint2 gPad2;
++  // Weight of this frame's estimate where the history holds. 1 disables it.
++  float gTemporalAlpha;
++  uint gPad2;
 +};
 +
 +#define FEATURE_AO 1u
@@ -5122,6 +5195,7 @@ index 0000000..e6eb67c
 +      gOutput[tid.xy] = float4(1.0f, 1.0f, 1.0f, 1.0f);
 +      gGuide[tid.xy] = float4(0.0f, 0.0f, 0.0f, 0.0f);
 +      gReflection[tid.xy] = float4(0.0f, 0.0f, 0.0f, 0.0f);
++      gHistoryOut[tid.xy] = float4(1.0f, 1.0f, 1.0f, 1.0f);
 +      return;
 +    }
 +  }
@@ -5131,6 +5205,7 @@ index 0000000..e6eb67c
 +    gOutput[tid.xy] = float4(1.0f, 1.0f, 1.0f, 1.0f);
 +    gGuide[tid.xy] = float4(0.0f, 0.0f, 0.0f, 0.0f);
 +    gReflection[tid.xy] = float4(0.0f, 0.0f, 0.0f, 0.0f);
++    gHistoryOut[tid.xy] = float4(1.0f, 1.0f, 1.0f, 1.0f);
 +    return;
 +  }
 +  const float3 dir =
@@ -5155,6 +5230,7 @@ index 0000000..e6eb67c
 +    gOutput[tid.xy] = float4(miss, 1.0f);
 +    gGuide[tid.xy] = float4(0.0f, 0.0f, 0.0f, 0.0f);
 +    gReflection[tid.xy] = float4(0.0f, 0.0f, 0.0f, 0.0f);
++    gHistoryOut[tid.xy] = float4(miss, 1.0f);
 +    return;
 +  }
 +
@@ -5430,7 +5506,21 @@ index 0000000..e6eb67c
 +    return;
 +  }
 +
-+  gOutput[tid.xy] = float4(result, 1.0f);
++  // Blend into the previous frame where the same surface was at this pixel.
++  // Normal and distance both have to agree: distance alone lets a silhouette
++  // slide over a background at the same depth, and normal alone lets a wall
++  // inherit the floor it meets.
++  float3 accumulated = result;
++  if (gTemporalAlpha < 1.0f) {
++    const float4 previous = gGuidePrev[tid.xy];
++    const float distance = primary.CommittedRayT();
++    if (previous.w > 0.0f && dot(n, previous.xyz) > 0.9f &&
++        abs(distance - previous.w) <= 0.02f * distance) {
++      accumulated = lerp(gHistoryIn[tid.xy].rgb, result, gTemporalAlpha);
++    }
++  }
++  gHistoryOut[tid.xy] = float4(accumulated, 1.0f);
++  gOutput[tid.xy] = float4(accumulated, 1.0f);
 +}
 diff --git a/lib/rt/shaders/rt_denoise.hlsl b/lib/rt/shaders/rt_denoise.hlsl
 new file mode 100644

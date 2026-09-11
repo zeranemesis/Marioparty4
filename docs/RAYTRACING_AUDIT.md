@@ -414,3 +414,76 @@ fois moins cher que 2,5 millions.
 le même chantier qui réglerait le bruit verrouillé à l'écran du constat §7.
 Réserve : les scènes diffèrent un peu d'un lancement à l'autre (14 239 à 16 845
 triangles ici), ce qui vaut environ ±0,3 ms de bruit sur ces chiffres.
+
+---
+
+# Accumulation temporelle (11 septembre 2026)
+
+La décomposition ci-dessus disait que tout le coût était dans le nombre
+d'échantillons : 0,30 ms de socle, puis 0,078 ms par échantillon et par frame.
+Un jeu qui sort lance un ou deux rayons par pixel et converge entre les frames ;
+on en lançait soixante-quatre.
+
+## Sans vecteurs de mouvement
+
+La géométrie est cuite relativement à la matrice de chaque draw et placée par des
+transformations d'instance renouvelées à chaque frame : il n'existe pas d'espace
+stable où reprojeter, et la découpe en groupes peut changer, ce qui casserait
+toute correspondance d'instance à instance. Les vecteurs de mouvement sont donc
+un chantier à part entière.
+
+Le test est le tampon guide lui-même : **même pixel, même normale, même distance
+d'impact** veut dire même surface, donc on mélange. Les deux moitiés comptent —
+la distance seule laisse une silhouette glisser sur un fond à la même profondeur,
+la normale seule laisse un mur hériter du sol qu'il rejoint.
+
+Caméra immobile : ça converge. Mouvement : le test échoue à ce pixel et on
+retombe sur la frame seule, jamais pire qu'avant. Mario Party passe l'essentiel
+de son temps immobile.
+
+Deux guides et deux historiques alternent selon la parité de frame. Les sorties
+anticipées — pixel masqué, rayon primaire dans le vide, projection dégénérée —
+écrivent l'historique aussi, sinon une valeur périmée survit derrière elles.
+
+## Ce que ça donne
+
+| configuration | tracé |
+|---|---|
+| 48 AO / 16 ombres, sans accumulation | ~5,0 ms |
+| 48 / 16, avec accumulation | 3,9 ms |
+| **8 / 4, avec accumulation** | **0,84 ms** en jeu |
+| 8 / 4, caméra en mouvement constant | 1,27 ms |
+
+La luminosité moyenne de 8/4 accumulé et de 48/16 accumulé s'accordent à 0,5 %
+près. Le survol d'introduction, où la caméra bouge sans arrêt et où
+l'accumulation est rejetée en continu, reste propre.
+
+Les niveaux de qualité sont donc recoupés, puisqu'ils étaient dimensionnés pour
+un monde sans accumulation :
+
+| niveau | résolution | rayons | tracé |
+|---|---|---|---|
+| Low | 640 × 480 | 4 / 2 | — |
+| Medium | 896 × 672 | 6 / 3 | — |
+| **High** (défaut) | 1280 × 960 | 8 / 4 | **0,89 ms** |
+| Ultra | 1920 × 1440 | 16 / 8 | 4,71 ms |
+
+## Le chemin complet
+
+| étape | tracé |
+|---|---|
+| ce que l'ancien compteur affichait | « 0,05 ms » |
+| mesure réelle, pleine résolution, 48/16 | 8,72 ms |
+| demi-résolution | 3,80 ms |
+| accumulation + 8/4 | **0,89 ms** |
+
+Soit un facteur **dix** entre le coût réel de départ et celui d'aujourd'hui, à
+qualité comparable — et le point de départ de tout cela était de découvrir que le
+chiffre affiché mesurait la soumission CPU et pas le GPU.
+
+## Ce qui reste ouvert
+
+`AURORA_RT_TEMPORAL=1` désactive l'accumulation, et les nouveaux compteurs
+paraîtront alors aussi bruités qu'ils le sont. De vrais vecteurs de mouvement
+feraient converger aussi pendant les déplacements, ce que ce test par guide ne
+fait pas.
