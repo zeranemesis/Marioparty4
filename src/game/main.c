@@ -26,6 +26,7 @@
 #include "port/rollback.h"
 #include "port/rollback_clock.h"
 #include "port/netplay_runtime.h"
+#include "port/crash_report.h"
 #include "port/dolassets.h"
 #include "port/ui.h"
 #include "aurora/dvd.h"
@@ -79,6 +80,7 @@ s16 HuSysVWaitGet(s16 param);
 void PartyBoard_RequestRestart(void)
 {
     PartyBoard_NetplayTrace("loop_exit reason=restart_requested");
+    PartyBoard_CrashNoteUserShutdown("restart requested");
     PartyBoard_RestartRequested = SUPPORTS_PROCESS_RESTART;
     PartyBoard_IsRunning = FALSE;
 }
@@ -197,6 +199,11 @@ void main(void)
         }
         if (exiting) {
             PartyBoard_NetplayTrace("loop_exit reason=aurora_exit");
+            // The window was closed. Record it as an expected shutdown so the
+            // supervisor can tell a requested exit from a disappearance. The
+            // supervisor knows separately when IT sent the close, and classifies
+            // that case as SUPERVISOR_TERMINATED instead.
+            PartyBoard_CrashNoteUserShutdown("window closed (AURORA_EXIT)");
             break;
         }
 #endif

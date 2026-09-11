@@ -2,7 +2,7 @@
 #include "port/netplay_transport.hpp"
 #include "port/netplay_runtime.h"
 #include "port/rollback.h"
-#include "port/coroutine_stack.h"
+#include "port/crash_report.h"
 
 #include <cstring>
 
@@ -17,8 +17,20 @@ extern "C" bool PartyBoard_OnlineBarrierProbe(void);
 
 int main(int argc, char *argv[])
 {
-    if (argc == 2 && std::strcmp(argv[1], "--coroutine-stack-self-test") == 0)
-        return PartyBoard_CoroutineStackRunSelfTest() ? 0 : 1;
+    // First statement in the process: a fault before this point would leave no
+    // report, and the whole point is that no termination goes unexplained. The
+    // session directory and seat come from the launcher's environment; both are
+    // refined below once the command line has been parsed.
+    PartyBoard_CrashReportInit(nullptr, -1, nullptr);
+
+    if (argc == 2 && std::strcmp(argv[1], "--crash-report-self-test") == 0)
+        return PartyBoard_CrashReportRunSelfTest() ? 0 : 1;
+    if (argc == 3 && std::strcmp(argv[1], "--crash-report-provoke") == 0) {
+        // Raises a real exception on purpose; the process is expected to die of
+        // it so the reporter can be verified end to end.
+        PartyBoard_CrashReportProvoke(argv[2]);
+        return 0; // only reached if the fault somehow did not happen
+    }
     if (argc == 2 && std::strcmp(argv[1], "--online-disc-check") == 0)
         return PartyBoard_OnlineCheckDisc() ? 0 : 3;
     if (argc == 2 && std::strcmp(argv[1], "--rollback-self-test") == 0)
@@ -26,7 +38,7 @@ int main(int argc, char *argv[])
     if (argc == 2 && std::strcmp(argv[1], "--netplay-self-test") == 0)
         return PartyBoard_RollbackRunSelfTest() && PartyBoard_NetTransportRunSelfTest()
                 && PartyBoard_NetplayRuntimeRunSelfTest()
-                && PartyBoard_CoroutineStackRunSelfTest()
+                && PartyBoard_CrashReportRunSelfTest()
             ? 0
             : 1;
 
@@ -60,6 +72,9 @@ int main(int argc, char *argv[])
 #endif
 
     const int result = port_main(argc, argv);
+    // Reaching here means the main loop returned of its own accord, so the
+    // termination is expected and must not be classified as a crash.
+    PartyBoard_CrashNoteNormalExit();
 
 #if defined(_WIN32)
     if (singleInstance != nullptr)

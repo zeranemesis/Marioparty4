@@ -12,6 +12,15 @@ EXPORTS
     PartyBoard_NetplayShutdown
     PartyBoard_NetplayRuntimeRunSelfTest
     PartyBoard_NetplayPadRunProbe
+    PartyBoard_CrashReportInit
+    PartyBoard_CrashSetPeer
+    PartyBoard_CrashReportRunSelfTest
+    PartyBoard_CrashReportProvoke
+    PartyBoard_CrashNoteUserShutdown
+    PartyBoard_CrashNoteSupervisorShutdown
+    PartyBoard_CrashNoteNormalExit
+    PartyBoard_CrashShutdownExpected
+    PartyBoard_CrashReportAbnormal
     PartyBoard_CoroutineStackRunSelfTest
     PartyBoard_CoroutineSymbolsReady
     BoardArcCos

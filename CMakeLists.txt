@@ -156,7 +156,8 @@ endif()
 target_link_libraries(dol PUBLIC aurora::core aurora::card aurora::dvd aurora::gx aurora::mtx aurora::os aurora::si aurora::vi aurora::pad musyx absl::flat_hash_map nlohmann_json::nlohmann_json fmt::fmt rmlui_debugger)
 if (WIN32)
     target_link_libraries(dol PUBLIC ws2_32)
-    # StackWalk64 and the symbol helpers used to name a coroutine stack owner.
+    # dbghelp is loaded lazily by the crash reporter for MiniDumpWriteDump, but
+    # StackWalk64 and the symbol helpers are linked directly.
     target_link_libraries(dol PUBLIC dbghelp)
     # Give every libco coroutine stack its own guarded reservation instead of a
     # bare malloc block. libco falls back to malloc only when these are

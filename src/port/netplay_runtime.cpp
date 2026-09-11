@@ -16,6 +16,7 @@
 #include "port/rollback_sequence.h"
 #include "port/rollback_scene.h"
 #include "port/settings.h"
+#include "port/crash_report.h"
 #include "port/config.hpp"
 #include <filesystem> // port/main.h declares a std::filesystem::path global.
 #include "port/main.h"
@@ -594,6 +595,80 @@ bool checkStateFailure()
     return false;
 }
 
+// Publish the facts a crash report needs, once per accepted simulation tick.
+// Everything here is a value the game thread already owns, so the cost is a
+// struct copy; the point is that a termination which cannot be intercepted
+// in-process still leaves the frame, overlay and network state on disk.
+void publishCrashState(const StateDigest &stamp)
+{
+    static std::int32_t previousOverlay = -1;
+    static std::int32_t lastOverlay = -1;
+    static std::uint32_t overlayTransitionFrame = 0;
+
+    PartyBoardCrashSimState state {};
+    state.simulationFrame = gRuntime.frame;
+    state.networkFrame = gRuntime.lastWireFrame;
+    state.gameContext = gRuntime.observedContext;
+    state.overlay = PartyBoard_NetplayContextId();
+    state.minigame = PartyBoard_NetplayMinigameId();
+    if (state.overlay != lastOverlay) {
+        previousOverlay = lastOverlay;
+        lastOverlay = state.overlay;
+        overlayTransitionFrame = gRuntime.frame;
+    }
+    state.overlayPrevious = previousOverlay;
+    state.overlayTransitionFrame = overlayTransitionFrame;
+
+    state.lastStateHash = stamp.hash;
+    state.lastStateHashFrame = stamp.frame;
+
+    state.frand = frand_state_get();
+    state.rand8 = static_cast<u32>(rand8_state_get());
+    state.boardRand = boardRandSeed;
+    state.frandCalls = PartyBoard_NetplayFrandCalls();
+    state.rand8Calls = PartyBoard_NetplayRand8Calls();
+    state.boardRandCalls = PartyBoard_NetplayBoardRandCalls();
+
+    state.received = gRuntime.receivedPackets;
+    state.rejected = gRuntime.rejectedPackets;
+    state.repaired = gRuntime.repairPackets;
+    state.sendErrors = gRuntime.sendFailures;
+    const auto now = monotonicMs();
+    state.packetAgeMs = static_cast<u32>(gRuntime.lastPacketMs ? now - gRuntime.lastPacketMs : 0);
+    state.stalledTicks = gRuntime.stalledTicks;
+    state.maximumStalledTicks = gRuntime.maximumStalledTicks;
+    state.txSequence = gRuntime.sequence;
+    state.randomSynchronized = gRuntime.randomSynchronized;
+    state.configMismatch = gRuntime.configMismatch;
+    state.contextMismatchFrames = gRuntime.contextMismatchFrames;
+
+    const auto &local = gRuntime.localHistory[gRuntime.frame % kHistorySize];
+    const auto &remote = gRuntime.remoteHistory[gRuntime.frame % kHistorySize];
+    state.localReady = local.valid && local.frame == gRuntime.frame;
+    state.remoteReady = remote.valid && remote.frame == gRuntime.frame;
+    state.localButtons = local.input.buttons;
+    state.remoteButtons = remote.input.buttons;
+    state.localStickX = local.input.stickX;
+    state.localStickY = local.input.stickY;
+    state.remoteStickX = remote.input.stickX;
+    state.remoteStickY = remote.input.stickY;
+
+    if (gRuntime.rollbackSession) {
+        const auto stats = gRuntime.rollbackSession->stats();
+        state.rollbackActive = 1;
+        state.rollbackCount = stats.rollbackCount;
+        state.rollbackReplayed = stats.resimulatedFrames;
+        state.rollbackPredicted = stats.predictedFrames;
+    }
+
+    // Audio thread values: diagnostic only, never hashed. See C5/C6 in
+    // docs/NETPLAY_DETERMINISM_AUDIT.md.
+    for (int channel = 0; channel < 4; ++channel)
+        state.musStatus[channel] = msmMusGetStatus(channel);
+
+    PartyBoard_CrashUpdateSimState(&state);
+    PartyBoard_CrashHeartbeat();
+}
 bool captureCommittedState()
 {
     const auto frame = gRuntime.frame - 1; // AFTER logic F, BEFORE render/counter publication.
@@ -606,6 +681,7 @@ bool captureCommittedState()
     gRuntime.detailHistory[frame % kDetailHistorySize] = std::move(state);
     gRuntime.detailFrames[frame % kDetailHistorySize] = frame;
     gRuntime.states.capture(stamp);
+    publishCrashState(stamp);
     // New frames stream immediately; input traffic repairs the oldest missing
     // state in parallel. No extra round-trip barrier for each gameplay frame.
     sendInput(frame, {}, false, &stamp);
@@ -1019,6 +1095,8 @@ extern "C" bool PartyBoard_NetplayConfigureFromArgs(int argc, char **argv)
     }
 
     gRuntime.localPlayer = host ? 0 : 1;
+    // The crash reporter is already armed; this only lets a report name the seat.
+    PartyBoard_CrashSetPeer(gRuntime.localPlayer, host ? "host" : "client");
     // The online companion owns the Internet-facing encrypted transport.
     // Its game subprocess must never expose the raw UDP protocol to the LAN.
     bool loopbackOnly = false;
@@ -1153,6 +1231,9 @@ extern "C" bool PartyBoard_NetplayTick(void)
         runtime.rollbackContextReady = false;
         if (!runtime.rollbackSession) runtime.rollbackUnavailable = false;
         std::fprintf(stdout, "Netplay: game context %d at network frame %u.\n", gameContext, runtime.frame);
+        PartyBoard_CrashBreadcrumb(PARTYBOARD_CRASH_CAT_OVERLAY,
+            "context %d at frame %u (overlay %d minigame %d)", gameContext,
+            runtime.frame, PartyBoard_NetplayContextId(), PartyBoard_NetplayMinigameId());
     }
     // A full game owns ONE input timeline and ONE initial RNG agreement.
     // Loading a module must not discard delayed inputs or authorize local ticks.

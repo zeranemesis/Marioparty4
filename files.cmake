@@ -84,6 +84,7 @@ set(PORT_FILES
         src/port/byteswap.cpp
         src/port/config.cpp
         src/port/coroutine_stack.cpp
+        src/port/crash_report.cpp
         src/port/dolassets.cpp
         #        src/port/dvd.c
         src/port/file_select.cpp

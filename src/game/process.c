@@ -5,6 +5,7 @@
 #ifdef TARGET_PC
 #include <string.h>
 #include "port/coroutine_stack.h"
+#include "port/crash_report.h"
 #endif
 
 #ifdef __MWERKS__
@@ -132,6 +133,9 @@ Process *HuPrcCreate(void (*func)(void), u16 prio, u32 stack_size, s32 extra_siz
     // which process owns it so a guard-page fault can name the culprit and the
     // peak depth can be attributed. See include/port/coroutine_stack.h.
     PartyBoard_CoroutineStackArm(process->thread, stack_size, (const void *)func);
+    PartyBoard_CrashBreadcrumb(PARTYBOARD_CRASH_CAT_PROCESS,
+        "create prio=%u stack=%u(game %u) thread=%p", prio, stack_size, stack_size / 2,
+        process->thread);
 #else
     process->base_sp = ((uintptr_t)HuMemMemoryAlloc(heap, stack_size, FAKE_RETADDR)) + stack_size - 8;
     gcsetjmp(&process->jump);
@@ -319,7 +323,10 @@ void HuPrcCall(s32 tick)
             case 2:
                 // Fold this stack's high-water mark into the worst case for its
                 // process before libco hands the memory back.
-                PartyBoard_CoroutineStackRetire(processcur->thread);
+                PartyBoard_CrashBreadcrumb(PARTYBOARD_CRASH_CAT_PROCESS,
+                    "destroy thread=%p peak=%u of %u", processcur->thread,
+                    PartyBoard_CoroutineStackPeak(processcur->thread, processcur->thread_size),
+                    processcur->thread_size);
                 co_delete(processcur->thread);
 #else
     ret = gcsetjmp(&processjmpbuf);
