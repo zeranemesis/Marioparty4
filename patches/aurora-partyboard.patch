@@ -1,8 +1,8 @@
 diff --git a/cmake/aurora_gx.cmake b/cmake/aurora_gx.cmake
-index e81b621..ed02554 100644
+index e81b621..26b0b7a 100644
 --- a/cmake/aurora_gx.cmake
 +++ b/cmake/aurora_gx.cmake
-@@ -46,6 +46,68 @@ target_link_libraries(aurora_gx PUBLIC aurora::core dawn::webgpu_dawn xxhash)
+@@ -46,6 +46,77 @@ target_link_libraries(aurora_gx PUBLIC aurora::core dawn::webgpu_dawn xxhash)
  target_link_libraries(aurora_gx PRIVATE absl::btree absl::flat_hash_map sqlite3 TracyClient PNG::PNG)
  target_compile_definitions(aurora_gx PRIVATE WEBGPU_DAWN)
  
@@ -36,9 +36,17 @@ index e81b621..ed02554 100644
 +            "C:/Program Files (x86)/Windows Kits/10/bin"
 +        PATH_SUFFIXES x64
 +    )
++    # Without DXC the ray tracing shaders cannot be built, but nothing else in
++    # the project depends on them. Failing the whole configure step for that
++    # would make any build host without the Windows SDK's dxc -- the release CI
++    # among them -- unable to build the game at all, so the feature drops out
++    # instead. AURORA_HAS_RAYTRACING gates the code that needs the compiled
++    # DXIL; the same functions keep their non-Windows bodies, which report the
++    # feature as unavailable.
 +    if (NOT AURORA_DXC)
-+        message(FATAL_ERROR "dxc not found: required to compile the ray tracing shaders")
-+    endif ()
++        message(WARNING "dxc not found: building without hardware ray tracing")
++    else ()
++    target_compile_definitions(aurora_gx PRIVATE AURORA_HAS_RAYTRACING)
 +
 +    set(AURORA_RT_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/rt_shaders")
 +    file(MAKE_DIRECTORY "${AURORA_RT_SHADER_DIR}")
@@ -66,6 +74,7 @@ index e81b621..ed02554 100644
 +                "${AURORA_RT_SHADER_DIR}/rt_denoise_dxil.h")
 +    add_dependencies(aurora_gx aurora_rt_shaders)
 +    target_include_directories(aurora_gx PRIVATE "${AURORA_RT_SHADER_DIR}")
++    endif ()
 +endif ()
 +
  if (AURORA_ENABLE_RMLUI)
@@ -599,7 +608,7 @@ index 7ec451d..4eb8f1c 100644
  enum class DrawKind : uint32_t {
 diff --git a/lib/rt/rt_accel.cpp b/lib/rt/rt_accel.cpp
 new file mode 100644
-index 0000000..05087d4
+index 0000000..8e13a19
 --- /dev/null
 +++ b/lib/rt/rt_accel.cpp
 @@ -0,0 +1,639 @@
@@ -612,7 +621,7 @@ index 0000000..05087d4
 +#include <cstdlib>
 +#include <cstring>
 +
-+#ifdef _WIN32
++#ifdef AURORA_HAS_RAYTRACING
 +#include <d3d12.h>
 +#include <wrl/client.h>
 +#endif
@@ -623,7 +632,7 @@ index 0000000..05087d4
 +namespace {
 +AccelStats g_stats;
 +
-+#ifdef _WIN32
++#ifdef AURORA_HAS_RAYTRACING
 +using Microsoft::WRL::ComPtr;
 +
 +ComPtr<ID3D12CommandQueue> g_queue;
@@ -814,7 +823,7 @@ index 0000000..05087d4
 +
 +const AccelStats& stats() noexcept { return g_stats; }
 +
-+#ifndef _WIN32
++#ifndef AURORA_HAS_RAYTRACING
 +bool build(const float*, const float*, size_t) noexcept { return false; }
 +void shutdown() noexcept {}
 +void* tlas_resource() noexcept { return nullptr; }
@@ -2846,7 +2855,7 @@ index 0000000..9e699be
 +} // namespace aurora::rt
 diff --git a/lib/rt/rt_device.cpp b/lib/rt/rt_device.cpp
 new file mode 100644
-index 0000000..e283efd
+index 0000000..12f7b9b
 --- /dev/null
 +++ b/lib/rt/rt_device.cpp
 @@ -0,0 +1,249 @@
@@ -2862,7 +2871,7 @@ index 0000000..e283efd
 +
 +#include <cstdlib>
 +
-+#ifdef _WIN32
++#ifdef AURORA_HAS_RAYTRACING
 +#include <d3d12.h>
 +#include <d3d12sdklayers.h>
 +#include <dxgi1_6.h>
@@ -2876,7 +2885,7 @@ index 0000000..e283efd
 +DeviceCaps g_caps;
 +bool g_probed = false;
 +
-+#ifdef _WIN32
++#ifdef AURORA_HAS_RAYTRACING
 +using Microsoft::WRL::ComPtr;
 +
 +ComPtr<ID3D12Device5> g_d3dDevice;
@@ -2951,7 +2960,7 @@ index 0000000..e283efd
 +const DeviceCaps& caps() noexcept { return g_caps; }
 +
 +void* native_device() noexcept {
-+#ifdef _WIN32
++#ifdef AURORA_HAS_RAYTRACING
 +  return g_d3dDevice.Get();
 +#else
 +  return nullptr;
@@ -2975,7 +2984,7 @@ index 0000000..e283efd
 +  }
 +  g_probed = true;
 +
-+#ifndef _WIN32
++#ifndef AURORA_HAS_RAYTRACING
 +  Log.info("Ray tracing unavailable: DXR requires Windows");
 +  return false;
 +#else
@@ -3047,7 +3056,7 @@ index 0000000..e283efd
 +// when it died, which is the only way to name an invalid DXR usage without the
 +// process-wide debug layer.
 +void report_device_removal() noexcept {
-+#ifdef _WIN32
++#ifdef AURORA_HAS_RAYTRACING
 +  if (!g_d3dDevice) {
 +    return;
 +  }
@@ -3090,7 +3099,7 @@ index 0000000..e283efd
 +  // first or the device outlives nothing and the release order is wrong.
 +  trace::shutdown();
 +  accel::shutdown();
-+#ifdef _WIN32
++#ifdef AURORA_HAS_RAYTRACING
 +  g_d3dDevice.Reset();
 +  g_adapter.Reset();
 +#endif
@@ -3371,7 +3380,7 @@ index 0000000..f6dffd4
 +} // namespace aurora::rt::interop
 diff --git a/lib/rt/rt_trace.cpp b/lib/rt/rt_trace.cpp
 new file mode 100644
-index 0000000..d0eb005
+index 0000000..038d164
 --- /dev/null
 +++ b/lib/rt/rt_trace.cpp
 @@ -0,0 +1,894 @@
@@ -3387,7 +3396,7 @@ index 0000000..d0eb005
 +#include <cstring>
 +#include <vector>
 +
-+#ifdef _WIN32
++#ifdef AURORA_HAS_RAYTRACING
 +#include <d3d12.h>
 +#include <wrl/client.h>
 +
@@ -3401,7 +3410,7 @@ index 0000000..d0eb005
 +namespace {
 +TraceStats g_stats;
 +
-+#ifdef _WIN32
++#ifdef AURORA_HAS_RAYTRACING
 +using Microsoft::WRL::ComPtr;
 +
 +ComPtr<ID3D12CommandQueue> g_queue;
@@ -3926,7 +3935,7 @@ index 0000000..d0eb005
 +
 +const TraceStats& stats() noexcept { return g_stats; }
 +
-+#ifndef _WIN32
++#ifndef AURORA_HAS_RAYTRACING
 +bool run(const TraceParams&,
 +         const char*) noexcept {
 +  return false;
