@@ -164,6 +164,11 @@ extern "C" void PartyBoard_MemDiagRegisterHeap(s32 heapId, void *base, size_t si
         heap.base = static_cast<unsigned char *>(base);
         heap.size = size;
         heap.used = true;
+        // A negative result is only worth something if the detector can be
+        // shown to have been running, so it says so out loud.
+        std::fprintf(stderr, "[MEM DIAG] heap %d registered: base 0x%llx size %llu\n", heapId,
+            static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(base)),
+            static_cast<unsigned long long>(size));
         return;
     }
 }
@@ -509,6 +514,14 @@ extern "C" bool PartyBoard_MemDiagSweep(void)
     gBlockCount.store(total, std::memory_order_relaxed);
     gSweepCount.fetch_add(1, std::memory_order_relaxed);
     gLastGoodFrame.store(frame, std::memory_order_release);
+    // Periodic proof of life with the cost figures, so "no corruption found"
+    // can be read as "checked and clean" rather than "never ran".
+    const auto sweeps = gSweepCount.load(std::memory_order_relaxed);
+    if (sweeps % 1800 == 1) {
+        std::fprintf(stderr,
+            "[MEM DIAG] frame %u clean: %u blocks, %u sweeps, avg %.3f ms, worst %.3f ms\n",
+            frame, total, sweeps, sweeps ? gTotalSweepMs / sweeps : 0.0, gWorstSweepMs);
+    }
     return true;
 }
 
