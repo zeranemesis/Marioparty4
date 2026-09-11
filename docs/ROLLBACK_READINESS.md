@@ -72,6 +72,36 @@ autorise quatre sur 47 921 frames. Ce n'est pas une limite du probe, c'est une
 propriété du moteur, et c'est elle qu'il faut traiter avant d'espérer une
 couverture de rollback digne de ce nom.
 
+#### Les clauses se recouvrent — expérience faite, et négative
+
+L'hypothèse évidente était que `HuSprLayerHook`, le hook du système de sprites,
+est du dessin pur et pourrait être autorisé : il ne fait qu'appeler
+`HuSprDispInit` et `HuSprExec`, et l'horloge logique des sprites est avancée
+ailleurs, par `HuSprFinish` dans `PartyBoard_AnimationAdvance`, qu'un tick rejoué
+exécute bien.
+
+Cela a été essayé, sur le même replay, dans les mêmes conditions :
+
+| clause | avant | après |
+|---|---|---|
+| `layer-hook` | 89 | **0** |
+| `model-draw-hook` | 46 | **135** |
+| `sprite-draw-hook` | 10 | 10 |
+| `wipe-active` | 8 | 8 |
+| **total refusé** | **155** | **155** |
+| tentatives / réussites / échecs | 6 / 4 / 0 | 6 / 4 / 0 |
+
+**Le nombre de captures n'a pas bougé d'une unité.** Les 89 images bloquées par
+le hook de calque étaient déjà bloquées par un hook de modèle ; les clauses se
+recouvrent presque entièrement. Le changement était correct et sans effet, donc
+il a été retiré : desserrer une barrière de sûreté pour un gain mesuré à zéro
+est exactement le genre de correction spéculative que ce projet s'interdit.
+
+Ce que l'expérience apprend malgré tout, et qui vaut d'être écrit : **le goulot
+est `HU3D_ATTR_HOOKFUNC` sur les modèles**, pas les calques. Quiconque s'attaque
+à la couverture de rollback doit commencer par là, et saura que le hook de
+calque attend juste derrière.
+
 ### 3. D6 ne peut pas se produire à 60 images par seconde
 
 Le détecteur ajouté dans `main.c` n'a rien imprimé sur 47 921 frames. C'est
