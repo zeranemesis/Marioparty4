@@ -97,6 +97,29 @@ foreach ($name in $anchors.Keys) {
     }
 }
 
+# The validation matrix is the single place where the overlay / board-id / name
+# pairing is written down. It is parsed, not duplicated.
+$matrixPath = Resolve-MatrixPath 'docs/netplay_validation_matrix.md'
+$matrixLines = if (Test-Path -LiteralPath $matrixPath) { Get-Content $matrixPath } else { @() }
+
+# Boards are wNNDll. Their GWSystem.board id is NOT their overlay index, which
+# is why the pairing has to be read rather than computed.
+$boards = @{}
+foreach ($pair in $overlayOf.GetEnumerator()) {
+    if ($pair.Value -match '^w(\d{2})[Dd]ll$') {
+        $boards[$pair.Key] = @{ Overlay = $pair.Key; Module = $pair.Value; Name = '(non nomme)'; BoardId = -1 }
+    }
+}
+foreach ($line in $matrixLines) {
+    if ($line -match '^\|\s*(\d{2})\s*\|\s*`(w\d{2}dll)`\s*\|\s*(\d+)\s*\|\s*([^|]+?)\s*\|') {
+        $overlay = [int]$Matches[1]
+        if ($boards.ContainsKey($overlay)) {
+            $boards[$overlay].BoardId = [int]$Matches[3]
+            $boards[$overlay].Name = $Matches[4].Trim()
+        }
+    }
+}
+
 # Minigame modules are mNNNDll / mNNNdll; the number is the minigame id.
 $minigames = @{}
 foreach ($pair in $overlayOf.GetEnumerator()) {
@@ -107,27 +130,42 @@ foreach ($pair in $overlayOf.GetEnumerator()) {
     }
 }
 
-# Names, from the validation matrix table which was itself built from
-# selmenuDll/main.c. Optional: a missing name is reported as such, never
-# invented.
+# Minigame names, from the same table. A missing name is reported as missing,
+# never invented.
 $names = @{}
-$matrixPath = Resolve-MatrixPath 'docs/netplay_validation_matrix.md'
-if (Test-Path -LiteralPath $matrixPath) {
-    foreach ($line in Get-Content $matrixPath) {
-        if ($line -match '^\|\s*(\d{3})\s*\|\s*(\d+)\s*\|\s*`(m\d{3}[Dd]ll)`\s*\|\s*([^|]+?)\s*\|') {
-            $names[[int]$Matches[1]] = $Matches[4].Trim()
-        }
+foreach ($line in $matrixLines) {
+    if ($line -match '^\|\s*(\d{3})\s*\|\s*(\d+)\s*\|\s*`(m\d{3}[Dd]ll)`\s*\|\s*([^|]+?)\s*\|') {
+        $names[[int]$Matches[1]] = $Matches[4].Trim()
     }
 }
 
 # ---- what the results say ----
 $state = @{}
 foreach ($key in $minigames.Keys) { $state[$key] = @{ State = 'UNTESTED'; Why = ''; Runs = 0 } }
+$boardState = @{}
+foreach ($key in $boards.Keys) { $boardState[$key] = @{ State = 'UNTESTED'; Why = ''; Runs = 0; Depth = -1 } }
+$rank = @{ 'UNTESTED' = 0; 'SCRIPTED-PARTIAL' = 1; 'HUMAN-PASS' = 2; 'REAL-NETWORK-PASS' = 3; 'BLOCKED' = 4; 'FAIL' = 5 }
+
+function PromoteBoard([int]$overlay, [string]$candidate, [string]$why, [int]$depth) {
+    if (-not $boardState.ContainsKey($overlay)) { return }
+    $cell = $boardState[$overlay]
+    if ($rank[$candidate] -gt $rank[$cell.State]) {
+        $cell.State = $candidate
+        $cell.Why = $why
+        $cell.Depth = $depth
+    } elseif ($rank[$candidate] -eq $rank[$cell.State] -and $depth -gt $cell.Depth) {
+        # Same verdict, better evidence. "Reached the board" and "played five
+        # turns on it" are both SCRIPTED-PARTIAL, and reporting whichever ran
+        # first would throw away the one that says more.
+        $cell.Why = $why
+        $cell.Depth = $depth
+    }
+    $cell.Runs++
+}
 
 function Promote([int]$overlay, [string]$candidate, [string]$why) {
     if (-not $state.ContainsKey($overlay)) { return }
     # FAIL outranks everything: one failure is not erased by later successes.
-    $rank = @{ 'UNTESTED' = 0; 'SCRIPTED-PARTIAL' = 1; 'HUMAN-PASS' = 2; 'REAL-NETWORK-PASS' = 3; 'BLOCKED' = 4; 'FAIL' = 5 }
     $current = $state[$overlay].State
     if ($rank[$candidate] -gt $rank[$current]) {
         $state[$overlay].State = $candidate
@@ -164,6 +202,34 @@ foreach ($file in $runFiles) {
             # RECORDED replays a human session; it is still not a human session,
             # so it is capped exactly where SCRIPTED is.
             Promote $id 'SCRIPTED-PARTIAL' "$source, $($run.scenario)"
+        }
+    }
+}
+
+# Boards, from the same runs. The overlay path names which board a run entered,
+# and board_coverage says which of its mechanics fired - a board reached with
+# two mechanics is not the same claim as a board played through, so the count
+# travels with the verdict.
+foreach ($file in $runFiles) {
+    $run = Get-Content $file.FullName -Raw | ConvertFrom-Json
+    if ($run.result -eq 'HARNESS_FAILURE') { continue }
+    $path = @()
+    if ($run.PSObject.Properties.Name -contains 'overlays') { $path = @($run.overlays) }
+    $source = if ($run.PSObject.Properties.Name -contains 'coverage_source') { [string]$run.coverage_source } else { 'RECORDED' }
+    $mechanics = 0
+    if ($run.PSObject.Properties.Name -contains 'board_coverage') { $mechanics = @($run.board_coverage).Count }
+    $turn = if ($run.PSObject.Properties.Name -contains 'board_turn') { [int]$run.board_turn } else { -1 }
+    foreach ($entryText in $path) {
+        $id = [int](($entryText -split '@')[0])
+        if (-not $boardState.ContainsKey($id)) { continue }
+        # Depth: how much the run actually did on the board. Turns dominate,
+        # mechanics break the tie - a run on turn 5 says more than one on turn 1
+        # whatever else it touched.
+        $depth = ($turn * 100) + $mechanics
+        if ($run.result -eq 'CRASH' -or $run.result -eq 'DESYNC') {
+            PromoteBoard $id 'FAIL' "$($run.result) in $($run.scenario)" $depth
+        } else {
+            PromoteBoard $id 'SCRIPTED-PARTIAL' "$source, $mechanics mecaniques, tour $turn" $depth
         }
     }
 }
@@ -216,7 +282,28 @@ Emit 'Un resultat `SCRIPTED` plafonne a `SCRIPTED-PARTIAL`. Il n''est jamais pro
 Emit 'en `PASS`, quel que soit le nombre de runs verts : le volume de succes'
 Emit 'automatiques ne remplace pas la nature de la preuve.'
 
+Emit ''
+Emit '## Plateaux'
+Emit ''
+Emit '| overlay | module | board | nom | etat | pourquoi |'
+Emit '|---|---|---|---|---|---|'
+foreach ($key in ($boards.Keys | Sort-Object)) {
+    $b = $boards[$key]
+    Emit ('| {0} | `{1}` | {2} | {3} | `{4}` | {5} |' -f
+        $b.Overlay, $b.Module, $b.BoardId, $b.Name, $boardState[$key].State, $boardState[$key].Why)
+}
+$boardCounts = @{}
+foreach ($name in 'UNTESTED', 'SCRIPTED-PARTIAL', 'HUMAN-PASS', 'REAL-NETWORK-PASS', 'FAIL', 'BLOCKED') {
+    $boardCounts[$name] = @($boardState.Values | Where-Object { $_.State -eq $name }).Count
+}
+Emit ''
+Emit ('{0} plateaux : {1} jamais atteints, {2} exerces automatiquement, {3} joues par un humain, {4} valides entre deux machines.' -f
+    $boards.Count, $boardCounts['UNTESTED'], $boardCounts['SCRIPTED-PARTIAL'],
+    $boardCounts['HUMAN-PASS'], $boardCounts['REAL-NETWORK-PASS'])
+
 if ($Detail -or $Markdown) {
+    Emit ''
+    Emit '## Mini-jeux, un par ligne'
     Emit ''
     Emit '| overlay | module | id | nom | etat | pourquoi |'
     Emit '|---|---|---|---|---|---|'

@@ -117,5 +117,22 @@ if ($bad.Count -gt 0) {
 }
 Say "log: $logPath"
 
+# The morning should not have to ask. The matrix is rebuilt from what the night
+# actually produced, so the first thing readable after a night is the coverage
+# it bought - or did not.
+Say ''
+Say 'rebuilding the coverage matrix'
+$previous = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    & (Join-Path $PSScriptRoot 'coverage_matrix.ps1') -Markdown 'docs/couverture.md' 2>&1 |
+        Where-Object { $_ -match 'jamais atteints|exerces|reellement|valides|plateaux :|ecrit dans' } |
+        ForEach-Object { Say ("  " + $_) }
+} catch {
+    Say ("  the matrix could not be rebuilt: " + $_.Exception.Message)
+} finally {
+    $ErrorActionPreference = $previous
+}
+
 if ($bad.Count -gt 0) { exit 1 }
 exit 0
