@@ -283,10 +283,27 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         target_frame_rate_peer_1 = $(if ($TargetFrameRatePeer1 -gt 0) { $TargetFrameRatePeer1 } else { $TargetFrameRate })
         replay = $entry.Replay
         netplay_delay = $entry.NetplayDelay
-        # SCRIPTED coverage can carry a matrix cell to PARTIAL and never to
-        # PASS. Recorded per run so a result can never be mistaken for a human
-        # session, and defaulted from the scenario rather than remembered.
+        # THE THREE LEVELS OF PROOF, and they never convert into one another:
+        #
+        #   SCRIPTED      generated input. Ceiling: PARTIAL. Never PASS, no
+        #                 matter how many green runs accumulate - a thousand
+        #                 scripted successes still do not show that a person can
+        #                 play a game normally until they choose to stop, which
+        #                 is the project's acceptance criterion.
+        #   HUMAN         a real person played it. The only level that can reach
+        #                 PASS on gameplay and stability.
+        #   REAL_NETWORK  two physical machines on a real network. The only level
+        #                 that says anything about network behaviour; a loopback
+        #                 on 127.0.0.1 is not a substitute.
+        #
+        # A campaign run is SCRIPTED or, when it replays a human recording,
+        # RECORDED - which is a replay of a human session and still not a human
+        # session, so it too is capped at PARTIAL. Only record_board_session.ps1
+        # and merge_session.ps1 may write HUMAN or REAL_NETWORK.
         coverage_source = $(if ($entry.CoverageSource) { $entry.CoverageSource } elseif ($entry.Generated) { 'SCRIPTED' } else { 'RECORDED' })
+        # The ceiling this run can ever justify, carried with the run so nobody
+        # has to remember the rule when reading results later.
+        coverage_ceiling = 'PARTIAL'
         started_at = (Get-Date).ToString('o')
         duration_seconds = 0
         last_frame = 0
@@ -322,6 +339,10 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         d6_worst_batch = 0
         crash_fingerprint = ''
         desync_fingerprint = ''
+        rollback_failures = 0
+        rollback_attempted = 0
+        rollback_passed = 0
+        minigames_played = @()
         result = 'HARNESS_FAILURE'
         notes = @()
     }
@@ -639,6 +660,33 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
     }
     $record.board_coverage = @($coverage.Keys | Sort-Object | ForEach-Object { "$_@$($coverage[$_])" })
 
+    # ---- the rollback probe's own tally ----
+    # From the probe's final counter line rather than by counting log lines, so
+    # a truncated diagnostic file cannot under-report a failure.
+    foreach ($side in 0, 1) {
+        $logPath = Join-Path $runPath "peer-$side-native.log"
+        if (-not (Test-Path -LiteralPath $logPath)) { continue }
+        $counters = @(Select-String -Path $logPath -Pattern 'attempted=(\d+) passed=(\d+) failed=(\d+)' -ErrorAction SilentlyContinue)
+        if ($counters.Count -eq 0) { continue }
+        $last = $counters[-1].Matches[0]
+        $record.rollback_attempted = [Math]::Max($record.rollback_attempted, [int]$last.Groups[1].Value)
+        $record.rollback_passed = [Math]::Max($record.rollback_passed, [int]$last.Groups[2].Value)
+        $record.rollback_failures = [Math]::Max($record.rollback_failures, [int]$last.Groups[3].Value)
+    }
+
+    # ---- which minigames this run actually entered ----
+    # Read from the overlay path rather than from the scenario's declaration: a
+    # scenario that says it plays a minigame and a run that reached it are two
+    # different claims. Board and system overlays are excluded by number.
+    $systemOverlays = @(1, 3, 70, 74, 84, 89, 90, 91, 92, 93, 94, 95, 96, 97)
+    $seen = @{}
+    foreach ($entryText in $overlays[0]) {
+        $id = [int]($entryText -split '@')[0]
+        if ($id -lt 0 -or $systemOverlays -contains $id) { continue }
+        $seen[$id] = $true
+    }
+    $record.minigames_played = @($seen.Keys | Sort-Object)
+
     # ---- progress ----
     # The furthest either peer got. They are in lockstep, so they should agree;
     # taking the maximum means a peer that died a tick early cannot under-report
@@ -761,6 +809,7 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         $m = [regex]::Match($text, 'first_divergent_field=([^
 ]+)');  if ($m.Success) { $field = $m.Groups[1].Value.Trim() }
         $record.desync_fingerprint = "ROLLBACK:$subsystem`:$field"
+        $record.rollback_failures = $rollbackReports.Count
         $record.notes += "$($rollbackReports.Count) rollback failure report(s), first divergence in $subsystem at $field"
     }
 

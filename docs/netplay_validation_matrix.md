@@ -249,7 +249,28 @@ salle de jeux), mais ce n'est pas etabli et ce document ne le prétendra pas.
 
 ### La liste
 
-**58 mini-jeux**, dont quatre traverses par l'enregistrement existant.
+**61 mini-jeux**, dont quatre traverses par l'enregistrement existant.
+
+> **Correction, 2026-09-11.** Cette table annoncait 58 mini-jeux et en listait
+> 58. `include/ovl_table.h` en contient **61** dans la plage `m401`-`m463`, et
+> les trois manquants existent bel et bien : leurs modules sont dans
+> `src/REL/`, et `mgInfoTbl` (`src/game/objsub.c`) les reference.
+>
+> | id | module | nom | type | pourquoi il manquait |
+> |---|---|---|---|---|
+> | 433 | `m433dll` | BEACH VOLLEY | 2 (2 contre 2) | omission ; il est bien dans la liste jouable de `selmenuDll` |
+> | 453 | `m453dll` | *(non nomme dans `selmenuDll`)* | **7** | type 7, dont aucun consommateur n'est identifie dans le code decompile |
+> | 463 | `m463dll` | *(non nomme dans `selmenuDll`)* | **7** | idem |
+>
+> 433 est ajoute a la table ci-dessous. 453 et 463 ne le sont pas : ils n'ont ni
+> nom dans `selmenuDll` ni chemin de selection connu, et les inscrire comme
+> `UNTESTED` laisserait croire qu'il suffit de les atteindre. Ils sont candidats
+> a `BLOCKED`, et ce qui le trancherait est l'identification du type 7 — voir la
+> table des types plus haut, ou les types 3, 5, 6, 7 et 8 sont declares non
+> identifies.
+>
+> Le chiffre de 58 circulait aussi dans `docs/canonical_hash_exclusions.md` et
+> dans le registre des defauts. Il vient de cette table, pas d'un comptage.
 
 | id | overlay | dll | nom | type | statut |
 |---|---|---|---|---|---|
@@ -285,6 +306,7 @@ salle de jeux), mais ce n'est pas etabli et ce document ne le prétendra pas.
 | 430 | 38 | `m430dll` | PARASAILING GO | 2 (2 contre 2) | `UNTESTED` |
 | 431 | 39 | `m431dll` | GURUGURU BOX | 2 (2 contre 2) | `UNTESTED` |
 | 432 | 40 | `m432dll` | PAIR DE RACE | 2 (2 contre 2) | `UNTESTED` |
+| 433 | 41 | `m433dll` | BEACH VOLLEY | 2 (2 contre 2) | `UNTESTED` |
 | 434 | 42 | `m434dll` | KINGYOSUKUI | 2 (2 contre 2) | `UNTESTED` |
 | 435 | 43 | `m435dll` | KOOPA DARTS | 3 | `UNTESTED` |
 | 436 | 44 | `m436dll` | KOOPANO AREGA TABETAI! | 3 | `UNTESTED` |

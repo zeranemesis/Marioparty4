@@ -70,7 +70,18 @@ param(
     [string]$ReplayInput = '',
     # Rehearsal only: stop after this many seconds rather than waiting for a
     # window to close.
-    [int]$MaxSeconds = 0
+    [int]$MaxSeconds = 0,
+    # Makes Bowser's Gnarly Party appear in the board menu. It is locked behind
+    # GWGameStat.open_w06, which only the story mode sets, and the board select
+    # reads it at src/REL/mentDll/main.c:207. The port has a setting for it, and
+    # the isolated recording profile is the right place to turn it on: the
+    # personal save is never touched.
+    #
+    # Both seats get the same value, because they share this profile. For a
+    # TWO-MACHINE session both machines must pass this flag or not pass it -
+    # the setting is per-machine and is NOT part of the canonical hash, so two
+    # peers disagreeing about it would see different menus with matching hashes.
+    [switch]$UnlockBowser
 )
 $ErrorActionPreference = 'Stop'
 $projectPath = Split-Path $PSScriptRoot -Parent
@@ -176,6 +187,7 @@ foreach ($side in $sides) {
         'backend.skipPreLaunchUI'    = $true
         'video.targetFrameRate'      = 60
     }
+    if ($UnlockBowser) { $settings['game.unlockBowsersGnarlyParty'] = $true }
     # Windows PowerShell 5.1 has no utf8NoBOM encoding name, and the config
     # parser rejects a byte-order mark.
     [IO.File]::WriteAllText((Join-Path $profile 'config.json'),
@@ -696,6 +708,7 @@ $document = [ordered]@{
     role = $Role
     label = $Label
     rehearsal = $isRehearsal
+    unlock_bowser = [bool]$UnlockBowser
     replay_input = $ReplayInput
     coverage_source = $(if ($isRehearsal) { 'SCRIPTED' } else { 'HUMAN' })
     session_directory = $runPath
