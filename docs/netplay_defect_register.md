@@ -137,3 +137,73 @@ l'affectation est alors **écrasée**. Il n'y a pas d'accès hors-bornes — `va
 pointe toujours sur un emplacement valide — mais un joueur perd son association.
 
 Aucune preuve que ce cas se produise. Inscrit pour ne pas le redécouvrir.
+
+---
+
+## D3 — Lecture invalide dans le décodeur ADPCM, sur le thread audio
+
+**Classification : invalid read on the MusyX audio thread, intermittent.**
+
+**Statut : non corrigé, non investigué. MusyX est hors périmètre par consigne.**
+
+Apparu une fois pendant la vérification du correctif de pile, à la frame 27 750,
+capturé par le rapporteur de crash avec une trace complète :
+
+```
+0xC0000005  read  0x2108b2741a0
+ensureADPCMBlockDecoded+0xa4  [extern/musyx/src/musyx/runtime/hw_pc.c:711]
+sampleAtPos                   [hw_pc.c:797]
+decodeSourceSamples           [hw_pc.c:840]
+fillSourceBuffer              [hw_pc.c:893]
+renderVoiceSegment            [hw_pc.c:1070]
+salCtrlDsp                    [hw_pc.c:1430]
+snd_handle_irq                [hardware.c:57]
+salAudioThreadFunc            [hw_pc.c:1665]
+```
+
+**Ce que l'on sait.** La faute est une **lecture** à une adresse invalide, sur le
+**thread audio**, pas sur le thread de jeu. Le verdict des piles de coroutine est
+explicite : l'adresse n'appartient à aucune pile connue. Ce n'est donc pas le
+défaut D4 déguisé.
+
+**Ce que l'on ne sait pas.** Sa fréquence : il s'est produit une fois sur les
+quatre replays de vérification. Une seule occurrence ne permet pas de dire s'il
+s'agit d'une course entre le thread de jeu et le thread audio, d'un pointeur
+périmé après un changement d'overlay, ou d'un cas limite du décodeur.
+
+**Pourquoi il compte.** C'est désormais le seul crash observé qui reste sur le
+chemin d'une partie en ligne. Il est indépendant de D4 et ne peut pas être
+corrigé sans toucher MusyX, ce que la consigne interdit.
+
+---
+
+## D4 — Débordement de pile de coroutine HuPrc — **CORRIGÉ**
+
+**Classification : coroutine stack exhaustion, confirmed at instruction level.**
+
+**Statut : corrigé par `875a1ef7`, vérifié deux fois.**
+
+Conservé ici parce que le chemin qui a mené à sa découverte est réutilisable.
+
+`fn_1_30A4` (`src/REL/w04Dll/boo_event.c:343`) demandait la constante `0x1000`,
+doublée à 8192 octets sur PC, pour un besoin mesuré de **8200 octets**. Il
+débordait de **huit octets**, exactement l'adresse de retour d'un `call`.
+
+Deux manifestations selon la présence d'une page de garde :
+
+| Build | Pile de coroutine | Symptôme |
+|---|---|---|
+| `bc63c93c` | bloc `malloc` nu | écrase l'en-tête de tas voisin → `0xC0000374` |
+| avec page de garde | réservation gardée | faute sur la page de garde → `0xC0000005` |
+
+**Pourquoi il a résisté si longtemps.** Ce mode de défaillance détruit ses
+propres preuves. Le `call` qui déborde ne peut pas empiler son adresse de
+retour ; le noyau ne peut pas davantage empiler un cadre d'exception ; aucun
+gestionnaire en mode utilisateur ne s'exécute. De plus, le compteur de marque
+d'eau ne mesure que les piles retirées ou vivantes au moment d'un rapport : la
+pile qui déborde tue le processus à cet instant et n'est **jamais** mesurée.
+Tous les pics jamais imprimés étaient des survivants, ce qui a fait passer
+l'hypothèse pour réfutée avec un maximum rassurant de 27 %.
+
+La sortie a été la sémantique `PAGE_GUARD` de Windows, qui lève une exception
+*et* débloque la page dans le même geste, laissant assez de pile pour rapporter.

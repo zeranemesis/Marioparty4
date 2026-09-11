@@ -71,6 +71,68 @@ aucune boutique, aucune loterie, aucun Boo hors de cet événement, aucun item, 
 fin de partie, aucun joueur CPU, deux joueurs sur quatre, une seule machine en
 bouclage local.
 
+### S2 — Replay Big Boo, cause racine trouvée et corrigée — 2026-09-11
+
+La session S1 n'était pas un mystère de désynchronisation : c'était un
+**débordement de pile de coroutine HuPrc**, défaut D4 du registre.
+
+`fn_1_30A4`, le processus d'événement Big Boo créé à
+`src/REL/w04Dll/boo_event.c:343`, demandait la constante PowerPC `0x1000`.
+Doublée sur PC, elle donnait 8192 octets pour un besoin mesuré de **8200**. Il
+débordait de **huit octets**, l'adresse de retour d'un `call`, à chaque partie.
+
+Preuve au niveau de l'instruction, obtenue par WinDbg sur le minidump WER :
+
+```
+ExceptionAddress: KERNELBASE!WriteFile+0x86
+   instruction:   call qword ptr [_imp_NtWriteFile]
+   Parameter[0]:  1                  -> WRITE
+   Attempt to write to address ...0ff8
+   rsp = ...81000                    -> frontiere de page
+!teb  StackBase/StackLimit d'une TOUT AUTRE region
+  -> le thread ne tournait pas sur sa pile Windows
+```
+
+Les deux pairs sont logiquement identiques : mêmes 12 bits de poids faible sur
+`rsp`, `rax`, `rbx`, `r10`, seule l'ASLR diffère.
+
+Mesures de consommation réelle, constante d'origine à gauche :
+
+| Constante | Pic réel | ×2 donnait | Verdict |
+|---|---|---|---|
+| 2048 | 280 | 4096 | ok |
+| **4096** | **8200** | **8192** | **déborde de 8 octets** |
+| 8192 | 6552 | 16384 | ok |
+| 14336 | 6696 | 28672 | ok |
+| 16384 | 6312 | 32768 | ok |
+| 24576 | 8552 | 49152 | ok |
+
+Le besoin est une propriété de la chaîne d'appels, autour de 8,5 Ko au plus
+profond, et n'a presque aucun rapport avec la constante d'origine. Corrigé par
+`875a1ef7` : multiplicateur ×4 **et plancher de 32 Ko**, soit 3,8 fois la
+profondeur maximale jamais mesurée.
+
+| Verdict | Résultat |
+|---|---|
+| `DETERMINISM` | **PASS** — `mismatch=0`, `rng_sync=1` sur toute la durée |
+| `STABILITY` | **PASS pour D4** — plus aucun débordement ; D3 reste ouvert |
+
+Vérifications :
+
+| Run | Configuration | Frame atteinte | Débordement | Sync |
+|---|---|---|---|---|
+| mesure | piles ×8 | **93 241** | aucun | `mismatch=0` |
+| correctif | ×4 + plancher 32 Ko | **59 925** | aucun | `mismatch=0` |
+
+Les deux dépassent l'ancien point de crash (48 671) de dizaines de milliers de
+frames, les deux pairs toujours d'accord.
+
+**Ce qui reste ouvert** : le défaut D3, une lecture invalide intermittente dans
+le décodeur ADPCM sur le thread audio, apparue une fois sur quatre replays. Il
+est indépendant de D4 et hors périmètre tant que MusyX est gelé.
+
+---
+
 ## Matrice des mécaniques
 
 | Mécanique | DETERMINISM | STABILITY |
