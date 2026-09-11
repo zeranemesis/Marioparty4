@@ -365,7 +365,15 @@ bool writeMinidump(const char *path, EXCEPTION_POINTERS *pointers, DWORD threadI
     const BOOL ok = gMiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, type,
         pointers ? &info : nullptr, nullptr, nullptr);
     CloseHandle(file);
-    return ok != FALSE;
+    if (ok == FALSE) {
+        // CreateFileA already made the file, so a failed write leaves a
+        // zero-byte .dmp behind. That is worse than no file at all: anything
+        // looking for evidence of a crash finds one, and it says nothing. The
+        // report still records that the dump was not written.
+        DeleteFileA(path);
+        return false;
+    }
+    return true;
 }
 
 // --- Exception detail and stack walk -------------------------------------

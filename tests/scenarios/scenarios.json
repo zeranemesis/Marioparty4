@@ -3,6 +3,19 @@
   "note": "Scenarios the campaign runner can execute. Every entry must correspond to something that actually exists: a recorded replay on disk, or a probe the binary implements. Nothing here is invented from memory. Boards and overlays are named from include/ovl_table.h, where the TARGET_PC block gives overlay 89..97 to w01Dll..w21Dll, 84 to resultDll and 3 to instDll.",
   "scenarios": [
     {
+      "id": "w04-boot-smoke",
+      "description": "The first two minutes of the recorded session: boot, the mode select and menu overlays, and the entry onto the board. Short enough to be the gate a change has to pass before a long campaign is worth starting.",
+      "board": "w04Dll (overlay 92)",
+      "kind": "replay",
+      "replay": "work/netplay-recordings/board-replay.txt",
+      "expectedOverlays": "work/netplay-recordings/board-replay.txt.overlays",
+      "durationSeconds": 120,
+      "minFrames": 6000,
+      "repeats": 1,
+      "netplayDelay": 3,
+      "seed": "recorded"
+    },
+    {
       "id": "w04-board-replay",
       "description": "Recorded human session on the w04 board: four minigames, four returns through the results screen, the Big Boo event that used to overflow a coroutine stack at frame 48671.",
       "board": "w04Dll (overlay 92)",

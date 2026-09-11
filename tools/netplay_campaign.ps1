@@ -36,7 +36,12 @@ param(
     [switch]$RerunFailures,
     # Verbosity of the audio lifetime trace: '' off, '1' banks and violations,
     # '2' every voice event as well.
-    [string]$AudioDiagnostics = '1'
+    [string]$AudioDiagnostics = '1',
+    # Forced local rollback probe, '' off. See PARTYBOARD_FORCE_ROLLBACK.
+    [string]$ForceRollback = '',
+    # Suffix for the campaign directory, so several campaigns started in the
+    # same second do not collide.
+    [string]$Label = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -113,6 +118,7 @@ if ($Resume) {
     Write-Output "Resuming campaign $campaignPath"
 } else {
     $stamp = (Get-Date).ToString('yyyy-MM-dd_HHmmss')
+    if ($Label) { $stamp = "$stamp-$Label" }
     $campaignPath = Join-Path (Resolve-CampaignPath $CampaignRoot) $stamp
     New-Item -ItemType Directory -Path $campaignPath -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $campaignPath 'runs') -Force | Out-Null
@@ -180,6 +186,8 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         binary = $build.Binary
         binary_written = $build.BinaryWritten
         seed = $entry.Seed
+        audio_diagnostics = $AudioDiagnostics
+        force_rollback = $ForceRollback
         replay = $entry.Replay
         netplay_delay = $entry.NetplayDelay
         started_at = (Get-Date).ToString('o')
@@ -252,9 +260,11 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
             $start.EnvironmentVariables['PARTYBOARD_CRASH_DIR'] = $runPath
             $start.EnvironmentVariables['PARTYBOARD_CRASH_PEER'] = "$side"
             $start.EnvironmentVariables['PARTYBOARD_CRASH_ROLE'] = $(if ($side -eq 0) { 'host' } else { 'client' })
-            if ($AudioDiagnostics) {
-                $start.EnvironmentVariables['PARTYBOARD_AUDIO_DIAGNOSTICS'] = $AudioDiagnostics
-            }
+            # Set explicitly rather than inherited, both of them, so a variable
+            # left over in the launching shell can never silently change what a
+            # campaign measured.
+            $start.EnvironmentVariables['PARTYBOARD_AUDIO_DIAGNOSTICS'] = $AudioDiagnostics
+            $start.EnvironmentVariables['PARTYBOARD_FORCE_ROLLBACK'] = $ForceRollback
 
             $process = [Diagnostics.Process]::Start($start)
             $peers += @{
@@ -377,6 +387,16 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
     $record.transitions = $overlays[0].Count
 
     # ---- fingerprints ----
+    # A minidump with no report beside it is a crash the reporter could not
+    # describe, and it must not be able to pass as a clean run. An empty one is
+    # a reporter that could not finish, which is its own kind of finding.
+    $dumps = @($peers[0].Minidumps) + @($peers[1].Minidumps)
+    $solidDumps = @($dumps | Where-Object { (Get-Item -LiteralPath $_).Length -gt 0 })
+    $emptyDumps = @($dumps | Where-Object { (Get-Item -LiteralPath $_).Length -eq 0 })
+    if ($emptyDumps.Count -gt 0) {
+        $record.notes += "$($emptyDumps.Count) empty minidump(s): the reporter started and did not finish"
+    }
+
     $crashReports = @($peers[0].CrashReports) + @($peers[1].CrashReports)
     if ($crashReports.Count -gt 0) {
         $facts = Get-CrashReportFacts $crashReports[0]
@@ -391,6 +411,20 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         $record.desync_fingerprint = Get-DesyncFingerprint $desyncReports[0]
     }
 
+    # A forced rollback that did not reproduce its own frame is a determinism
+    # failure, even though no peer disagreed with the other: the same inputs
+    # gave two different answers on one machine.
+    $rollbackReports = @(Get-ChildItem -LiteralPath $runPath -Filter 'rollback-failure-*.txt' -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+    if ($rollbackReports.Count -gt 0) {
+        $text = Get-Content -LiteralPath $rollbackReports[0] -Raw
+        $subsystem = 'unknown'; $field = 'unknown'
+        $m = [regex]::Match($text, 'first_divergent_subsystem=(\S+)'); if ($m.Success) { $subsystem = $m.Groups[1].Value }
+        $m = [regex]::Match($text, 'first_divergent_field=([^
+]+)');  if ($m.Success) { $field = $m.Groups[1].Value.Trim() }
+        $record.desync_fingerprint = "ROLLBACK:$subsystem`:$field"
+        $record.notes += "$($rollbackReports.Count) rollback failure report(s), first divergence in $subsystem at $field"
+    }
+
     # ---- verdict ----
     # Most severe cause first. A crash outranks everything: a run that crashed
     # cannot also be said to have passed some other way.
@@ -400,8 +434,14 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         $record.notes += $harnessError
     } elseif ($classifications -contains 'PROCESS_CRASH') {
         $record.result = 'CRASH'
-    } elseif ($classifications -contains 'NETPLAY_DESYNC' -or ($record.mismatch -ne 'unknown' -and [int]$record.mismatch -gt 0)) {
+    } elseif ($classifications -contains 'NETPLAY_DESYNC' -or $rollbackReports.Count -gt 0 -or ($record.mismatch -ne 'unknown' -and [int]$record.mismatch -gt 0)) {
         $record.result = 'DESYNC'
+    } elseif ($solidDumps.Count -gt 0) {
+        $record.result = 'CRASH'
+        $record.notes += "minidump written with no crash report: $($solidDumps[0])"
+        if (-not $record.crash_fingerprint) {
+            $record.crash_fingerprint = 'UNDESCRIBED_CRASH:unknown:minidump_without_report'
+        }
     } elseif ($classifications -contains 'UNKNOWN_ABNORMAL_EXIT') {
         $record.result = 'ABNORMAL_EXIT'
     } elseif ($record.last_frame -lt $entry.MinFrames) {
@@ -552,8 +592,8 @@ foreach ($record in $records) {
 $md = New-Object Collections.Generic.List[string]
 $md.Add("# Campagne netplay $(Split-Path $campaignPath -Leaf)")
 $md.Add('')
-$md.Add("Commit `$($build.Commit)` sur la branche `$($build.Branch)`, arbre $($build.Tree).")
-$md.Add("Disque : `$disc`.")
+$md.Add(('Commit `{0}` sur la branche `{1}`, arbre {2}.' -f $build.Commit, $build.Branch, $build.Tree))
+$md.Add(('Disque : `{0}`.' -f $disc))
 $md.Add('')
 $md.Add("| runs | PASS | CRASH | DESYNC | TIMEOUT | ABNORMAL | HARNESS |")
 $md.Add('|---|---|---|---|---|---|---|')
