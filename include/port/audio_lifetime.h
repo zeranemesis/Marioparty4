@@ -78,8 +78,16 @@ void PartyBoard_AudioSampleIdentify(const void *addr, uint32_t sampleId);
 
 /* A sample copy is about to be freed. This is detector 1: the voices are walked
  * here, while the memory is still mapped, and any voice still carrying this
- * address is reported. Called from hwRemoveSample, immediately before free(). */
+ * address is reported. Called from hwRemoveSample, immediately before free()
+ * and AFTER the lifetime barrier, so what it reports is the state at the
+ * instant the memory goes away. After the barrier it must always find nothing;
+ * anything it finds is the barrier failing. */
 void PartyBoard_AudioSampleFree(const void *addr);
+
+/* The barrier detached a live voice from a sample being freed. Not a violation:
+ * it is the work the barrier exists to do, counted separately so the two can
+ * never be confused with each other. */
+void PartyBoard_AudioVoiceDetachedForFree(uint32_t voice, const void *addr);
 
 /* sndPopGroup has been entered for this group. The voices are about to be asked
  * to stop; the memory is still valid at this point. */
@@ -131,6 +139,11 @@ bool PartyBoard_AudioLifetimeViolationDetected(void);
 
 void PartyBoard_AudioLifetimeStats(uint32_t *banksLoaded, uint32_t *banksFreed,
     uint32_t *staleAtFree, uint32_t *staleReads, uint32_t *voicesStarted);
+
+/* How many live voices the barrier had to detach. Zero would mean the ordinary
+ * kill path already stops everything; a non-zero count is the measure of what
+ * the barrier is actually catching. */
+uint32_t PartyBoard_AudioVoicesDetached(void);
 
 /* Suppresses report files while the detector is being tested against known
  * stale references, so a self-test never litters a session directory. */

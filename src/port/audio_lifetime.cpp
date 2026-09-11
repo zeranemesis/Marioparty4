@@ -119,6 +119,7 @@ std::atomic<u32> gStatVoicesStarted { 0 };
 std::atomic<u32> gStatUnknownVoices { 0 };
 std::atomic<u32> gStatSamplesStored { 0 };
 std::atomic<u32> gStatSamplesFreed { 0 };
+std::atomic<u32> gStatVoicesDetached { 0 };
 std::atomic<u32> gEventsWritten { 0 };
 std::atomic<u32> gEventsDropped { 0 };
 std::atomic<bool> gViolation { false };
@@ -610,6 +611,22 @@ extern "C" void PartyBoard_AudioNoteSampleRead(u32 voice, const void *addr)
     }
 }
 
+extern "C" void PartyBoard_AudioVoiceDetachedForFree(u32 voice, const void *addr)
+{
+    if (level() == 0) return;
+    gStatVoicesDetached.fetch_add(1, std::memory_order_relaxed);
+    SampleRecord *record = findSlot((uintptr_t)addr, false);
+    writeEvent("VOICE_DETACHED_FOR_FREE", "voice=%u bank=%u generation=%u sample=%u addr=%p",
+        voice, record ? record->bankId.load(std::memory_order_relaxed) : 0,
+        record ? record->generation.load(std::memory_order_relaxed) : 0,
+        record ? record->sampleId.load(std::memory_order_relaxed) : 0, addr);
+}
+
+extern "C" u32 PartyBoard_AudioVoicesDetached(void)
+{
+    return gStatVoicesDetached.load(std::memory_order_relaxed);
+}
+
 extern "C" bool PartyBoard_AudioLifetimeViolationDetected(void)
 {
     return gViolation.load(std::memory_order_acquire);
@@ -680,6 +697,7 @@ void resetForSelfTest()
     gStatStaleAtFree.store(0, std::memory_order_relaxed);
     gStatStaleReads.store(0, std::memory_order_relaxed);
     gStatUnknownVoices.store(0, std::memory_order_relaxed);
+    gStatVoicesDetached.store(0, std::memory_order_relaxed);
     gViolation.store(false, std::memory_order_relaxed);
     gFakeVoiceCount = 0;
 }
