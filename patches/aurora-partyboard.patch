@@ -1376,10 +1376,10 @@ index 0000000..b4a896f
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_capture.cpp b/lib/rt/rt_capture.cpp
 new file mode 100644
-index 0000000..ca724eb
+index 0000000..21342fd
 --- /dev/null
 +++ b/lib/rt/rt_capture.cpp
-@@ -0,0 +1,1630 @@
+@@ -0,0 +1,1641 @@
 +#include "rt_capture.hpp"
 +
 +#include "rt_accel.hpp"
@@ -1608,8 +1608,19 @@ index 0000000..ca724eb
 +// behind it -- measured at -44.6% on a mini-game panel against -13.7% on the
 +// scene it covers. One uint per tile rather than a bitfield: 27 KB is nothing
 +// and the shader reads it without masking.
-+constexpr uint32_t kMaskCols = 96;
-+constexpr uint32_t kMaskRows = 72;
++// 192x144 rather than 96x72. A bounding box is rounded out to whole tiles, and
++// at the coarser grid that showed as unshaded scene around every interface
++// panel. Measured over twelve frames of play with the mask drawn on its own
++// (debug mode 9), the median masked area falls from 27.6% of the screen to
++// 26.0%: a 6% relative tightening, not the fifth a back of the envelope count
++// of one whole tile per edge suggested -- a box gains about half a tile per
++// edge on average, not a full one. Small, but the buffer is only 108 KB.
++//
++// The rest of the over-coverage is not quantisation and cannot be tuned away
++// here: a panel's quad is larger than the opaque part of its texture, and a
++// mask built from geometry cannot see alpha.
++constexpr uint32_t kMaskCols = 192;
++constexpr uint32_t kMaskRows = 144;
 +std::vector<uint32_t> g_orthoMask(static_cast<size_t>(kMaskCols) * kMaskRows, 0u);
 +// Fraction of tiles covered, for the periodic report: a mask that covers
 +// everything would silently switch the whole effect off.
@@ -4600,10 +4611,10 @@ index 0000000..98c8d55
 +} // namespace aurora::rt::trace
 diff --git a/lib/rt/shaders/rt_ao.hlsl b/lib/rt/shaders/rt_ao.hlsl
 new file mode 100644
-index 0000000..93f576c
+index 0000000..4e7416c
 --- /dev/null
 +++ b/lib/rt/shaders/rt_ao.hlsl
-@@ -0,0 +1,483 @@
+@@ -0,0 +1,490 @@
 +// Ray traced ambient occlusion for PartyBoard.
 +//
 +// Primary visibility is traced rather than rasterised: with inline RayQuery the
@@ -4711,6 +4722,11 @@ index 0000000..93f576c
 +#define DEBUG_MATERIAL 6u   // material flags as colour
 +#define DEBUG_REFLECTION 7u // reflected colour, scaled by its blend weight
 +#define DEBUG_TEXCOORD 8u   // interpolated uv, to check the capture decodes it
++// 9: the orthographic mask's own extent. A masked pixel leaves this shader
++// before the switch below, writing white, so writing black for everything else
++// makes the frame show through exactly where the mask protects it -- which is
++// how to see whether the bounding boxes cover more than the interface does.
++#define DEBUG_MASK 9u
 +
 +#define MATERIAL_REFLECTIVE 1u
 +#define MATERIAL_CUTOUT 2u
@@ -5064,6 +5080,8 @@ index 0000000..93f576c
 +      if (m == 0u) {
 +        debugColour = float3(0.35f, 0.35f, 0.35f);
 +      }
++    } else if (gDebugMode == DEBUG_MASK) {
++      debugColour = float3(0.0f, 0.0f, 0.0f);
 +    } else if (gDebugMode == DEBUG_TEXCOORD) {
 +      // frac so a wrapped coordinate still reads as a gradient rather than
 +      // saturating, and blue marks a draw that carried no coordinates at all.

@@ -37,7 +37,11 @@ param(
     [int]$Frames = 4,
     [int]$Attempts = 3,
     # How many cards right of the first board to take on the selection carousel.
-    [int]$BoardIndex = 0
+    [int]$BoardIndex = 0,
+    # Steps of actual play once the scene is up. Loading a board is not playing
+    # one: the intro fly-through carries no interface, so the 2D mask is never
+    # exercised until a turn starts and the HUD appears.
+    [int]$PlaySteps = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -227,6 +231,17 @@ function Invoke-Run {
         Start-Sleep -Seconds 4
         foreach ($k in 1..$Frames) { Save-Frame $window ('scene{0:d2}' -f $k) | Out-Null; Start-Sleep -Milliseconds 900 }
     }
+    if ($reached -and $PlaySteps -gt 0) {
+        Write-Host "  jeu en cours, $PlaySteps etapes"
+        foreach ($k in 1..$PlaySteps) {
+            if ($process.HasExited) { Write-Host "  *** mort pendant le jeu, etape $k"; break }
+            Save-Frame $window ('play{0:d3}' -f $k) | Out-Null
+            # A on every port clears the dialogues the turn starts with; the
+            # occasional stick nudge moves whatever cursor is up.
+            if ($k % 4 -eq 0) { Send-Pad 0 0 -100 } else { Send-PadAllPorts $A }
+            Start-Sleep -Milliseconds 1200
+        }
+    }
     $died = $process.HasExited
     if (-not $died) { $process.CloseMainWindow() | Out-Null; Start-Sleep -Seconds 3 }
     if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
@@ -257,6 +272,16 @@ foreach ($pattern in @('Ray tracing active', 'Orthographic coverage', 'Perspecti
                        'Scene extent', 'Of \d+ captured draws', 'still running when')) {
     $hit = $scene | Select-String -Pattern $pattern | Select-Object -Last 1
     if ($hit) { Write-Host ("  " + ($hit.ToString() -replace '^\[INFO \| aurora::rt\] ', '')) }
+}
+
+# Did the 2D mask ever have anything to protect? Every capture taken at the
+# moment a board loads reports 0%, because the intro fly-through has no
+# interface -- which is why loading a board never validated the HUD fix.
+$maskLines = $scene | Select-String -Pattern 'Orthographic coverage: ([0-9.]+)% .*?(\d+) bounded'
+$engaged = @($maskLines | Where-Object { [double]$_.Matches[0].Groups[1].Value -gt 0 })
+Write-Host ("  masque 2D : engage sur {0} des {1} rapports de cette scene" -f $engaged.Count, $maskLines.Count)
+if ($engaged.Count -gt 0) {
+    Write-Host ("    " + ($engaged[-1].ToString() -replace '^\[INFO \| aurora::rt\] ', ''))
 }
 
 $errors = ($scene | Select-String -Pattern 'aurora::rt.*ERROR|device removed|DEVICE_HUNG').Count
