@@ -58,6 +58,11 @@ int main(int argc, char *argv[])
             ? 0
             : 1;
 
+    // Anything the previous run left behind becomes a queued incident here, at
+    // the next launch rather than while the last one was dying. A no-op in a
+    // supervised session, where reports belong to the campaign directory.
+    PartyBoard_CrashQueueScan(PartyBoard_CrashReportDirectory());
+
     if (!PartyBoard_NetplayConfigureFromArgs(argc, argv))
         return 2;
     for (int i = 1; i < argc; ++i) {

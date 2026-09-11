@@ -130,6 +130,11 @@ s32 PartyBoard_CrashCurrentOverlay(void);
 // accepted tick; the write itself is throttled internally.
 void PartyBoard_CrashHeartbeat(void);
 
+// The directory reports are written to, resolved once by
+// PartyBoard_CrashReportInit. Empty means the working directory. The startup
+// scan needs this so it looks where the reporter actually wrote.
+const char *PartyBoard_CrashReportDirectory(void);
+
 // A shutdown the user asked for: the window's close button, Alt+F4, or a menu
 // quit that reached the normal exit path. After this, termination is expected.
 void PartyBoard_CrashNoteUserShutdown(const char *how);

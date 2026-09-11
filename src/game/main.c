@@ -24,6 +24,7 @@
 #include "port/frame_interpolation.h"
 #include "port/main.h"
 #include "port/rollback.h"
+#include "port/rollback_animation.h"
 #include "port/rollback_clock.h"
 #include "port/netplay_runtime.h"
 #include "port/crash_report.h"
@@ -97,6 +98,21 @@ static void PartyBoard_RunGameLogicTick(void)
 
 bool PartyBoard_RollbackRunGameLogicTick(const PartyBoardRollbackInput inputs[4], u8 connectedMask)
 {
+    /* Defect D5. A rendered frame runs the logic for a tick, the netplay commit
+     * captures the canonical state, and only THEN does Hu3DExec advance the
+     * animation clock. So the state captured at frame F does not yet contain
+     * the advance that the drawing of F performs, and reaching F+1 from it
+     * needs that advance before the logic of F+1 - exactly the order below.
+     *
+     * A replayed tick has no presentation pass, so without this every replayed
+     * frame came back with motWork.time one frame behind, which is what the
+     * forced rollback probe measured at its very first test:
+     * ANIMATION (model->motWork).time expected 268.0, actual 267.0.
+     *
+     * The other thing Hu3DExec does under the same guard, data->tick++, is
+     * deliberately not replayed: it counts drawn models, not simulated ticks,
+     * and PartyBoard_NetplayAnimationState does not export it. */
+    PartyBoard_AnimationAdvance();
     if (!PartyBoard_RollbackApplyPads(inputs, connectedMask)) return false;
     PartyBoard_RunGameLogicTick();
     return true;

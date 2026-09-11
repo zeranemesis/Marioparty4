@@ -816,6 +816,11 @@ extern "C" void PartyBoard_CrashUpdateSimState(const PartyBoardCrashSimState *st
     gSim = *state;
 }
 
+extern "C" const char *PartyBoard_CrashReportDirectory(void)
+{
+    return gIdentity.sessionDir[0] != 0 ? gIdentity.sessionDir : ".";
+}
+
 extern "C" u32 PartyBoard_CrashCurrentFrame(void)
 {
     return gSimFrameFast.load(std::memory_order_relaxed);

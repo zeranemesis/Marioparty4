@@ -509,17 +509,33 @@ void configureForceRollback()
 // silently refuses every test looks exactly like a probe that silently passes
 // every test, and the two must never be confusable. writeDiagnostic throttles
 // the repeats, so this stays one line every couple of seconds.
-void reportForceRollbackProgress(std::uint32_t distance, const char *outcome)
+void reportForceRollbackProgress(std::uint32_t distance, const char *outcome,
+    std::uint32_t atFrame = 0)
 {
     const ForceRollbackProbe &probe = gForceRollback;
     char event[224];
+    // A refusal happens at the frame it was refused on, not at the last frame a
+    // test was armed on; reporting the stale saveFrame made twenty refusals all
+    // look like they happened at frame 900.
     std::snprintf(event, sizeof(event),
-        "force-rollback %s save_frame=%u distance=%u attempted=%u passed=%u failed=%u refused=%u",
-        outcome, probe.saveFrame, distance, probe.attempted, probe.passed, probe.failed,
-        probe.refused);
-    // The first test of a session and every failure are always written; the rest
-    // are throttled.
-    writeDiagnostic(event, probe.attempted <= 1 || probe.failed != 0);
+        "force-rollback %s frame=%u distance=%u attempted=%u passed=%u failed=%u refused=%u",
+        outcome, atFrame != 0 ? atFrame : probe.saveFrame, distance, probe.attempted,
+        probe.passed, probe.failed, probe.refused);
+    // writeDiagnostic throttles unforced lines to one every two seconds across
+    // every diagnostic the runtime writes, and the netplay checkpoint line takes
+    // that slot, so an unforced line is an invisible line.
+    //
+    // Every OUTCOME is therefore written: a pass, a failure, a refusal. Only the
+    // arming, which happens once per test and says nothing on its own, is
+    // throttled to every tenth.
+    //
+    // An earlier version forced on `attempted % 10`, which never fired: a test
+    // refused before the comparison does not increment `attempted`, so a probe
+    // refusing every test sat at attempted=1 and said nothing at all. Silence
+    // from a probe has to mean the probe is silent, not that it stopped.
+    const bool arming = std::strcmp(outcome, "armed") == 0;
+    const bool always = !arming || ((probe.attempted + probe.refused) % 10) == 0;
+    writeDiagnostic(event, always);
 }
 
 std::array<PartyBoardRollbackInput, rollback::kMaxPlayers> currentAppliedInputs()
@@ -767,13 +783,13 @@ void forceRollbackTick(std::uint32_t frame)
         // Not a safe boundary: a wipe, a render callback, an I/O operation or a
         // module transition is in flight. Refused and counted, never forced.
         ++probe.refused;
-        reportForceRollbackProgress(0, "refused-unsafe-boundary");
+        reportForceRollbackProgress(0, "refused-unsafe-boundary", frame);
         return;
     }
     probe.before.assign(bytes, 0);
     if (!PartyBoard_RollbackCheckpointSave(probe.before.data(), bytes)) {
         ++probe.refused;
-        reportForceRollbackProgress(0, "refused-save-failed");
+        reportForceRollbackProgress(0, "refused-save-failed", frame);
         return;
     }
     probe.saveFrame = frame;
