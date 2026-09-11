@@ -370,3 +370,47 @@ Treize scènes distinctes mesurées en tout — trois plateaux, six mini-jeux pl
 l'audit. Sur soixante-et-un mini-jeux et neuf plateaux. Les plateaux restants
 sont verrouillés par la progression de la sauvegarde ; les mini-jeux, eux, sont
 tous accessibles, `-MinigameIndex` suffit.
+
+---
+
+# D'où viennent les 5 ms (11 septembre 2026)
+
+Question posée : ces latences paraissent hautes pour un si petit décor. Elles le
+sont, et la décomposition dit exactement pourquoi. Même plateau, `w01Dll`,
+1280 × 960, RTX 5090.
+
+| configuration | tracé |
+|---|---|
+| défaut : 48 AO, 16 ombres, débruiteur actif | 5,02 ms |
+| débruiteur désactivé | 5,33 ms |
+| 1 échantillon d'AO, 16 ombres | 1,50 ms |
+| 1 AO, 1 ombre, sans débruiteur | **0,30 ms** |
+
+## Le débruiteur ne coûte rien
+
+5,33 ms sans lui contre 5,02 ms avec : l'écart est dans le bruit, et il va dans
+le mauvais sens. Les quatre passes à-trous sont gratuites à cette échelle.
+J'avais supposé qu'une partie des 5 ms pouvait leur revenir, puisque les
+horodatages les englobent. Non.
+
+## Tout est dans le nombre d'échantillons
+
+Le socle — visibilité primaire, tampon guide, coût de lancement — vaut **0,30 ms**.
+Le reste est linéaire en rayons : passer l'AO de 48 à 1 échantillon fait tomber
+la passe de 5,02 à 1,50 ms, soit environ **0,078 ms par échantillon et par frame**
+à cette résolution. Cela fait 1,23 M rayons en 0,078 ms, autour de **16 Grayons/s** :
+un débit ordinaire pour cette carte. Le GPU n'est pas en cause.
+
+Ce qui est en cause, c'est qu'on lance **64 rayons par pixel** là où un jeu qui
+sort en lance **1 ou 2**, et rattrape la qualité par accumulation temporelle
+entre les frames. À 2 rayons par pixel, la même passe coûterait environ
+0,30 + 2 × 0,078 ≈ **0,46 ms**.
+
+Le faible nombre de triangles ne sauve rien : le coût d'un rayon croît à peu près
+comme le logarithme de la géométrie, donc 25 000 triangles ne valent pas cent
+fois moins cher que 2,5 millions.
+
+**L'accumulation temporelle vaut donc un facteur dix sur cette passe**, et c'est
+le même chantier qui réglerait le bruit verrouillé à l'écran du constat §7.
+Réserve : les scènes diffèrent un peu d'un lancement à l'autre (14 239 à 16 845
+triangles ici), ce qui vaut environ ±0,3 ms de bruit sur ces chiffres.
