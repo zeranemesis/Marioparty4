@@ -39,6 +39,7 @@ EXPORTS
     PartyBoard_CrashQueueSetConsent
     PartyBoard_CrashQueuePendingCount
     PartyBoard_CrashQueuePrune
+    PartyBoard_CrashQueueScan
     PartyBoard_AudioLifetimeRunSelfTest
     PartyBoard_AudioLifetimeEnabled
     PartyBoard_AudioLifetimeViolationDetected

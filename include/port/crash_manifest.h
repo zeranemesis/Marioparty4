@@ -82,6 +82,21 @@ bool PartyBoard_CrashQueueSetConsent(const char *incidentDirectory,
 uint32_t PartyBoard_CrashQueuePendingCount(void);
 bool PartyBoard_CrashQueuePrune(void);
 
+/* Looks in `reportsDirectory` for crash reports that have not been turned into
+ * incidents yet, builds a manifest for each, moves it and its minidump into the
+ * queue, and prunes. Returns how many new incidents were created.
+ *
+ * Deduplication happens here too: a report whose fingerprint already has an
+ * incident bumps that incident's occurrence count and last-seen date instead of
+ * creating a second folder. The first occurrence's files are the ones kept -
+ * they are the evidence, and the hundredth copy of them says nothing new.
+ *
+ * Called once at startup, and ONLY when PARTYBOARD_CRASH_DIR is unset. That
+ * variable means a supervised session whose reports belong to a campaign
+ * directory, and moving those into a player's queue would take evidence out of
+ * the run that produced it. */
+unsigned PartyBoard_CrashQueueScan(const char *reportsDirectory);
+
 bool PartyBoard_CrashManifestRunSelfTest(void);
 
 #ifdef __cplusplus

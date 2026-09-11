@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -474,6 +475,170 @@ extern "C" bool PartyBoard_CrashQueuePrune(void)
 }
 
 // ---------------------------------------------------------------------------
+// Startup scan
+//
+// Deliberately not done while crashing. A dying process has enough to do
+// writing its report; building JSON, creating directories and moving files in
+// it is how a report gets lost. The next launch has all the time in the world.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A short, stable name for an incident folder. FNV-1a over the fingerprint,
+// which is itself free of pids, addresses and timestamps, so the same defect
+// lands in the same folder on every machine and on every launch.
+std::string fingerprintFolder(const std::string &fingerprint)
+{
+    std::uint64_t hash = 14695981039346656037ull;
+    for (const unsigned char byte : fingerprint) {
+        hash = (hash ^ byte) * 1099511628211ull;
+    }
+    char name[32];
+    std::snprintf(name, sizeof(name), "%016llx", static_cast<unsigned long long>(hash));
+    return name;
+}
+
+std::string manifestFingerprint(const fs::path &manifestPath)
+{
+    const std::string text = readFile(manifestPath.string());
+    if (text.empty()) return {};
+    const json parsed = json::parse(text, nullptr, false);
+    if (parsed.is_discarded()) return {};
+    return parsed.value("fingerprint", std::string());
+}
+
+// The minidump that belongs to a report: the path the report names, or the
+// name the reporter would have used, which is the report's own name with
+// "-report" removed and the extension changed.
+fs::path minidumpFor(const fs::path &reportPath, const std::string &reportText)
+{
+    std::error_code error;
+    const std::string named = matchOne(reportText, "minidump=([^\\r\\n]+)");
+    if (!named.empty() && named.front() != '<') {
+        const fs::path beside = reportPath.parent_path() / fs::path(named).filename();
+        if (fs::exists(beside, error)) return beside;
+        if (fs::exists(named, error)) return named;
+    }
+    const std::string stem = reportPath.stem().string();
+    const std::string prefix = "crash-report-";
+    if (stem.rfind(prefix, 0) == 0) {
+        const fs::path guess =
+            reportPath.parent_path() / ("crash-" + stem.substr(prefix.size()) + ".dmp");
+        if (fs::exists(guess, error)) return guess;
+    }
+    return {};
+}
+
+void bumpOccurrence(const fs::path &incident)
+{
+    const fs::path manifestPath = incident / "manifest.json";
+    const std::string text = readFile(manifestPath.string());
+    if (text.empty()) return;
+    json manifest = json::parse(text, nullptr, false);
+    if (manifest.is_discarded()) return;
+    manifest["occurrences"] = manifest.value("occurrences", 1u) + 1u;
+    const auto now = std::time(nullptr);
+    char stamp[32] = {};
+    std::strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%S", std::gmtime(&now));
+    manifest["last_seen"] = stamp;
+    std::ofstream file(manifestPath, std::ios::binary | std::ios::trunc);
+    if (file) file << manifest.dump(2);
+}
+
+} // namespace
+
+extern "C" unsigned PartyBoard_CrashQueueScan(const char *reportsDirectory)
+{
+    // A supervised session's reports belong to the run directory that produced
+    // them. Taking those out of it would remove evidence from a campaign.
+    if (const char *supervised = std::getenv("PARTYBOARD_CRASH_DIR")) {
+        if (supervised[0] != 0) return 0;
+    }
+    if (reportsDirectory == nullptr || reportsDirectory[0] == 0) return 0;
+
+    std::error_code error;
+    if (!fs::is_directory(reportsDirectory, error)) return 0;
+
+    std::vector<fs::path> reports;
+    for (const auto &entry : fs::directory_iterator(reportsDirectory, error)) {
+        if (error) break;
+        if (!entry.is_regular_file(error)) continue;
+        const std::string name = entry.path().filename().string();
+        if (name.rfind("crash-report-", 0) != 0) continue;
+        if (entry.path().extension() != ".txt") continue;
+        reports.push_back(entry.path());
+    }
+    // Oldest first, so the folder that survives deduplication holds the first
+    // occurrence rather than whichever the filesystem happened to list first.
+    std::sort(reports.begin(), reports.end());
+
+    unsigned created = 0;
+    for (const auto &report : reports) {
+        const std::string text = readFile(report.string());
+        if (text.empty()) continue;
+
+        // The manifest has to exist before the fingerprint can be read back, so
+        // it is written in place first and moved with the report afterwards.
+        if (!PartyBoard_CrashWriteManifest(report.string().c_str(), nullptr,
+                report.parent_path().string().c_str())) {
+            continue;
+        }
+        const std::string fingerprint =
+            manifestFingerprint(report.parent_path() / "manifest.json");
+        fs::remove(report.parent_path() / "manifest.json", error);
+        if (fingerprint.empty()) continue;
+
+        const fs::path incident = fs::path(queueRoot()) / fingerprintFolder(fingerprint);
+        const bool known = fs::exists(incident / "manifest.json", error);
+        if (known) {
+            bumpOccurrence(incident);
+            // The first occurrence's files stay. This one has been counted, and
+            // keeping a hundred identical copies of it helps nobody.
+            fs::remove(report, error);
+            const fs::path dump = minidumpFor(report, text);
+            if (!dump.empty()) fs::remove(dump, error);
+            continue;
+        }
+
+        fs::create_directories(incident, error);
+        if (error) continue;
+        const fs::path dump = minidumpFor(report, text);
+        const fs::path movedReport = incident / report.filename();
+        fs::rename(report, movedReport, error);
+        if (error) {
+            // Across volumes rename fails; copy then remove.
+            error.clear();
+            fs::copy_file(report, movedReport, fs::copy_options::overwrite_existing, error);
+            if (error) continue;
+            fs::remove(report, error);
+            error.clear();
+        }
+        fs::path movedDump;
+        if (!dump.empty()) {
+            movedDump = incident / dump.filename();
+            fs::rename(dump, movedDump, error);
+            if (error) {
+                error.clear();
+                fs::copy_file(dump, movedDump, fs::copy_options::overwrite_existing, error);
+                if (error) { movedDump.clear(); error.clear(); }
+                else { fs::remove(dump, error); error.clear(); }
+            }
+        }
+
+        if (!PartyBoard_CrashWriteManifest(movedReport.string().c_str(),
+                movedDump.empty() ? nullptr : movedDump.string().c_str(),
+                incident.string().c_str())) {
+            continue;
+        }
+        PartyBoard_CrashQueueAdd(incident.string().c_str());
+        ++created;
+    }
+
+    if (created != 0) PartyBoard_CrashQueuePrune();
+    return created;
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 //
 // The two things worth failing on here are privacy and stability. A sanitiser
@@ -704,13 +869,83 @@ extern "C" bool PartyBoard_CrashManifestRunSelfTest(void)
     ok &= expectManifest(afterConsent.find("\"minidump\": false") != std::string::npos,
         "consenting to the report also consented to the dump");
 
+    // ---- startup scan ----
+    //
+    // Two properties matter here: the same defect does not make a second folder,
+    // and a supervised session's evidence is never moved out of its run.
+    {
+        const fs::path loose = sandbox / "loose";
+        fs::create_directories(loose, error);
+        setEnvironment("PARTYBOARD_CRASH_QUEUE", (sandbox / "scanqueue").string());
+
+        const auto writeReport = [&](const char *name, const char *dumpName, int context) {
+            std::string body = report;
+            const std::string from = "game_context=84";
+            const auto at = body.find(from);
+            if (at != std::string::npos) {
+                body.replace(at, from.size(), "game_context=" + std::to_string(context));
+            }
+            {
+                std::ofstream file(loose / name, std::ios::binary | std::ios::trunc);
+                file << body;
+            }
+            if (dumpName != nullptr) {
+                std::ofstream file(loose / dumpName, std::ios::binary | std::ios::trunc);
+                file << "not a real dump";
+            }
+        };
+
+        // A supervised session must be left alone, whatever is in its directory.
+        writeReport("crash-report-peer-0-2026-01-01_000001.txt", "crash-peer-0-2026-01-01_000001.dmp", 84);
+        setEnvironment("PARTYBOARD_CRASH_DIR", (sandbox / "somewhere").string());
+        ok &= expectManifest(PartyBoard_CrashQueueScan(loose.string().c_str()) == 0,
+            "the scan ran inside a supervised session");
+        ok &= expectManifest(fs::exists(loose / "crash-report-peer-0-2026-01-01_000001.txt", error),
+            "the scan moved a supervised session's report");
+        setEnvironment("PARTYBOARD_CRASH_DIR", "");
+
+        // One report becomes one incident, and the files move with it.
+        ok &= expectManifest(PartyBoard_CrashQueueScan(loose.string().c_str()) == 1,
+            "the first report did not create exactly one incident");
+        ok &= expectManifest(!fs::exists(loose / "crash-report-peer-0-2026-01-01_000001.txt", error),
+            "the report was not moved out of the loose directory");
+        ok &= expectManifest(!fs::exists(loose / "crash-peer-0-2026-01-01_000001.dmp", error),
+            "the minidump was not moved with its report");
+        ok &= expectManifest(PartyBoard_CrashQueuePendingCount() == 1,
+            "the new incident was not pending");
+
+        // The same defect again: counted, not duplicated.
+        writeReport("crash-report-peer-0-2026-01-01_000002.txt", nullptr, 84);
+        ok &= expectManifest(PartyBoard_CrashQueueScan(loose.string().c_str()) == 0,
+            "the same fingerprint created a second incident");
+        ok &= expectManifest(PartyBoard_CrashQueuePendingCount() == 1,
+            "the duplicate was queued as its own incident");
+        ok &= expectManifest(!fs::exists(loose / "crash-report-peer-0-2026-01-01_000002.txt", error),
+            "the counted duplicate was left lying around");
+
+        // A different overlay is a different fingerprint, so a different folder.
+        writeReport("crash-report-peer-0-2026-01-01_000003.txt", nullptr, 92);
+        ok &= expectManifest(PartyBoard_CrashQueueScan(loose.string().c_str()) == 1,
+            "a different fingerprint did not create its own incident");
+        ok &= expectManifest(PartyBoard_CrashQueuePendingCount() == 2,
+            "the second defect was not pending");
+
+        // Nothing left to do is not an error.
+        ok &= expectManifest(PartyBoard_CrashQueueScan(loose.string().c_str()) == 0,
+            "an empty scan reported work it did not do");
+        ok &= expectManifest(PartyBoard_CrashQueueScan(nullptr) == 0,
+            "scanning nowhere reported work");
+    }
+
     setEnvironment("PARTYBOARD_CRASH_QUEUE", previousQueue);
     fs::remove_all(sandbox, error);
 
     if (ok) {
         std::printf("Crash manifest: PASS (profile/LOCALAPPDATA/bare-name sanitisation, short "
                     "buffer, three fingerprint shapes and their stability, manifest from a report "
-                    "with no account name and no pid, queue add/dedup/consent/refusal). "
+                    "with no account name and no pid, queue add/dedup/consent/refusal, startup "
+                    "scan creating one incident per fingerprint, counting a repeat instead of "
+                    "duplicating it, and refusing to touch a supervised session). "
                     "Files only; nothing is sent anywhere.\n");
     }
     return ok;
