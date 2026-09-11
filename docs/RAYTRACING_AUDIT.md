@@ -269,3 +269,55 @@ fonctionnalité.
 **Tampons d'indices.** Toujours trois sommets uniques par triangle. La source GX
 est souvent déjà indexée ; les réutiliser réduirait les tampons et le coût de
 construction. Non tenté.
+
+---
+
+# Balayage sur plateaux réels — 11 septembre 2026
+
+20 mesures, 3 plateaux, via `tools/test_raytracing.ps1` et `tools/sweep_raytracing.ps1`.
+Aucune erreur, aucun retrait de périphérique, aucun plantage.
+
+| plateau | n | tracé min | max | médiane | découpe | env. mappé |
+|---|---|---|---|---|---|---|
+| `w01Dll` | 3 | 4,90 ms | 6,18 ms | 5,86 ms | 28,8–31,2 % | 28–31 % |
+| `w04Dll` | 3 | 1,84 ms | 4,74 ms | 1,89 ms | 6,9–13,4 % | ~1 % |
+| `w05Dll` | 14 | 1,83 ms | 6,61 ms | 6,00 ms | 24,5–30,4 % | ~0 % |
+| **toutes** | **20** | **1,83 ms** | **6,61 ms** | **5,85 ms** | | |
+
+## Ce que ça dit
+
+**Le coût dépend surtout de la caméra, pas du plateau.** `w05Dll` seul couvre
+1,83 à 6,61 ms — un facteur 3,6, aussi large que l'écart entre plateaux. Une
+première lecture de trois mesures m'avait fait écrire que `w04Dll` coûtait 3 fois
+moins que `w01Dll` « à cause de la couverture écran plutôt que du nombre de
+triangles » ; avec vingt mesures, c'était de la variance intra-plateau lue comme
+un signal inter-plateau. Le nombre de triangles ne prédit rien, ça reste vrai ;
+mais l'identité du plateau non plus.
+
+**La médiane réelle est 5,85 ms, pas 3,49 ms.** Le défaut demi-résolution a été
+validé sur une seule mesure de `w10Dll` à 3,49 ms. Sur un plateau ordinaire le
+tracé prend donc plutôt **35 % d'une frame à 60 Hz que 21 %**. Le réglage n'est
+pas mauvais, mais la marge annoncée venait de l'échantillon le plus favorable.
+
+**Les propriétés de matériau, elles, sont stables par plateau** et très
+différentes entre eux : `w01Dll` marque 28–31 % de draws en découpe et autant en
+environment mapping, `w04Dll` 7–13 % et 1 %, `w05Dll` 25–30 % et 0 %. La
+géométrie découpée est tracée comme opaque ; les 0,31 % de pixels qui justifiaient
+de l'ignorer avaient été mesurés sur un menu, pas sur un plateau à végétation.
+
+## Ce que ce balayage ne dit pas
+
+**Le masque 2D n'y est jamais sollicité.** Les vingt captures affichent 0 % de
+couverture avec 0 draw 2D borné : l'outil s'arrête à la première image du
+plateau, qui est toujours le survol d'introduction, sans interface. Le correctif
+du HUD reste validé uniquement sur `w10Dll`. Pour l'exercer il faut jouer un tour,
+pas seulement charger le plateau.
+
+**Trois plateaux sur neuf.** Les autres sont verrouillés dans cette sauvegarde :
+Mario Party 4 débloque ses plateaux par le mode Histoire, et
+`game.unlockBowsersGnarlyParty` n'en ouvre pas d'autre sur ce chemin de menu.
+C'est une limite de la sauvegarde, pas de l'outil.
+
+**Et `w10Dll`, la référence de tout l'audit, n'a pas été retrouvée.** Le chemin de
+menu que prend l'outil actuel n'y mène jamais ; l'ancienne séquence y arrivait.
+Quel écran c'est exactement reste inconnu.
