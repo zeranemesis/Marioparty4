@@ -3514,6 +3514,94 @@ index a86f4ac..6412166 100644
  #endif
      }
      break;
+diff --git a/src/musyx/runtime/synth_wait.h b/src/musyx/runtime/synth_wait.h
+new file mode 100644
+index 0000000..995c683
+--- /dev/null
++++ b/src/musyx/runtime/synth_wait.h
+@@ -0,0 +1,82 @@
++/* Private macro wait implementation, shared with the focused regression test. */
++static u32 mcmdWait(SYNTH_VOICE* svoice, MSTEP* cstep) {
++  u32 w;  // r1+0x10
++  u32 ms; // r29
++
++  if ((ms = (u16)(cstep->para[1] >> 0x10))) {
++    if (((u8)(cstep->para[0] >> 8) & 1)) {
++      if (svoice->cFlags & 8) {
++        if (!(svoice->cFlags & 0x10000000000)) {
++          return 0;
++        }
++        svoice->cFlags |= 0x40000000000;
++      }
++      svoice->cFlags |= 4;
++    } else {
++      svoice->cFlags &= ~4;
++    }
++
++    if (((u8)(cstep->para[0] >> 0x18) & 1)) {
++      if (!(svoice->cFlags & 0x20) && !hwIsActive(svoice->id & 0xFF)) {
++        return 0;
++      }
++      svoice->cFlags |= 0x40000;
++    } else {
++      svoice->cFlags &= ~0x40000;
++    }
++
++    if (((u8)(cstep->para[0] >> 0x10)) & 1) {
++      ms = sndRand() % ms;
++    }
++
++    if (ms != 0xFFFF) {
++      if ((w = ((u8)(cstep->para[1] >> 0x8) & 1) != 0)) {
++        sndConvertMs(&ms);
++      } else {
++        sndConvertTicks(&ms, svoice);
++      }
++
++      if (w != 0) {
++        if ((u8)cstep->para[1] & 1) {
++          svoice->wait = svoice->macStartTime + ms;
++        } else {
++          svoice->wait = macRealTime + ms;
++        }
++      } else {
++        if ((u8)cstep->para[1] & 1) {
++          svoice->wait = ms;
++        } else {
++          svoice->wait = svoice->waitTime + ms;
++        }
++      }
++
++      if (!(svoice->wait > macRealTime)) {
++        svoice->waitTime = svoice->wait;
++        svoice->wait = 0;
++      }
++    } else {
++      svoice->wait = -1;
++    }
++
++    if (svoice->wait != 0) {
++      if (svoice->wait != -1) {
++        TimeQueueAdd(svoice);
++      }
++      macMakeInactive(svoice, 1);
++      return 1;
++    }
++  }
++
++  return 0;
++}
++
++static u32 mcmdWaitMs(SYNTH_VOICE* svoice, MSTEP* cstep) {
++  /* The original PPC byte write at offset 6 selects milliseconds (bits
++   * 8..15 of para[1]). On little-endian hosts that byte is part of the
++   * duration instead: 333 becomes 257, and 0xffff loses its infinite-wait
++   * meaning. An absolute wait then uses the tick/global-time path and
++   * eventually expires immediately for every newly started instrument.
++   * Select the field by value, preserving duration and absolute mode. */
++  cstep->para[1] = (cstep->para[1] & ~0x0000ff00u) | 0x00000100u;
++  return mcmdWait(svoice, cstep);
++}
 diff --git a/src/musyx/runtime/synthdata.c b/src/musyx/runtime/synthdata.c
 index 00badf6..66a4e8b 100644
 --- a/src/musyx/runtime/synthdata.c
@@ -4140,91 +4228,134 @@ index 98f9465..67feb67 100644
    return -1;
  #endif
  }
-diff --git a/src/musyx/runtime/synth_wait.h b/src/musyx/runtime/synth_wait.h
+diff --git a/test/wait_ms_regression.c b/test/wait_ms_regression.c
 new file mode 100644
-index 0000000..995c683
+index 0000000..a57a370
 --- /dev/null
-+++ b/src/musyx/runtime/synth_wait.h
-@@ -0,0 +1,82 @@
-+/* Private macro wait implementation, shared with the focused regression test. */
-+static u32 mcmdWait(SYNTH_VOICE* svoice, MSTEP* cstep) {
-+  u32 w;  // r1+0x10
-+  u32 ms; // r29
++++ b/test/wait_ms_regression.c
+@@ -0,0 +1,125 @@
++/* Exercise the actual wait interpreter with isolated clock/hardware boundaries. */
++#include "musyx/hardware.h"
++#include "musyx/macros.h"
++#include "musyx/snd.h"
++#include <stdio.h>
 +
-+  if ((ms = (u16)(cstep->para[1] >> 0x10))) {
-+    if (((u8)(cstep->para[0] >> 8) & 1)) {
-+      if (svoice->cFlags & 8) {
-+        if (!(svoice->cFlags & 0x10000000000)) {
-+          return 0;
-+        }
-+        svoice->cFlags |= 0x40000000000;
-+      }
-+      svoice->cFlags |= 4;
-+    } else {
-+      svoice->cFlags &= ~4;
-+    }
++static u64 macRealTime;
++static SYNTH_VOICE* macActiveMacroRoot;
++static SYNTH_VOICE* macTimeQueueRoot;
++static void TimeQueueAdd(SYNTH_VOICE* voice) { macTimeQueueRoot = voice; }
++void macMakeInactive(SYNTH_VOICE* voice, MAC_STATE state) { voice->macState = state; }
++#include "../src/musyx/runtime/synth_wait.h"
 +
-+    if (((u8)(cstep->para[0] >> 0x18) & 1)) {
-+      if (!(svoice->cFlags & 0x20) && !hwIsActive(svoice->id & 0xFF)) {
-+        return 0;
-+      }
-+      svoice->cFlags |= 0x40000;
-+    } else {
-+      svoice->cFlags &= ~0x40000;
-+    }
-+
-+    if (((u8)(cstep->para[0] >> 0x10)) & 1) {
-+      ms = sndRand() % ms;
-+    }
-+
-+    if (ms != 0xFFFF) {
-+      if ((w = ((u8)(cstep->para[1] >> 0x8) & 1) != 0)) {
-+        sndConvertMs(&ms);
-+      } else {
-+        sndConvertTicks(&ms, svoice);
-+      }
-+
-+      if (w != 0) {
-+        if ((u8)cstep->para[1] & 1) {
-+          svoice->wait = svoice->macStartTime + ms;
-+        } else {
-+          svoice->wait = macRealTime + ms;
-+        }
-+      } else {
-+        if ((u8)cstep->para[1] & 1) {
-+          svoice->wait = ms;
-+        } else {
-+          svoice->wait = svoice->waitTime + ms;
-+        }
-+      }
-+
-+      if (!(svoice->wait > macRealTime)) {
-+        svoice->waitTime = svoice->wait;
-+        svoice->wait = 0;
-+      }
-+    } else {
-+      svoice->wait = -1;
-+    }
-+
-+    if (svoice->wait != 0) {
-+      if (svoice->wait != -1) {
-+        TimeQueueAdd(svoice);
-+      }
-+      macMakeInactive(svoice, 1);
-+      return 1;
-+    }
-+  }
-+
-+  return 0;
++static unsigned tickConversions;
++u32 hwIsActive(u32 voice) { (void)voice; return 1; }
++u16 sndRand(void) { return 123; }
++void synthForceLowPrecisionUpdate(SYNTH_VOICE* voice) { (void)voice; }
++void sndConvertMs(u32* value) { *value *= 256; }
++void sndConvertTicks(u32* value, SYNTH_VOICE* voice) {
++  (void)voice;
++  ++tickConversions;
++  /* synthSetBpm(90): ((90 << 3) * 1536) / 240 == 4608. */
++  *value = (((*value << 16) / 4608) * 1000) / 32;
 +}
 +
-+static u32 mcmdWaitMs(SYNTH_VOICE* svoice, MSTEP* cstep) {
-+  /* The original PPC byte write at offset 6 selects milliseconds (bits
-+   * 8..15 of para[1]). On little-endian hosts that byte is part of the
-+   * duration instead: 333 becomes 257, and 0xffff loses its infinite-wait
-+   * meaning. An absolute wait then uses the tick/global-time path and
-+   * eventually expires immediately for every newly started instrument.
-+   * Select the field by value, preserving duration and absolute mode. */
-+  cstep->para[1] = (cstep->para[1] & ~0x0000ff00u) | 0x00000100u;
-+  return mcmdWait(svoice, cstep);
++static int check(const char* name, u64 now, u32 first, u32 second,
++                 u64 expectedWait, u32 expectedYield) {
++  SYNTH_VOICE voice = {0};
++  MSTEP command = {{first, second}};
++  macActiveMacroRoot = NULL;
++  macTimeQueueRoot = NULL;
++  macRealTime = now;
++  voice.macStartTime = now;
++  voice.waitTime = now;
++  voice.addr = &command;
++  voice.macState = MAC_STATE_RUNNABLE;
++  tickConversions = 0;
++  u32 yielded = mcmdWaitMs(&voice, &command);
++  int ok = voice.wait == expectedWait && yielded == expectedYield &&
++           tickConversions == 0 && (command.para[1] >> 16) == (second >> 16);
++  printf("%s %s: wait=%llu expected=%llu yield=%u ticks=%u duration=%u\n",
++         ok ? "PASS" : "FAIL", name, (unsigned long long)voice.wait,
++         (unsigned long long)expectedWait, yielded, tickConversions,
++         command.para[1] >> 16);
++  return !ok;
++}
++
++static u32 legacyWaitMs(SYNTH_VOICE* voice, MSTEP* command) {
++  /* Exact former implementation; retained only to reproduce the failure. */
++  *((u8*)command->para + 6) = 1;
++  return mcmdWait(voice, command);
++}
++
++static int checkMenuChain(void) {
++  int stable[2] = {0};
++  for (int fixed = 0; fixed < 2; ++fixed) {
++    SYNTH_VOICE voice = {0};
++    MSTEP startWait = {{7, 0x014d0001}};
++    MSTEP noteWait = {{0x107, 0xffff0000}};
++    u32 (*execute)(SYNTH_VOICE*, MSTEP*) = fixed ? mcmdWaitMs : legacyWaitMs;
++    macRealTime = 120000ULL * 256;
++    voice.macStartTime = macRealTime;
++    voice.waitTime = macRealTime;
++    macTimeQueueRoot = NULL;
++    if (execute(&voice, &startWait)) {
++      /* Resume the macro when its initial timed wait expires. */
++      macRealTime = voice.wait;
++      voice.waitTime = voice.wait;
++      voice.wait = 0;
++    }
++    stable[fixed] = execute(&voice, &noteWait) && voice.wait == (u64)-1;
++  }
++  printf("Menu macro after 120s: former code %s; fixed code %s\n",
++         stable[0] ? "waits" : "falls through to KeyOff immediately",
++         stable[1] ? "waits for the note's KeyOff" : "FAIL");
++  return stable[0] || !stable[1];
++}
++
++int main(void) {
++  int failures = 0;
++  /* 0x014d0001 is present in the original menu's instrument macros. */
++  failures += check("333ms absolute at startup", 0, 7, 0x014d0001,
++                    333ULL * 256, 1);
++  failures += check("333ms absolute after two minutes", 120000ULL * 256,
++                    7, 0x014d0001, 120333ULL * 256, 1);
++  failures += check("333ms absolute after one hour", 3600000ULL * 256,
++                    7, 0x014d0001, 3600333ULL * 256, 1);
++  failures += check("indefinite until keyoff", 120000ULL * 256,
++                    0x107, 0xffff0000, (u64)-1, 1);
++  failures += check("indefinite until sample end", 120000ULL * 256,
++                    0x01000007, 0xffff0000, (u64)-1, 1);
++  failures += check("3000ms absolute sample-end timeout", 120000ULL * 256,
++                    0x01000007, 0x0bb80001, 123000ULL * 256, 1);
++  failures += check("100ms relative", 120000ULL * 256,
++                    7, 0x00640000, 120100ULL * 256, 1);
++  failures += check("zero duration", 120000ULL * 256, 7, 0, 0, 0);
++  failures += checkMenuChain();
++  /* Every encoded duration, in absolute and relative mode, at startup and
++   * after an hour. This includes the 0xffff indefinite sentinel. */
++  unsigned cases = 0;
++  for (unsigned late = 0; late < 2; ++late) {
++    for (unsigned absolute = 0; absolute < 2; ++absolute) {
++      for (unsigned duration = 0; duration <= 0xffff; ++duration) {
++        SYNTH_VOICE voice = {0};
++        MSTEP command = {{7, (duration << 16) | absolute}};
++        macRealTime = late ? 3600000ULL * 256 : 0;
++        macTimeQueueRoot = NULL;
++        voice.macStartTime = macRealTime;
++        voice.waitTime = macRealTime;
++        tickConversions = 0;
++        u64 expected = duration == 0xffff ? (u64)-1 :
++                       duration == 0 ? 0 : macRealTime + duration * 256ULL;
++        u32 yielded = mcmdWaitMs(&voice, &command);
++        if (voice.wait != expected || yielded != (duration != 0) ||
++            tickConversions != 0 || command.para[1] >> 16 != duration) {
++          ++failures;
++        }
++        ++cases;
++      }
++    }
++  }
++  printf("%u exhaustive duration/clock cases executed\n", cases);
++  printf("%d regression failures\n", failures);
++  return failures ? 1 : 0;
 +}
