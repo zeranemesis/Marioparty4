@@ -48,8 +48,21 @@ static class Tests {
     static void Reject(Action action,string name) {bool rejected=false;try{action();}catch{rejected=true;}Check(rejected,name);}
     static void Codecs() {
         var invite=new Invitation{Address=IPAddress.Parse("8.8.8.8"),Port=32000,Expires=DateTime.UtcNow.AddMinutes(30),Fingerprint=Wire.Random(16),Token=Wire.Random(16),Build=Wire.Random(32)};
-        Check(invite.Encode().Length==60,"compact invitation length");var decoded=Invitation.Decode(invite.Encode());Check(decoded.Port==32000 && Wire.Equal(invite.Token,decoded.Token) && Wire.Equal(invite.Fingerprint,decoded.Fingerprint),"invitation round trip");
+        Check(invite.Encode().Length==68,"compact invitation length");var decoded=Invitation.Decode(invite.Encode());Check(decoded.Port==32000 && Wire.Equal(invite.Token,decoded.Token) && Wire.Equal(invite.Fingerprint,decoded.Fingerprint),"invitation round trip");
         Reject(()=>Invitation.Decode("bad"),"malformed invite");Reject(()=>Invitation.Decode(new string('x',1000)),"bounded invite");
+        // The local path. Without it two PCs in one house are sent out through
+        // the box and back: 15 ms between machines that are 0 ms apart, and a
+        // control channel the router cut after forty to fifty seconds.
+        Check(!decoded.HasLocalPath,"invitation without a local address offers none");
+        invite.LocalAddress=IPAddress.Parse("192.168.1.14");invite.LocalPort=32100;
+        decoded=Invitation.Decode(invite.Encode());
+        Check(decoded.HasLocalPath && decoded.LocalAddress.Equals(IPAddress.Parse("192.168.1.14")) && decoded.LocalPort==32100,"private local address survives the round trip");
+        invite.LocalAddress=IPAddress.Parse("9.9.9.9");
+        Check(!Invitation.Decode(invite.Encode()).HasLocalPath,"public local address is discarded, not dialled");
+        invite.LocalAddress=IPAddress.Loopback;
+        Check(!Invitation.Decode(invite.Encode()).HasLocalPath,"loopback local address is discarded");
+        invite.LocalAddress=IPAddress.Any;invite.LocalPort=0;
+        Reject(()=>Invitation.Decode("PB2."+new string('A',56)),"previous invitation format refused by name");
         invite.Address=IPAddress.Loopback;Reject(()=>Invitation.Decode(invite.Encode()),"loopback invite rejected");
         invite.Address=IPAddress.Parse("8.8.8.8");invite.Expires=DateTime.UtcNow.AddSeconds(-1);Reject(()=>Invitation.Decode(invite.Encode()),"expired invite");
         foreach(string addr in new[]{"0.1.2.3","10.0.0.1","127.0.0.1","100.64.0.1","192.168.1.1","169.254.1.1","198.18.0.1","203.0.113.1","224.0.0.1","::1"}) Check(!Gateway.Public(IPAddress.Parse(addr)),"public address filter");

@@ -82,7 +82,11 @@ sealed class Session : IDisposable {
             mappingUdp=new Gateway(route,port,mapping.Port,true);mappingUdp.Open();
             if(mappingUdp.Port!=mapping.Port || !mappingUdp.Address.Equals(mapping.Address))throw new IOException("La box n'a pas pu réserver le même accès rapide pour le jeu. Inversez les rôles et réessayez.");
             if(disposed) throw new OperationCanceledException();
-            Invite=new Invitation{Address=mapping.Address,Port=mapping.Port,Expires=DateTime.UtcNow.AddMinutes(30),Fingerprint=Wire.Hash(cert.RawData).Take(16).ToArray(),Token=Wire.Random(16),Build=build};
+            // route.Local is what the listener and the game UDP socket are
+            // already bound to, so a guest on the same network can reach them
+            // without the invitation changing anything on this side.
+            Invite=new Invitation{Address=mapping.Address,Port=mapping.Port,Expires=DateTime.UtcNow.AddMinutes(30),Fingerprint=Wire.Hash(cert.RawData).Take(16).ToArray(),Token=Wire.Random(16),Build=build,
+                LocalAddress=Gateway.Private(route.Local)?route.Local:IPAddress.Any,LocalPort=Gateway.Private(route.Local)?port:0};
             Task.Run(()=>Maintain());
             Task.Run(()=>Accept());
         } catch {Dispose();throw;}
@@ -115,24 +119,47 @@ sealed class Session : IDisposable {
         } catch {if(!disposed) {failed("L'attente a été interrompue. Recréez une partie.");Dispose();}}
     }
     public int HostGamePort;
+    // "lan" or "internet" - which route actually carried this session. A name,
+    // never an address: the diagnostic must stay free of endpoints.
+    public string JoinPath="listening";
     public void Join(string invitation) {
         Host=false;Invite=Invitation.Decode(invitation);
         build=Wire.BuildHash(AppDomain.CurrentDomain.BaseDirectory);
         if(Invite.Build!=null && !Wire.Equal(Invite.Build,build)) throw new IOException("Les versions sont différentes. Copiez le même dossier PartyBoard sur les deux PC.");
-        status("Connexion à votre ami…");peer=new TcpClient(AddressFamily.InterNetwork);
-        var task=peer.ConnectAsync(Invite.Address,Invite.Port);
-        if(!task.Wait(10000)) {peer.Close();throw new IOException("Votre ami n'est pas joignable. Vérifiez qu'il a laissé sa fenêtre ouverte, ou essayez d'inverser les rôles.");}
-        var toHost=Wire.Client(peer,Invite,build,0);
+        status("Connexion à votre ami…");
+        // Try the host's own network first. Two seconds, because an address that
+        // is not on this network refuses or times out fast, and the public
+        // address is still there behind it. Reaching the wrong machine cannot
+        // succeed: Wire.Client pins the certificate fingerprint carried by the
+        // invitation, so a stranger at that address fails the handshake and we
+        // fall through exactly as if nothing had answered.
+        var target=Invite.Address;var targetPort=Invite.Port;SslStream toHost=null;
+        if(Invite.HasLocalPath) {
+            status("Recherche de votre ami sur votre réseau…");
+            var lan=new TcpClient(AddressFamily.InterNetwork);
+            try {
+                if(lan.ConnectAsync(Invite.LocalAddress,Invite.LocalPort).Wait(2000) && lan.Connected) {
+                    toHost=Wire.Client(lan,Invite,build,0);
+                    peer=lan;target=Invite.LocalAddress;targetPort=Invite.LocalPort;JoinPath="lan";
+                }
+            } catch {}
+            if(toHost==null) {try{lan.Close();}catch{}}
+        }
+        if(toHost==null) {
+            status("Connexion à votre ami…");peer=new TcpClient(AddressFamily.InterNetwork);
+            if(!peer.ConnectAsync(Invite.Address,Invite.Port).Wait(10000)) {peer.Close();throw new IOException("Votre ami n'est pas joignable. Vérifiez qu'il a laissé sa fenêtre ouverte, ou essayez d'inverser les rôles.");}
+            toHost=Wire.Client(peer,Invite,build,0);target=Invite.Address;targetPort=Invite.Port;JoinPath="internet";
+        }
         status("Premier canal sécurisé. Préparation du second…");peerWrite=new TcpClient(AddressFamily.InterNetwork);
-        task=peerWrite.ConnectAsync(Invite.Address,Invite.Port);
+        var task=peerWrite.ConnectAsync(target,targetPort);
         if(!task.Wait(10000)){peerWrite.Close();throw new IOException("Le second canal n'a pas pu être créé.");}
         var fromHost=Wire.Client(peerWrite,Invite,build,1);if(disposed){toHost.Dispose();fromHost.Dispose();throw new OperationCanceledException();}
         internetGame=new UdpClient(new IPEndPoint(IPAddress.Any,0));
-        Bridge=new Bridge(peerWrite,fromHost,peer,toHost,1,internetGame,new IPEndPoint(Invite.Address,Invite.Port),Invite.Token);internetGame=null;AttachLobby();
+        Bridge=new Bridge(peerWrite,fromHost,peer,toHost,1,internetGame,new IPEndPoint(target,targetPort),Invite.Token);internetGame=null;AttachLobby();
     }
     void AttachLobby() {
         Bridge.Diagnostic=Report.Write;
-        Report.Write("role="+(Host?"host":"guest")+" build="+BitConverter.ToString(build).Replace("-","")+" tls=connected game_transport=udp-authenticated");
+        Report.Write("role="+(Host?"host":"guest")+" build="+BitConverter.ToString(build).Replace("-","")+" tls=connected game_transport=udp-authenticated path="+JoinPath);
         Lobby=new Lobby(Host,Profile,Bridge.SendControl,id=>Task.Run(()=>LoadGame(id)),id=>{Report.Write("commit="+id);Bridge.CommitGame();gameStart.Commit(id);},connected);
         Bridge.Control=Lobby.Receive;Bridge.Ping=value=>{PingMs=value;connected();};
         Watch();Lobby.Announce();connected();

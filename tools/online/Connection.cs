@@ -79,25 +79,46 @@ static class Wire {
 
 sealed class Invitation {
     public IPAddress Address; public int Port; public DateTime Expires;
+    // The host's address on its own network, alongside its public one. Two PCs
+    // in the same house are zero milliseconds apart, but an invitation that
+    // carries only the public address sends them out through the box and back
+    // in - measured at 15 ms between two machines on one switch, and cut by the
+    // router after forty to fifty seconds, three sessions out of three. The
+    // guest tries this one first and keeps the public address as the fallback,
+    // so nothing is lost when the two really are far apart.
+    public IPAddress LocalAddress=IPAddress.Any; public int LocalPort;
     public byte[] Fingerprint,Token,Build;
+    public bool HasLocalPath {get{return LocalPort>0 && LocalAddress!=null && !LocalAddress.Equals(IPAddress.Any) && !LocalAddress.Equals(Address);}}
     public string Encode() {
         if(Fingerprint.Length!=16 || Token.Length!=16)throw new IOException("Invitation incompatible.");
         using(var m=new MemoryStream()) using(var w=new BinaryWriter(m)) {
             w.Write(Address.GetAddressBytes());w.Write((ushort)Port);
             w.Write((uint)(Expires-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalSeconds);
             w.Write(Fingerprint);w.Write(Token);
-            return "PB2."+Convert.ToBase64String(m.ToArray()).Replace('+','-').Replace('/','_');
+            w.Write((LocalAddress??IPAddress.Any).GetAddressBytes());w.Write((ushort)LocalPort);
+            return "PB3."+Convert.ToBase64String(m.ToArray()).Replace('+','-').Replace('/','_');
         }
     }
     public static Invitation Decode(string text,bool localTest=false) {
         try {
             if(text==null) throw new FormatException(); text=text.Trim();
-            if(text.Length!=60 || !text.StartsWith("PB2.",StringComparison.Ordinal)) throw new FormatException();
+            // A PB2 invitation carries no local address. Refusing it by name
+            // beats letting it decode short and fail later as "incomplete".
+            if(text.StartsWith("PB2.",StringComparison.Ordinal))
+                throw new IOException("Cette invitation vient d'une version plus ancienne de PartyBoard. Copiez le même dossier sur les deux PC et recréez le salon.");
+            if(text.Length!=68 || !text.StartsWith("PB3.",StringComparison.Ordinal)) throw new FormatException();
             var b64=text.Substring(4).Replace('-','+').Replace('_','/'); b64+=new string('=',(4-b64.Length%4)%4);
-            var data=Convert.FromBase64String(b64); if(data.Length!=42) throw new FormatException();
+            var data=Convert.FromBase64String(b64); if(data.Length!=48) throw new FormatException();
             using(var r=new BinaryReader(new MemoryStream(data))) {
                 var i=new Invitation{Address=new IPAddress(r.ReadBytes(4)),Port=r.ReadUInt16(),Expires=new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc).AddSeconds(r.ReadUInt32()),Fingerprint=r.ReadBytes(16),Token=r.ReadBytes(16)};
+                i.LocalAddress=new IPAddress(r.ReadBytes(4));i.LocalPort=r.ReadUInt16();
                 if(i.Port==0 || (!localTest && !Gateway.Public(i.Address))) throw new FormatException();
+                // The local address is deliberately NOT required to be public -
+                // that is the whole point - but it must be a private address, so
+                // an invitation cannot redirect the first attempt anywhere else.
+                // Reaching the wrong machine is harmless anyway: the TLS
+                // handshake pins the certificate fingerprint from the invitation.
+                if(i.LocalPort!=0 && !Gateway.Private(i.LocalAddress)) {i.LocalAddress=IPAddress.Any;i.LocalPort=0;}
                 if(i.Expires<DateTime.UtcNow) throw new IOException("Cette invitation a expiré. L'hôte doit recréer une partie.");
                 if(i.Expires>DateTime.UtcNow.AddMinutes(31)) throw new FormatException();
                 return i;
