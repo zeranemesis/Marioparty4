@@ -827,3 +827,84 @@ Il est au **démarrage**. Chaque session le traverse, et une session humaine de
 deux heures qui meurt à la frame 2 coûte la soirée de deux personnes. Un défaut
 rare sur un chemin emprunté une seule fois par run reste rare ; celui-ci est rare
 sur un chemin emprunté par tout le monde, à chaque fois.
+
+---
+
+## D11 — Divergence `ANIMATION` à la deuxième entrée sur un plateau
+
+**Classification : single-subsystem canonical divergence in ANIMATION, one frame,
+under netplay at 60 Hz. Observé une fois. D6 écarté par la mesure.**
+
+**Statut : non corrigé. Premier défaut trouvé par entrée générée.**
+
+### L'isolation
+
+| frame | état |
+|---|---|
+| 14421 | **identique sur les seize sous-systèmes** |
+| 14422 | **seul `ANIMATION` diffère** — local `0a9ed93d`, distant `74807821` |
+
+Une frame, un sous-système. Tout le reste — `RNG`, `GAMEWORK`, `PLAYERS`,
+`BOARD`, `OBJECTS`, `PROCESSES`, `INPUT`, `TIMERS` — concorde des deux côtés à la
+frame de la divergence. Les entrées sont donc identiques et c'est bien l'horloge
+d'animation qui diverge, pas ce qui la pilote.
+
+### D6 est écarté, et par la mesure et non par l'argument
+
+| | |
+|---|---|
+| `d6_batched_frames` | **0** |
+| `d6_worst_batch` | **0** |
+| cadence des deux pairs | **60 / 60** |
+| lignes `D6>` imprimées | **0** |
+
+Aucun regroupement de ticks de simulation dans une image rendue. Le bridage de
+`target_frame_rate()` a tenu exactement comme l'entrée D6 l'affirme. **Ce défaut
+est autre chose.**
+
+### Ce qui rend ce run différent de tous les précédents
+
+Son chemin d'overlays :
+
+```
+1@2  74@840  70@2939  95@3869  70@4206  89@7586
+                       ^^^^^^          ^^^^^^
+                    Tutorial          Toad's
+```
+
+Le run **entre sur un plateau, en ressort vers le menu, puis entre sur un
+second**. Aucune session de ce projet n'avait jamais fait cela — tous les
+enregistrements existants entrent sur un plateau et y restent.
+
+C'est aussi exactement le déplacement que Valentin avait suggéré (quitter par le
+menu pour aller sur un autre plateau), obtenu ici par un singe.
+
+### L'hypothèse, et elle n'est pas vérifiée
+
+L'état d'animation ne serait pas entièrement réinitialisé entre deux entrées de
+plateau, laissant à la seconde un reliquat qui peut différer entre les deux
+pairs. Le défaut n'apparaîtrait donc **que** sur une deuxième entrée, ce qui
+expliquerait qu'aucun enregistrement ne l'ait jamais montré.
+
+**Rien ne l'établit encore.** C'est une hypothèse tirée d'une seule occurrence et
+d'une particularité du chemin ; elle peut être fausse.
+
+### Ce qu'il faut faire
+
+1. **Rejouer la même graine.** Si la divergence revient à la frame 14422, elle
+   est déterministe et tient à la logique ; sinon c'est une course, et le trafic
+   observé le rendrait plausible — `rejected=12474` sur `received=16376`, soit
+   76 % de paquets rejetés, et `remote_ready=0` au moment de l'arrêt.
+2. **Construire un scénario minimal** : entrer sur un plateau, ressortir,
+   entrer sur un second. S'il diverge de façon répétée, le défaut est cerné sans
+   dépendre d'un singe.
+3. **Ne pas corriger avant.** L'entrée D5 a déjà déplacé l'avance d'animation ;
+   y toucher de nouveau sur une seule observation risquerait de casser ce qui
+   marche.
+
+### Pourquoi cette occurrence compte au-delà d'elle-même
+
+C'est le **premier défaut que la campagne automatique trouve seule**. Les
+enregistrements humains existants ne pouvaient pas le produire : ils n'entrent
+jamais deux fois sur un plateau. Cela valide l'ensemble de la démarche — une
+entrée générée atteint des chemins qu'aucun enregistrement ne contient.
