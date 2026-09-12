@@ -891,10 +891,30 @@ d'une particularité du chemin ; elle peut être fausse.
 
 ### Ce qu'il faut faire
 
-1. **Rejouer la même graine.** Si la divergence revient à la frame 14422, elle
-   est déterministe et tient à la logique ; sinon c'est une course, et le trafic
-   observé le rendrait plausible — `rejected=12474` sur `received=16376`, soit
-   76 % de paquets rejetés, et `remote_ready=0` au moment de l'arrêt.
+1. ~~Rejouer la même graine.~~ **Fait, et la réponse est : intermittent.**
+
+   | | |
+   |---|---|
+   | occurrences | **1** |
+   | exécutions du fichier exact | **7** |
+
+   Les six répétitions ont toutes réussi, et elles sont allées **plus loin** que
+   le run divergent — environ 19 100 frames contre 14 426. Même fichier d'entrée,
+   mêmes frames, six fois sur sept sans divergence.
+
+   Cela réoriente le diagnostic : **une course, pas une faute de logique**. Une
+   divergence logique sur une entrée identique se reproduirait à la frame près,
+   comme D5 le faisait à sa première occasion. Le trafic observé au moment de
+   l'incident va dans le même sens — `rejected=12474` sur `received=16376`, soit
+   **76 % de paquets rejetés**, et `remote_ready=0` à l'arrêt.
+
+   Ce qui reste à expliquer est alors : *qu'est-ce qui, dans l'ordonnancement,
+   peut faire avancer l'horloge d'animation d'un pair et pas de l'autre ?* Et
+   l'hypothèse de la deuxième entrée de plateau reste compatible avec une
+   course : un reliquat non réinitialisé peut n'être lu que dans une fenêtre
+   étroite.
+
+   **Six verts ne referment pas ce défaut**, pas plus que les cinq de D10.
 2. **Construire un scénario minimal** : entrer sur un plateau, ressortir,
    entrer sur un second. S'il diverge de façon répétée, le défaut est cerné sans
    dépendre d'un singe.
