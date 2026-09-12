@@ -300,6 +300,20 @@ omObjData *omAddObjEx(Process *objman_process, s16 prio, u16 mdlcnt, u16 mtncnt,
         object->motion = NULL;
         object->mtncnt = 0;
     }
+    /* D15. omAddMember assigns object->group only when the group has room, and
+     * says nothing when it does not - so an object created with a valid group
+     * on a manager whose groups have no capacity used to leave this function
+     * with the field never written, holding whatever the recycled pool slot
+     * held. Two machines held 480 and 389 there on 2026-09-12; the canonical
+     * hash saw the difference and stopped the session, and omDelMember would
+     * have indexed objman->group[480] on an array of ten.
+     *
+     * Initialising here closes that hole without touching either existing
+     * outcome: a successful omAddMember overwrites both fields itself, and the
+     * else branch below is left exactly as it was, so a negative group that is
+     * not -1 still lands where it always did. */
+    object->group = -1;
+    object->group_idx = 0;
     if (group >= 0) {
         omAddMember(objman_process, group, object);
     }
