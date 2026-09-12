@@ -993,3 +993,130 @@ dit rien.
    agrégat ; le rapport de divergence ne nomme pas encore le champ fautif, et
    c'est la première chose à instrumenter avant toute correction.
 3. **Ne pas corriger.** Une seule occurrence, un agrégat, aucune cause établie.
+
+---
+
+## D14 — la fin de la vidéo d'intro n'arrive pas sur la même frame
+
+**Classification : non-determinism in a gameplay-blocking wait, observed between
+two physical machines, surfacing as a `SCENE` state divergence.**
+
+**Statut : non corrigé. Cause probable identifiée, mécanisme exact non encore
+mesuré.**
+
+**Niveau de preuve : REAL-NETWORK.** C'est la première divergence du projet
+observée entre deux machines physiques, et elle n'était pas reproductible en
+boucle locale.
+
+### Ce qui a été observé
+
+Session du 2026-09-12, 10:07:31 → 10:08:01. Hôte et client sur deux PC, même
+paquet (`ff2a8040…6b1651c`), même disque, ping 15–17 ms, **0 paquet perdu, 0
+erreur de socket**.
+
+```
+DESYNC frame=1804 category=SCENE context=74/74 counter=1804/1804
+```
+
+Quinze sous-systèmes sur seize sont identiques au bit près à cette frame, RNG et
+entrées compris. Les deux rapports sont exactement symétriques :
+
+| frame | SCENE hôte | SCENE client |
+|---|---|---|
+| 1801 | `4fde85d4` | `4fde85d4` |
+| 1803 | `4fde85d4` | `4fde85d4` |
+| **1804** | **`2feec2b4`** | `4fde85d4` |
+
+Seul l'hôte a bougé. Son vidage de champs au moment de la détection :
+
+```
+wipeData.mode = 2 (WIPE_MODE_OUT)   stat = 1
+wipeData.time = 0.0                 duration = 10.0
+couleur = 255/255/255
+```
+
+Un fondu blanc de dix frames qui **vient d'être créé**. Le client ne l'avait pas
+encore créé.
+
+Aucune touche n'était pressée sur aucun des deux PC des frames 1797 à 1808 : le
+déclencheur n'est pas une entrée.
+
+### Le chemin, établi par lecture
+
+Les deux pairs entrent dans l'overlay 74 (`modeseldll`) à la **frame 872
+exactement**, avec le même `mode_select online=1 menu_event=0 skip_file=1`. La
+divergence est donc entièrement contenue dans les 932 ticks qui suivent.
+
+`src/REL/modeseldll/modesel.c:207` :
+
+```c
+while (!HuTHPEndCheck()) {
+    ...
+    HuPrcVSleep();
+}
+_ClearFlag(FLAG_ID_MAKE(1, 11));
+WipeColorSet(255, 255, 255);
+WipeCreate(WIPE_MODE_OUT, WIPE_TYPE_NORMAL, 10);
+```
+
+Le fondu est déclenché par la **fin de la vidéo THP d'intro**, et par rien
+d'autre. Couleur et durée concordent avec ce site d'appel et avec aucun autre :
+`modeseldll/main.c` ne crée que des fondus noirs de durée 20.
+
+### Ce qui rend ce défaut instructif
+
+**Le problème était déjà connu et déjà corrigé.** `src/port/thp_player.cpp:203`
+porte ce commentaire :
+
+> *les modules bloquent sur la fin du film, donc deux machines quittaient un
+> film sur des frames différentes et demandaient ensuite des fondus d'écran
+> différents*
+
+Le correctif fait dériver la position du film d'un compteur de ticks simulés
+(`logical_frame()`) au lieu du curseur audio, dès que le netplay est actif, et
+il a son propre test. Vérifié par lecture :
+
+- `PartyBoard_ThpLogicalTick()` est appelé depuis `PadReadSimulationTick`
+  (`src/game/pad.c:385`), **après** la porte netplay, donc une seule fois par
+  tick accepté ;
+- l'index des frames du film est construit intégralement à l'ouverture depuis
+  l'en-tête du fichier, donc `frames.size()` et `fps` sont identiques des deux
+  côtés (même disque, SHA-256 vérifié) ;
+- `HuTHPSprCreateVol` est appelé depuis la logique de jeu, donc sur le même tick.
+
+**Le taux est donc corrigé, et pourtant les deux pairs ne sont pas sortis du
+film ensemble.** Il reste une différence dans le *nombre de ticks effectivement
+comptés* — `PartyBoard_ThpLogicalTick()` ne compte que si `g_movie` existe — ou
+dans un chemin qui contourne la porte. Le client rapporte `repaired=7` là où
+l'hôte rapporte `repaired=0` ; ce n'est pas une explication, c'est la seule
+asymétrie relevée entre les deux journaux.
+
+### Pourquoi il a fallu 932 frames pour le voir
+
+**La position du film n'est pas hachée.** Aucun des 2 211 champs du hachage
+canonique ne la contient. Les deux pairs pouvaient donc s'écarter dès la frame
+872 sans que rien ne le dise, jusqu'à ce que l'écart produise un effet dans un
+champ haché — le fondu, 932 frames plus tard.
+
+C'est exactement ce que `docs/canonical_hash_exclusions.md` existe pour prévoir :
+ce qui est exclu du hachage est ce dont le hachage ne peut rien dire.
+
+### Ce qu'il faut faire, dans l'ordre
+
+1. **Mesurer avant de corriger.** Publier `logicalTicks`, `playback_frame()` et
+   la frame de simulation à laquelle `g_movie` a été créé dans le diagnostic
+   natif des deux pairs, puis rejouer la même approche. La comparaison dit
+   immédiatement si l'écart est un décalage constant pris au démarrage ou une
+   dérive accumulée.
+2. **Hacher la position logique du film**, pour que la prochaine divergence de
+   cette famille soit signalée à la frame où elle naît et nommée, au lieu de
+   remonter 932 frames plus tard sous une autre catégorie.
+3. Seulement ensuite, corriger. La piste à évaluer est de dériver la position du
+   film de la frame réseau elle-même — identique aux deux pairs par
+   construction — plutôt que d'un compteur d'appels.
+
+### Contournement immédiat
+
+Passer la vidéo d'intro avec une touche. Un saut est une entrée, donc en
+lockstep, donc les deux pairs quittent le film sur la même frame. Non vérifié.
+

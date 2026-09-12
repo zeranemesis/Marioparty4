@@ -184,8 +184,13 @@ try {
 
     $commit = (& git -C $projectPath rev-parse HEAD).Trim()
     $describe = (& git -C $projectPath rev-parse --short HEAD).Trim()
-    $dirty = (& git -C $projectPath status --porcelain) -join ''
-    if ($dirty) { $commit = "$commit (arbre modifie)" }
+    # Name what is uncommitted rather than just admitting that something is.
+    # extern/musyx and extern/aurora are permanently in this state by design:
+    # their changes ship as patches/*.patch, so seeing them here is expected and
+    # seeing anything else is not.
+    $dirty = @(& git -C $projectPath status --porcelain |
+        ForEach-Object { $_.Substring(3).Trim('"') })
+    if ($dirty.Count) { $commit = "$commit + non committe: " + ($dirty -join ' ') }
     $version = 'dev-' + $describe
     foreach ($line in Get-Content (Join-Path $projectPath 'tools/online/UpdateService.cs')) {
         if ($line -match 'CurrentVersion\s*=\s*"([^"]+)"') { $version = $Matches[1] + ' / dev-' + $describe }
