@@ -28,6 +28,10 @@
 param(
     [string]$CampaignRoot = 'work/netplay-campaigns',
     [string]$SessionRoot = 'work/netplay-recordings',
+    # Sessions actually played between two physical machines, kept as the pair
+    # of diagnostics both peers wrote. Until this was read, the only level of
+    # proof that says anything about the network was invisible here.
+    [string]$RealNetworkRoot = 'work/real-network',
     [switch]$Detail,
     [string]$Markdown = ''
 )
@@ -144,7 +148,15 @@ $state = @{}
 foreach ($key in $minigames.Keys) { $state[$key] = @{ State = 'UNTESTED'; Why = ''; Runs = 0 } }
 $boardState = @{}
 foreach ($key in $boards.Keys) { $boardState[$key] = @{ State = 'UNTESTED'; Why = ''; Runs = 0; Depth = -1 } }
-$rank = @{ 'UNTESTED' = 0; 'SCRIPTED-PARTIAL' = 1; 'HUMAN-PASS' = 2; 'REAL-NETWORK-PASS' = 3; 'BLOCKED' = 4; 'FAIL' = 5 }
+# REAL-NETWORK-PARTIAL is not in the original vocabulary, and it is here because
+# the original vocabulary could not describe what happened on 2026-09-12: a board
+# played for four and a half minutes between two houses' worth of hardware, which
+# is far more than any script can claim, and which nevertheless did not finish.
+# Calling that REAL-NETWORK-PASS would overstate it and UNTESTED would erase it.
+# It answers the fourth question asked of this matrix - how many were really
+# played across two machines, as opposed to validated there.
+$rank = @{ 'UNTESTED' = 0; 'SCRIPTED-PARTIAL' = 1; 'HUMAN-PASS' = 2;
+           'REAL-NETWORK-PARTIAL' = 3; 'REAL-NETWORK-PASS' = 4; 'BLOCKED' = 5; 'FAIL' = 6 }
 
 function PromoteBoard([int]$overlay, [string]$candidate, [string]$why, [int]$depth) {
     if (-not $boardState.ContainsKey($overlay)) { return }
@@ -256,13 +268,55 @@ foreach ($file in $sessionFiles) {
     }
 }
 
+# ---- sessions played through the lobby, between two machines ----
+# These leave no session.json: record_board_session.ps1 was never in the loop,
+# the players used the lobby. What they do leave is each peer's native.txt, and
+# that carries the overlay path and the desync - which is what a cell needs.
+#
+# They are credited REAL-NETWORK-PARTIAL and never REAL-NETWORK-PASS, however
+# well they went. PASS requires the verdict machinery in session.json, which
+# knows whether the session ended because the players chose to stop; a raw
+# native.txt only shows a window closing, and a window closes on delight and on
+# disgust alike.
+$realRoots = @(Get-ChildItem (Resolve-MatrixPath $RealNetworkRoot) -Directory -ErrorAction SilentlyContinue)
+foreach ($root in $realRoots) {
+    $natives = @(Get-ChildItem $root.FullName -Recurse -Filter 'native.txt' -ErrorAction SilentlyContinue)
+    if ($natives.Count -eq 0) { continue }
+    $visited = New-Object 'Collections.Generic.HashSet[int]'
+    $failedAt = -1
+    $lastFrame = 0
+    foreach ($native in $natives) {
+        foreach ($line in [IO.File]::ReadLines($native.FullName)) {
+            if ($line -match 'event=DESYNC .*?context=(-?\d+)') { $failedAt = [int]$Matches[1] }
+            if ($line -match ' context=(-?\d+)') { [void]$visited.Add([int]$Matches[1]) }
+            if ($line -match ' frame=(\d+)') {
+                $f = [int]$Matches[1]
+                if ($f -gt $lastFrame) { $lastFrame = $f }
+            }
+        }
+    }
+    $seconds = [math]::Round($lastFrame / 60.0)
+    foreach ($id in $visited) {
+        if ($id -lt 0) { continue }
+        if ($id -eq $failedAt) {
+            $why = "DESYNC en session reelle $($root.Name)"
+            Promote $id 'FAIL' $why
+            PromoteBoard $id 'FAIL' $why $lastFrame
+        } else {
+            $why = "session reelle $($root.Name), $lastFrame frames ($seconds s)"
+            Promote $id 'REAL-NETWORK-PARTIAL' $why
+            PromoteBoard $id 'REAL-NETWORK-PARTIAL' $why $lastFrame
+        }
+    }
+}
+
 # ---- report ----
 $lines = New-Object Collections.Generic.List[string]
 function Emit([string]$text) { $lines.Add($text); Write-Output $text }
 
 $total = $minigames.Count
 $counts = @{}
-foreach ($name in 'UNTESTED', 'SCRIPTED-PARTIAL', 'HUMAN-PASS', 'REAL-NETWORK-PASS', 'FAIL', 'BLOCKED') {
+foreach ($name in 'UNTESTED', 'SCRIPTED-PARTIAL', 'HUMAN-PASS', 'REAL-NETWORK-PARTIAL', 'REAL-NETWORK-PASS', 'FAIL', 'BLOCKED') {
     $counts[$name] = @($state.Values | Where-Object { $_.State -eq $name }).Count
 }
 
@@ -275,13 +329,14 @@ Emit ("**{0} mini-jeux** enumeres depuis \`include/ovl_table.h\`." -f $total)
 Emit ''
 Emit '| etat | nombre | sur |'
 Emit '|---|---|---|'
-foreach ($name in 'UNTESTED', 'SCRIPTED-PARTIAL', 'HUMAN-PASS', 'REAL-NETWORK-PASS', 'FAIL', 'BLOCKED') {
+foreach ($name in 'UNTESTED', 'SCRIPTED-PARTIAL', 'HUMAN-PASS', 'REAL-NETWORK-PARTIAL', 'REAL-NETWORK-PASS', 'FAIL', 'BLOCKED') {
     Emit ('| `{0}` | **{1}** | {2} |' -f $name, $counts[$name], $total)
 }
 Emit ''
 Emit ('- jamais atteints : **{0} sur {1}**' -f $counts['UNTESTED'], $total)
 Emit ('- exerces automatiquement : **{0}**' -f $counts['SCRIPTED-PARTIAL'])
 Emit ('- reellement joues par un humain : **{0}**' -f $counts['HUMAN-PASS'])
+Emit ('- joues entre deux machines sans aller au bout : **{0}**' -f $counts['REAL-NETWORK-PARTIAL'])
 Emit ('- valides entre deux machines : **{0}**' -f $counts['REAL-NETWORK-PASS'])
 Emit ''
 Emit 'Un resultat `SCRIPTED` plafonne a `SCRIPTED-PARTIAL`. Il n''est jamais promu'
@@ -299,13 +354,13 @@ foreach ($key in ($boards.Keys | Sort-Object)) {
         $b.Overlay, $b.Module, $b.BoardId, $b.Name, $boardState[$key].State, $boardState[$key].Why)
 }
 $boardCounts = @{}
-foreach ($name in 'UNTESTED', 'SCRIPTED-PARTIAL', 'HUMAN-PASS', 'REAL-NETWORK-PASS', 'FAIL', 'BLOCKED') {
+foreach ($name in 'UNTESTED', 'SCRIPTED-PARTIAL', 'HUMAN-PASS', 'REAL-NETWORK-PARTIAL', 'REAL-NETWORK-PASS', 'FAIL', 'BLOCKED') {
     $boardCounts[$name] = @($boardState.Values | Where-Object { $_.State -eq $name }).Count
 }
 Emit ''
-Emit ('{0} plateaux : {1} jamais atteints, {2} exerces automatiquement, {3} joues par un humain, {4} valides entre deux machines.' -f
+Emit ('{0} plateaux : {1} jamais atteints, {2} exerces automatiquement, {3} joues par un humain, {4} joues entre deux machines sans aller au bout, {5} valides entre deux machines.' -f
     $boards.Count, $boardCounts['UNTESTED'], $boardCounts['SCRIPTED-PARTIAL'],
-    $boardCounts['HUMAN-PASS'], $boardCounts['REAL-NETWORK-PASS'])
+    $boardCounts['HUMAN-PASS'], $boardCounts['REAL-NETWORK-PARTIAL'], $boardCounts['REAL-NETWORK-PASS'])
 
 if ($Detail -or $Markdown) {
     Emit ''
