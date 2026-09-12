@@ -96,12 +96,38 @@ foreach ($case in @(
 # Windows Application event log record for a process that faulted, used when the
 # in-process reporter could not run.
 function Get-FaultRecord([int]$processId, [datetime]$from, [datetime]$to) {
-    $window = @{ LogName = 'Application'; ProviderName = 'Application Error'; StartTime = $from.AddSeconds(-5) }
+    # This function INVENTED a crash, which is worse than missing one: a run
+    # whose peers both exited 0 with no report, no dump and no desync was
+    # classified PROCESS_CRASH on both seats. The fault it "found" belonged to
+    # the PREVIOUS run, which really had crashed seconds earlier.
+    #
+    # Two causes, both fixed here.
+    #
+    # It matched on the image name alone and never checked which PROCESS the
+    # event was about, so any partyboard.exe crash in the window was attributed
+    # to whichever peer was being classified. record_board_session.ps1 had the
+    # PID check all along; this copy did not, and nothing compared them.
+    #
+    # And the window began five seconds BEFORE the process started. A crash
+    # cannot be logged before its process exists, so that slack could only ever
+    # reach backwards into an earlier run. Slack belongs on the exit side, where
+    # the log genuinely lags.
+    $window = @{ LogName = 'Application'; ProviderName = 'Application Error'; StartTime = $from }
     try { $events = Get-WinEvent -FilterHashtable $window -MaxEvents 40 -ErrorAction Stop }
     catch { return $null }
     foreach ($event in $events) {
         if ($event.Message -notmatch 'partyboard\.exe') { continue }
-        if ($event.TimeCreated -lt $from.AddSeconds(-5)) { continue }
+        # Field 8 of this event is the faulting process id, in hex. Both the
+        # English and French log wordings are matched, because the machine that
+        # runs these campaigns is French and the one that reads them may not be.
+        # NOT $pid: that is PowerShell's automatic variable for the current
+        # process, and assigning to it clobbers something the rest of the
+        # session may rely on.
+        $faultPid = [regex]::Match($event.Message,
+            '(?:process id|ID du processus)[^:]*:\s*0x([0-9A-Fa-f]+)')
+        if (-not $faultPid.Success) { continue }
+        if ([Convert]::ToInt64($faultPid.Groups[1].Value, 16) -ne $processId) { continue }
+        if ($event.TimeCreated -lt $from) { continue }
         if ($to -ne $null -and $event.TimeCreated -gt $to.AddSeconds(30)) { continue }
         $code = [regex]::Match($event.Message, 'code d.exception\s*:?\s*(0x[0-9a-fA-F]+)|xception code:?\s*(0x[0-9a-fA-F]+)')
         $module = [regex]::Match($event.Message, 'odule d.fectueux[^:]*:\s*([^\r\n,]+)|aulting module name:\s*([^\r\n,]+)')
