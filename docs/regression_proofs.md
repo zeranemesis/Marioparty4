@@ -141,6 +141,81 @@ faut donc lire la frame finale avant de lire la couverture. C'est corrigé dans
 
 ---
 
+## D13 — le pont du lanceur ne reconnaissait plus les paquets du jeu
+
+**Trouvé le 2026-09-12, en préparant le paquet à transférer sur un second PC.**
+
+Deux programmes doivent s'accorder sur la forme d'un datagramme.
+`src/port/netplay_transport.cpp` l'émet ; le pont de `tools/online/Connection.cs`
+le relaie entre les deux PC, et ne le relaie **que s'il le reconnaît** :
+
+```csharp
+internal static bool Packet(byte[] b,int player) {
+    return b.Length==GameDatagram.Payload      // 88
+        && b[0]==80 && b[1]==66 && b[2]==82 && b[3]==66
+        && b[4]==0 && b[5]==6                  // protocole v6
+        && b[6]>=1 && b[6]<=3 && b[7]==player;
+}
+```
+
+Les deux nombres avaient été recopiés à la main depuis l'en-tête du moteur. Le
+2026-09-10, `0e98fb1e` (« netplay: complete canonical deterministic state
+hashing ») a porté le paquet de **88 à 152 octets** et le protocole de **6 à
+7** — seize sous-systèmes de plus dans le hachage canonique, soit
+`84 + 16 × 4 + 4 = 152`. La copie C# est restée à 88 et 6.
+
+### Ce que cela produisait
+
+À partir de ce commit, le pont rejetait **100 % du trafic de jeu**, sans
+afficher la moindre erreur : `continue` sur chaque paquet. Les deux salons se
+connectaient, les empreintes de disque concordaient, l'hôte lançait la partie,
+les deux jeux démarraient — puis chacun attendait deux minutes et mourait sur
+
+```
+[NET] ERROR frame=0: Aucun joueur compatible apres 2 minutes.
+```
+
+`ProgressFailure::NoPeer` signifie exactement cela : aucun paquet de pair n'a
+jamais été accepté.
+
+### Pourquoi rien ne l'a dit pendant deux jours
+
+Aucun test local ne traverse le pont. Les campagnes utilisent
+`--netplay-host` / `--netplay-join` directement sur `127.0.0.1` : les deux jeux
+se parlent en direct, le lanceur n'est pas dans le chemin. Plus de cent
+sessions vertes cette nuit-là ne disaient rien du tout de ce défaut.
+
+Le seul test qui le traversait est `Tests.Tls(...)` du lanceur, et il n'avait
+pas tourné : la porte de publication qui l'exécute ne se déclenche plus que sur
+une étiquette depuis W0.
+
+### La preuve
+
+`tools/test_wire_format.ps1`, vu rouge puis vert, `Connection.cs` remis dans
+son état du 10 septembre puis restauré :
+
+| état de `Connection.cs` | résultat |
+|---|---|
+| littéraux 88 / v6 (état du 10 septembre) | **FAIL (4)** — les quatre contrôles de provenance |
+| constantes générées | PASS |
+
+### Le correctif
+
+Les deux nombres ne sont plus recopiés : `tools/build_online.ps1` les lit dans
+`include/port/netplay_transport.hpp` et génère `WireFormat.generated.cs`, que
+`Connection.cs` référence. La dérive n'est plus possible par transcription.
+`test_wire_format.ps1` garde ce qui reste : supprimer le générateur, ou
+réécrire un littéral à côté.
+
+### Ce que ce défaut apprend
+
+Une constante partagée entre deux langages sans mécanisme la liant est une
+divergence en attente. Et un test qui ne tourne jamais protège exactement
+autant qu'un test qui n'existe pas : celui-ci existait, était correct, et
+aurait attrapé le défaut le jour même.
+
+---
+
 ## Ce que cette page ne prouve pas
 
 Elle prouve que **ces trois scénarios touchent ces trois chemins**. Elle ne
