@@ -20,7 +20,11 @@
 param(
     [int]$Seconds = 3600,
     [string]$Since = '',
-    [int]$PollMs = 2000
+    [int]$PollMs = 2000,
+    # The folder the game is actually launched from. Its fingerprint is what the
+    # two PCs must agree on, so it is read from there rather than written into
+    # this script, where it would go stale the first time the game is rebuilt.
+    [string]$GameDirectory = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -33,6 +37,18 @@ if (-not (Test-Path -LiteralPath $diagnostics)) {
 }
 
 $cutoff = if ($Since) { [datetime]::Parse($Since) } else { Get-Date }
+
+$expectedBuild = ''
+$searched = @($GameDirectory) + @("$env:USERPROFILE\Desktop\Nouveau dossier\PartyBoard", 'C:\Jeux\PartyBoard')
+foreach ($candidate in $searched) {
+    if (-not $candidate) { continue }
+    $readme = Join-Path $candidate 'LISEZ-MOI.txt'
+    if (-not (Test-Path -LiteralPath $readme)) { continue }
+    foreach ($line in Get-Content $readme) {
+        if ($line -match 'Empreinte\s+([0-9a-f]{64})') { $expectedBuild = $Matches[1] }
+    }
+    if ($expectedBuild) { break }
+}
 function Say([string]$text) {
     Write-Output ((Get-Date -Format 'HH:mm:ss') + '  ' + $text)
 }
@@ -51,6 +67,7 @@ $lastLocal = -1
 $lastPeer = -1
 $lastNative = 0
 $sawGameTraffic = $false
+$lastDesync = ''
 $deadline = (Get-Date).AddSeconds($Seconds)
 
 while ((Get-Date) -lt $deadline) {
@@ -63,6 +80,7 @@ while ((Get-Date) -lt $deadline) {
         $current = $candidate
         $offset = 0; $lastPhase = ''; $lastLocal = -1; $lastPeer = -1; $lastNative = 0
         $sawGameTraffic = $false
+        $lastDesync = ''
         $pings.Clear()
         Say "=== nouvelle session $($current.Name) ==="
     }
@@ -105,9 +123,18 @@ while ((Get-Date) -lt $deadline) {
                 }
                 elseif ($body -match 'build=([0-9A-F]{64})') {
                     $hash = $Matches[1].ToLowerInvariant()
-                    $same = $hash -eq 'ff2a80402d42fce13911da9abeef09fe9f0584845ce1ce0c4262b169e6b1651c'
                     Say ("handshake accepte : {0}" -f ($body -replace 'build=[0-9A-F]{64}', 'build=...'))
-                    Say ("   empreinte {0}" -f $(if ($same) { 'identique au paquet livre' } else { "INATTENDUE $hash" }))
+                    if (-not $expectedBuild) { Say "   empreinte $hash (aucune reference lue)" }
+                    elseif ($hash -eq $expectedBuild) { Say '   empreinte identique au paquet installe' }
+                    else { Say "   empreinte INATTENDUE $hash" }
+                    # The route this session actually took. 'lan' means the two
+                    # PCs reached each other directly; 'internet' means the
+                    # traffic left through the box and came back.
+                    if ($body -match 'path=(\w+)') {
+                        $route = $Matches[1]
+                        if ($route -eq 'lan') { Say '   >>> CHEMIN LOCAL DIRECT, la box n est plus dans le circuit' }
+                        elseif ($route -eq 'internet') { Say '   route internet (aller-retour par la box)' }
+                    } else { Say '   (ancien lanceur : ne dit pas quelle route il a prise)' }
                 }
                 else {
                     Say $body
@@ -129,8 +156,18 @@ while ((Get-Date) -lt $deadline) {
                     if ($lastNative -eq 0) { Say "   >>> le jeu ecrit son diagnostic ($name)" }
                     $lastNative = $size
                 }
+                # The sidecar keeps existing, so reporting it on presence
+                # reprinted forty lines every two seconds and buried the session
+                # it was meant to explain. Report it when its content changes.
                 if ($name -eq 'native.txt.desync') {
-                    Say "   >>> DESYNC ENREGISTREE : $(Get-Content $path -Raw)"
+                    $text = Get-Content $path -Raw
+                    if ($text -and $text -ne $lastDesync) {
+                        $lastDesync = $text
+                        $headline = ($text -split "`n" | Select-Object -First 1)
+                        $differing = @($text -split "`n" | Where-Object { $_ -match 'DIFFERENT' })
+                        Say "   >>> DESYNC : $headline"
+                        foreach ($d in $differing) { Say "       $($d.Trim())" }
+                    }
                 }
             }
         }
