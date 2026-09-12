@@ -213,7 +213,12 @@ foreach ($side in $sides) {
     } else {
         "--netplay-join 127.0.0.1:$port"
     }
-    $role = if ($side -eq 0) { 'host' } else { 'client' }
+    # NOT $role: PowerShell variable names are case-insensitive, so $role IS the
+    # $Role parameter, whose ValidateSet only accepts Local/Host/Join. Assigning
+    # 'client' to it made every invocation fail before a single line ran - the
+    # same collision as $manifest/$Manifest in verify_replays.ps1, reintroduced
+    # here when this file was split into roles.
+    $seatRole = if ($side -eq 0) { 'host' } else { 'client' }
     $recording = Join-Path $runPath "peer-$side-input.txt"
 
     $start = [Diagnostics.ProcessStartInfo]::new()
@@ -235,14 +240,14 @@ foreach ($side in $sides) {
     # working directory, so two instances overwrote each other's evidence.
     $start.EnvironmentVariables['PARTYBOARD_CRASH_DIR'] = $runPath
     $start.EnvironmentVariables['PARTYBOARD_CRASH_PEER'] = "$side"
-    $start.EnvironmentVariables['PARTYBOARD_CRASH_ROLE'] = $role
+    $start.EnvironmentVariables['PARTYBOARD_CRASH_ROLE'] = $seatRole
     # The detector that could have explained the heap corruption that ended
     # session S1. A human session is the most expensive evidence this project
     # collects; running it with the instrument switched off wastes it.
     $start.EnvironmentVariables['PARTYBOARD_MEM_DIAGNOSTICS'] = '1'
     $start.EnvironmentVariables['PARTYBOARD_AUDIO_DIAGNOSTICS'] = '1'
     $process = [Diagnostics.Process]::Start($start)
-    $peers += @{ Process = $process; Side = $side; Role = $role; Recording = $recording
+    $peers += @{ Process = $process; Side = $side; Role = $seatRole; Recording = $recording
         Out = $process.StandardOutput.ReadToEndAsync()
         StartTime = $process.StartTime
         ClosedBySupervisor = $false
@@ -320,7 +325,18 @@ foreach ($peer in $peers) {
     }
     $peer.Process.WaitForExit()
     $peer.ExitCode = $peer.Process.ExitCode
-    $peer.ExitTime = $peer.Process.ExitTime
+    # ExitTime can come back unset - a process the supervisor killed does not
+    # always publish one - and every duration below then subtracts from $null,
+    # which PowerShell reports as "no overload for op_Subtraction". A session
+    # report must survive a missing timestamp: the whole point of this script is
+    # to say what happened, and it cannot do that by throwing.
+    $peer.ExitTime = try { $peer.Process.ExitTime } catch { $null }
+    if ($null -eq $peer.ExitTime -or $peer.ExitTime -eq [datetime]::MinValue) {
+        $peer.ExitTime = Get-Date
+        $peer.ExitTimeEstimated = $true
+    } else {
+        $peer.ExitTimeEstimated = $false
+    }
     # One log file per instance, kept beside its own diagnostic and reports.
     [IO.File]::WriteAllText((Join-Path $runPath "peer-$($peer.Side)-stdout.log"), $peer.Out.Result)
 }
@@ -605,7 +621,7 @@ foreach ($peer in $peers) {
     $summary.Add("[PEER $side - $($peer.Role)]")
     $summary.Add("pid=$($peer.Process.Id)")
     $summary.Add("started_at=$($peer.StartTime.ToString('yyyy-MM-dd HH:mm:ss.fff'))")
-    $summary.Add("exited_at=$($peer.ExitTime.ToString('yyyy-MM-dd HH:mm:ss.fff'))")
+    $summary.Add("exited_at=$($peer.ExitTime.ToString('yyyy-MM-dd HH:mm:ss.fff'))$(if ($peer.ExitTimeEstimated) { ' (estime: le processus n a pas publie d heure de sortie)' })")
     $summary.Add("lifetime_seconds=$([math]::Round(($peer.ExitTime - $peer.StartTime).TotalSeconds, 3))")
     $summary.Add("exit_code=$(Format-ExitCode $peer.ExitCode)")
     $summary.Add("classification=$($peer.Classification)")
@@ -640,6 +656,14 @@ $summary.Add('[ORDER OF TERMINATION]')
 if ($peers.Count -lt 2) {
     $summary.Add(("This machine supervised one instance. The other machine's termination is " +
         "recorded in its own session folder and is NOT inferred here."))
+} elseif ($deadlineReached) {
+    # No peer was "seen first" because none of them exited on their own: the
+    # deadline expired and the supervisor closed both. Computing an order here
+    # subtracted from $null and took the whole report down with it - a report
+    # that cannot be written is worse than one that says "no order to report".
+    $summary.Add(("The rehearsal reached its {0} second deadline with both peers still " +
+        "running; the supervisor closed them. There is no order of termination to " +
+        "report, and none is claimed.") -f $MaxSeconds)
 } elseif ($observedSimultaneously) {
     $summary.Add(("Both peers were already gone when the supervisor next polled, " +
         "$pollMilliseconds ms apart at most. The real order is AMBIGUOUS and is not claimed."))
