@@ -68,11 +68,17 @@ static class Tests {
         reply=new byte[16];reply[1]=130;Gateway.Put16(reply,8,32000);Gateway.Put16(reply,10,32100);Gateway.Put32(reply,12,120);
         Check(Gateway.PmpReply(reply,32000,out port,out life) && port==32100 && life==120,"NAT-PMP response");
         reply[3]=2;Check(!Gateway.PmpReply(reply,32000,out port,out life),"NAT-PMP refusal");
-        var payload=new byte[GameDatagram.Payload];payload[0]=80;payload[1]=66;payload[2]=82;payload[3]=66;payload[4]=0;payload[5]=6;payload[6]=1;payload[7]=0;
-        Check(Bridge.Packet(payload,0), "v6 input accepted by bridge");
+        // Shaped from the engine's own constants, never from a literal. The
+        // literal version of these four lines said 88 bytes and v6 for two days
+        // after the engine moved to 152 and v7, and the bridge silently dropped
+        // every game packet between the two PCs.
+        var payload=new byte[GameDatagram.Payload];payload[0]=80;payload[1]=66;payload[2]=82;payload[3]=66;payload[4]=WireFormat.VersionHigh;payload[5]=WireFormat.VersionLow;payload[6]=1;payload[7]=0;
+        Check(Bridge.Packet(payload,0), "current native protocol accepted by bridge");
         foreach(byte type in new byte[]{2,3}) { payload[6]=type; Check(Bridge.Packet(payload,0),"explicit repair/state packet accepted"); }
         payload[6]=4;Check(!Bridge.Packet(payload,0),"unknown packet type rejected");
-        payload[6]=1;payload[5]=5;Check(!Bridge.Packet(payload,0),"old native protocol rejected");payload[5]=6;
+        payload[6]=1;payload[5]=(byte)(WireFormat.VersionLow-1);Check(!Bridge.Packet(payload,0),"old native protocol rejected");payload[5]=WireFormat.VersionLow;
+        var truncated=new byte[GameDatagram.Payload-1];Buffer.BlockCopy(payload,0,truncated,0,truncated.Length);
+        Check(!Bridge.Packet(truncated,0),"packet of the wrong length rejected");
         var datagramKey=GameDatagram.Key(invite.Token);var datagram=GameDatagram.Seal(datagramKey,0,42,payload);ulong sequence;byte[] opened;
         Check(GameDatagram.Open(datagramKey,0,datagram,out sequence,out opened) && sequence==42 && Wire.Equal(payload,opened),"authenticated UDP game packet round trip");
         datagram[20]^=1;Check(!GameDatagram.Open(datagramKey,0,datagram,out sequence,out opened),"tampered UDP game packet rejected");

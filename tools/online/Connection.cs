@@ -107,7 +107,11 @@ sealed class Invitation {
 }
 
 static class GameDatagram {
-    public const int Payload=88,Size=14+Payload+16;
+    // Sized from the engine header by tools/build_online.ps1. A hardcoded copy
+    // fell behind the 88 -> 152 byte change and the bridge dropped every game
+    // packet, which reads to a player as "Aucun joueur compatible apres 2
+    // minutes" with a lobby that looked perfectly connected.
+    public const int Payload=WireFormat.PacketSize,Size=14+Payload+16;
     const int Header=14,Tag=16;
     public static byte[] Key(byte[] token) {return Wire.Hash(token.Concat(Encoding.ASCII.GetBytes("PartyBoard UDP v1")).ToArray());}
     public static byte[] Seal(byte[] key,int player,ulong sequence,byte[] payload) {
@@ -159,7 +163,7 @@ sealed class Bridge : IDisposable {
         readTcp=reader;readSsl=readStream;writeTcp=writer;writeSsl=writeStream;localPlayer=player;network=internet;networkPeer=internetPeer;learnNetworkPeer=internetPeer==null;datagramKey=GameDatagram.Key(token);udp=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));
         if(hostGamePort!=0) {game=new IPEndPoint(IPAddress.Loopback,hostGamePort); udp.Connect(game);}
     }
-    internal static bool Packet(byte[] b,int player) {return b.Length==GameDatagram.Payload && b[0]==80 && b[1]==66 && b[2]==82 && b[3]==66 && b[4]==0 && b[5]==6 && b[6]>=1 && b[6]<=3 && b[7]==player;}
+    internal static bool Packet(byte[] b,int player) {return b.Length==GameDatagram.Payload && b[0]==80 && b[1]==66 && b[2]==82 && b[3]==66 && b[4]==WireFormat.VersionHigh && b[5]==WireFormat.VersionLow && b[6]>=1 && b[6]<=3 && b[7]==player;}
     void Write(byte[] payload) {
         if(payload.Length<1 || payload.Length>256)throw new IOException("Message de salon trop long.");
         var frame=new byte[payload.Length+2];frame[0]=(byte)(payload.Length>>8);frame[1]=(byte)payload.Length;
