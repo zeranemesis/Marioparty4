@@ -928,3 +928,68 @@ C'est le **premier défaut que la campagne automatique trouve seule**. Les
 enregistrements humains existants ne pouvaient pas le produire : ils n'entrent
 jamais deux fois sur un plateau. Cela valide l'ensemble de la démarche — une
 entrée générée atteint des chemins qu'aucun enregistrement ne contient.
+
+---
+
+## D12 — Divergence `OBJECTS` à l'instant du chargement d'un mini-jeu
+
+**Classification : single-subsystem canonical divergence in OBJECTS, one frame,
+exactly at the frame a minigame overlay loads. Observé une fois.**
+
+**Statut : non corrigé. Distinct de D11 : autre sous-système, autre chemin.**
+
+### L'isolation
+
+| frame | état |
+|---|---|
+| 17778 | **identique sur les seize sous-systèmes** |
+| 17779 | **seul `OBJECTS` diffère** — local `cfeb71a2`, distant `83b6f114` |
+
+### Le chemin, et pourquoi il compte
+
+```
+70@2904  →  89@11305  →  3@17492  →  15@17780
+menu        Toad's       instructions   BATTANDOMINO
+```
+
+La divergence tombe à la frame **17779**, soit **une frame avant** que l'overlay
+du mini-jeu n'apparaisse. C'est donc l'instant de la transition elle-même :
+l'écran d'instructions se retire et le mini-jeu se charge.
+
+`D6` est écarté ici aussi : `d6_batched_frames = 0`.
+
+### Ce qui le distingue de D11
+
+| | D11 | D12 |
+|---|---|---|
+| sous-système | `ANIMATION` | `OBJECTS` |
+| moment | en cours de jeu sur un plateau | à la transition vers un mini-jeu |
+| chemin particulier | deuxième entrée de plateau | entrée de mini-jeu |
+
+Rien n'interdit qu'ils aient une cause commune — tous deux sont des divergences
+d'un seul sous-système sur une transition — mais les traiter comme un seul défaut
+sans preuve serait la faute que ce registre existe pour empêcher.
+
+### Le taux
+
+**Deux occurrences**, et elles ont été trouvées par deux lots différents :
+
+| run | empreinte | contexte |
+|---|---|---|
+| `night-6022` | `DESYNC:OBJECTS:unknown` | frame 17779, chargement de BATTANDOMINO |
+| `survey-3101` | `DESYNC:OBJECTS:unknown` | lot de sondage, même signature |
+
+Deux occurrences indépendantes de la même signature en une nuit, alors que D11
+n'en a qu'une : **D12 est probablement le plus fréquent des trois défauts
+trouvés cette nuit.** Comme les autres il reste intermittent, et un run vert ne
+dit rien.
+
+### Ce qu'il faut faire
+
+1. Accumuler des occurrences. Chaque run qui entre dans un mini-jeu échantillonne
+   ce chemin gratuitement ; c'est le balayage des mini-jeux qui fournira les
+   statistiques, sans campagne dédiée.
+2. Quand il y en aura assez, regarder **quel objet** diverge. `OBJECTS` est un
+   agrégat ; le rapport de divergence ne nomme pas encore le champ fautif, et
+   c'est la première chose à instrumenter avant toute correction.
+3. **Ne pas corriger.** Une seule occurrence, un agrégat, aucune cause établie.

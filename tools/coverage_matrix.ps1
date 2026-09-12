@@ -177,6 +177,11 @@ function Promote([int]$overlay, [string]$candidate, [string]$why) {
 $runFiles = @(Get-ChildItem (Resolve-MatrixPath $CampaignRoot) -Recurse -Filter 'run.json' -ErrorAction SilentlyContinue)
 foreach ($file in $runFiles) {
     $run = Get-Content $file.FullName -Raw | ConvertFrom-Json
+    # A retracted verdict is a measurement known to be wrong, kept on disk as
+    # evidence of the harness defect that produced it. It stays readable and it
+    # stops counting - deleting it would hide a failure, and trusting it would
+    # repeat a falsehood.
+    if ($run.PSObject.Properties.Name -contains 'verdict_retracted') { continue }
     $played = @()
     if ($run.PSObject.Properties.Name -contains 'minigames_played') { $played = @($run.minigames_played) }
     if ($played.Count -eq 0) { continue }
@@ -212,6 +217,7 @@ foreach ($file in $runFiles) {
 # travels with the verdict.
 foreach ($file in $runFiles) {
     $run = Get-Content $file.FullName -Raw | ConvertFrom-Json
+    if ($run.PSObject.Properties.Name -contains 'verdict_retracted') { continue }
     if ($run.result -eq 'HARNESS_FAILURE') { continue }
     $path = @()
     if ($run.PSObject.Properties.Name -contains 'overlays') { $path = @($run.overlays) }
