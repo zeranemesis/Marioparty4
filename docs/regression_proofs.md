@@ -216,6 +216,70 @@ aurait attrapé le défaut le jour même.
 
 ---
 
+## L'enregistreur ecrasait un enregistrement de reference
+
+**Trouve le 2026-09-12, et il avait deja fait son degat.**
+
+`tools/record_board_session.ps1` avait pour sortie par defaut
+`work/netplay-recordings/board.txt` — **un fichier liste dans
+`tests/replays/manifest.json`**, c'est-a-dire exactement ce a quoi toutes les
+campagnes se comparent.
+
+### Ce qui s'est passe
+
+A 09:08, j'ai lance l'enregistreur sans `-Output` pour verifier les trois
+correctifs que je venais de lui apporter. Il a fait ce qu'on lui demandait :
+il a enregistre 5 254 frames et les a ecrites a l'emplacement par defaut. Les
+2 319 789 octets de l'enregistrement de reference sont partis avec.
+
+**Rien ne l'a signale.** La perte n'est ressortie que deux heures et demie plus
+tard, quand une campagne a refuse de demarrer :
+
+```
+DIFFERENT work/netplay-recordings/board.txt
+          231459 bytes on disk, 2319789 in the manifest
+HARNESS FAILURE: The recordings do not match tests/replays/manifest.json
+```
+
+Le garde-fou de W1 a donc parfaitement fonctionne : il a refuse de lancer une
+campagne sur un enregistrement modifie. Ce qui a manque, c'est un refus **au
+moment de l'ecriture**, quand la perte etait encore evitable.
+
+### Aggravant : le scan avalait le refus
+
+`scan_board_select.ps1` canalisait la campagne dans `Out-Null` et attrapait
+toute exception sans rien en faire. Dix-huit sondes ont donc rapporte `NO RUN`
+en silence pendant que la campagne declinait dix-huit fois, dans une phrase
+que personne ne voyait. C'est la regle du projet — ne jamais filtrer la sortie
+d'un test d'une facon qui puisse cacher son code de sortie — violee par un de
+mes propres outils.
+
+### Les deux correctifs, vus fonctionner
+
+L'enregistreur lit desormais le manifeste **avant de capturer une seule frame**
+et refuse par son nom tout chemin qui y figure :
+
+| `-Output` demande | resultat |
+|---|---|
+| `work/netplay-recordings/board-replay.txt` | **REFUS, code 2**, aucune frame capturee |
+| `work/netplay-recordings/essai.txt` | passe le garde-fou, echoue plus loin sur le disque absent |
+
+Le defaut n'est plus un nom de reference : `work/netplay-recordings/session.txt`.
+
+Le scan conserve maintenant le journal de chaque campagne, et **s'arrete** sur
+un refus au lieu de remplir un tableau de lignes vides.
+
+### Ce qui est perdu, et ce qui ne l'est pas
+
+L'enregistrement d'origine n'existe plus : `work/` n'est pas versionne et
+aucune copie n'a survecu. Aucun scenario ne le referencait — les campagnes
+utilisent `board-replay.txt` et `walk.txt` — donc rien n'est casse. Le
+manifeste a ete mis a jour par `verify_replays.ps1 -Update`, le chemin
+deliberement prevu pour cela, et ce paragraphe existe pour que la mise a jour
+ne passe pas pour une re-validation.
+
+---
+
 ## Ce que cette page ne prouve pas
 
 Elle prouve que **ces trois scénarios touchent ces trois chemins**. Elle ne

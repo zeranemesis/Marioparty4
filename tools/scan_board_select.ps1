@@ -109,12 +109,34 @@ foreach ($frame in $points) {
         [IO.File]::WriteAllText($manifest, ($document | ConvertTo-Json -Depth 8),
             (New-Object Text.UTF8Encoding $false))
 
+        # Out-Null used to eat everything the campaign said, including its
+        # refusals. Eighteen probes once reported NO RUN in a row while the
+        # campaign was declining each time, in a sentence nobody saw, because a
+        # reference recording had changed. Keep the log, and stop the scan on a
+        # refusal rather than filling a table with empty rows.
+        $campaignLog = Resolve-ScanPath "work/gen/$tag.campaign.log"
+        $campaignExit = 0
         try {
             & $campaign -DiscPath $DiscPath -Manifest 'work/scan-scenarios.json' `
-                -Scenario $tag -Label $tag -AudioDiagnostics '' 2>&1 | Out-Null
+                -Scenario $tag -Label $tag -AudioDiagnostics '' 2>&1 |
+                Tee-Object -FilePath $campaignLog | Out-Null
+            $campaignExit = $LASTEXITCODE
         } catch {
+            $campaignExit = 3
+            [IO.File]::AppendAllText($campaignLog, "$_`n")
         } finally {
             $ErrorActionPreference = $previous
+        }
+        if ($campaignExit -eq 3) {
+            Write-Output ''
+            Write-Output "ARRET: la campagne a refuse de demarrer sur $tag."
+            foreach ($line in (Get-Content $campaignLog -ErrorAction SilentlyContinue |
+                    Where-Object { $_ -match 'HARNESS FAILURE|REFUS|DIFFERENT|missing' } |
+                    Select-Object -First 6)) {
+                Write-Output "  $line"
+            }
+            Write-Output "  journal complet : $campaignLog"
+            exit 2
         }
 
         $dir = Get-ChildItem (Resolve-ScanPath 'work/netplay-campaigns') -Directory -Filter "*-$tag" -ErrorAction SilentlyContinue |

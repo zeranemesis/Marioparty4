@@ -56,7 +56,13 @@ param(
     # Join: where the other machine is listening, as address:port.
     [string]$JoinAddress = '',
     [string]$BinaryDirectory = 'build/aexp/RelWithDebInfo',
-    [string]$Output = 'work/netplay-recordings/board.txt',
+    # NOT a name from tests/replays/manifest.json. The default used to be
+    # work/netplay-recordings/board.txt, which IS a manifest reference, so a
+    # rehearsal run with no -Output silently replaced it - and the loss only
+    # surfaced two hours later as a campaign refusing to start. The guard below
+    # now refuses any manifest path outright; this default simply stops being
+    # one.
+    [string]$Output = 'work/netplay-recordings/session.txt',
     [int]$HostPad = 1,
     [int]$ClientPad = 1,
     # A name for this session folder, so the two machines' folders can be told
@@ -89,6 +95,28 @@ function Resolve-TestPath([string]$path) {
     if ([IO.Path]::IsPathRooted($path)) { return [IO.Path]::GetFullPath($path) }
     return [IO.Path]::GetFullPath((Join-Path $projectPath $path))
 }
+# A recording listed in tests/replays/manifest.json is what campaigns replay and
+# what verify_replays.ps1 checks before every run. Writing over one destroys the
+# thing every later result is compared against, and the manifest cannot tell a
+# deliberate re-record from an accident - it only reports that the bytes moved.
+# So refuse, by name, before a single frame is captured.
+$manifestPath = Resolve-TestPath 'tests/replays/manifest.json'
+if (Test-Path -LiteralPath $manifestPath) {
+    $target = Resolve-TestPath $Output
+    $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+    foreach ($entry in @($manifest.replays)) {
+        if (-not $entry.path) { continue }
+        if ([IO.Path]::GetFullPath((Resolve-TestPath $entry.path)) -ne $target) { continue }
+        Write-Output ''
+        Write-Output "REFUS: $($entry.path) est un enregistrement de reference du manifeste."
+        Write-Output '       L ecraser detruirait ce a quoi toutes les campagnes se comparent.'
+        Write-Output '       Choisissez un autre -Output. Pour re-enregistrer une reference'
+        Write-Output '       deliberement, ecrivez ailleurs puis remplacez le fichier et lancez'
+        Write-Output '       tools/verify_replays.ps1 -Update.'
+        exit 2
+    }
+}
+
 $binaryPath = Resolve-TestPath $BinaryDirectory
 $disc = [IO.Path]::GetFullPath($DiscPath)
 if (-not (Test-Path -LiteralPath $disc -PathType Leaf)) { throw "Disc file missing: $disc" }

@@ -1,7 +1,7 @@
 ﻿{
     "manifest_version":  1,
     "note":  "Recordings are evidence, and they are large: this manifest is versioned and the files are not. A recording whose sha256 no longer matches is a different recording, and any campaign result obtained with it belongs to that different recording. Keep the files where the paths below say, or copy them there before running a campaign.",
-    "generated_at":  "2026-09-11T15:53:47.3921207+02:00",
+    "generated_at":  "2026-09-12T11:43:00.1415851+02:00",
     "replays":  [
                     {
                         "path":  "work/netplay-recordings/board-replay.txt",
@@ -23,9 +23,9 @@
                         "path":  "work/netplay-recordings/board.txt",
                         "board":  "w04Dll",
                         "description":  "The raw recording before the incomplete trailing line was removed.",
-                        "bytes":  2319789,
+                        "bytes":  231459,
                         "lines":  99756,
-                        "sha256":  "c49b67f2ced59a8762fbfb02cfa690674616853509e83f929bb58b9e063c58d5"
+                        "sha256":  "8110ad2c8ea807c29a2827d9e1b485fb2f8d848b8b5c852d7e8471abfb24377c"
                     },
                     {
                         "path":  "work/netplay-recordings/walk.txt",
