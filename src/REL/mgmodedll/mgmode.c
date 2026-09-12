@@ -1,4 +1,8 @@
 #include "REL/mgmodedll.h"
+#ifdef TARGET_PC
+#include "port/netplay_runtime.h"
+#include <stdio.h>
+#endif
 #include "game/audio.h"
 #include "game/disp.h"
 #ifndef __MWERKS__
@@ -187,6 +191,22 @@ void fn_1_6F8(void)
         fn_1_25838(lbl_1_bss_2CE, lbl_1_bss_2A6 + 0x280002, -1, -999);
         while (1) {
             s16 delta = 0;
+            #ifdef TARGET_PC
+            /* Measurement only. The mode-select loop turned out to start 1567
+             * frames after its overlay did, so a probe aimed at the overlay hit
+             * nothing. These say when each of these loops really begins. */
+            {
+                static unsigned traceIter_mgmode_menu = 0;
+                if ((traceIter_mgmode_menu % 60u) == 0u) {
+                    char trace[96];
+                    snprintf(trace, sizeof(trace), "mgmode_menu iter=%u dstkrep=%02x stickx=%d sticky=%d",
+                        traceIter_mgmode_menu, HuPadDStkRep[0], (int)HuPadStkX[0], (int)HuPadStkY[0]);
+                    OSReport("%s\n", trace);
+                    PartyBoard_NetplayTrace(trace);
+                }
+                traceIter_mgmode_menu++;
+            }
+            #endif
             if ((HuPadDStkRep[0] & PAD_BUTTON_LEFT) && lbl_1_bss_2A6 > 0) {
                 delta = -1;
             }
@@ -330,6 +350,19 @@ void fn_1_DF0(void)
         espPosSet(lbl_1_bss_2C2C[0], -20 + (168.0f + (lbl_1_bss_2A4 * 80)), 180);
         while (1) {
             s16 delta = 0;
+            #ifdef TARGET_PC
+            {
+                static unsigned traceIter_cat = 0;
+                if ((traceIter_cat % 60u) == 0u) {
+                    char trace[96];
+                    snprintf(trace, sizeof(trace), "freeplay_cat iter=%u cat=%d dstkrep=%02x",
+                        traceIter_cat, (int)lbl_1_bss_2A4, HuPadDStkRep[0]);
+                    OSReport("%s\n", trace);
+                    PartyBoard_NetplayTrace(trace);
+                }
+                traceIter_cat++;
+            }
+            #endif
             if ((HuPadDStkRep[0] & PAD_BUTTON_LEFT) && lbl_1_bss_2A4 > 0) {
                 delta = -1;
             }

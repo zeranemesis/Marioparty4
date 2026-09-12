@@ -13,6 +13,10 @@
 #ifndef __MWERKS__
 #include "game/esprite.h"
 #include "game/thpmain.h"
+#ifdef TARGET_PC
+#include "port/netplay_runtime.h"
+#include <stdio.h>
+#endif
 #endif
 
 s16 lbl_1_data_80[] = { 16, 17, 18, 19, 20, 21 };
@@ -107,6 +111,31 @@ s32 fn_1_2490(void)
     HuWinMesSet(lbl_1_bss_82, lbl_1_data_BC[lbl_1_bss_80]);
     HuWinDispOn(temp_r29);
     while (1) {
+#ifdef TARGET_PC
+        /* Measurement, not behaviour. Five scripted probes held a direction
+         * across this whole overlay and the cursor never moved, while the same
+         * injection in the board menu worked - so either this loop does not run
+         * when the probes think it does, or it does not see what they inject.
+         * Reading the code has not separated the two; this line does. */
+        {
+            static s16 traceCursor = -99;
+            static u8 traceRep = 0xFF;
+            static u16 traceIter = 0;
+            if (lbl_1_bss_80 != traceCursor || HuPadDStkRep[0] != traceRep
+                || (traceIter % 300u) == 0u) {
+                char trace[96];
+                snprintf(trace, sizeof(trace),
+                    "modesel_loop iter=%u cursor=%d dstk=%02x dstkrep=%02x stickx=%d",
+                    (unsigned)traceIter, (int)lbl_1_bss_80, HuPadDStk[0],
+                    HuPadDStkRep[0], (int)HuPadStkX[0]);
+                OSReport("%s\n", trace);
+                PartyBoard_NetplayTrace(trace);
+            }
+            traceCursor = lbl_1_bss_80;
+            traceRep = HuPadDStkRep[0];
+            traceIter++;
+        }
+#endif
         temp_r30 = 0;
         if (HuPadDStkRep[0] & PAD_BUTTON_LEFT) {
             temp_r30 = -1;

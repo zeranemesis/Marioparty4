@@ -1,4 +1,8 @@
 #include "REL/mgmodedll.h"
+#ifdef TARGET_PC
+#include "port/netplay_runtime.h"
+#include <stdio.h>
+#endif
 #include "game/gamework.h"
 
 #include "game/audio.h"
@@ -288,6 +292,22 @@ s32 fn_1_6D28(void)
             espAttrSet(lbl_1_bss_2C2C[18], HUSPR_ATTR_DISPOFF);
         }
         temp_r27 = temp_r29 = 0;
+        #ifdef TARGET_PC
+        /* Measurement only. The mode-select loop turned out to start 1567
+         * frames after its overlay did, so a probe aimed at the overlay hit
+         * nothing. These say when each of these loops really begins. */
+        {
+            static unsigned traceIter_freeplay_list = 0;
+            if ((traceIter_freeplay_list % 60u) == 0u) {
+                char trace[96];
+                snprintf(trace, sizeof(trace), "freeplay_list iter=%u dstkrep=%02x stickx=%d sticky=%d",
+                    traceIter_freeplay_list, HuPadDStkRep[0], (int)HuPadStkX[0], (int)HuPadStkY[0]);
+                OSReport("%s\n", trace);
+                PartyBoard_NetplayTrace(trace);
+            }
+            traceIter_freeplay_list++;
+        }
+        #endif
         if (HuPadDStkRep[0] & PAD_BUTTON_UP) {
             temp_r29 = -1;
         }
