@@ -1120,3 +1120,137 @@ ce qui est exclu du hachage est ce dont le hachage ne peut rien dire.
 Passer la vidéo d'intro avec une touche. Un saut est une entrée, donc en
 lockstep, donc les deux pairs quittent le film sur la même frame. Non vérifié.
 
+---
+
+## D15 — `omAddMember` laisse `object->group` non initialisé quand le groupe est plein
+
+**Classification : use of an uninitialised struct field, producing a
+non-deterministic canonical hash and an out-of-bounds array index on
+destruction.**
+
+**Statut : non corrigé. Cause racine établie par lecture du code et mesurée sur
+les deux pairs.**
+
+**Niveau de preuve : REAL-NETWORK.** Trouvé en comparant les vidages de champs
+des deux machines de la session du 2026-09-12 10:32.
+
+### Le code
+
+`src/game/objmain.c:365` :
+
+```c
+void omAddMember(Process *objman_process, u16 group, omObjData *object)
+{
+    omObjMan *objman = objman_process->user_data;
+    omObjGroup *group_ptr = &objman->group[group];
+    if (group_ptr->num_objs != group_ptr->max_objs) {
+        object->group = group;          /* seule ecriture du champ */
+        object->group_idx = group_ptr->next_idx;
+        ...
+    }
+    /* pas de else */
+}
+```
+
+Et `omAddObjEx` (`src/game/objmain.c:303`) n'ecrit `object->group` que dans
+l'autre branche :
+
+```c
+if (group >= 0) {
+    omAddMember(objman_process, group, object);
+} else {
+    object->group = group;
+    object->group_idx = 0;
+}
+```
+
+**Quand `group >= 0` et que le groupe est plein, personne n'ecrit
+`object->group`.** L'objet vient d'etre pris dans le pool
+(`object = &obj_base[next_idx]`), donc le champ garde le contenu de
+l'emplacement recycle.
+
+### La mesure
+
+Desync du 2026-09-12, frame 16382, overlay 30 (`m422Dll`, BELCON COIN),
+`category=OBJECTS`. La comparaison des deux rapports donne **un seul champ
+different sur 2007** :
+
+```
+681  OBJECTS  object->group   000001e0 (480)  contre  00000185 (389)
+```
+
+`OM_MAX_GROUPS` vaut **10** : les valeurs valides sont 0 a 9, ou -1. Ni 480 ni
+389 n'en font partie. Les **sept autres objets** du meme vidage portent tous
+`ffffffff`, le sentinelle « aucun groupe ».
+
+Et la table des groupes de ce gestionnaire, des deux cotes :
+
+```
+groupe 0..9 : max_objs=0  num_objs=0  next_idx=0
+```
+
+**Les dix groupes ont une capacite nulle.** `num_objs != max_objs` est donc faux
+pour tous, et `omAddMember` ne fait jamais rien sur ce gestionnaire. Tout objet
+cree avec un `group >= 0` en ressort avec un champ non initialise.
+
+Les deux pairs ont des historiques d'allocation differents, donc des restes
+differents : 480 d'un cote, 389 de l'autre. Le hachage canonique les voit et
+arrete la partie.
+
+### La consequence qui depasse le determinisme
+
+`src/game/objmain.c:424` :
+
+```c
+void omDelMember(Process *objman_process, omObjData *object)
+{
+    if (object->group != -1) {
+        omObjGroup *group = &objman->group[object->group];
+        group->obj[object->group_idx] = NULL;
+        group->next[object->group_idx] = group->next_idx;
+        ...
+    }
+}
+```
+
+Avec `object->group == 480` et `objman->group` alloue a **dix** elements
+(`HuMemDirectMallocNum(HEAP_SYSTEM, OM_MAX_GROUPS * sizeof(omObjGroup))`),
+c'est une **ecriture hors bornes** loin apres la fin du tableau, dans le tas
+systeme.
+
+Ce n'est donc pas seulement un defaut de determinisme : c'est une corruption de
+tas latente, de la meme famille que D1.
+
+**Ce qui n'est PAS etabli** : que ce chemin ait ete emprunte lors du
+`STATUS_HEAP_CORRUPTION` de S1, ou qu'il explique D10. Les deux sont plausibles
+et aucun n'est demontre. On ne relie pas deux defauts sans preuve.
+
+### Le correctif envisage, et pourquoi il est sur
+
+Initialiser le champ **avant** la tentative d'insertion, dans `omAddObjEx` :
+
+```c
+object->group = -1;
+object->group_idx = 0;
+if (group >= 0) {
+    omAddMember(objman_process, group, object);
+}
+```
+
+Un objet dont l'insertion echoue devient alors proprement « sans groupe » au
+lieu de porter un reste. Le cas ou l'insertion reussit est inchange, puisque
+`omAddMember` ecrit les deux champs lui-meme. Aucun comportement existant n'est
+modifie ; seul un comportement indefini le devient.
+
+### Ce qu'il faut faire, dans l'ordre
+
+1. Un test deterministe qui cree un gestionnaire avec un groupe de capacite
+   nulle, appelle `omAddObjEx` avec `group = 0`, et exige `object->group == -1`.
+   Il doit **rougir** sur le code actuel.
+2. Le correctif, dans un commit separe.
+3. Rejouer BELCON COIN et exiger que la divergence ait disparu.
+4. Chercher **pourquoi** ce gestionnaire a dix groupes de capacite nulle : soit
+   les groupes ne sont jamais dimensionnes sur ce chemin, soit l'appelant
+   demande un groupe qui n'a jamais ete prevu. Le correctif rend le symptome
+   inoffensif ; il ne repond pas a cette question.
+
