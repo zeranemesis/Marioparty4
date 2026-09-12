@@ -736,3 +736,94 @@ horodatage ni d'un handle. L'**absence** de rapport fait partie de la signature 
 deux plantages qui rendent le rapporteur muet dans le même overlay sont bien plus
 probablement un seul défaut que deux. Ce n'est pas un correctif, c'est ce qui
 permet de compter les occurrences en attendant.
+
+---
+
+## D10 — Plantage intermittent dans la fusion de blocs de `HuMemMemoryFree`
+
+**Classification : access violation reading a free-list neighbour during block
+coalescing, at startup. Intermittent, observé une fois sur 27 exécutions du
+même fichier d'entrée.**
+
+**Statut : non corrigé, non expliqué. Un rapport complet existe.**
+
+### Ce qui a été observé
+
+```
+EXCEPTION_ACCESS_VIOLATION
+HuMemMemoryFree+0x115  [src/game/memory.c:154]
+simulation_frame=2  game_context=-1  overlay=1  board=0 turn=0
+```
+
+`src/game/memory.c:154` est dans le chemin de fusion des blocs libres :
+
+```c
+if (block->next > block && !block->next->flag) {
+    PartyBoard_MemDiagOnRetire(block->next);
+    block->next->next->prev = block;      /* <- ici */
+```
+
+La faute est une **lecture** : `block->next` pointait sur une zone illisible, donc
+`block->next->next` a fauté. Le voisin dans la liste libre est invalide.
+
+C'est à la **frame 2**, pendant le chargement, sur un seul des deux pairs.
+
+### Comment il a été trouvé, et ce que cela dit
+
+Par accident, pendant un balayage du menu sans rapport. L'impulsion injectée
+était à la frame 4160 et n'a jamais été appliquée — le processus était mort 4158
+frames plus tôt. **L'entrée n'y est pour rien.**
+
+C'est aussi le premier plantage neuf sur lequel le rapporteur produit un rapport
+complet, parce que la garde de pile a été armée le même soir (voir D9). Sans
+elle, ce défaut aurait été un `0xC0000005` muet de plus.
+
+### Ce que le détecteur de tas n'a pas vu, et pourquoi cela compte
+
+`PARTYBOARD_MEM_DIAGNOSTICS` était **armé** : dix tas enregistrés, balayage
+propre à la frame 0, `mem_corruption_detected = false`. Le détecteur n'a donc
+rien vu du bloc qui a fauté deux frames plus tard.
+
+Deux explications possibles, et rien ne permet encore de choisir :
+
+1. la corruption survient **entre deux balayages** — le balayage tourne une fois
+   par tick accepté, et tout peut arriver à l'intérieur d'un tick ;
+2. le bloc libéré **n'appartient à aucun tas surveillé** — `HuMemDirectMalloc`
+   et les allocations précoces ne passent pas forcément par un tas enregistré au
+   moment où elles sont faites.
+
+La seconde serait la plus utile à savoir : elle voudrait dire que le détecteur a
+un angle mort au démarrage, précisément là où ce défaut vit.
+
+### Le taux, et pourquoi cinq verts ne referment rien
+
+| | |
+|---|---|
+| occurrences | **1** |
+| exécutions du même fichier | **27** (22 pendant le balayage, 5 en répétition dédiée) |
+
+Cinq répétitions du fichier exact ont toutes réussi. **Cela ne referme pas le
+défaut.** Un défaut qui se manifeste une fois sur vingt-sept n'est pas écarté par
+cinq exécutions vertes ; c'est exactement ce que la règle du projet sur les
+défauts probabilistes interdit de conclure.
+
+### Ce qu'il faut faire, dans l'ordre
+
+1. **Ne pas corriger.** Rien n'explique encore la cause, et `memory.c` est le
+   chemin le plus fréquenté du jeu.
+2. Établir le taux réel : le démarrage est traversé par **chaque** run, donc
+   toute campagne l'échantillonne gratuitement. Compter les occurrences plutôt
+   que lancer un stress dédié.
+3. Trancher l'angle mort du détecteur : vérifier si le bloc fauté appartenait à
+   un tas enregistré au moment de la faute. Si non, le détecteur doit couvrir le
+   démarrage, et c'est un correctif de l'instrument, pas du jeu.
+4. Le plantage est sur **un seul** pair. Les deux exécutent la même entrée, donc
+   ce qui diffère est l'ordonnancement, pas la logique — un indice de course
+   plutôt que de logique déterministe.
+
+### Pourquoi ce défaut compte plus que son taux
+
+Il est au **démarrage**. Chaque session le traverse, et une session humaine de
+deux heures qui meurt à la frame 2 coûte la soirée de deux personnes. Un défaut
+rare sur un chemin emprunté une seule fois par run reste rare ; celui-ci est rare
+sur un chemin emprunté par tout le monde, à chaque fois.
