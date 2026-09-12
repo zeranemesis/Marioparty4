@@ -178,6 +178,16 @@ static class Program {
     [STAThread] static int Main(string[] args) {
         if(args.Length==3 && args[0]=="--firewall") {int port,pid;return int.TryParse(args[1],out port)&&int.TryParse(args[2],out pid)?Firewall.Broker(port,pid):2;}
         if(args.Length==1 && args[0]=="--self-test") return Tests.Run();
+        // Both PCs must hold byte-identical folders or Lobby refuses to start the
+        // game. Printing the same hash the handshake uses lets a player check that
+        // before a session instead of discovering it as a refusal.
+        if(args.Length==1 && args[0]=="--build-hash") {
+            try {
+                var root=AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar);
+                Console.WriteLine(BitConverter.ToString(Wire.BuildHash(root)).Replace("-","").ToLowerInvariant());
+                return 0;
+            } catch(Exception e) {Console.Error.WriteLine(e.Message);return 1;}
+        }
         if(args.Length==1 && args[0]=="--verify-disc") {
             try {using(var disc=DiscFile.Verify(Environment.GetEnvironmentVariable("PARTYBOARD_ONLINE_DISC"),_=>{},CancellationToken.None))Console.WriteLine("PASS: disque USA Rev 1 compatible, SHA-256 complet calculé, verrou de lecture actif.");return 0;}
             catch(Exception e){Console.Error.WriteLine(e.Message);return 3;}
