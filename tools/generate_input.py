@@ -164,6 +164,32 @@ WEIGHTED_BUTTONS = [
 # navigated with it and with nothing else, so this is the monkey's only way to
 # choose anything - a board, a character, a direction at a junction.
 STICK_PROBABILITY = 0.75
+
+# TWO PHASES, because one weighting cannot serve both jobs.
+#
+# Measured: eight monkeys started from a menu prefix, and all eight landed on
+# board 0 - the position the cursor already sat on. With A at 60% they pressed
+# it before ever moving, so they confirmed the default rather than choosing.
+# Lowering A would fix that and break the other half: A at 60% is what finally
+# got a monkey off turn 1 on a board, where the game is a corridor of
+# confirmation dialogs.
+#
+# So the monkey alternates. EXPLORE moves and rarely commits; CONFIRM commits
+# and rarely moves. A menu gets wandered before something is chosen, a board
+# still gets its dialogs cleared, and neither is starved.
+EXPLORE_WEIGHTS = [
+    (PAD_BUTTON_A, 6),
+    (PAD_BUTTON_B, 10),
+    (PAD_BUTTON_X, 4),
+    (PAD_BUTTON_Y, 4),
+    (PAD_TRIGGER_Z, 4),
+    (PAD_BUTTON_START, 2),
+]
+EXPLORE_STICK_PROBABILITY = 0.95
+# Seconds per phase, drawn between these bounds. Long enough for a cursor to
+# travel a list, short enough that a stuck dialog is not held for a minute.
+PHASE_MIN_FRAMES = 90
+PHASE_MAX_FRAMES = 400
 # The safety mask stays a plain list, derived from the weights so the two can
 # never drift apart: what may be pressed is defined in exactly one place.
 SAFE_BUTTONS = [button for button, _ in WEIGHTED_BUTTONS]
@@ -300,17 +326,20 @@ def run_navigator(steps):
 
 # --- monkey ----------------------------------------------------------------
 
-def weighted_button(rng):
-    """Pick a button from WEIGHTED_BUTTONS. Uses the rng passed in, so the file
+def weighted_button(rng, table=None):
+    """Pick a button from a weight table. Uses the rng passed in, so the file
     stays reproducible from its seed."""
-    total = sum(weight for _, weight in WEIGHTED_BUTTONS)
+    if table is None:
+        table = WEIGHTED_BUTTONS
+    WEIGHTED_BUTTONS_LOCAL = table
+    total = sum(weight for _, weight in WEIGHTED_BUTTONS_LOCAL)
     roll = rng.randint(1, total)
     running = 0
-    for button, weight in WEIGHTED_BUTTONS:
+    for button, weight in WEIGHTED_BUTTONS_LOCAL:
         running += weight
         if roll <= running:
             return button
-    return WEIGHTED_BUTTONS[0][0]
+    return WEIGHTED_BUTTONS_LOCAL[0][0]
 
 
 def run_monkey(frames_wanted, seed, hold_min, hold_max, idle_bias):
@@ -330,24 +359,33 @@ def run_monkey(frames_wanted, seed, hold_min, hold_max, idle_bias):
     # Independent streams per seat, so one seat's timing does not shadow the
     # other's. Derived from the one seed, so the file stays reproducible.
     seat_rngs = [random.Random(rng.getrandbits(64)) for _ in range(SEATS)]
-    seat_state = [dict(remaining=0, buttons=0, sx=0, sy=0) for _ in range(SEATS)]
+    seat_state = [dict(remaining=0, buttons=0, sx=0, sy=0,
+                       phase_left=0, exploring=False) for _ in range(SEATS)]
 
     while len(frames) < frames_wanted:
         frame = Frame()
         for seat in range(SEATS):
             state = seat_state[seat]
+            seat_rng = seat_rngs[seat]
+            # Flip between exploring and confirming on its own clock, so the
+            # two never line up with the input runs below.
+            if state["phase_left"] <= 0:
+                state["phase_left"] = seat_rng.randint(PHASE_MIN_FRAMES, PHASE_MAX_FRAMES)
+                state["exploring"] = not state["exploring"]
+            state["phase_left"] -= 1
             if state["remaining"] <= 0:
-                seat_rng = seat_rngs[seat]
                 state["remaining"] = seat_rng.randint(hold_min, hold_max)
                 if seat_rng.random() < idle_bias:
                     state["buttons"] = 0
                     state["sx"] = state["sy"] = 0
                 else:
-                    state["buttons"] = weighted_button(seat_rng)
+                    table = EXPLORE_WEIGHTS if state["exploring"] else WEIGHTED_BUTTONS
+                    state["buttons"] = weighted_button(seat_rng, table)
                     # A stick position more often than not: board movement and
                     # most minigames are analog, and a button-only monkey never
                     # walks anywhere.
-                    if seat_rng.random() < STICK_PROBABILITY:
+                    threshold = EXPLORE_STICK_PROBABILITY if state["exploring"] else STICK_PROBABILITY
+                    if seat_rng.random() < threshold:
                         angle = seat_rng.uniform(0, 6.283185307179586)
                         magnitude = seat_rng.randint(STICK_MAX // 2, STICK_MAX)
                         import math
