@@ -1254,3 +1254,68 @@ modifie ; seul un comportement indefini le devient.
    demande un groupe qui n'a jamais ete prevu. Le correctif rend le symptome
    inoffensif ; il ne repond pas a cette question.
 
+---
+
+## D16 — la comptabilite du tas diverge pendant un mini-jeu
+
+**Classification : divergent heap allocation bookkeeping between two peers,
+detected by the `HEAPS` subsystem of the canonical hash.**
+
+**Statut : non corrige. Deux occurrences, sur deux tas differents. On ne sait
+pas encore s'il s'agit d'un seul defaut ou de deux.**
+
+**Niveau de preuve : SCRIPTED.** Trouve par le balayage automatique des
+mini-jeux du 2026-09-12, en boucle locale. Aucune session a deux machines n'a
+encore rencontre ce chemin.
+
+### Les deux occurrences
+
+| | occurrence 1 | occurrence 2 |
+|---|---|---|
+| mini-jeu | overlay 15, `m407Dll` BATTANDOMINO | overlay 17, `m409Dll` CRAY SHOT |
+| frame | 20464 | 38125 |
+| tas | **2, `HEAP_DATA`** (44 Mo) | **0, `HEAP_SYSTEM`** (9 Mo) |
+| blocs | 7155 contre 7151, ecart **4** | 204 contre 212, ecart **8** |
+| octets | 12 735 360 contre 12 734 720, ecart **640** | 380 320 contre 385 344, ecart **5024** |
+| par bloc | 160 octets, exactement | 628 octets en moyenne |
+| champs differents | 2 sur 26 376 | 2 sur 3 709 |
+
+Dans les deux cas **rien d'autre ne differe**. Ni le RNG, ni les entrees, ni les
+objets, ni les compteurs : un pair a simplement alloue plus de blocs que
+l'autre, et le hachage canonique le voit.
+
+### Ce qui les distingue, et pourquoi ils restent separes
+
+Ce ne sont pas les memes tas. `HEAP_DATA` recoit les donnees lues du disque —
+modeles, animations, sprites — et `HEAP_SYSTEM` recoit les structures du
+moteur. Une cause qui expliquerait l'un n'expliquerait pas forcement l'autre, et
+les reunir sous un seul defaut sur la seule foi de leur categorie commune serait
+exactement le raccourci que ce registre interdit.
+
+L'ecart de 160 octets **exactement** quatre fois de suite, dans la premiere,
+n'est pas du bruit d'allocateur : ce sont quatre allocations identiques faites
+d'un cote et pas de l'autre.
+
+### Une observation a ne pas confondre avec une preuve
+
+Avant le correctif D15, BATTANDOMINO divergeait a la frame 20464. Apres, le meme
+marcheur l'a traverse entierement (3397 frames) et n'a diverge que deux
+mini-jeux plus loin.
+
+Un mecanisme relierait les deux : `omDelMember` indexait
+`objman->group[object->group]` avec une valeur non initialisee sur un tableau de
+dix elements, donc ecrivait **dans le tas**, et pouvait corrompre la
+comptabilite de l'allocateur differemment sur chaque pair. C'est plausible et
+ce n'est pas demontre. Une occurrence disparue apres un correctif est une
+observation, pas une causalite.
+
+### Ce qu'il faut faire, dans l'ordre
+
+1. **Instrumenter l'allocateur**, comme la boucle de curseur l'a ete cet
+   apres-midi : tracer chaque allocation du tas concerne avec sa taille et son
+   appelant, sur les deux pairs, et comparer. Quatre blocs de 160 octets se
+   retrouvent dans une trace.
+2. Rejouer BATTANDOMINO sur le binaire corrige de D15, plusieurs fois, pour
+   savoir si l'occurrence 1 a vraiment disparu ou si elle est intermittente.
+3. Seulement ensuite decider s'il s'agit d'un ou de deux defauts.
+
