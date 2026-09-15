@@ -169,6 +169,9 @@ if (WIN32)
 endif()
 if (MSVC)
     target_link_options(dol PRIVATE "/DEF:${CMAKE_SOURCE_DIR}/dol.def")
+    # Without this, editing the export list does not relink dol and the
+    # executable fails on a symbol that looks like it was just added.
+    set_property(TARGET dol APPEND PROPERTY LINK_DEPENDS "${CMAKE_SOURCE_DIR}/dol.def")
     # target_compile_options(dol PRIVATE "/WX")
     target_compile_options(dol PRIVATE "/wd4244") # implicit narrowing conversion
     target_compile_options(dol PRIVATE "/wd4101") # unreferenced local variable

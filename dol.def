@@ -12,6 +12,7 @@ EXPORTS
     PartyBoard_NetplayShutdown
     PartyBoard_NetplayRuntimeRunSelfTest
     PartyBoard_NetplayPadRunProbe
+    PartyBoard_ModsRunSelfTest
     BoardArcCos
     BoardArcSin
     BoardAudFXPlay

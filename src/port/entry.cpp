@@ -53,11 +53,14 @@ LONG WINAPI write_crash_dump(EXCEPTION_POINTERS *exceptionPointers)
 extern "C" int port_main(int argc, char* argv[]);
 extern "C" bool PartyBoard_OnlineCheckDisc(void);
 extern "C" bool PartyBoard_OnlineBarrierProbe(void);
+extern "C" bool PartyBoard_ModsRunSelfTest(void);
 
 int main(int argc, char *argv[])
 {
     if (argc == 2 && std::strcmp(argv[1], "--online-disc-check") == 0)
         return PartyBoard_OnlineCheckDisc() ? 0 : 3;
+    if (argc == 2 && std::strcmp(argv[1], "--mods-self-test") == 0)
+        return PartyBoard_ModsRunSelfTest() ? 0 : 1;
     if (argc == 2 && std::strcmp(argv[1], "--rollback-self-test") == 0)
         return PartyBoard_RollbackRunSelfTest() ? 0 : 1;
     if (argc == 2 && std::strcmp(argv[1], "--netplay-self-test") == 0)

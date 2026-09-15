@@ -27,6 +27,7 @@
 #include <port/config.hpp>
 #include <port/dolassets.h>
 #include <port/main.h>
+#include <port/mods.h>
 #include <port/settings.h>
 #include <port/netplay_runtime.h>
 #include <port/port_version.h>
@@ -588,6 +589,11 @@ extern "C" int port_main(int argc, char* argv[]) {
     if (!aurora_dvd_open(dvd_path.c_str())) {
         PartyBoardMainLog.error("Failed to open DVD image: {}", dvd_path);
         if (!onlineDisc.empty()) { partyboard::ui::shutdown(); aurora_shutdown(); return 3; }
+    }
+
+    // Mods must be overlaid before anything reads the FST.
+    if (PartyBoard_InitMods() > 0 && !onlineDisc.empty()) {
+        PartyBoardMainLog.warn("Mods are active in an online session; every player must run the same mod list");
     }
 
     PartyBoard_IsGameLaunched = true;

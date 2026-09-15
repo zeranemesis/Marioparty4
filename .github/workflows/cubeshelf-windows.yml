@@ -101,6 +101,13 @@ jobs:
             throw "PartyBoardOnline self-test failed with exit code $($test.ExitCode)."
           }
 
+          $mods = Start-Process -FilePath "build/install/partyboard.exe" `
+            -ArgumentList "--mods-self-test" -Wait -PassThru -NoNewWindow
+
+          if ($mods.ExitCode -ne 0) {
+            throw "CubeShelf mod overlay self-test failed with exit code $($mods.ExitCode)."
+          }
+
       - name: Package Windows
         shell: pwsh
         run: |
