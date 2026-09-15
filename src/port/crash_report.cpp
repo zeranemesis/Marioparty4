@@ -18,6 +18,7 @@
 #include "port/crash_report.h"
 
 #include "port/coroutine_stack.h"
+#include "port/netplay_runtime.h"
 #include "partyboard_version.h"
 
 extern "C" bool PartyBoard_IsRunning;
@@ -29,6 +30,10 @@ extern "C" bool PartyBoard_IsRunning;
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#ifdef _WIN32
+#include <float.h>
+#include <xmmintrin.h>
+#endif
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -261,7 +266,8 @@ void appendSimulation()
         sim = gSim;
     }
     reportLine("\n[SIMULATION]\n");
-    reportLine("simulation_frame=%u network_frame=%u\n", sim.simulationFrame, sim.networkFrame);
+    reportLine("simulation_frame=%u network_frame=%u rendered_frames=%u\n",
+        sim.simulationFrame, sim.networkFrame, PartyBoard_RenderedFrames);
     reportLine("game_context=%d overlay=%d minigame=%d\n", sim.gameContext, sim.overlay,
         sim.minigame);
     // Progress. A harness reading only simulation_frame cannot distinguish a run
@@ -275,6 +281,18 @@ void appendSimulation()
     reportLine("rng frand=%08x rand8=%08x boardrand=%08x\n", sim.frand, sim.rand8, sim.boardRand);
     reportLine("rng_calls frand=%u rand8=%u boardrand=%u\n", sim.frandCalls, sim.rand8Calls,
         sim.boardRandCalls);
+#ifdef _WIN32
+    // The floating-point environment, reported and not hashed. Two processes
+    // of the same binary that round differently produce different floats from
+    // the same inputs, and nothing else in this report would say so. A driver
+    // or an audio backend can change these words without asking.
+    {
+        const unsigned int mxcsr = _mm_getcsr();
+        const unsigned int controlfp = _controlfp(0, 0);
+        reportLine("fpu mxcsr=%08x controlfp=%08x sse_round=%u ftz=%u daz=%u\n",
+            mxcsr, controlfp, (mxcsr >> 13) & 3u, (mxcsr >> 15) & 1u, (mxcsr >> 6) & 1u);
+    }
+#endif
     reportLine("input local=%04x/%d/%d remote=%04x/%d/%d\n", sim.localButtons,
         static_cast<int>(sim.localStickX), static_cast<int>(sim.localStickY), sim.remoteButtons,
         static_cast<int>(sim.remoteStickX), static_cast<int>(sim.remoteStickY));

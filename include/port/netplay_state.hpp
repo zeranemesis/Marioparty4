@@ -5,7 +5,7 @@
 #include <vector>
 
 namespace partyboard::netplay {
-constexpr std::uint32_t kStateHashVersion = 2;
+constexpr std::uint32_t kStateHashVersion = 4;
 constexpr std::uint32_t kNoHashFrame = UINT32_MAX;
 constexpr std::size_t kStateHistorySize = 256;
 constexpr std::uint32_t kStateLeadLimit = 128;

@@ -39,6 +39,20 @@ extern "C" {
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#if defined(_WIN32)
+// For the D30 heap census only: a return address must be reported relative to
+// its module, and that needs GetModuleHandleEx. NOMINMAX because this file
+// uses std::min/std::max and windows.h would shadow them with macros.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#elif defined(__unix__) || defined(__APPLE__)
+#include <dlfcn.h>   // dladdr, pour la meme resolution d adresse hors Windows
+#endif
 #include <ctime>
 #include <filesystem>
 #include <memory>
@@ -89,7 +103,19 @@ constexpr std::uint32_t kSessionId = 0x4d503452u; // "MP4R"
 constexpr std::uint32_t kRuntimeConfigMagic = 0x4e500000u; // "NP" + delay
 constexpr std::uint32_t kRuntimeFullGameFlag = 0x00010000u;
 constexpr std::uint32_t kRuntimeRollbackFlag = 0x00020000u;
-constexpr std::uint32_t kRuntimeConfigMagicMask = 0xfffc0000u;
+// D23. The hook tick gate changes simulation behaviour, so two peers that
+// disagree about it are not playing the same game. The mask gives up bit 18
+// to carry it, which makes a gate-enabled peer unreadable to an older binary
+// - the right outcome, and better than a silent divergence ten minutes in.
+// Overlay indices of the minigame modules, from include/ovl_table.h: the
+// m3xx/m4xx entries sit between _minigameDLL/bootDll/instDll below and the
+// mode and board modules above.
+// D23: defini dans src/game/hsfanim.c, diagnostic uniquement, jamais hache.
+extern "C" u32 partyboardParManHookRuns;
+constexpr int kFirstMinigameOverlay = 4;
+constexpr int kLastMinigameOverlay = 70;
+constexpr std::uint32_t kRuntimeHookGateFlag = 0x00040000u;
+constexpr std::uint32_t kRuntimeConfigMagicMask = 0xfff80000u;
 constexpr std::size_t kHistorySize = 256;
 constexpr std::uint8_t kDefaultInputDelay = 3;
 constexpr std::uint8_t kMaximumInputDelay = 8;
@@ -126,6 +152,40 @@ struct Runtime {
     bool realtimeProbe = false;
     bool audioProbe = false;
     bool walkProbe = false;
+    // Overlay-aware walk. The free-running beat below picks the game mode
+    // and the board by accident: how many of its horizontal pulses land in
+    // a menu depends on how long that menu happens to stay open, which
+    // moves by hundreds of frames with the input that preceded it. On
+    // 2026-09-12 the same beat settled on Party mode in one run and Story
+    // mode in another. With a plan, the walk reacts to the overlay instead:
+    // silent where a stray pulse would change the mode, and spending an
+    // exact number of cursor moves where the board is chosen.
+    bool walkPlan = false;
+    // Which entry of the mode list to confirm: 0 Party, 1 Story,
+    // 2 the minigame mode (src/REL/modeseldll/main.c:210-243).
+    int walkMode = 0;
+    int walkModeLeft = 0;
+    // Cursor moves to spend in the board list once it says it is reading
+    // the stick. Signed: the cursor starts on w01 at index 2 of
+    // {1,2,0,3,4,5}, so +1 is w04 and -1 is w03.
+    int walkNotches = 0;
+    int walkNotchesLeft = 0;
+    std::uint32_t walkPulseStart = UINT32_MAX;
+    std::uint32_t walkPulseEnd = 0;
+    // Set by the menu itself, through PartyBoard_NetplayWalkMenu. A frame
+    // number cannot stand in for this: the list only accepts a move once its
+    // six panels have settled, and when that happens depends on load times.
+    bool walkMenuReady = false;
+    // Test-only override of the party turn count. A twenty-turn game takes
+    // over two hours, so the end of a game - final turn, bonus stars, results,
+    // ending sequence - had never once run. Shortening the game exercises all
+    // of it. Recorded in every result: a ten-turn game must never be read
+    // later as a twenty-turn one.
+    int maxTurnsOverride = 0;
+    // Test-only, see --netplay-inject-heap.
+    int injectHeapFrame = 0;
+    int injectHeapBlocks = 0;
+    std::uint32_t contextEntryFrame = 0;
     // Input recording and replay. A recording is raw pad samples keyed by the
     // frame they are APPLIED on, so the same file replays correctly at any
     // input delay. Both seats are stored, and each peer replays its own.
@@ -151,6 +211,11 @@ struct Runtime {
     std::uint64_t lastRepairRequestMs = 0;
     std::uint64_t lastDiagnosticMs = 0;
     unsigned diagnosticLines = 0;
+    // Named events are budgeted apart from the periodic heartbeat: they are
+    // rare, they arrive late, and sharing one cap made the heartbeat silence
+    // them. See the 2026-09-13 board run that hit 3000 lines before its
+    // final turn.
+    unsigned diagnosticEventLines = 0;
     std::uint32_t stalledTicks = 0;
     std::uint32_t consecutiveStalledTicks = 0;
     std::uint32_t maximumStalledTicks = 0;
@@ -196,7 +261,12 @@ void writeDiagnostic(const char *event, bool force = false)
 {
 #ifdef _WIN32
     const auto now = monotonicMs();
-    if (gRuntime.diagnosticLines >= 3000 || (!force && gRuntime.lastDiagnosticMs && now - gRuntime.lastDiagnosticMs < 2000)) return;
+    if (force) {
+        if (gRuntime.diagnosticEventLines >= 20000) return;
+    } else {
+        if (gRuntime.diagnosticLines >= 3000) return;
+        if (gRuntime.lastDiagnosticMs && now - gRuntime.lastDiagnosticMs < 2000) return;
+    }
     gRuntime.lastDiagnosticMs = now;
     const auto *path = _wgetenv(L"PARTYBOARD_NET_DIAGNOSTIC");
     if (!path || !*path) return;
@@ -216,7 +286,7 @@ void writeDiagnostic(const char *event, bool force = false)
     u32 available[2] {};
     for (unsigned i = 0; i < 64; ++i)
         if (GWMGAvailGet(401 + i)) available[i / 32] |= 1u << (i % 32);
-    std::fprintf(file, "utc_ms=%lld event=%s player=%u frame=%u context=%d wire_frame=%u local_ready=%d remote_ready=%d local_context=%u remote_context=%u received=%u rejected=%u repaired=%u send_errors=%u packet_age_ms=%llu rng_sync=%d seeds=%08x/%08x mismatch=%d context_skew=%u live_rng=%08x/%08x global_counter=%u tx_sequence=%u mg_available=%08x/%08x mg_next=%d language=%d message_speed=%d rollback_active=%d rollback_base=%u rollback_current=%u rollback_confirmed=%u rollback_count=%u rollback_replayed=%u rollback_max=%u rollback_predicted=%u rollback_late=%u\n",
+    std::fprintf(file, "utc_ms=%lld event=%s player=%u frame=%u context=%d wire_frame=%u local_ready=%d remote_ready=%d local_context=%u remote_context=%u received=%u rejected=%u repaired=%u send_errors=%u packet_age_ms=%llu rng_sync=%d seeds=%08x/%08x mismatch=%d context_skew=%u live_rng=%08x/%08x global_counter=%u tx_sequence=%u mg_available=%08x/%08x mg_next=%d language=%d message_speed=%d rollback_active=%d rollback_base=%u rollback_current=%u rollback_confirmed=%u rollback_count=%u rollback_replayed=%u rollback_max=%u rollback_predicted=%u rollback_late=%u parman_runs=%u rendered=%u turn=%d max_turn=%d board=%d\n",
         static_cast<long long>(utc), event, gRuntime.localPlayer, gRuntime.frame, gRuntime.observedContext,
         gRuntime.lastWireFrame, local.valid && local.frame == gRuntime.frame, remote.valid && remote.frame == gRuntime.frame,
         local.captureContext, remote.captureContext, gRuntime.receivedPackets, gRuntime.rejectedPackets,
@@ -227,9 +297,18 @@ void writeDiagnostic(const char *event, bool force = false)
         gRuntime.rollbackSession != nullptr, gRuntime.rollbackBaseFrame,
         rollbackStats.currentFrame, rollbackConfirmed, rollbackStats.rollbackCount,
         rollbackStats.resimulatedFrames, rollbackStats.maximumRollback,
-        rollbackStats.predictedFrames, rollbackStats.lateInputs);
+        rollbackStats.predictedFrames, rollbackStats.lateInputs,
+        partyboardParManHookRuns, PartyBoard_RenderedFrames,
+        /* Progress, not just motion. minFrames cannot tell "played twelve
+           turns" from "sat in a menu for twelve minutes", and that is how
+           nine runs stuck on the end-of-game statistics screens were filed
+           for days as a defect of the GAME. A run that reaches its frame
+           budget without reaching turns is an ABNORMAL_EXIT, and nothing
+           could say so because no log carried the turn. Now every line
+           does. */
+        GWSystem.turn, GWSystem.max_turn, GWSystem.board);
     std::fclose(file);
-    ++gRuntime.diagnosticLines;
+    if (force) { ++gRuntime.diagnosticEventLines; } else { ++gRuntime.diagnosticLines; }
 #else
     (void)event; (void)force;
 #endif
@@ -936,10 +1015,11 @@ const InputSlot *findInput(const std::array<InputSlot, kHistorySize> &history, s
 }
 
 std::uint32_t runtimeConfigSignature(std::uint8_t inputDelay, std::uint8_t contextId,
-    bool fullGame, bool rollbackRequested)
+    bool fullGame, bool rollbackRequested, bool hookGate)
 {
     return kRuntimeConfigMagic | (fullGame ? kRuntimeFullGameFlag : 0u)
         | (rollbackRequested ? kRuntimeRollbackFlag : 0u)
+        | (hookGate ? kRuntimeHookGateFlag : 0u)
         | (static_cast<std::uint32_t>(contextId) << 8) | inputDelay;
 }
 
@@ -966,7 +1046,8 @@ bool sendInput(std::uint32_t frame, const PartyBoardRollbackInput &input, bool r
     const InputSlot *slot = findInput(gRuntime.localHistory, frame);
     outgoing.captureContext = slot ? slot->captureContext : static_cast<std::uint32_t>(gRuntime.observedContext);
     outgoing.configSignature = runtimeConfigSignature(gRuntime.inputDelay, gRuntime.contextId,
-        gRuntime.fullGame, gRuntime.rollbackRequested);
+        gRuntime.fullGame, gRuntime.rollbackRequested,
+        PartyBoard_HookTickGateEnabled() != 0);
     outgoing.frandSeed = gRuntime.randomSynchronized ? gRuntime.sessionFrandSeed : 0;
     outgoing.rand8Seed = gRuntime.randomSynchronized ? gRuntime.sessionRand8Seed : 0;
     const bool sent = !gRuntime.transport.hasPeer() || gRuntime.transport.sendInput(outgoing);
@@ -1271,6 +1352,14 @@ void publishCrashState(const StateDigest &stamp)
 bool captureCommittedState()
 {
     const auto frame = gRuntime.frame - 1; // AFTER logic F, BEFORE render/counter publication.
+    // Test-only divergence, BEFORE the capture so the extra blocks are in the
+    // hash of this very frame. Fires once.
+    if (gRuntime.injectHeapFrame > 0
+        && frame == static_cast<std::uint32_t>(gRuntime.injectHeapFrame)) {
+        PartyBoard_NetplayHeapInjectLeak(gRuntime.injectHeapBlocks, 2048);
+        std::printf("[NET TEST] heap leak fired at frame %u\n", frame);
+        gRuntime.injectHeapFrame = 0;
+    }
     StateDigest stamp {frame,
         static_cast<std::uint32_t>(gRuntime.probeContext >= 0 ? gRuntime.probeContext : PartyBoard_NetplayContextId()),
         frand_state_get(), static_cast<std::uint32_t>(rand8_state_get()), GlobalCounter};
@@ -1320,17 +1409,22 @@ void receivePendingPackets()
             (packet.configSignature & kRuntimeConfigMagicMask) == kRuntimeConfigMagic;
         const bool remoteFullGame = (packet.configSignature & kRuntimeFullGameFlag) != 0;
         const bool remoteRollback = (packet.configSignature & kRuntimeRollbackFlag) != 0;
+        const bool remoteHookGate = (packet.configSignature & kRuntimeHookGateFlag) != 0;
         const std::uint8_t remoteContext =
             static_cast<std::uint8_t>((packet.configSignature >> 8) & 0xffu);
         const std::uint8_t remoteDelay = static_cast<std::uint8_t>(packet.configSignature & 0xffu);
         if (!signatureValid || remoteFullGame != gRuntime.fullGame
             || remoteRollback != gRuntime.rollbackRequested
+            || remoteHookGate != (PartyBoard_HookTickGateEnabled() != 0)
             || remoteDelay != gRuntime.inputDelay) {
             if (!gRuntime.configMismatch) {
                 std::fprintf(stderr,
-                    "Netplay: session mismatch (local mode %s/delay %u, remote signature 0x%08x).\n",
+                    "Netplay: session mismatch (local mode %s/delay %u/hook-gate %d, "
+                    "remote signature 0x%08x). PARTYBOARD_HOOK_TICK_GATE must be set "
+                    "the same way on both machines.\n",
                     gRuntime.fullGame ? "full" : "minigame",
-                    static_cast<unsigned>(gRuntime.inputDelay), packet.configSignature);
+                    static_cast<unsigned>(gRuntime.inputDelay),
+                    PartyBoard_HookTickGateEnabled(), packet.configSignature);
             }
             gRuntime.configMismatch = true;
             ++gRuntime.rejectedPackets;
@@ -1622,12 +1716,22 @@ bool timelineSelfTest()
         || parseLocalPad("0", parsedPad) || parseLocalPad("5", parsedPad)) {
         return false;
     }
-    return runtimeConfigSignature(0, 7, false, false) != runtimeConfigSignature(delay, 7, false, false)
-        && runtimeConfigSignature(delay, 7, false, false)
+    // Every field the signature carries must change it, or a peer that disagrees
+    // about that field would be accepted into the session.
+    return runtimeConfigSignature(0, 7, false, false, false)
+            != runtimeConfigSignature(delay, 7, false, false, false)
+        && runtimeConfigSignature(delay, 7, false, false, false)
             == (kRuntimeConfigMagic | (7u << 8) | delay)
-        && runtimeConfigSignature(delay, 7, false, false) != runtimeConfigSignature(delay, 8, false, false)
-        && runtimeConfigSignature(delay, 7, false, false) != runtimeConfigSignature(delay, 7, true, false)
-        && runtimeConfigSignature(delay, 7, false, false) != runtimeConfigSignature(delay, 7, false, true);
+        && runtimeConfigSignature(delay, 7, false, false, false)
+            != runtimeConfigSignature(delay, 8, false, false, false)
+        && runtimeConfigSignature(delay, 7, false, false, false)
+            != runtimeConfigSignature(delay, 7, true, false, false)
+        && runtimeConfigSignature(delay, 7, false, false, false)
+            != runtimeConfigSignature(delay, 7, false, true, false)
+        && runtimeConfigSignature(delay, 7, false, false, false)
+            != runtimeConfigSignature(delay, 7, false, false, true)
+        && (runtimeConfigSignature(delay, 7, false, false, true) & kRuntimeConfigMagicMask)
+            == kRuntimeConfigMagic;
 }
 
 }
@@ -1680,6 +1784,45 @@ extern "C" bool PartyBoard_NetplayConfigureFromArgs(int argc, char **argv)
             gRuntime.audioProbe = true;
         } else if (argument == "--netplay-walk-probe") {
             gRuntime.walkProbe = true;
+        } else if (argument.rfind("--netplay-inject-heap", 0) == 0) {
+            // Test-only: make the heaps diverge on purpose, to prove the
+            // census of D30 actually produces its lines.
+            const std::size_t equals = argument.find('=');
+            if (equals != std::string_view::npos) {
+                const std::string value(argument.substr(equals + 1));
+                const std::size_t colon = value.find(':');
+                gRuntime.injectHeapFrame = std::atoi(value.c_str());
+                gRuntime.injectHeapBlocks =
+                    colon == std::string::npos ? 7 : std::atoi(value.c_str() + colon + 1);
+                std::printf("[NET TEST] heap leak injected at frame %d, %d block(s)\n",
+                    gRuntime.injectHeapFrame, gRuntime.injectHeapBlocks);
+            }
+        } else if (argument.rfind("--netplay-max-turns", 0) == 0) {
+            const std::size_t equals = argument.find('=');
+            if (equals != std::string_view::npos) {
+                gRuntime.maxTurnsOverride =
+                    std::atoi(std::string(argument.substr(equals + 1)).c_str());
+                std::printf("[NET TEST] max_turns override=%d\n", gRuntime.maxTurnsOverride);
+            }
+        } else if (argument.rfind("--netplay-walk-plan", 0) == 0) {
+            gRuntime.walkProbe = true;
+            gRuntime.walkPlan = true;
+            const std::size_t equals = argument.find('=');
+            if (equals != std::string_view::npos) {
+                const std::string value(argument.substr(equals + 1));
+                const std::size_t colon = value.find(':');
+                if (colon == std::string::npos) {
+                    gRuntime.walkNotches = std::atoi(value.c_str());
+                } else {
+                    gRuntime.walkMode = std::atoi(value.substr(0, colon).c_str());
+                    gRuntime.walkNotches = std::atoi(value.substr(colon + 1).c_str());
+                }
+                gRuntime.walkNotchesLeft = gRuntime.walkNotches;
+                gRuntime.walkModeLeft = gRuntime.walkMode;
+            }
+            // Say it out loud: a run whose log does not carry this line was not
+            // planned, whatever the campaign manifest claims it asked for.
+            std::printf("[NET TEST] walk_plan armed mode=%d notches=%d\n", gRuntime.walkMode, gRuntime.walkNotches);
         } else if (argument == "--netplay-record-input" && index + 1 < argc) {
             gRuntime.recordPath = argv[++index];
         } else if (argument == "--netplay-replay-input" && index + 1 < argc) {
@@ -1765,6 +1908,35 @@ extern "C" bool PartyBoard_NetplayEnabled(void)
     return partyboard::netplay::gRuntime.enabled;
 }
 
+// Called by a menu that has a cursor a scripted walk must move, to say
+// whether it is reading the stick this frame. Both peers run the same menu
+// code on the same simulation tick, so this stays in step by construction -
+// which a frame number chosen in advance does not.
+// D23. A draw hook advances game state, so it belongs to the tick and not to
+// the image: a peer waiting for its partner still renders, and would run every
+// hook again on a frame the network refused it. Read once - this is consulted
+// from the drawing pass, per model and per sprite.
+extern "C" int PartyBoard_HookTickGateEnabled(void)
+{
+    static int resolved = -1;
+    if (resolved < 0) {
+        const char *value = std::getenv("PARTYBOARD_HOOK_TICK_GATE");
+        resolved = (value && *value && *value != '0') ? 1 : 0;
+    }
+    return resolved;
+}
+
+// Test-only. 0 means the game decides, as it normally does.
+extern "C" int PartyBoard_NetplayMaxTurnsOverride(void)
+{
+    return partyboard::netplay::gRuntime.maxTurnsOverride;
+}
+
+extern "C" void PartyBoard_NetplayWalkMenu(int ready)
+{
+    partyboard::netplay::gRuntime.walkMenuReady = ready != 0;
+}
+
 extern "C" void PartyBoard_NetplayTrace(const char *event)
 {
     if (partyboard::netplay::gRuntime.enabled && event)
@@ -1838,6 +2010,10 @@ extern "C" bool PartyBoard_NetplayTick(void)
         : PartyBoard_NetplayMinigameId());
     if (runtime.observedContext != gameContext) {
         runtime.observedContext = gameContext;
+        runtime.contextEntryFrame = runtime.frame;
+        // A menu that is no longer on screen is no longer listening, whatever
+        // it last reported.
+        runtime.walkMenuReady = false;
         runtime.rollbackProbeDone = false;
         runtime.rollbackContextReady = false;
         if (!runtime.rollbackSession) runtime.rollbackUnavailable = false;
@@ -1961,6 +2137,16 @@ extern "C" bool PartyBoard_NetplayTick(void)
             const std::uint32_t applied = runtime.frame + runtime.inputDelay;
             if (applied < runtime.replaySamples.size() && runtime.replayPresent[applied]) {
                 runtime.pendingLocal = runtime.replaySamples[applied][runtime.localPlayer];
+                // START inside a minigame is not a pause, it is an abort:
+                // MGSeqPauseKill() ends the sequence. Generated inputs send it
+                // blind because the instruction screen needs it, and then keep
+                // sending it. Strip it once a minigame overlay is running.
+                // Context is hashed, so both peers strip the same bit on the
+                // same frame. Only replayed input is touched.
+                const int overlay = PartyBoard_NetplayContextId();
+                if (overlay >= kFirstMinigameOverlay && overlay <= kLastMinigameOverlay) {
+                    runtime.pendingLocal.buttons &= ~PAD_BUTTON_START;
+                }
             } else {
                 // Past the end of the recording: hold neutral rather than let
                 // a physical controller join a replay half way through.
@@ -1985,9 +2171,139 @@ extern "C" bool PartyBoard_NetplayTick(void)
                 // first one. The offset keeps the two seats from always pressing
                 // the same button on the same frame.
                 const unsigned beat = runtime.frame + runtime.localPlayer * 15u;
-                if (beat % 30 < 3) {
+                const int context = runtime.observedContext;
+                const unsigned held = runtime.frame - runtime.contextEntryFrame;
+                const bool modeSelect = runtime.walkPlan
+                    && context == static_cast<int>(MenuProbeOverlay::modeseldll);
+                const bool partySetup = runtime.walkPlan
+                    && context == static_cast<int>(MenuProbeOverlay::mentDll);
+                // The minigame mode is a vertical list, not a horizontal one.
+                const bool minigameList = runtime.walkPlan
+                    && context == static_cast<int>(MenuProbeOverlay::mgmodedll);
+                if (modeSelect) {
+                    // The mode list. Its cursor starts on Party, and a single
+                    // horizontal pulse moves it; the free beat delivers one
+                    // every 240 frames, so which mode is chosen depends only on
+                    // how long this screen stayed open. Measured 2026-09-12:
+                    // 1102 frames here gave Party, 817 frames gave Story. Send
+                    // no horizontal at all, and the cursor cannot drift.
+                    // This list reads the stick on its first iteration and a
+                    // single A press leaves it, so every owed move must be
+                    // spent before any A is sent. It also reads pad 0 only
+                    // (HuPadDStkRep[0]), so seat 1 stays silent throughout.
+                    if (runtime.walkMenuReady && runtime.walkModeLeft != 0) {
+                        if (runtime.localPlayer == 0) {
+                            if (runtime.walkPulseStart == UINT32_MAX) {
+                                if (runtime.frame - runtime.walkPulseEnd >= 60) {
+                                    runtime.walkPulseStart = runtime.frame;
+                                }
+                            }
+                            if (runtime.walkPulseStart != UINT32_MAX) {
+                                if (runtime.frame - runtime.walkPulseStart < 3) {
+                                    runtime.pendingLocal.stickX =
+                                        runtime.walkModeLeft < 0 ? -100 : 100;
+                                } else {
+                                    runtime.walkPulseEnd = runtime.frame;
+                                    runtime.walkPulseStart = UINT32_MAX;
+                                    runtime.walkModeLeft +=
+                                        runtime.walkModeLeft < 0 ? 1 : -1;
+                                }
+                            }
+                        }
+                    } else if (held > 60 && beat % 30 < 3 && (beat / 30) % 4 == 0) {
+                        runtime.pendingLocal.buttons = PAD_BUTTON_A;
+                    }
+                } else if (minigameList) {
+                    // Same rule as the board list, and for the same reason: a
+                    // frame window asked for row 44 and got row 0, because the
+                    // list was not on screen when the moves were spent.
+                    // Vertical here - this list scrolls, it does not slide.
+                    if (runtime.walkMenuReady && runtime.walkNotchesLeft != 0) {
+                        if (runtime.localPlayer == 0) {
+                            if (runtime.walkPulseStart == UINT32_MAX) {
+                                if (runtime.frame - runtime.walkPulseEnd >= 60) {
+                                    runtime.walkPulseStart = runtime.frame;
+                                }
+                            }
+                            if (runtime.walkPulseStart != UINT32_MAX) {
+                                if (runtime.frame - runtime.walkPulseStart < 3) {
+                                    runtime.pendingLocal.stickY =
+                                        runtime.walkNotchesLeft < 0 ? 100 : -100;
+                                } else {
+                                    runtime.walkPulseEnd = runtime.frame;
+                                    runtime.walkPulseStart = UINT32_MAX;
+                                    runtime.walkNotchesLeft +=
+                                        runtime.walkNotchesLeft < 0 ? 1 : -1;
+                                }
+                            }
+                        }
+                    } else if (beat % 30 < 3 && (beat / 30) % 4 == 0) {
+                        runtime.pendingLocal.buttons = PAD_BUTTON_A;
+                    }
+                } else if (partySetup) {
+                    // Party setup. A carries the walk through its screens; the
+                    // board list is the one place a cursor has to move, and the
+                    // first attempt aimed its moves at a frame number. That
+                    // cannot work: the list reads the stick only once its six
+                    // panels have settled, and when that happens depends on how
+                    // long the preceding screens took to load. So the menu says
+                    // when it is listening, and the walk answers.
+                    if (runtime.walkMenuReady && runtime.walkNotchesLeft != 0) {
+                        // Seat 0 only: the two seats are 15 frames apart, and a
+                        // shared cursor would move twice per intended notch.
+                        // Neither seat presses A while a move is owed, or the
+                        // list would be confirmed on the wrong board.
+                        if (runtime.localPlayer == 0) {
+                            if (runtime.walkPulseStart == UINT32_MAX) {
+                                // 60 frames between pulses: the list needs 0x15
+                                // frames to settle after each move before it
+                                // accepts the next one.
+                                if (runtime.frame - runtime.walkPulseEnd >= 60) {
+                                    runtime.walkPulseStart = runtime.frame;
+                                }
+                            }
+                            if (runtime.walkPulseStart != UINT32_MAX) {
+                                if (runtime.frame - runtime.walkPulseStart < 3) {
+                                    runtime.pendingLocal.stickX =
+                                        runtime.walkNotchesLeft < 0 ? -100 : 100;
+                                } else {
+                                    runtime.walkPulseEnd = runtime.frame;
+                                    runtime.walkPulseStart = UINT32_MAX;
+                                    runtime.walkNotchesLeft +=
+                                        runtime.walkNotchesLeft < 0 ? 1 : -1;
+                                }
+                            }
+                        }
+                    } else if (beat % 30 < 3 && (beat / 30) % 4 == 0) {
+                        runtime.pendingLocal.buttons = PAD_BUTTON_A;
+                    }
+                } else if (beat % 30 < 3) {
                     switch ((beat / 30) % 8) {
-                    case 2: runtime.pendingLocal.buttons = PAD_BUTTON_START; break;
+                    case 2:
+                        // START every 240 frames was how this walk got past the
+                        // title screen - and also how it opened the pause menu on
+                        // every board and killed the sequence of every minigame it
+                        // entered (objsysobj.c:86, MGSeqPauseKill). Valentin, who
+                        // watches these runs, saw the game pausing constantly.
+                        //
+                        // A planned walk therefore presses START only where it is
+                        // NEEDED, and presses A everywhere else.
+                        //
+                        // Where it is needed, measured: the boot screen, and the
+                        // minigame instructions screen. instDll/main.c:295 leaves
+                        // only on `btnDown == PAD_BUTTON_START` - an equality, so
+                        // START alone and nothing with it - unless all four seats
+                        // are CPU. With two human seats there is no other way out,
+                        // and a walk without START sat on that screen for 308 000
+                        // frames on 2026-09-13 before its budget ran out.
+                        if (!runtime.walkPlan
+                            || context == static_cast<int>(MenuProbeOverlay::bootDll)
+                            || context == static_cast<int>(MenuProbeOverlay::instDll)) {
+                            runtime.pendingLocal.buttons = PAD_BUTTON_START;
+                        } else {
+                            runtime.pendingLocal.buttons = PAD_BUTTON_A;
+                        }
+                        break;
                     // The D-pad is masked out by HuPadRead; menus read the
                     // analog stick through PadADConv.
                     case 4: runtime.pendingLocal.stickY = -100; break;
@@ -2139,6 +2455,14 @@ extern "C" bool PartyBoard_NetplayHasError(void)
 extern "C" bool PartyBoard_NetplayWaiting(void) {
     using namespace partyboard::netplay;
     return gRuntime.enabled && gRuntime.progress.waiting(monotonicMs());
+}
+
+// True once a packet from the other side has ever been accepted. Lets the
+// waiting notice say whether nobody has joined yet, or whether the peer was
+// there and is gone - two different situations for whoever is watching.
+extern "C" bool PartyBoard_NetplayPeerSeen(void)
+{
+    return partyboard::netplay::gRuntime.progress.connected();
 }
 
 extern "C" const char *PartyBoard_NetplayError(void)

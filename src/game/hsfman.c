@@ -651,6 +651,14 @@ void Hu3DModelKill(s16 arg0) {
                 HuSprAnimKill(copy->anim);
             }
             temp_r31->hsf = NULL;
+#ifdef TARGET_PC
+            /* D24: hsf and hookFunc share storage, so the line above has just
+             * set this hook function to null. Leaving HU3D_ATTR_HOOKFUNC on
+             * tells Hu3DDrawPost there is still a hook to call, and it calls
+             * address zero - the KINOPIO HAMMER crash, three times out of
+             * three. A destroyed hook must stop advertising itself. */
+            temp_r31->attr &= ~HU3D_ATTR_HOOKFUNC;
+#endif
             if (modelKillAllF == 0) {
                 HuMemDCFlush(HEAP_DATA);
             }
@@ -2441,9 +2449,37 @@ void PartyBoard_NetplayAnimationState(PartyBoardNetplayStateSink sink, void *con
             WORD(model->clusterAttr[j]);
             WORD(model->motIdCluster[j]);
         }
+        /* The four work structures above are hashed; until 2026-09-12 the four
+         * identifiers that say WHICH animation each of them advances were not.
+         * Two peers could therefore run different motions with identical clocks
+         * and be declared in agreement. It is not a theoretical hole:
+         * m415Dll/main.c:1014 branches on Hu3DMotionShiftIDGet(), which returns
+         * motIdShift, and the branch it guards allocates seven HEAP_SYSTEM
+         * blocks - exactly the 7-block, 15360-byte quantum measured three times
+         * that day. See D19. */
+        WORD(model->motId);
+        WORD(model->motIdOvl);
+        WORD(model->motIdShift);
+        WORD(model->motIdShape);
         WORD(model->motIdSrc);
         WORD(model->linkMdlId);
         WORD(model->cameraBit);
+        /* Diagnostic, added 2026-09-12 for the OBJECTS family.
+         *
+         * Six divergences that evening were tiny float differences in
+         * object->trans - two thousandths of a unit - with nothing else in the
+         * whole state disagreeing. object->trans is hashed; the model
+         * transforms many object functions read and write are not, so a drift
+         * that starts in a model position stays invisible until it reaches an
+         * object, which can be thousands of frames later.
+         *
+         * Hashing them names the drift at the frame it begins instead of its
+         * distant consequence. Verified beforehand that frame interpolation
+         * works on copies (renderPos/renderRot/renderScale in Hu3DExec) and
+         * never touches these, so they are game state and not presentation. */
+        FWORD(model->pos.x); FWORD(model->pos.y); FWORD(model->pos.z);
+        FWORD(model->rot.x); FWORD(model->rot.y); FWORD(model->rot.z);
+        FWORD(model->scale.x); FWORD(model->scale.y); FWORD(model->scale.z);
     }
     WORD(live);
 #undef MOTWORK

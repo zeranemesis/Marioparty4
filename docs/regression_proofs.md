@@ -296,3 +296,50 @@ n'ont donc rien à annuler.
 Le coût total est d'environ quarante minutes de machine et deux reconstructions
 par défaut. C'est le prix de la différence entre « le test est vert » et « le test
 serait rouge si le défaut revenait ».
+
+
+---
+
+## Incident du 2026-09-12 : le harnais tue sa propre campagne et laisse un orphelin
+
+Une campagne de relevé s'est arrêtée après son deuxième run avec
+`HARNESS FAILURE: Accès refusé`, à `netplay_campaign.ps1:539` — c'est-à-dire
+dans le bloc `finally` qui arrête les deux pairs.
+
+### Ce qui s'est passé
+
+Arrêter un pair est une course avec le pair qui s'arrête tout seul.
+`Process.HasExited`, `CloseMainWindow`, `Kill` et `ExitTime` lèvent tous une
+`Win32Exception` « Accès refusé » sur un processus déjà en train de mourir. Ce
+bloc n'avait aucune garde : la première exception est sortie du `finally`, a
+remonté jusqu'à la boucle de campagne, et l'a terminée.
+
+**Le coût réel n'est pas la campagne perdue, c'est ce qu'elle a laissé derrière.**
+Le pair « join » du run en cours est resté vivant, à attendre un hôte qui
+n'existait plus, en tenant son port UDP et en écrivant encore son état. Vu de
+l'extérieur, il ressemblait à un run qui progresse. Il a fallu lister les lignes
+de commande des processus pour distinguer l'orphelin des deux campagnes saines
+qui tournaient en même temps.
+
+C'est exactement ce que la discipline du projet interdit : un état qui *ressemble*
+à un résultat sans en être un.
+
+### Le correctif
+
+Chaque pair est démonté dans sa propre garde, en trois temps :
+
+1. arrêt normal — fermeture de fenêtre, attente, `Kill` si besoin ;
+2. **filet** — si le processus est toujours vivant après ça, `Stop-Process -Force`,
+   et la note le dit ;
+3. si même ça échoue, la note porte le mot `ORPHELIN` et le pid.
+
+Les lectures de `ExitCode` et `ExitTime` et l'écriture des sorties sont gardées
+séparément. Un run garde donc son verdict, la campagne passe au scénario suivant,
+et ce qui a mal tourné est **écrit dans les notes du run** au lieu d'être deviné
+plus tard à partir d'un dossier manquant.
+
+### Ce qui reste à faire
+
+Ce correctif n'a pas encore été vu échouer sans lui, parce que la course n'est pas
+reproductible à volonté. Il est donc inscrit ici comme un correctif **non
+démontré rouge**, et pas au même rang que D3, D4 et D5.

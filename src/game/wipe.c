@@ -1,5 +1,8 @@
 #include "dolphin.h"
 #include "game/wipe.h"
+#ifdef TARGET_PC
+#include "port/crash_report.h"
+#endif
 #include "game/memory.h"
 #include "game/flag.h"
 #include "game/board/tutorial.h"
@@ -159,6 +162,15 @@ void WipeCreate(s16 mode, s16 type, s16 duration)
 	}
 	wipe = &wipeData;
 	if(wipe->stat) {
+#ifdef TARGET_PC
+		/* D20: a refused fade is how a one-frame difference between two
+		 * peers becomes a permanent one. Not silenced, and not accepted
+		 * either - accepting would hide the difference instead of
+		 * explaining it. */
+		PartyBoard_CrashBreadcrumb("WIPE",
+			"WipeCreate refused: mode %d type %d duration %d while mode %d is running",
+			(int)mode, (int)type, (int)duration, (int)wipe->mode);
+#endif
 		return;
 	}
 	if(mode == WIPE_MODE_IN || mode == WIPE_MODE_OUT) {

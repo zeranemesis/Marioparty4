@@ -283,6 +283,53 @@ ne peuvent pas avoir la même, et aucune logique ne devrait en dépendre. Si une
 logique en dépendait, ce serait un défaut de cette logique et pas une lacune du
 hash.
 
+## Le sous-système 3D — audité le 2026-09-12, et il manquait quelque chose
+
+Ce document n'avait jamais regardé `HU3DMODEL`. La question posée à chaque champ
+a été celle-ci, et pas une autre : **ce champ est-il lu par un `if` ?**
+
+### Ce qui a été trouvé, et corrigé — D19
+
+`PartyBoard_NetplayAnimationState` exportait les quatre structures d'horloge
+(`motWork`, `motOvlWork`, `motShiftWork`, `motShapeWork`) mais **aucun des quatre
+identifiants qui disent quelle animation ces horloges font avancer** :
+
+```c
+HU3DMOTID motId;
+HU3DMOTID motIdOvl;
+HU3DMOTID motIdShift;
+HU3DMOTID motIdShape;
+```
+
+Ce n'est pas théorique. `Hu3DMotionEndCheck` compare un temps haché à une durée
+lue dans `Hu3DMotion[motId]` — par un index qui ne l'était pas — et
+`m415Dll/main.c:1014` branche dessus pour décider d'une allocation de sept blocs.
+Les quatre sont désormais hachés, et `kStateHashVersion` est passé de 2 à 3.
+
+### Ce qui reste exclu, et le candidat suivant
+
+`model->pos`, `model->rot`, `model->scale` et `model->mtx` ne sont pas exportés.
+
+Ce n'est pas un trou au sens de D19 : ces valeurs sont **calculées** à partir
+d'entrées qui, elles, sont hachées. Deux pairs d'accord sur tout le reste
+calculent la même position. L'exception est celle de **D23** : si une fonction
+qui les écrit tourne un nombre de fois différent sur les deux pairs, elles
+divergent sans que rien ne le signale — jusqu'à ce que la dérive atteigne un
+champ haché, ce qui peut prendre des milliers de frames.
+
+Les hacher rendrait cette dérive visible **à la frame où elle commence** au lieu
+de sa conséquence lointaine. C'est un gain de diagnostic réel.
+
+**Et c'est précisément pour cela qu'ils ne sont pas hachés aujourd'hui.** Les
+ajouter ferait mourir les runs plus tôt, au moment où l'objectif est d'en mener
+un jusqu'au vingtième tour. Le candidat est donc inscrit ici, argumenté, et
+laissé en attente — pas oublié, et pas armé par commodité.
+
+Vérifié au passage : l'interpolation d'image travaille sur des copies
+(`renderPos`, `renderRot`, `renderScale` dans `Hu3DExec`) et ne touche jamais
+`model->pos`. Ces champs sont donc bien de l'état de jeu, et non de la
+présentation — les hacher serait légitime, le jour où on le décidera.
+
 ## Règle qui découle de tout ceci
 
 Quand un bridage rend inoffensive l'absence d'un champ dans le hash — le taux

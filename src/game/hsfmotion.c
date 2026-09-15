@@ -1,4 +1,26 @@
 #include "game/ClusterExec.h"
+#ifdef TARGET_PC
+#include "port/netplay_runtime.h"
+#include "port/netplay_state.h"
+#include <stdio.h>
+#include <stdlib.h>
+
+#ifdef TARGET_PC
+/* PARTYBOARD_TRACE_MOTION=1 re-enables the D25 motion-speed trace. Off by
+ * default: it fires thousands of times per board game (19 735 lines out of
+ * 20 270 on 2026-09-13) and exhausts the diagnostic budget, silencing the rare
+ * events other investigations depend on. Read once. */
+static int PartyBoard_MotionTraceEnabled(void)
+{
+    static int resolved = -1;
+    if (resolved < 0) {
+        const char *value = getenv("PARTYBOARD_TRACE_MOTION");
+        resolved = (value && *value && *value != '0') ? 1 : 0;
+    }
+    return resolved;
+}
+#endif
+#endif
 #include "game/EnvelopeExec.h"
 #include "game/ShapeExec.h"
 #include "game/hsfload.h"
@@ -435,6 +457,19 @@ void Hu3DMotionSpeedSet(s16 arg0, float arg1)
 {
     HU3DMODEL *temp_r31 = &Hu3DData[arg0];
 
+#ifdef TARGET_PC
+    /* D25: two peers were measured with 1.0 against 0.9 on the four player
+     * models. Two discrete values means a call that happened on one side and
+     * not the other, so what has to be compared is the calls themselves.
+     * Only values away from 1.0 are recorded: that is the whole population of
+     * interest, and tracing every call would drown it. */
+    if (arg1 != 1.0f && PartyBoard_MotionTraceEnabled()) {
+        char trace[96];
+        snprintf(trace, sizeof(trace), "mot_speed model=%d speed=%08x",
+            (int)arg0, PartyBoard_NetplayFloatWord(arg1));
+        PartyBoard_NetplayTrace(trace);
+    }
+#endif
     temp_r31->motWork.speed = arg1;
 }
 
@@ -442,6 +477,14 @@ void Hu3DMotionShiftSpeedSet(s16 arg0, float arg1)
 {
     HU3DMODEL *temp_r31 = &Hu3DData[arg0];
 
+#ifdef TARGET_PC
+    if (arg1 != 1.0f) {
+        char trace[96];
+        snprintf(trace, sizeof(trace), "mot_shift_speed model=%d speed=%08x",
+            (int)arg0, PartyBoard_NetplayFloatWord(arg1));
+        PartyBoard_NetplayTrace(trace);
+    }
+#endif
     temp_r31->motShiftWork.speed = arg1;
 }
 

@@ -6,6 +6,14 @@
 
 #include "ext_math.h"
 #include <string.h>
+#ifdef TARGET_PC
+#include "port/crash_report.h"
+#include "port/netplay_runtime.h"
+#include <stdbool.h>
+#include <stdlib.h>
+extern bool PartyBoard_IsSimulationTick;
+/* The gate itself lives in the port, so every call site reads one decision. */
+#endif
 
 #define DRAW_OBJ_MAX 512
 
@@ -2307,6 +2315,20 @@ void Hu3DDrawPost(void) {
             drawObj = &DrawObjData[DrawObjNum[drawObjNo]];
             if (drawObj->model->attr & HU3D_ATTR_HOOKFUNC) {
                 hookFunc = (void *)drawObj->model->hsf;
+#ifdef TARGET_PC
+                /* D24: the model may have been killed after it was queued,
+                   which nulls this pointer. Refuse it rather than jump to
+                   address zero, and say so - a dead hook drawing nothing is
+                   correct, a jump to zero is a crash with no stack. */
+                if (hookFunc == NULL) {
+                    PartyBoard_CrashBreadcrumb("HOOK",
+                        "draw hook refused: model %d has HU3D_ATTR_HOOKFUNC with a null function",
+                        (int)(drawObj->model - Hu3DData));
+                } else
+                /* D23: a frame that carried no simulation tick must not move
+                   the state these hooks own. */
+                if (!PartyBoard_HookTickGateEnabled() || PartyBoard_IsSimulationTick)
+#endif
                 hookFunc(drawObj->model, drawObj->matrix);
                 for (i = 0; i < 8; i++) {
                     BmpPtrBak[i] = PTR_INVALID;

@@ -56,6 +56,18 @@ param(
     # MEM1, yet no script had ever set it, so every campaign so far ran with the
     # one instrument that could have explained that crash switched off.
     [string]$MemDiagnostics = '1',
+    # Byte the game allocator writes over every payload it hands out, '' off.
+    # An experiment, not a setting to leave on: a fill makes a read of memory
+    # that was never written identical on both peers, so it HIDES the class of
+    # defect it is used to identify. Off by default for that reason, recorded
+    # in every result when used, so a run with the fill can never be read
+    # later as an ordinary one.
+    [string]$MemFill = '',
+    # D23. '1' makes a model draw hook run only on a frame that carried a
+    # simulation tick. Off by default until it has been seen both red and
+    # green on the same scenario; recorded in every result either way, so a
+    # run with the gate can never be read later as an ordinary one.
+    [string]$HookTickGate = '',
     # Forced local rollback probe, '' off. See PARTYBOARD_FORCE_ROLLBACK.
     [string]$ForceRollback = '',
     # Evaluate the rollback capture gate on EVERY frame and histogram the runs of
@@ -142,6 +154,12 @@ function Read-Manifest([string]$path) {
             Minigame = if ($entry.PSObject.Properties.Name -contains 'minigame') { [string]$entry.minigame } else { '' }
             Kind = [string]$entry.kind
             Replay = if ($entry.PSObject.Properties.Name -contains 'replay') { [string]$entry.replay } else { '' }
+            # Engine flags a scenario needs and the campaign has no opinion
+            # about - the built-in walk probe, for one. Appended verbatim to
+            # both peers. Kept out of the replay path deliberately: a scenario
+            # that drives the game from a flag has no recording, and a scenario
+            # that has a recording does not need a flag.
+            ExtraArguments = if ($entry.PSObject.Properties.Name -contains 'extraArguments') { [string]$entry.extraArguments } else { '' }
             ExpectedOverlays = if ($entry.PSObject.Properties.Name -contains 'expectedOverlays') { [string]$entry.expectedOverlays } else { '' }
             DurationSeconds = [int]$entry.durationSeconds
             # Progress, not activity. minFrames only asks whether the process
@@ -152,6 +170,16 @@ function Read-Manifest([string]$path) {
             # reading a property it does not have THROWS rather than returning
             # null - so an optional field has to be probed, not defaulted.
             MinTurns = $(if ($entry.PSObject.Properties.Name -contains 'minTurns') { [int]$entry.minTurns } else { 0 })
+            # Being stuck, as opposed to playing. MinFrames asks whether the
+            # process ran and MinTurns whether the game advanced, but a driver
+            # parked on a screen it cannot leave keeps doing BOTH: the frames
+            # accumulate, the turns are already won, and the verdict reads PASS.
+            # That is exactly how nine runs sitting on the end-of-game statistics
+            # pages were filed for days as a defect of the game. This asks the one
+            # remaining question - did the game ever move on? Absent or 0 means the
+            # scenario makes no claim, which is right for a run that is SUPPOSED to
+            # end inside a long ceremony.
+            MaxFinalOverlayFrames = $(if ($entry.PSObject.Properties.Name -contains 'maxFinalOverlayFrames') { [int]$entry.maxFinalOverlayFrames } else { 0 })
             # A generated scenario carries its recipe, not its megabytes: an
             # approach prefix sliced from a real recording, a seed, and a frame
             # count. The input file is rebuilt from those before the run, so the
@@ -259,6 +287,11 @@ Save-State
 # ---------------------------------------------------------------------------
 
 function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
+    # Defined here and not where it is first used: a run that fails before
+    # reaching the supervision loop still reaches the record-writing code,
+    # and under Set-StrictMode reading an undefined variable there throws -
+    # which killed a campaign on 2026-09-12, from this very patch.
+    $peakTurn = -1
     New-Item -ItemType Directory -Path $runPath -Force | Out-Null
 
     $record = [ordered]@{
@@ -275,6 +308,8 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         seed = $entry.Seed
         audio_diagnostics = $AudioDiagnostics
         mem_diagnostics = $MemDiagnostics
+        mem_fill = $MemFill
+        hook_tick_gate = $HookTickGate
         stack_watchdog = $StackWatchdog
         replay_fingerprints_verified = (-not $SkipReplayVerification)
         force_rollback = $ForceRollback
@@ -282,6 +317,11 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         target_frame_rate = $TargetFrameRate
         target_frame_rate_peer_1 = $(if ($TargetFrameRatePeer1 -gt 0) { $TargetFrameRatePeer1 } else { $TargetFrameRate })
         replay = $entry.Replay
+        # The engine flags this run actually carried. Without them a result
+        # cannot say what produced it: on 2026-09-12 six overnight runs were
+        # believed to be selecting boards while they were in fact in Story
+        # mode, and nothing in any run.json said which flags had been passed.
+        extra_arguments = $entry.ExtraArguments
         netplay_delay = $entry.NetplayDelay
         # THE THREE LEVELS OF PROOF, and they never convert into one another:
         #
@@ -326,9 +366,15 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         stack_guard_armed = $false
         stack_guards = 0
         board_turn = -1
+        # Images presented beyond the simulation frame, per peer. See D23.
+        rendered_surplus_peer_0 = -1
+        rendered_surplus_peer_1 = -1
         board_max_turn = -1
         board_id = -1
         min_turns = 0
+        max_final_overlay_frames = 0
+        final_overlay = -1
+        final_overlay_frames = -1
         generated_seed = -1
         generated_frames = 0
         generator_version = ''
@@ -443,6 +489,9 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
             if ($entry.Replay) {
                 $start.Arguments += ' --netplay-replay-input ' + [char]34 + (Resolve-CampaignPath $entry.Replay) + [char]34
             }
+            if ($entry.ExtraArguments) {
+                $start.Arguments += ' ' + $entry.ExtraArguments
+            }
             $start.UseShellExecute = $false
             $start.CreateNoWindow = $true
             $start.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
@@ -463,6 +512,8 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
             # campaign measured.
             $start.EnvironmentVariables['PARTYBOARD_AUDIO_DIAGNOSTICS'] = $AudioDiagnostics
             $start.EnvironmentVariables['PARTYBOARD_MEM_DIAGNOSTICS'] = $MemDiagnostics
+            $start.EnvironmentVariables['PARTYBOARD_MEM_FILL'] = $MemFill
+            $start.EnvironmentVariables['PARTYBOARD_HOOK_TICK_GATE'] = $HookTickGate
             $start.EnvironmentVariables['PARTYBOARD_STACK_WATCHDOG'] = $StackWatchdog
             $start.EnvironmentVariables['PARTYBOARD_FORCE_ROLLBACK'] = $ForceRollback
             # Explicit in both directions, like the two detectors above: a
@@ -501,7 +552,27 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         # a desync is seen in a peer's own diagnostic.
         $wait.Restart()
         $endedEarly = $null
+        $peakPoll = [Diagnostics.Stopwatch]::StartNew()
         while ($wait.Elapsed.TotalSeconds -lt $entry.DurationSeconds) {
+            # The deepest turn ever reached, sampled as the run goes. A finished
+            # game returns to the menu and its turn counter no longer says where
+            # it has been, so the end-of-run reading alone would understate - and
+            # would understate hardest on exactly the run worth having.
+            if ($peakPoll.Elapsed.TotalSeconds -ge 5) {
+                $peakPoll.Restart()
+                foreach ($peer in $peers) {
+                    $live = Join-Path $runPath "live-state-peer-$($peer.Side).txt"
+                    if (Test-Path -LiteralPath $live) {
+                        try {
+                            $text = Get-Content -Raw -LiteralPath $live -ErrorAction Stop
+                            if ($text -match "turn=(-?\d+) max_turn=") {
+                                $t = [int]$Matches[1]
+                                if ($t -gt $peakTurn) { $peakTurn = $t }
+                            }
+                        } catch { }
+                    }
+                }
+            }
             foreach ($peer in $peers) {
                 if ($peer.Process.HasExited) {
                     $endedEarly = "peer $($peer.Side) exited during gameplay"
@@ -522,19 +593,50 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
     } catch {
         $harnessError = $_.Exception.Message
     } finally {
+        # Shutting a peer down races the peer shutting itself down. HasExited,
+        # CloseMainWindow, Kill and ExitTime all throw a Win32Exception - "Access
+        # denied" - on a process that is already on its way out, and on
+        # 2026-09-12 one such throw escaped this block, killed the whole
+        # campaign and left the other peer of that run orphaned, holding a
+        # netplay port and waiting for a partner that no longer existed.
+        #
+        # So each peer is torn down inside its own guard, and what went wrong is
+        # recorded rather than swallowed: the run still gets a verdict, the
+        # campaign still moves to the next scenario, and the failure is visible
+        # in the notes instead of being inferred from a missing directory.
         foreach ($peer in $peers) {
-            if (-not $peer.Process.HasExited) {
-                $peer.ClosedBySupervisor = $true
-                $peer.Cancel.Set() | Out-Null
-                $peer.Process.CloseMainWindow() | Out-Null
-                if (-not $peer.Process.WaitForExit(5000)) { $peer.Process.Kill() }
+            try {
+                if (-not $peer.Process.HasExited) {
+                    $peer.ClosedBySupervisor = $true
+                    $peer.Cancel.Set() | Out-Null
+                    $peer.Process.CloseMainWindow() | Out-Null
+                    if (-not $peer.Process.WaitForExit(5000)) { $peer.Process.Kill() }
+                }
+                $peer.Process.WaitForExit()
+            } catch {
+                $record.notes += "peer $($peer.Side): arret supervise incomplet: $($_.Exception.Message)"
             }
-            $peer.Process.WaitForExit()
-            $peer.ExitCode = $peer.Process.ExitCode
-            $peer.ExitTime = $peer.Process.ExitTime
-            [IO.File]::WriteAllText((Join-Path $runPath "peer-$($peer.Side)-stdout.log"), $peer.Out.Result)
-            [IO.File]::WriteAllText((Join-Path $runPath "peer-$($peer.Side)-stderr.log"), $peer.Err.Result)
-            $peer.Process.Dispose(); $peer.Ready.Dispose(); $peer.Go.Dispose(); $peer.Cancel.Dispose()
+            # A process that will not die is the one thing this block must not
+            # leave behind: an orphan holds its port and looks like a running run.
+            try {
+                if (-not $peer.Process.HasExited) {
+                    Stop-Process -Id $peer.Process.Id -Force -ErrorAction Stop
+                    $peer.Process.WaitForExit(5000) | Out-Null
+                    $record.notes += "peer $($peer.Side): termine de force apres un arret refuse"
+                }
+            } catch {
+                $record.notes += "peer $($peer.Side): ORPHELIN, pid $($peer.Process.Id) toujours vivant: $($_.Exception.Message)"
+            }
+            try { $peer.ExitCode = $peer.Process.ExitCode } catch { $peer.ExitCode = $null }
+            try { $peer.ExitTime = $peer.Process.ExitTime } catch { $peer.ExitTime = Get-Date }
+            try {
+                [IO.File]::WriteAllText((Join-Path $runPath "peer-$($peer.Side)-stdout.log"), $peer.Out.Result)
+                [IO.File]::WriteAllText((Join-Path $runPath "peer-$($peer.Side)-stderr.log"), $peer.Err.Result)
+            } catch {
+                $record.notes += "peer $($peer.Side): sortie non ecrite: $($_.Exception.Message)"
+            }
+            try { $peer.Process.Dispose() } catch {}
+            try { $peer.Ready.Dispose(); $peer.Go.Dispose(); $peer.Cancel.Dispose() } catch {}
         }
     }
 
@@ -685,9 +787,15 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
     # taking the maximum means a peer that died a tick early cannot under-report
     # what the session achieved.
     $record.min_turns = $entry.MinTurns
+    $record.max_final_overlay_frames = $entry.MaxFinalOverlayFrames
     foreach ($side in 0, 1) {
         if ($peers[$side].LiveState) {
             $record.board_turn = [Math]::Max($record.board_turn, [int]$peers[$side].LiveState.Turn)
+            $rendered = [int]$peers[$side].LiveState.RenderedFrames
+            if ($rendered -ge 0) {
+                $record["rendered_surplus_peer_$side"] = $rendered - [int]$peers[$side].LiveState.Frame
+            }
+            $record.board_turn = [Math]::Max($record.board_turn, $peakTurn)
             $record.board_max_turn = [Math]::Max($record.board_max_turn, [int]$peers[$side].LiveState.MaxTurn)
             $record.board_id = [Math]::Max($record.board_id, [int]$peers[$side].LiveState.Board)
         }
@@ -736,6 +844,19 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
     $record.minigames_played = @($seen.Keys | Sort-Object)
 
     $record.transitions = $overlays[0].Count
+
+    # ---- how long the run sat in its LAST overlay ----
+    # The overlay path already carries this: every entry is id@frame, so the
+    # last transition against the last frame reached says how long the game
+    # stayed where it stopped. No new instrumentation, and it is recorded on
+    # every run whether or not the scenario makes a claim about it - a number
+    # nobody asked for is what lets the next person notice a pattern.
+    if ($overlays[0].Count -gt 0 -and [int]$record.last_frame -ge 0) {
+        $lastEntry = $overlays[0][$overlays[0].Count - 1]
+        $record.final_overlay = [int](($lastEntry -split '@')[0])
+        $enteredAt = [int](($lastEntry -split '@')[1])
+        $record.final_overlay_frames = [Math]::Max(0, [int]$record.last_frame - $enteredAt)
+    }
 
     # Defect D6: a rendered frame that batched more than one simulation tick.
     # The game prints it; the campaign only has to notice.
@@ -851,6 +972,15 @@ function Invoke-CampaignRun($entry, [int]$runIndex, [string]$runPath) {
         $record.notes += ("reached frame $($record.last_frame) but only turn " +
             "$($record.board_turn); the scenario needs $($entry.MinTurns). " +
             "Frames without turns means the process ran and the game did not.")
+    } elseif ($entry.MaxFinalOverlayFrames -gt 0 -and $record.final_overlay_frames -gt $entry.MaxFinalOverlayFrames) {
+        # A screen the driver cannot leave. Frames and turns both keep
+        # passing, so without this the run reads as a PASS and the campaign
+        # credits itself with coverage it never had.
+        $record.result = 'ABNORMAL_EXIT'
+        $record.notes += ("the run spent its last $($record.final_overlay_frames) frames " +
+            "in overlay $($record.final_overlay) without ever leaving it; the scenario " +
+            "allows $($entry.MaxFinalOverlayFrames). Frames and turns keep accumulating " +
+            "on a screen nobody can get out of, so this would otherwise read as a PASS.")
     } elseif ($overlays[0].Count -eq 0 -or (Compare-Object $overlays[0] $overlays[1] -SyncWindow 0)) {
         $record.result = 'DESYNC'
         $record.notes += 'the two peers took different overlay paths'

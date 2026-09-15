@@ -3,6 +3,20 @@
 #include "dolphin/os.h"
 #ifdef TARGET_PC
 #include "port/mem_diagnostics.h"
+#ifdef TARGET_PC
+/* The allocator records its caller so a desync report can name who made an
+ * allocation (D30). The intrinsic differs per compiler; TARGET_PC is not a
+ * Windows-only target. */
+#if defined(_MSC_VER)
+#include <intrin.h>
+#pragma intrinsic(_ReturnAddress)
+#define PARTYBOARD_RETURN_ADDRESS() ((uintptr_t)_ReturnAddress())
+#elif defined(__GNUC__) || defined(__clang__)
+#define PARTYBOARD_RETURN_ADDRESS() ((uintptr_t)__builtin_return_address(0))
+#else
+#define PARTYBOARD_RETURN_ADDRESS() ((uintptr_t)0)
+#endif
+#endif
 #endif
 
 static u32 HeapSizeTbl[HEAP_MAX] = { 0x240000, 0x140000, 0xA80000, 0x580000, 0 };
@@ -62,7 +76,9 @@ void HuMemDCFlush(HeapID heap)
 void *HuMemDirectMalloc(HeapID heap, size_t size)
 {
 #ifdef TARGET_PC
-    u32 retaddr = 0;
+    /* The header has always had room for the caller; on PC nothing filled
+      it, so every block looked anonymous. See D30. */
+    uintptr_t retaddr = PARTYBOARD_RETURN_ADDRESS();
 #else
     register u32 retaddr;
     asm {
@@ -76,7 +92,9 @@ void *HuMemDirectMalloc(HeapID heap, size_t size)
 void *HuMemDirectMallocNum(HeapID heap, size_t size, uintptr_t num)
 {
 #ifdef TARGET_PC
-    u32 retaddr = 0;
+    /* The header has always had room for the caller; on PC nothing filled
+      it, so every block looked anonymous. See D30. */
+    uintptr_t retaddr = PARTYBOARD_RETURN_ADDRESS();
 #else
     register u32 retaddr;
     asm {
@@ -90,7 +108,9 @@ void *HuMemDirectMallocNum(HeapID heap, size_t size, uintptr_t num)
 void HuMemDirectFree(void *ptr)
 {
 #ifdef TARGET_PC
-    u32 retaddr = 0;
+    /* The header has always had room for the caller; on PC nothing filled
+      it, so every block looked anonymous. See D30. */
+    uintptr_t retaddr = PARTYBOARD_RETURN_ADDRESS();
 #else
     register u32 retaddr;
     asm {
@@ -103,7 +123,9 @@ void HuMemDirectFree(void *ptr)
 void HuMemDirectFreeNum(HeapID heap, uintptr_t num)
 {
 #ifdef TARGET_PC
-    u32 retaddr = 0;
+    /* The header has always had room for the caller; on PC nothing filled
+      it, so every block looked anonymous. See D30. */
+    uintptr_t retaddr = PARTYBOARD_RETURN_ADDRESS();
 #else
     register u32 retaddr;
     asm {

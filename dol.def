@@ -7,9 +7,16 @@ EXPORTS
     PartyBoard_BoardCoverageMark
     PartyBoard_NetplayEnabled
     PartyBoard_NetplayTrace
+    PartyBoard_NetplayWalkMenu
+    PartyBoard_HookTickGateEnabled
+    PartyBoard_NetplayMaxTurnsOverride
     PartyBoard_OnlineCheckDisc
     PartyBoard_OnlineBarrierProbe
     PartyBoard_NetplayAllowsMultipleInstances
+    PartyBoard_NetplayHeapCensus
+    PartyBoard_NetplayRngRingRead
+    PartyBoard_NetplayHeapInjectLeak
+    PartyBoard_NetplayPeerSeen
     PartyBoard_NetplayShutdown
     PartyBoard_NetplayRuntimeRunSelfTest
     PartyBoard_NetplayPadRunProbe

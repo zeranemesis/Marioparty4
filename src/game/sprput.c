@@ -1,4 +1,8 @@
 #include "dolphin/gx.h"
+#ifdef TARGET_PC
+#include "port/netplay_runtime.h"
+extern bool PartyBoard_IsSimulationTick;
+#endif
 #include "dolphin/mtx.h"
 #include "dolphin/vi.h"
 #include "game/disp.h"
@@ -77,6 +81,12 @@ void HuSprDisp(HUSPRITE *sprite)
     if(sprite->attr & HUSPR_ATTR_FUNC) {
         if(sprite->func) {
             func = sprite->func;
+#ifdef TARGET_PC
+            /* D23: a sprite draw hook advances game state as readily as a
+             * model one - the mode select plays its movie as a sprite - and
+             * this pass runs once per rendered frame, not once per tick. */
+            if(!PartyBoard_HookTickGateEnabled() || PartyBoard_IsSimulationTick)
+#endif
             func(sprite);
             HuSprDispInit();
         }

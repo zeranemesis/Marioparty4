@@ -2,6 +2,11 @@
 #include "dolphin/os.h"
 #ifdef TARGET_PC
 #include "port/mem_diagnostics.h"
+#include "port/netplay_runtime.h"
+#include <stdio.h>
+u32 PartyBoard_NetplayFrameForDiagnostics(void);
+#include <stdlib.h>
+#include <string.h>
 #endif
 
 #ifdef SKIP_HU_ALLOC
@@ -31,6 +36,50 @@ struct  memory_block {
 };
 
 static void *HuMemMemoryAlloc2(void *heap_ptr, size_t size, uintptr_t num, uintptr_t retaddr);
+
+#ifdef TARGET_PC
+/* PARTYBOARD_MEM_FILL: byte written over every payload handed out, as a
+ * decimal value, or empty/unset for no fill. See docs/netplay_defect_register.md,
+ * the 2026-09-12 experiment. Read once: getenv must not be called from the
+ * allocator on every allocation. */
+/* PARTYBOARD_ALLOC_TRACE=<first>-<last>: log every allocation made between
+ * those two simulation frames, with its heap, its size and its caller. Empty
+ * or unset logs nothing. See the 2026-09-12 HEAP_DATA divergence at frame
+ * 6649, which repeats to the byte. */
+static int HuMemTraceWindow(u32 *first, u32 *last)
+{
+    static int resolved = -2;
+    static u32 from = 0, to = 0;
+    if (resolved == -2) {
+        const char *value = getenv("PARTYBOARD_ALLOC_TRACE");
+        resolved = 0;
+        if (value && *value) {
+            const char *dash = strchr(value, 45);
+            if (dash) {
+                from = (u32)atoi(value);
+                to = (u32)atoi(dash + 1);
+                resolved = 1;
+            }
+        }
+    }
+    *first = from;
+    *last = to;
+    return resolved;
+}
+
+static int HuMemFillByte(void)
+{
+    static int resolved = -2;
+    if (resolved == -2) {
+        const char *value = getenv("PARTYBOARD_MEM_FILL");
+        resolved = (value && *value) ? (atoi(value) & 0xFF) : -1;
+        if (resolved >= 0) {
+            OSReport("[MEM FILL] payloads filled with 0x%02X\n", resolved);
+        }
+    }
+    return resolved;
+}
+#endif
 
 void *HuMemHeapInit(void *ptr, size_t size)
 {
@@ -92,6 +141,26 @@ static void *HuMemMemoryAlloc2(void *heap_ptr, size_t size, uintptr_t num, uintp
              * the payload, and records the allocation in the table that lives
              * outside MEM1. No layout change: see docs/humem_layout.md. */
             PartyBoard_MemDiagOnAlloc(block, size, (size_t)block->size, retaddr);
+            {
+                const int fill = HuMemFillByte();
+                if (fill >= 0) {
+                    memset(BLOCK_GET_DATA(block), fill, size);
+                }
+            }
+            {
+                u32 traceFirst = 0, traceLast = 0;
+                if (HuMemTraceWindow(&traceFirst, &traceLast)) {
+                    const u32 frame = PartyBoard_NetplayFrameForDiagnostics();
+                    if (frame >= traceFirst && frame <= traceLast) {
+                        char trace[128];
+                        snprintf(trace, sizeof(trace),
+                            "alloc f=%u size=%u block=%d num=%u caller=%08x",
+                            frame, (unsigned)size, (int)block->size,
+                            (unsigned)num, (unsigned)retaddr);
+                        PartyBoard_NetplayTrace(trace);
+                    }
+                }
+            }
 #endif
             return BLOCK_GET_DATA(block);
         }
@@ -275,6 +344,53 @@ void PartyBoard_NetplayHeapState(PartyBoardNetplayStateSink sink, void *context)
         WORD(HuMemUsedMallocBlockGet(heap));
     }
 #undef WORD
+}
+
+/* D30. The counts above say THAT two peers hold a different number of
+ * blocks; they cannot say which allocations, nor who made them. This walks
+ * the same heaps block by block and hands out the caller that the allocator
+ * already records in every header, so two censuses diff to the exact
+ * allocation sites that only one machine visited.
+ *
+ * Diagnostics only, called from the report writer after a divergence is
+ * already established - never from the hashing path, and never on a hot
+ * frame. It allocates nothing and mutates nothing. */
+/* Test-only, opt-in, and never called unless --netplay-inject-heap is on the
+ * command line. Allocates from HEAP_SYSTEM and deliberately keeps the blocks,
+ * so one peer holds more live blocks than the other and the HEAPS subsystem
+ * diverges on purpose. The allocation site is here, in the allocator's own
+ * translation unit, so the census reports a stable address in dol.dll. */
+void PartyBoard_NetplayHeapInjectLeak(int blocks, uint32_t bytes)
+{
+    int i;
+    for (i = 0; i < blocks; i++) {
+        void *leaked = HuMemDirectMalloc(HEAP_SYSTEM, (size_t)bytes);
+        (void)leaked; /* Kept on purpose: the divergence IS the point. */
+    }
+}
+
+void PartyBoard_NetplayHeapCensus(PartyBoardHeapBlockSink sink, void *context)
+{
+    static const HeapID heaps[3] = { HEAP_SYSTEM, HEAP_DATA, HEAP_DVD };
+    int i;
+    if (!sink) {
+        return;
+    }
+    for (i = 0; i < 3; i++) {
+        const HeapID heap = heaps[i];
+        struct memory_block *start = HuMemHeapPtrGet(heap);
+        struct memory_block *block = start;
+        if (!start) {
+            continue; /* Arena not created yet. */
+        }
+        do {
+            if (block->flag == 1) {
+                sink(context, (int)heap, (uint32_t)block->size,
+                    (uint32_t)block->num, block->retaddr);
+            }
+            block = block->next;
+        } while (block != start);
+    }
 }
 #endif
 

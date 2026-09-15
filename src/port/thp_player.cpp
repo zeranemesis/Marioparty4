@@ -3,6 +3,7 @@
 #include <climits>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -140,6 +141,7 @@ public:
         targetGain.store(gain_from_volume(volume));
         cursor.store(0);
         stopped.store(false);
+        audioDrained.store(false, std::memory_order_relaxed);
         return true;
     }
 
@@ -175,7 +177,10 @@ public:
                 if (looped) {
                     position = 0;
                 } else {
-                    stopped.store(true, std::memory_order_relaxed);
+                    /* D14: the DEVICE ran dry. That is a property of this
+                     * machine, not of the movie, and it must never be what
+                     * ends a movie two peers are both waiting on. */
+                    audioDrained.store(true, std::memory_order_relaxed);
                     break;
                 }
             }
@@ -219,13 +224,42 @@ public:
         return sample * static_cast<uint64_t>(fps * 100000.0f) / (uint64_t(rate) * 100000);
     }
 
+    /* D14: two peers left the movie wait two simulation frames apart while
+     * the position they reported tracked identically, so the answer differs
+     * from inputs that look the same. Logged once, at the transition, on
+     * each peer - the two lines are meant to be read side by side. */
+    void trace_end_transition(bool over) {
+        if (!over) { endReported = false; return; }
+        if (endReported) return;
+        endReported = true;
+        char trace[160];
+        std::snprintf(trace, sizeof(trace),
+            "thp_end ticks=%llu logical=%llu playback=%llu frames=%d stopped=%d drained=%d looped=%d",
+            static_cast<unsigned long long>(logicalTicks),
+            static_cast<unsigned long long>(logical_frame()),
+            static_cast<unsigned long long>(playback_frame()),
+            static_cast<int>(frames.size()),
+            stopped.load(std::memory_order_relaxed) ? 1 : 0,
+            audioDrained.load(std::memory_order_relaxed) ? 1 : 0,
+            looped ? 1 : 0);
+        PartyBoard_NetplayTrace(trace);
+    }
+
     bool ended() const {
         if (looped) {
             return false;
         }
         // stopped is set by HuTHPStop from game logic, so it is already the
-        // same on both peers.
-        return stopped.load(std::memory_order_relaxed) || playback_frame() >= frames.size();
+        // same on both peers. audioDrained is set by the mixer when the device
+        // empties, and is deliberately NOT consulted under netplay: it is what
+        // made two peers leave the same wait two simulation frames apart.
+        if (stopped.load(std::memory_order_relaxed)) {
+            return true;
+        }
+        if (!PartyBoard_NetplayEnabled() && audioDrained.load(std::memory_order_relaxed)) {
+            return true;
+        }
+        return playback_frame() >= frames.size();
     }
 
     int current_frame() const {
@@ -299,6 +333,7 @@ public:
     void restart() {
         cursor.store(0, std::memory_order_relaxed);
         stopped.store(false, std::memory_order_relaxed);
+        audioDrained.store(false, std::memory_order_relaxed);
         logicalTicks = 0;
     }
 
@@ -568,11 +603,15 @@ private:
     bool textureInitialized[kTextureSlots]{};
     std::atomic<bool> graphicsClosed{false};
     std::atomic<bool> stopped{true};
+    /* Set by the mixer when the device queue empties. Reported, and used only
+     * offline - see D14. */
+    std::atomic<bool> audioDrained{false};
     std::atomic<uint64_t> cursor{0};
     std::atomic<int> gain{0};
     std::atomic<int> targetGain{0};
     std::atomic<int> rampRemaining{0};
     bool looped = false;
+    bool endReported = false;
     uint32_t width = 0;
     uint32_t height = 0;
     uint32_t channels = 0;
@@ -668,7 +707,10 @@ extern "C" void PartyBoard_ThpLogicalTick(void) {
 
 extern "C" BOOL HuTHPEndCheck(void) {
     std::lock_guard<std::mutex> lock(g_movieMutex);
-    return g_movie ? g_movie->ended() : TRUE;
+    if (!g_movie) return TRUE;
+    const bool over = g_movie->ended();
+    g_movie->trace_end_transition(over);
+    return over ? TRUE : FALSE;
 }
 
 extern "C" s32 HuTHPFrameGet(void) {

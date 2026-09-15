@@ -153,11 +153,18 @@ function Read-LiveState([string]$path) {
         # -1, never 0: a run that never reached a board has no turn, and calling
         # that "turn 0" would make it indistinguishable from a run on turn 0.
         Turn = -1; MaxTurn = -1; Board = -1
+        # Images presented since boot. Under lockstep this must track the
+        # simulation frame: every image beyond it is an image the game drew
+        # while the network refused it a tick, and every draw hook ran on it.
+        # -1 means the binary predates the counter, which is not the same as
+        # zero surplus and must not be read as one.
+        RenderedFrames = -1
     }
     if (-not (Test-Path -LiteralPath $path)) { return $state }
     $text = Get-Content -LiteralPath $path -Raw
     $m = [regex]::Match($text, 'shutdown_intent=(\S+)');            if ($m.Success) { $state.ShutdownIntent = $m.Groups[1].Value }
     $m = [regex]::Match($text, 'simulation_frame=(\d+)');           if ($m.Success) { $state.Frame = [int]$m.Groups[1].Value }
+    $m = [regex]::Match($text, 'rendered_frames=(\d+)');            if ($m.Success) { $state.RenderedFrames = [int]$m.Groups[1].Value }
     $m = [regex]::Match($text, 'game_context=(-?\d+) overlay=(-?\d+)')
     if ($m.Success) { $state.GameContext = $m.Groups[1].Value; $state.Overlay = $m.Groups[2].Value }
     $m = [regex]::Match($text, 'last_state_hash=([0-9a-f]+) at_frame=(\d+)')
@@ -225,7 +232,17 @@ function Get-CrashReportFacts([string]$reportPath) {
     $m = [regex]::Match($text, 'access_violation operation=(\w+)')
     if ($m.Success) { $facts.Operation = $m.Groups[1].Value }
     $m = [regex]::Match($text, 'faulting_module=([^\r\n]+)')
-    if ($m.Success) { $facts.Module = [IO.Path]::GetFileName($m.Groups[1].Value.Trim()) }
+    if ($m.Success) {
+        # NOT [IO.Path]::GetFileName. This text comes from a process that has
+        # just died, and the reporter writes "<none: address is not inside a
+        # loaded module>" when the faulting address belongs to no module at
+        # all. Angle brackets are illegal in a Windows path, GetFileName
+        # throws, and the harness dies on the single worst crash it exists
+        # to record - a jump to a wild address. Split on separators by hand:
+        # a module name never needs path validation.
+        $raw = $m.Groups[1].Value.Trim()
+        $facts.Module = $raw.Split([char[]]@([char]92, [char]47))[-1]
+    }
     $m = [regex]::Match($text, 'faulting_offset=(0x[0-9a-fA-F]+)')
     if ($m.Success) { $facts.ModuleOffset = $m.Groups[1].Value }
     $m = [regex]::Match($text, 'coroutine_stack_verdict=([^\r\n]+)')

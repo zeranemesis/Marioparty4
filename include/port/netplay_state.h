@@ -9,6 +9,18 @@ extern "C" {
  * Every exporter must be callable from the game thread at a tick boundary and
  * must never mutate game state, allocate, or block. */
 typedef void (*PartyBoardNetplayStateSink)(void *, const char *, uint32_t);
+/* One live allocation: heap id, payload bytes, allocation group, and the
+ * return address of the code that asked for it. Diagnostics only - this one
+ * DOES carry an address, and it is never hashed. The reader is responsible
+ * for turning it into a module-relative offset before two machines compare
+ * anything, because a raw address is an ASLR address. */
+typedef void (*PartyBoardHeapBlockSink)(void *, int, uint32_t, uint32_t, uintptr_t);
+/* One recorded random draw: the simulation frame it was made on, and the
+ * return address of the code that asked for it. Diagnostics only, and like
+ * the heap census the reader must reduce the address to a module offset
+ * before two machines can be compared. */
+typedef void (*PartyBoardRngDrawSink)(void *, uint32_t, uintptr_t);
+void PartyBoard_NetplayRngRingRead(PartyBoardRngDrawSink sink, void *context);
 static inline uint32_t PartyBoard_NetplayFloatWord(float value) {
     uint32_t bits;
     memcpy(&bits, &value, sizeof(bits)); /* IEEE-754 numeric value only. */
@@ -24,6 +36,12 @@ void PartyBoard_NetplayObjectState(PartyBoardNetplayStateSink sink, void *contex
 void PartyBoard_NetplaySceneState(PartyBoardNetplayStateSink sink, void *context);
 void PartyBoard_NetplayTimerState(PartyBoardNetplayStateSink sink, void *context);
 void PartyBoard_NetplayHeapState(PartyBoardNetplayStateSink sink, void *context);
+/* Every live block of every ready heap. Used by the desync report when the
+ * HEAPS subsystem is the one that differs - see D30. */
+void PartyBoard_NetplayHeapCensus(PartyBoardHeapBlockSink sink, void *context);
+/* Test-only: allocate and deliberately keep blocks, to make the HEAPS
+ * subsystem diverge on purpose and prove the census works. */
+void PartyBoard_NetplayHeapInjectLeak(int blocks, uint32_t bytes);
 void PartyBoard_NetplayAnimationState(PartyBoardNetplayStateSink sink, void *context);
 /* Logical audio state only: what the game can observe and block on. Physical
  * mixing, device buffers and voice DSP state are deliberately excluded. */

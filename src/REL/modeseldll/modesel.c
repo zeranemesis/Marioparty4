@@ -54,7 +54,19 @@ s32 fn_1_2490(void)
     fn_1_3668();
     fn_1_1EC0(1);
     temp_r25 = HuAudFXPlay(2094);
+#ifdef TARGET_PC
+    /* G10. bootDll fades OUT TO WHITE before handing over here
+       (bootDll/main.c:384). The only thing that ever fades back IN is the
+       save-file screen (filesel.c:188) - and online, main.c:91 skips that
+       screen so the two machines need not agree on a file. Online,
+       omovlevtno is 0, so this test was false as well, and nothing lifted
+       the white curtain: the menu ran, read the pad and moved its cursor,
+       entirely invisible. Reported from a real two-machine session on
+       2026-09-13, whose own trace shows the cursor moving behind it. */
+    if (omovlevtno || PartyBoard_NetplayEnabled()) {
+#else
     if (omovlevtno) {
+#endif
         WipeCreate(WIPE_MODE_IN, WIPE_TYPE_NORMAL, 30);
     }
     for (temp_r31 = 0; temp_r31 <= 20; temp_r31++) {
@@ -135,6 +147,13 @@ s32 fn_1_2490(void)
             traceRep = HuPadDStkRep[0];
             traceIter++;
         }
+#endif
+#ifdef TARGET_PC
+        /* This loop reads the pad on every iteration and leaves on the
+         * first A, so a scripted walk has to know it is on screen before
+         * it sends anything. There is no settle counter to wait for here,
+         * unlike the board list: being in the loop IS the readiness. */
+        PartyBoard_NetplayWalkMenu(1);
 #endif
         temp_r30 = 0;
         if (HuPadDStkRep[0] & PAD_BUTTON_LEFT) {
@@ -234,12 +253,41 @@ s32 fn_1_2490(void)
     temp_f31 = 0;
     temp_f30 = 5;
     while (!HuTHPEndCheck()) {
+#ifdef TARGET_PC
+        /* D14/D20: the two peers must leave this wait on the same tick. The
+         * exit test reads the movie position, so the position itself is what
+         * has to be compared - one line every 60 ticks is enough to see a
+         * clock that lags. */
+        {
+            static unsigned traceWait = 0;
+            if ((traceWait % 60u) == 0u) {
+                char trace[96];
+                snprintf(trace, sizeof(trace), "modesel_movie_wait iter=%u thp_frame=%d",
+                    traceWait, (int)HuTHPFrameGet());
+                PartyBoard_NetplayTrace(trace);
+            }
+            traceWait++;
+        }
+#endif
         Hu3DModelPosSet(lbl_1_bss_19A[22], 0, -33.0f + (temp_f31 / 30.0f), 50.0f - temp_f31);
         temp_f31 += temp_f30;
         temp_f30 += 5.0f;
         HuPrcVSleep();
     }
     _ClearFlag(FLAG_ID_MAKE(1, 11));
+#ifdef TARGET_PC
+    /* D20/D14: the two peers must leave the movie wait on the same tick and
+     * find the same fade state. Three runs died here; this says which of
+     * the two was not true. */
+    {
+        char trace[128];
+        snprintf(trace, sizeof(trace),
+            "modesel_movie_end thp_frame=%d thp_total=%d wipe_stat=%d",
+            (int)HuTHPFrameGet(), (int)HuTHPTotalFrameGet(), (int)WipeStatGet());
+        OSReport("%s\n", trace);
+        PartyBoard_NetplayTrace(trace);
+    }
+#endif
     WipeColorSet(255, 255, 255);
     #if VERSION_PAL
     WipeCreate(WIPE_MODE_OUT, WIPE_TYPE_NORMAL, 30);

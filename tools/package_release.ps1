@@ -79,18 +79,25 @@ $newestSource = Get-ChildItem (Join-Path $projectPath 'src'), (Join-Path $projec
     -Recurse -File -Include '*.c', '*.cpp', '*.h', '*.hpp' -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
 #
-# It compares against the NEWEST of the two, not both, and that limit is
-# deliberate: partyboard.exe is a thin entry point that does not depend on
-# src/game, so a change to src/game/process.c legitimately leaves it untouched
-# while dol.dll is rebuilt. Requiring both to be newer than every source turns
-# a normal build into a refusal. What survives is the failure that matters:
-# somebody edited a source and never rebuilt anything at all. Which target
-# needed which source is CMake's knowledge, not this script's - run the build
-# itself if you want that answer.
+# It compares against the NEWEST produced binary, not against each of them, and
+# that limit is deliberate: partyboard.exe is a thin entry point that does not
+# depend on src/game, so a change to src/game/process.c legitimately leaves it
+# untouched while dol.dll is rebuilt. Requiring every binary to be newer than
+# every source turns a normal build into a refusal. What survives is the
+# failure that matters: somebody edited a source and never rebuilt anything at
+# all. Which target needed which source is CMake's knowledge, not this
+# script's - run the build itself if you want that answer.
+#
+# The overlay modules belong in this set. Watching only partyboard.exe and
+# dol.dll made the check fire on a correct build on 2026-09-13: the edit was in
+# src/REL/mstory3Dll/main.c, which rebuilds mstory3Dll.dll and moves neither
+# watched file. A check that refuses a correct build is a check that teaches
+# people to pass -AllowStale, which is exactly what it exists to prevent.
 if ($newestSource) {
-    $newestBinary = @('partyboard.exe', 'dol.dll') |
-        ForEach-Object { Get-Item -LiteralPath (Join-Path $build $_) } |
-        Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    $produced = @(Get-ChildItem -LiteralPath $build -File -Filter '*.dll' |
+        Where-Object { $_.Name -match 'Dll\.dll$|dll\.dll$|^dol\.dll$' })
+    $produced += Get-Item -LiteralPath (Join-Path $build 'partyboard.exe')
+    $newestBinary = $produced | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
     if ($newestSource.LastWriteTimeUtc -gt $newestBinary.LastWriteTimeUtc) {
         $message = "$($newestSource.Name) a ete modifie apres la derniere construction " +
             "($($newestSource.LastWriteTime.ToString('MM-dd HH:mm')) contre " +
@@ -99,6 +106,26 @@ if ($newestSource) {
         if (-not $AllowStale) { Fail $message 2 }
         Write-Output "AVERTISSEMENT: $message"
     }
+}
+
+# The lobby is a separate build system. `cmake --build` does not compile
+# tools/online/*.cs at all: it reports success having never looked at them,
+# so an edit there reaches the package silently unless something checks. It
+# is checked against its OWN binary, because comparing C# sources to dol.dll
+# would refuse every ordinary C++ build.
+$newestLobbySource = Get-ChildItem (Join-Path $projectPath 'tools/online') `
+    -File -Include '*.cs' -Recurse -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+$lobbyBinary = Get-Item -LiteralPath (Join-Path $build 'PartyBoardOnline.exe') -ErrorAction SilentlyContinue
+if ($newestLobbySource -and $lobbyBinary -and
+    $newestLobbySource.LastWriteTimeUtc -gt $lobbyBinary.LastWriteTimeUtc) {
+    $message = "$($newestLobbySource.Name) a ete modifie apres la derniere " +
+        "construction du salon ($($newestLobbySource.LastWriteTime.ToString('MM-dd HH:mm')) " +
+        "contre PartyBoardOnline.exe a $($lobbyBinary.LastWriteTime.ToString('MM-dd HH:mm'))). " +
+        "Le salon ne se construit PAS avec cmake : lancez " +
+        "tools/build_online.ps1 -OutputDirectory $build, ou passez -AllowStale."
+    if (-not $AllowStale) { Fail $message 2 }
+    Write-Output "AVERTISSEMENT: $message"
 }
 
 # ------------------------------------------------------------------ build hash
@@ -171,7 +198,7 @@ try {
         Write-Output "$($runtime.Count) bibliotheques Visual C++ ajoutees."
     }
 
-    foreach ($name in 'Lancer PartyBoard.cmd', 'Jouer en ligne.cmd', 'Verifier le dossier.cmd') {
+    foreach ($name in 'Lancer PartyBoard.cmd', 'Jouer en ligne.cmd', 'Jouer en ligne (test D23).cmd', 'Verifier le dossier.cmd') {
         $source = Join-Path $PSScriptRoot (Join-Path 'package' $name)
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { Fail "tools/package/$name manque." 2 }
         Copy-Item $source (Join-Path $staging $name) -Force
@@ -261,7 +288,8 @@ try {
         $problems.Add("empreinte apres extraction $roundTrip au lieu de $buildHash")
     }
     $expected = $required + @('LISEZ-MOI.txt', 'manifest.json', 'empreintes.txt',
-        'Jouer en ligne.cmd', 'Lancer PartyBoard.cmd', 'Verifier le dossier.cmd')
+        'Jouer en ligne.cmd', 'Jouer en ligne (test D23).cmd', 'Lancer PartyBoard.cmd',
+        'Verifier le dossier.cmd')
     foreach ($name in $expected) {
         if (-not (Test-Path -LiteralPath (Join-Path $extracted $name) -PathType Leaf)) {
             $problems.Add("$name absent du zip")

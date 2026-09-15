@@ -307,6 +307,10 @@ s32 fn_1_6D28(void)
             }
             traceIter_freeplay_list++;
         }
+        /* Being in this loop IS the readiness: it reads the pad on every
+         * iteration. Signalled from here and not from the category screen,
+         * so a scripted walk spends its moves in the list and not above it. */
+        PartyBoard_NetplayWalkMenu(1);
         #endif
         if (HuPadDStkRep[0] & PAD_BUTTON_UP) {
             temp_r29 = -1;

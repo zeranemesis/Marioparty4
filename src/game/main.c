@@ -292,6 +292,12 @@ void main(void)
         }
         PartyBoard_SimulationTicksThisFrame = simulatedTicks;
         PartyBoard_IsSimulationTick = simulatedTicks != 0;
+        /* Every pass through this loop presents an image, whether or not it
+           carried a simulation tick - and Hu3DDrawPost, which calls every
+           model draw hook, runs on all of them. Two peers that have rendered
+           a different number of frames at the same simulation frame have run
+           those hooks a different number of times. */
+        PartyBoard_RenderedFrames++;
         /* Defect D6, detection only. PARTYBOARD_ADVANCE_FRAME is this bool, not
          * a count, and Hu3DExec runs once per rendered frame - so a frame that
          * batches two simulation ticks advances the animation clock once, for
@@ -364,17 +370,43 @@ void main(void)
         }
 
 #ifdef TARGET_PC
+        /* The notice has to LAST. It used to be pushed once, for eight
+           seconds, behind a latch that never re-armed - so after thirteen
+           seconds the screen went silent again and stayed that way. And
+           under --netplay-full no tick passes until someone joins, so
+           nothing redraws either: a responsive window showing the last
+           image, which is a blank screen if that image was a fade. It has
+           cost Valentin two sessions.
+
+           Counted in RENDERED frames, deliberately: it is exactly when the
+           simulation stops ticking that this message must stay alive. */
         static bool netplayWaitingShown = false;
-        if (PartyBoard_NetplayWaiting() && !netplayWaitingShown) {
-            ui_push_toast("info", "En attente de l'autre joueur", "La partie est en pause. Reprise automatique si la synchronisation revient avant 2 minutes.", 8000);
-            netplayWaitingShown = true;
-        } else if (netplayWaitingShown && !PartyBoard_NetplayWaiting() && !PartyBoard_NetplayHasError()) {
+        static unsigned netplayNoticeFrame = 0;
+        if (PartyBoard_NetplayWaiting()) {
+            if (!netplayWaitingShown
+                || PartyBoard_RenderedFrames - netplayNoticeFrame >= 600u) {
+                if (PartyBoard_NetplayPeerSeen()) {
+                    ui_push_toast("info", "En attente de l'autre joueur",
+                        "La liaison est interrompue. La partie reprend seule si elle revient avant 2 minutes.", 12000);
+                } else {
+                    ui_push_toast("info", "En attente du second joueur",
+                        "Personne n'a encore rejoint. Rien ne s'affichera tant que la partie n'a pas commence : c'est normal, ce n'est pas un plantage.", 12000);
+                }
+                netplayWaitingShown = true;
+                netplayNoticeFrame = PartyBoard_RenderedFrames;
+            }
+        } else if (netplayWaitingShown && !PartyBoard_NetplayHasError()) {
             ui_push_toast("info", "Connexion retablie", "La partie reprend.", 3000);
             netplayWaitingShown = false;
         }
-        if (!netplayErrorShown && PartyBoard_NetplayHasError()) {
-            ui_push_toast("error", "Online session stopped", PartyBoard_NetplayError(), 60000);
+        /* A stopped session keeps saying so. A sixty-second toast that
+           expires leaves the same blank, silent screen as no toast at all. */
+        if (PartyBoard_NetplayHasError()
+            && (!netplayErrorShown
+                || PartyBoard_RenderedFrames - netplayNoticeFrame >= 1800u)) {
+            ui_push_toast("error", "Session en ligne arretee", PartyBoard_NetplayError(), 30000);
             netplayErrorShown = true;
+            netplayNoticeFrame = PartyBoard_RenderedFrames;
         }
         ui_update();
         aurora_end_frame();
@@ -399,6 +431,10 @@ s16 HuSysVWaitGet(s16 param)
 {
     return (s16)minimumVcount;
 }
+
+#ifdef TARGET_PC
+unsigned int PartyBoard_RenderedFrames;
+#endif
 
 s32 rnd_seed = 0x0000D9ED;
 

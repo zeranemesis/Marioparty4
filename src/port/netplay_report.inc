@@ -10,6 +10,41 @@ constexpr unsigned kReportFramesBefore = 120;
 constexpr unsigned kReportFramesAfter = 30;
 constexpr unsigned kReportVersion = 1;
 
+// Reduces a return address to <module>+0x<offset>. Never print a raw address in
+// a report meant to be compared between two machines: it changes on every
+// launch. Same rule the crash reporter follows for its faulting address.
+static void PartyBoard_DescribeCodeAddress(std::uintptr_t address, char *out, std::size_t size)
+{
+    if (address == 0) {
+        std::snprintf(out, size, "<nul>");
+        return;
+    }
+#if defined(_WIN32)
+    HMODULE module = nullptr;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+            | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(address), &module) && module) {
+        char path[MAX_PATH] = {};
+        GetModuleFileNameA(module, path, sizeof(path) - 1);
+        const char *name = std::strrchr(path, '\\');
+        name = name ? name + 1 : path;
+        std::snprintf(out, size, "%s+0x%llx", name,
+            static_cast<unsigned long long>(address - reinterpret_cast<std::uintptr_t>(module)));
+        return;
+    }
+#elif defined(__unix__) || defined(__APPLE__)
+    Dl_info info {};
+    if (dladdr(reinterpret_cast<void *>(address), &info) && info.dli_fname && info.dli_fbase) {
+        const char *name = std::strrchr(info.dli_fname, '/');
+        name = name ? name + 1 : info.dli_fname;
+        std::snprintf(out, size, "%s+0x%llx", name,
+            static_cast<unsigned long long>(address - reinterpret_cast<std::uintptr_t>(info.dli_fbase)));
+        return;
+    }
+#endif
+    std::snprintf(out, size, "<hors-module>");
+}
+
 std::string reportTimestamp()
 {
     const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
@@ -126,6 +161,44 @@ std::string writeDesyncReport(std::uint32_t frame, StateFailure failure)
     } else {
         std::fprintf(file, "category=UNKNOWN local_digest=%d remote_digest=%d\n",
             local != nullptr, remote != nullptr);
+    }
+
+    // D30. When the heaps are what differ, the counts alone are a dead end:
+    // they say seven blocks too many and never who asked for them. So list
+    // every live block with the caller the allocator already records.
+    //
+    // Each caller is printed as <module>+0x<offset>, never raw: a return
+    // address is an ASLR address, so two lists of raw addresses would compare
+    // to nothing. Same rule the crash reporter follows for its own faulting
+    // address.
+    // D31. When the RANDOMNESS is what differs, the counts say how many draws
+    // were made and never which code made them - the same dead end the heap
+    // counts were. frand and frandmod keep a ring of their recent callers; print
+    // it, oldest first, module-relative for the same ASLR reason as above.
+    if (local && remote
+        && local->parts[static_cast<std::size_t>(Subsystem::Rng)]
+            != remote->parts[static_cast<std::size_t>(Subsystem::Rng)]) {
+        std::fprintf(file, "\n[RNG DRAWS] recent draws, oldest first, caller relative to its module\n");
+        PartyBoard_NetplayRngRingRead([](void *context, std::uint32_t frame,
+                std::uintptr_t caller) {
+            auto *out = static_cast<std::FILE *>(context);
+            char where[128];
+            PartyBoard_DescribeCodeAddress(caller, where, sizeof(where));
+            std::fprintf(out, "RNGDRAW frame=%u caller=%s\n", frame, where);
+        }, file);
+    }
+
+    if (local && remote
+        && local->parts[static_cast<std::size_t>(Subsystem::Heaps)]
+            != remote->parts[static_cast<std::size_t>(Subsystem::Heaps)]) {
+        std::fprintf(file, "\n[HEAP CENSUS] every live block, caller relative to its module\n");
+        PartyBoard_NetplayHeapCensus([](void *context, int heap, std::uint32_t size,
+                std::uint32_t /*num: pointer-derived, never comparable*/, std::uintptr_t caller) {
+            auto *out = static_cast<std::FILE *>(context);
+            char where[128];
+            PartyBoard_DescribeCodeAddress(caller, where, sizeof(where));
+            std::fprintf(out, "HEAPBLOCK heap=%d size=%u caller=%s\n", heap, size, where);
+        }, file);
     }
 
     // Field-level evidence for the failing frame. Both peers emit the same

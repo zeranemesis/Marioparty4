@@ -379,6 +379,18 @@ void BoardPartyConfigSet(s32 team, s32 bonus_star, s32 mg_list, s32 max_turn, s3
     GWSystem.bonus_star = bonus_star;
     GWMGListSet(mg_list);
     GWSystem.max_turn = max_turn;
+#ifdef TARGET_PC
+    {
+        /* Test-only, and identical on both peers because it comes from the
+         * command line. A twenty-turn game runs over two hours, so nothing
+         * had ever reached the final turn, the bonus stars, the results or
+         * the ending. A shorter game exercises all of them. */
+        const int override = PartyBoard_NetplayMaxTurnsOverride();
+        if (override > 0) {
+            GWSystem.max_turn = (u8)override;
+        }
+    }
+#endif
     memset(GWPlayer, 0, 4*sizeof(PlayerState));
     GWPlayer[0].handicap = p1_handicap;
     GWPlayer[1].handicap = p2_handicap;
