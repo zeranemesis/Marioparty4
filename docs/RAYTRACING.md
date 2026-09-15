@@ -1569,3 +1569,86 @@ Au passage, une fausse alerte de ma part : j'ai soupçonné que les grands index
 dépasseraient le plafond de 60 étapes de navigation. C'était faux : le script
 envoie tout le déplacement dans la liste en une étape, et chaque run atteint sa
 scène vers l'étape 38, quel que soit l'index.
+
+## Un vrai test alpha en traversée (15 septembre 2026)
+
+Lot C1 du plan. Jusqu'ici toute la géométrie entrait dans le BLAS marquée
+opaque. Une surface découpée, feuillage, bulle ou grille, bloquait donc les
+rayons selon l'alpha moyen de sa texture : uniformément, sans trou. Seul le
+rayon primaire franchissait ce qui est surtout du vide, par une heuristique.
+
+### Ce qui change
+
+- Les groupes qui contiennent des triangles **découpés et texturés** entrent
+  non opaques dans le BLAS. Tout le reste reste opaque et ne coûte rien de plus.
+- Pour un candidat de ces groupes, le shader lit l'alpha du texel touché dans la
+  vignette 16×16 déjà liée pour les réflexions, aux coordonnées interpolées du
+  triangle.
+- Chaque rayon s'en sert selon ce qu'il cherche :
+  - rayon primaire et réflexion : le texel est la surface s'il atteint 0,5 ;
+  - ombre : la lumière perd, couche après couche, ce que chaque texel couvre ;
+  - occlusion ambiante : le premier texel qui n'est pas un trou (alpha > 0,05),
+    pondéré par son propre alpha.
+- `AURORA_RT_ALPHA_TEST=0` rend l'ancien comportement. Le banc A/B compare les
+  deux sur une même frame avec `-AB "alphaTest=0"`.
+
+### La première version était fausse
+
+Elle faisait un test binaire à 0,5 pour tous les rayons, surfaces translucides
+comprises. Sur m401Dll, en vue d'occlusion brute, 35,9 % des pixels changeaient,
+et toute la partie haute de la scène s'assombrissait.
+
+Ma première hypothèse, les surfaces uniformément translucides, était fausse. Je
+les ai exclues du test, sans effet sur m401Dll : la vue des matériaux et le
+rapport de la capture (« 0 uniformly translucent ») montraient que le fond
+assombri était classé *découpé*. Ses texels dépassent 0,5 sans être opaques, et
+le test binaire le faisait passer d'occultant partiel à occultant total.
+
+D'où la version livrée, où l'ombre et l'occlusion sont pondérées par l'alpha du
+texel. L'exclusion des translucides reste : un voile se mélange, il ne se teste
+pas.
+
+### Vérification
+
+| | |
+|---|---|
+| test nul, w01Dll, `alphaTest=1` | 0 pixel différent sur 1 228 800 |
+| même frame, m416Dll, `alphaTest=0`, occlusion brute | 23,6 % des pixels changent ; luminance moyenne 0,517 sans le test, 0,701 avec |
+
+Le script est tombé sur m416Dll et non sur m401Dll : le mini-jeu atteint varie
+d'un run à l'autre. Sur m416Dll, un calque posé au-dessus du sol et classé
+découpé (11 draws découpés sur 368) occultait tout le sol. Avec le test, sa
+partie transparente laisse passer l'occlusion. Le trou apparaît en marches
+d'escalier, parce que la vignette ne fait que 16×16.
+
+### Coût
+
+Mesuré sur la même build, test allumé puis coupé (`AURORA_RT_ALPHA_TEST=0`), avec
+`-FrameStats -Uncapped`. Les deux runs suivent les mêmes menus au même rythme :
+leurs rapports se correspondent un à un, et seuls comptent ceux qui suivent le
+chargement de la scène. Coupé, le test laisse les drapeaux non opaques du BLAS en
+place : l'écart mesure le travail du shader sur les candidats, pas la structure.
+
+| scène, rapports après chargement | tracé GPU, test coupé | tracé GPU, test allumé | écart par rapport |
+|---|---|---|---|
+| w01Dll, 6 rapports (14 à 34 k triangles) | 0,67 à 2,07 ms | 0,72 à 2,42 ms | +0,01 à +0,35 ms |
+| m401Dll, 5 rapports (26 à 29 k triangles) | 0,95 à 1,22 ms | 0,83 à 1,76 ms | −0,12 à +0,63 ms |
+
+Sur m401Dll, deux rapports sur cinq coûtent 0,5 à 0,6 ms de plus, les autres
+rien. Le quatrième compare deux frames différentes, 29 k triangles contre 26 k.
+
+La période de frame bouge moins qu'elle ne varie d'un rapport à l'autre d'un
+même run. Moyennes médianes : 6,25 ms coupé et 6,35 ms allumé sur le plateau,
+6,65 et 7,12 ms sur m401Dll. Ces runs sont courts, avec cinq ou six rapports en
+scène, dont deux ou trois de période.
+
+### Ce qui reste
+
+- **La version pondérée n'a pas été revérifiée sur m401Dll**, là où la première
+  version assombrissait le fond.
+- **Les rectangles des bulles de m401Dll restent.** Les bulles et le corail sont
+  bien classés découpés, mais leur alpha est lu au mauvais endroit. La capture
+  lit la vignette de l'unité de texture 0 aux coordonnées TEX0 brutes, sans les
+  matrices de texture avec lesquelles une planche de sprites choisit son image.
+  C'est le lot suivant, C1b.
+- Une vignette 16×16 résout un disque de bulle, pas un grillage.

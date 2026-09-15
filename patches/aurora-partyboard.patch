@@ -1311,10 +1311,10 @@ index 7ec451d..4eb8f1c 100644
  enum class DrawKind : uint32_t {
 diff --git a/lib/rt/rt_accel.cpp b/lib/rt/rt_accel.cpp
 new file mode 100644
-index 0000000..6859eeb
+index 0000000..04e886b
 --- /dev/null
 +++ b/lib/rt/rt_accel.cpp
-@@ -0,0 +1,664 @@
+@@ -0,0 +1,680 @@
 +#include "rt_accel.hpp"
 +
 +#include "rt_device.hpp"
@@ -1721,9 +1721,25 @@ index 0000000..6859eeb
 +    D3D12_RAYTRACING_GEOMETRY_DESC& geometry = g_geometries[i];
 +    geometry = {};
 +    geometry.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-+    // Opaque so inline RayQuery resolves without candidate handling.
-+    // Alpha-tested GX surfaces are traced as solid: measured at 0.31% of pixels.
-+    geometry.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
++    // Opaque unless the group holds textured cut-out triangles -- surfaces with
++    // holes. Those are left for the shader's candidate loop, which tests them
++    // against their texture's alpha; everything else resolves without
++    // candidates. This used to be opaque for all, with a note that alpha-tested
++    // surfaces were 0.31% of pixels -- they are 6 to 35% of draws in the
++    // mini-games swept since.
++    //
++    // Holes only, not haze. A uniformly translucent surface is blended, not
++    // tested: a texel at 0.6 alpha lets 40% through. The first version tested
++    // those too, and on m401Dll the water surface and the shafts of light went
++    // from partial to total occluders, darkening the whole upper scene. They
++    // keep their whole-texture weight, as before.
++    bool holedTextured = false;
++    for (uint32_t t = 0; t < groups[i].triangleCount && !holedTextured; ++t) {
++      const uint32_t m = materials[groups[i].firstTriangle + t];
++      holedTextured = (m & MaterialCutout) != 0u && ((m >> MaterialThumbnailShift) & 0xffffu) != 0u;
++    }
++    geometry.Flags = holedTextured ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE
++                                   : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
 +    geometry.Triangles.VertexBuffer.StartAddress =
 +        vertexBase + static_cast<uint64_t>(groups[i].firstTriangle) * 3 * 3 * sizeof(float);
 +    geometry.Triangles.VertexBuffer.StrideInBytes = 3 * sizeof(float);
@@ -2090,10 +2106,10 @@ index 0000000..d901137
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_capture.cpp b/lib/rt/rt_capture.cpp
 new file mode 100644
-index 0000000..ead0d25
+index 0000000..25397ef
 --- /dev/null
 +++ b/lib/rt/rt_capture.cpp
-@@ -0,0 +1,2014 @@
+@@ -0,0 +1,2026 @@
 +#include "rt_capture.hpp"
 +
 +#include "rt_accel.hpp"
@@ -2189,6 +2205,11 @@ index 0000000..ead0d25
 +double g_abValue = 0.0;
 +// Set once the test script signals that the scene it drove to is up.
 +bool g_abArmed = false;
++// Alpha testing of see-through candidates in the trace. On by default;
++// AURORA_RT_ALPHA_TEST=0 turns it off, and the A/B bench can compare the two on
++// one frame with AURORA_RT_AB=alphaTest=0. Kept apart from g_features, which
++// set_features rebuilds from the three settings and would clear.
++bool g_alphaTest = true;
 +bool g_armed = false;
 +// Every call that reaches the hook, before any filtering: separates "the"
 +// geometry was rejected" from "the geometry never arrived".
@@ -3542,10 +3563,14 @@ index 0000000..ead0d25
 +      g_dumpFrame = std::atoi(env);
 +      Log.info("Geometry capture armed for frame {}", g_dumpFrame);
 +    }
++    if (const char* env = std::getenv("AURORA_RT_ALPHA_TEST")) {
++      g_alphaTest = env[0] != '0';
++      Log.info("Alpha testing of see-through surfaces {}", g_alphaTest ? "on" : "off");
++    }
 +    if (const char* env = std::getenv("AURORA_RT_AB")) {
 +      static constexpr const char* kAbNames[] = {"aoSamples", "shadowSamples", "lightRadius",
 +                                                 "aoRadius",  "bounce",        "denoisePhi",
-+                                                 "denoisePasses", "debugMode"};
++                                                 "denoisePasses", "debugMode", "alphaTest"};
 +      bool known = false;
 +      if (const char* eq = std::strchr(env, '='); eq != nullptr) {
 +        const std::string name(env, eq);
@@ -3562,7 +3587,7 @@ index 0000000..ead0d25
 +                 "(needs AURORA_RT_DUMP_FRAME or AURORA_RT_DUMP_MIN_TRIS)", g_abName, g_abValue);
 +      } else {
 +        Log.warn("AURORA_RT_AB ignored: expected name=value, name one of aoSamples, shadowSamples, "
-+                 "lightRadius, aoRadius, bounce, denoisePhi, denoisePasses, debugMode");
++                 "lightRadius, aoRadius, bounce, denoisePhi, denoisePasses, debugMode, alphaTest");
 +      }
 +    }
 +    // Frame numbers are a poor handle: the counter runs uncapped through boot,
@@ -3932,7 +3957,7 @@ index 0000000..ead0d25
 +  params.aoRadius = aoRadius;
 +  params.aoSamples = g_samples;
 +  params.shadowSamples = g_shadowSamples;
-+  params.features = g_features;
++  params.features = g_features | (g_alphaTest ? trace::FeatureAlphaTest : 0u);
 +  params.reflectionRange = shadowRange; // the scene's own size bounds both
 +  params.debugMode = g_debugMode;
 +  if (g_maskEnabled) {
@@ -3972,6 +3997,9 @@ index 0000000..ead0d25
 +      probe.denoisePasses = static_cast<int32_t>(value);
 +    } else if (g_abName == "debugMode") {
 +      probe.debugMode = static_cast<uint32_t>(value);
++    } else if (g_abName == "alphaTest") {
++      probe.features = value != 0.0 ? (probe.features | trace::FeatureAlphaTest)
++                                    : (probe.features & ~static_cast<uint32_t>(trace::FeatureAlphaTest));
 +    }
 +    if (!trace::run(probe, "rt_ab_b.pfm")) {
 +      Log.error("A/B bench: the B trace failed");
@@ -5946,10 +5974,10 @@ index 0000000..8499f29
 +} // namespace aurora::rt::trace
 diff --git a/lib/rt/rt_trace.hpp b/lib/rt/rt_trace.hpp
 new file mode 100644
-index 0000000..2cfe986
+index 0000000..9063baf
 --- /dev/null
 +++ b/lib/rt/rt_trace.hpp
-@@ -0,0 +1,121 @@
+@@ -0,0 +1,125 @@
 +#pragma once
 +
 +#include <cstdint>
@@ -5983,6 +6011,10 @@ index 0000000..2cfe986
 +  FeatureShadows = 1u << 1,
 +  // Only surfaces the game itself environment maps are traced; see MaterialFlag.
 +  FeatureReflections = 1u << 2,
++  // Test see-through candidates against their texture's alpha instead of
++  // counting them whole. Off, every candidate counts, which is how the geometry
++  // behaved while it was flagged opaque -- the A/B bench compares the two.
++  FeatureAlphaTest = 1u << 3,
 +};
 +
 +struct TraceParams {
@@ -6073,10 +6105,10 @@ index 0000000..2cfe986
 +} // namespace aurora::rt::trace
 diff --git a/lib/rt/shaders/rt_ao.hlsl b/lib/rt/shaders/rt_ao.hlsl
 new file mode 100644
-index 0000000..c551771
+index 0000000..e2c7764
 --- /dev/null
 +++ b/lib/rt/shaders/rt_ao.hlsl
-@@ -0,0 +1,665 @@
+@@ -0,0 +1,763 @@
 +// Ray traced ambient occlusion for PartyBoard.
 +//
 +// Primary visibility is traced rather than rasterised: with inline RayQuery the
@@ -6110,7 +6142,11 @@ index 0000000..c551771
 +// Saying so at compile time is what makes a single Proceed() provably correct
 +// rather than correct by accident, and it lets the compiler take the specialised
 +// path. See docs/RAYTRACING_AUDIT.md section 4.
-+#define TRAVERSAL_FLAGS (RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES)
++// No RAY_FLAG_FORCE_OPAQUE: geometry the capture marks as textured and
++// see-through is non-opaque in the acceleration structures, and every query
++// below walks its candidates to alpha test them. Opaque geometry still resolves
++// without candidates, through its own geometry flag.
++#define TRAVERSAL_FLAGS (RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES)
 +
 +RaytracingAccelerationStructure gScene : register(t0);
 +StructuredBuffer<float3> gVertices : register(t1); // 3 consecutive per triangle
@@ -6203,6 +6239,7 @@ index 0000000..c551771
 +#define FEATURE_AO 1u
 +#define FEATURE_SHADOWS 2u
 +#define FEATURE_REFLECTIONS 4u
++#define FEATURE_ALPHA_TEST 8u
 +
 +// How much of a reflective surface the traced reflection replaces. The game
 +// already draws its own environment map, so this stays well short of a mirror:
@@ -6275,6 +6312,60 @@ index 0000000..c551771
 +    return 1.0f;
 +  }
 +  return float((material >> MATERIAL_OPACITY_SHIFT) & MATERIAL_OPACITY_MASK) * (1.0f / 255.0f);
++}
++
++bool has_thumbnail(uint material) {
++  const uint index = (material >> MATERIAL_THUMBNAIL_SHIFT) & MATERIAL_THUMBNAIL_MASK;
++  return index != 0u && index < gThumbnailCount;
++}
++
++// A texel this transparent is a hole: the ray goes straight through.
++#define HOLE_ALPHA 0.05f
++
++// The alpha of a textured cut-out candidate where the ray crosses it, from its
++// 16x16 thumbnail -- coarse, but the texture deciding rather than a
++// whole-texture average. 1 for everything this does not apply to: the feature
++// off, a surface without holes, or no thumbnail to read. With the feature off
++// every candidate is therefore solid, exactly how the geometry behaved while it
++// was flagged opaque, which is what lets the A/B bench compare the two.
++float candidate_alpha(uint prim, float2 bary) {
++  if ((gFeatures & FEATURE_ALPHA_TEST) == 0u) {
++    return 1.0f;
++  }
++  const uint material = gMaterials[prim];
++  // Holes only: a uniformly translucent surface keeps its whole-texture weight.
++  if ((material & MATERIAL_CUTOUT) == 0u || !has_thumbnail(material)) {
++    return 1.0f;
++  }
++  const uint index = (material >> MATERIAL_THUMBNAIL_SHIFT) & MATERIAL_THUMBNAIL_MASK;
++  const float3 uv = gTexcoords[prim * 3u + 0u] * (1.0f - bary.x - bary.y) +
++                    gTexcoords[prim * 3u + 1u] * bary.x + gTexcoords[prim * 3u + 2u] * bary.y;
++  const float2 wrapped = frac(frac(uv.xy) + 1.0f);
++  const uint tx = min(uint(wrapped.x * float(THUMBNAIL_EDGE)), THUMBNAIL_EDGE - 1u);
++  const uint ty = min(uint(wrapped.y * float(THUMBNAIL_EDGE)), THUMBNAIL_EDGE - 1u);
++  const uint packed = gThumbnails[index * THUMBNAIL_EDGE * THUMBNAIL_EDGE + ty * THUMBNAIL_EDGE + tx];
++  return float((packed >> 24u) & 0xffu) * (1.0f / 255.0f);
++}
++
++// For the rays that pick a surface -- the primary and the reflection -- a
++// texel is the surface or it is not, and half is where the game's own alpha
++// compare usually draws that line.
++bool candidate_is_solid(uint prim, float2 bary) {
++  return candidate_alpha(prim, bary) >= 0.5f;
++}
++
++// How much a committed hit occludes. A textured cut-out blocks what its texel
++// covers. That was 1 for anything past 0.5 in the first version, and a
++// backdrop on m401Dll classified cut-out, with its texels above 0.5 without
++// being opaque, went from partial to total and darkened the whole upper scene.
++// Everything else keeps its whole-texture average, as before.
++float committed_opacity(uint prim, float2 bary) {
++  const uint material = gMaterials[prim];
++  if ((gFeatures & FEATURE_ALPHA_TEST) != 0u && (material & MATERIAL_CUTOUT) != 0u &&
++      has_thumbnail(material)) {
++    return candidate_alpha(prim, bary);
++  }
++  return hit_opacity(material);
 +}
 +
 +// Interleaved gradient noise (Jimenez, 2014). A plain hash scatters samples
@@ -6390,7 +6481,12 @@ index 0000000..c551771
 +    RayDesc stepRay = ray;
 +    stepRay.TMin = primaryFrom;
 +    primary.TraceRayInline(gScene, RAY_FLAG_NONE, 0xFF, stepRay);
-+    primary.Proceed();
++    [loop] while (primary.Proceed()) {
++      if (candidate_is_solid(primary.CandidateInstanceID() + primary.CandidatePrimitiveIndex(),
++                             primary.CandidateTriangleBarycentrics())) {
++        primary.CommitNonOpaqueTriangleHit();
++      }
++    }
 +    if (primary.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
 +      break;
 +    }
@@ -6398,7 +6494,12 @@ index 0000000..c551771
 +    const uint hitMaterial = gMaterials[hitPrim];
 +    // Uniformly translucent surfaces go the same way: a shaft of light or a
 +    // pane of glass is drawn over the scene, not in place of it.
-+    const bool seeThrough = hit_opacity(hitMaterial) < PRIMARY_OPACITY_FLOOR;
++    // A hit the alpha test accepted was solid at that point and is the surface.
++    // Only see-through surfaces the test cannot read -- no thumbnail, or the
++    // feature off -- still go by their whole-texture average.
++    const bool alphaTested = (gFeatures & FEATURE_ALPHA_TEST) != 0u &&
++                             (hitMaterial & MATERIAL_CUTOUT) != 0u && has_thumbnail(hitMaterial);
++    const bool seeThrough = !alphaTested && hit_opacity(hitMaterial) < PRIMARY_OPACITY_FLOOR;
 +    if (!seeThrough) {
 +      break;
 +    }
@@ -6538,10 +6639,26 @@ index 0000000..c551771
 +
 +        RayQuery<TRAVERSAL_FLAGS | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> occluder;
 +        occluder.TraceRayInline(gScene, RAY_FLAG_NONE, 0xFF, shadowRay);
-+        occluder.Proceed();
++        // Light through textured cut-outs loses what each texel covers, layer
++        // by layer. The product does not depend on the order the traversal
++        // meets the layers in, and an opaque blocker still ends the search and
++        // blocks as before. With the feature off every candidate is committed,
++        // the old behaviour exactly.
++        float transmittance = 1.0f;
++        [loop] while (occluder.Proceed()) {
++          if ((gFeatures & FEATURE_ALPHA_TEST) == 0u) {
++            occluder.CommitNonOpaqueTriangleHit();
++          } else {
++            transmittance *= 1.0f - candidate_alpha(occluder.CandidateInstanceID() +
++                                                        occluder.CandidatePrimitiveIndex(),
++                                                    occluder.CandidateTriangleBarycentrics());
++          }
++        }
 +        if (occluder.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
 +          const uint occPrim = occluder.CommittedInstanceID() + occluder.CommittedPrimitiveIndex();
 +          blocked += hit_opacity(gMaterials[occPrim]);
++        } else {
++          blocked += 1.0f - transmittance;
 +        }
 +      }
 +
@@ -6570,12 +6687,20 @@ index 0000000..c551771
 +
 +    RayQuery<TRAVERSAL_FLAGS> aoQuery;
 +    aoQuery.TraceRayInline(gScene, RAY_FLAG_NONE, 0xFF, aoRay);
-+    aoQuery.Proceed();
++    [loop] while (aoQuery.Proceed()) {
++      // The nearest texel that is not a hole, weighed by its own alpha below
++      // rather than counted whole.
++      if (candidate_alpha(aoQuery.CandidateInstanceID() + aoQuery.CandidatePrimitiveIndex(),
++                          aoQuery.CandidateTriangleBarycentrics()) > HOLE_ALPHA) {
++        aoQuery.CommitNonOpaqueTriangleHit();
++      }
++    }
 +    if (aoQuery.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
 +      const float t = aoQuery.CommittedRayT() / max(gRayLength, 1e-4f);
 +      const float falloff = 1.0f - t;
 +      const uint hitPrim0 = aoQuery.CommittedInstanceID() + aoQuery.CommittedPrimitiveIndex();
-+      const float weight = falloff * falloff * hit_opacity(gMaterials[hitPrim0]);
++      const float weight =
++          falloff * falloff * committed_opacity(hitPrim0, aoQuery.CommittedTriangleBarycentrics());
 +      occlusion += weight;
 +
 +      // What the ray landed on, interpolated across the triangle: this is the
@@ -6618,7 +6743,12 @@ index 0000000..c551771
 +
 +    RayQuery<TRAVERSAL_FLAGS> reflQuery;
 +    reflQuery.TraceRayInline(gScene, RAY_FLAG_NONE, 0xFF, reflRay);
-+    reflQuery.Proceed();
++    [loop] while (reflQuery.Proceed()) {
++      if (candidate_is_solid(reflQuery.CandidateInstanceID() + reflQuery.CandidatePrimitiveIndex(),
++                             reflQuery.CandidateTriangleBarycentrics())) {
++        reflQuery.CommitNonOpaqueTriangleHit();
++      }
++    }
 +    if (reflQuery.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
 +      const uint rp = reflQuery.CommittedInstanceID() + reflQuery.CommittedPrimitiveIndex();
 +      const float2 rb = reflQuery.CommittedTriangleBarycentrics();
