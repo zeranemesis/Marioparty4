@@ -55,6 +55,10 @@ param(
     # measure_raytracing_sequence.ps1. What the A/B pair cannot show: it holds
     # the accumulation off. Not together with -AB.
     [int]$Sequence = 0,
+    # One exact scene, such as m401Dll: any other attempt fails and is retried.
+    # Two sequences only compare on the same scene; the target alone accepts any
+    # board or any mini-game.
+    [string]$Scene = '',
     # End-to-end frame period, as a distribution the game logs every 600
     # frames (AURORA_FRAME_STATS). Meaningless under vsync: pair it with
     # -Uncapped, which turns vsync off and asks for 240 FPS -- the ceiling the
@@ -275,7 +279,9 @@ function Invoke-Run {
             # turn now and then, and a mini-game run that landed on w01Dll was
             # once measured and passed as though it were the mini-game.
             $scene = $overlay
-            $reached = $overlay -match $(if ($Target -eq 'minigame') { '^m\d' } else { '^w\d' })
+            $wanted = if ($Scene) { '^' + [regex]::Escape($Scene) }
+                      elseif ($Target -eq 'minigame') { '^m\d' } else { '^w\d' }
+            $reached = $overlay -match $wanted
             break
         }
 
