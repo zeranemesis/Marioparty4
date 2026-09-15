@@ -259,7 +259,14 @@ function Invoke-Run {
             Start-Sleep -Seconds 3
         }
         $banner = Save-Frame $window ('step{0:d3}_{1}' -f $step, ($overlay -replace '\.dll', ''))
-        if ($overlay -match '^w\d' -or $overlay -match '^m\d') { $reached = $true; $scene = $overlay; break }
+        if ($overlay -match '^w\d' -or $overlay -match '^m\d') {
+            # Only the kind of scene asked for counts. The menus take a wrong
+            # turn now and then, and a mini-game run that landed on w01Dll was
+            # once measured and passed as though it were the mini-game.
+            $scene = $overlay
+            $reached = $overlay -match $(if ($Target -eq 'minigame') { '^m\d' } else { '^w\d' })
+            break
+        }
 
         if ($overlay -match 'boot') { Send-Pad $START }
         elseif ($overlay -match 'modesel') {
@@ -320,7 +327,8 @@ function Invoke-Run {
     if (-not $died) { $process.CloseMainWindow() | Out-Null; Start-Sleep -Seconds 3 }
     if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
     Remove-Item $channel, (Join-Path $binary 'rt_ab_arm') -ErrorAction SilentlyContinue
-    return @{ Reached = $reached; Scene = $scene; DiedInScene = $died; Reason = 'max steps reached' }
+    $reason = if ($scene -and -not $reached) { "landed on $scene" } else { 'max steps reached' }
+    return @{ Reached = $reached; Scene = $scene; DiedInScene = $died; Reason = $reason }
 }
 
 # The menu sequence is timing sensitive and misses roughly one run in three.
@@ -415,6 +423,9 @@ if ($AB) {
         Write-Host ''
         Write-Host ("  A/B, frame in {0}: {1}" -f $where, ($pairHit.ToString() -replace '^\[INFO \| aurora::rt\] ', ''))
         $abResult = & (Join-Path $PSScriptRoot 'compare_raytracing_ab.ps1') -A (Join-Path $output 'rt_ab_a.pfm') -B (Join-Path $output 'rt_ab_b.pfm')
+        if ($abResult -and $abResult.Uniform) {
+            $failures += "A/B pair written on a uniform frame in ${where}: nothing was hit, so the comparison proves nothing"
+        }
     } else {
         $failures += "A/B pair requested ($AB) but not written after the scene was reached"
     }

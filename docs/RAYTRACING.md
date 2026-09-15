@@ -1809,3 +1809,31 @@ défaut est corrigé au lot suivant.
   les générateurs affines des sprites, approchée pour une projection.
 - Sur une surface ajourée à plusieurs cartes, les réflexions lisent la couleur de
   la carte de couverture.
+
+## Deux façons dont les tests passaient sans rien prouver (15 septembre 2026)
+
+Les deux sont apparues pendant la validation de C1b.
+
+- **La scène atteinte n'était pas vérifiée.** `tools/test_raytracing.ps1` prenait
+  n'importe quel plateau ou mini-jeu pour la scène qu'il cherchait. Le run de coût
+  « mini-jeu » de C1b a atterri sur w01Dll, l'a mesuré, et a affiché PASS. La
+  cible compte désormais : `^m\d` pour `-Target minigame`, `^w\d` pour
+  `-Target board`. Une autre scène fait échouer la tentative en la nommant, et le
+  script réessaie.
+- **Une paire A/B pouvait tomber sur une frame vide.** Une paire du plateau est
+  sortie uniformément blanche : aucun rayon primaire ne touchait rien, zéro pixel
+  différent. Un test nul sur une telle frame passe par construction.
+  `tools/compare_raytracing_ab.ps1` signale maintenant une paire uniforme, et le
+  script de test échoue dessus.
+
+Vérifié :
+
+- le comparateur sur cette paire uniforme réelle : avertissement, `Uniform = True` ;
+- le comparateur sur une paire normale : sortie inchangée, `Uniform = False` ;
+- l'analyse syntaxique du script ;
+- un test nul sur w01Dll avec les deux changements : scène reconnue comme un
+  plateau, 0 pixel différent sur 1 228 800, sur une vraie frame (766 543 pixels
+  en pénombre), PASS.
+
+Le cas d'une scène du mauvais type n'a pas été reproduit exprès : il dépend d'une
+erreur de navigation que le script ne sait pas provoquer.

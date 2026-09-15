@@ -137,6 +137,14 @@ public static class RtAb {
         maxAbs = max;
         return new long[] { pixels, count };
     }
+
+    // A buffer with a single value everywhere: no primary ray hit anything, or
+    // every pixel was masked. Two of those compare equal and prove nothing.
+    public static bool Uniform(float[] l) {
+        for (int p = 1; p < l.Length; ++p)
+            if (l[p] != l[0]) return false;
+        return true;
+    }
 }
 "@
 
@@ -149,6 +157,7 @@ $w = $mapA.Width
 $h = $mapA.Height
 $lumA = [RtAb]::Luminance($mapA)
 $lumB = [RtAb]::Luminance($mapB)
+$uniform = [RtAb]::Uniform($lumA) -and [RtAb]::Uniform($lumB)
 
 $all = [long]0
 $penumbra = [long]0
@@ -174,6 +183,9 @@ foreach ($row in $rows) {
     Write-Host ("  {0,-18} A {1,9:F5}   B {2,9:F5}   {3,8:F2} %" -f $row.mesure, $row.A, $row.B, $change)
 }
 Write-Host ("  pixels differents  {0} sur {1}; ecart moyen {2:F6} sur l'image, {3:F5} sur les pixels differents, maximal {4:F5}" -f $diff[0], $diff[1], $meanAbs, $meanDiffering, $maxAbs)
+if ($uniform) {
+    Write-Host "  ATTENTION : A et B sont uniformes, aucun rayon n'a rien touche. Cette paire ne prouve rien."
+}
 
 [pscustomobject]@{
     Width = $w; Height = $h; PenumbraPixels = $penumbra
@@ -184,4 +196,5 @@ Write-Host ("  pixels differents  {0} sur {1}; ecart moyen {2:F6} sur l'image, {
     DifferingPixels = $diff[0]; Pixels = $diff[1]
     MeanAbsDifference = $meanAbs; MeanAbsDifferenceOverDiffering = $meanDiffering
     MaxAbsDifference = $maxAbs
+    Uniform = $uniform
 }
