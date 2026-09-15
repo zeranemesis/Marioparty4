@@ -56,7 +56,7 @@ int main(int argc, char *argv[])
         // this replaced stopped at the first failure, so one broken component
         // hid an unknown number of others behind it - and a component became
         // silently untested the day anything before it started failing. A
-        // release gate that cannot say which of its eight checks ran is not a
+        // release gate that cannot say which of its nine checks ran is not a
         // gate.
         int total = 0;
         int failed = 0;
@@ -74,6 +74,7 @@ int main(int argc, char *argv[])
         check("audio-lifetime", PartyBoard_AudioLifetimeRunSelfTest());
         check("crash-manifest", PartyBoard_CrashManifestRunSelfTest());
         check("crash-uploader", PartyBoard_CrashUploaderRunSelfTest());
+        check("mod-overlay", PartyBoard_ModsRunSelfTest());
         std::printf("SELFTEST total=%d failed=%d\n", total, failed);
         std::fflush(stdout);
         return failed == 0 ? 0 : 1;

@@ -114,10 +114,10 @@ jobs:
       - name: Engine self-tests
         shell: pwsh
         # The launcher self-test was, until now, the only thing between a build
-        # and a public download. The engine carries eight self-tests of its own -
+        # and a public download. The engine carries nine self-tests of its own -
         # rollback, transport, netplay runtime, crash reporter, heap detector,
-        # audio lifetime, crash manifest, crash uploader - and none of them ran
-        # here. They need no disc and no network.
+        # audio lifetime, crash manifest, crash uploader, CubeShelf mod overlay -
+        # and none of them ran here. They need no disc and no network.
         run: |
           $ErrorActionPreference = "Stop"
           $log = & "build/install/partyboard.exe" "--netplay-self-test" 2>&1
@@ -136,8 +136,8 @@ jobs:
 
           # A gate that cannot say how many checks ran is not a gate: if a
           # component is ever removed from the chain this step has to notice.
-          if ($total -ne 8) {
-            throw "Expected 8 engine self-tests, the binary ran $total."
+          if ($total -ne 9) {
+            throw "Expected 9 engine self-tests, the binary ran $total."
           }
           if ($failed -ne 0 -or $code -ne 0) {
             throw "$failed of $total engine self-tests failed (exit code $code)."
