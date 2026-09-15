@@ -1998,3 +1998,117 @@ une décision.
 - Seul le mélange additif est reconnu. Les couches soustractives (`GX_BM_SUBTRACT`)
   et multiplicatives assombrissent l'image sans être solides, et restent tracées.
 - La décision se prend par draw, sur l'état de mélange au moment de la capture.
+
+## Une vraie passe temporelle : cadrage par le voisinage, variance accumulée (15 septembre 2026)
+
+Lots C2 et C3 du plan. L'accumulation mélangeait chaque frame à son historique
+avec un poids fixe, dans la passe de tracé elle-même. Or cette passe calcule chaque
+pixel sans voir ses voisins, d'où deux défauts :
+
+- **rien ne bornait un historique périmé.** Une ombre qui s'est déplacée, un objet
+  parti : la seule garde était le test de normale et de distance. La borne par
+  pixel essayée le 11 attrapait le bruit d'échantillonnage plutôt que la traînée.
+- **le filtre ne savait pas séparer le bruit d'un bord.** Le filtre à trous
+  pondérait les voisins par la dispersion 3×3 de la frame, qui monte autant sur
+  un vrai bord que sur du grain.
+
+### Ce qui change
+
+Une passe de calcul à part (`rt_temporal.hlsl`) s'insère entre le tracé et le
+filtre :
+
+- **cadrage** (Salvi, 2016) : l'historique est ramené dans la boîte des voisins
+  3×3 de la frame courante, à ± 2 écarts types (`AURORA_RT_CLAMP_SIGMA`) ;
+- **longueur d'historique** : moyenne vraie tant que l'historique est court, puis
+  le poids fixe. Un pixel neuf se pose en quelques frames au lieu de porter vingt
+  frames sa première estimation bruitée ;
+- **variance** (Schied et al., SVGF, 2017) : deux moments de luminance accumulés
+  donnent une variance temporelle. Un pixel à l'historique trop court prend la
+  variance spatiale de son voisinage ;
+- **filtre** : il lit cette variance, préfiltrée en 3×3, à la place de sa
+  dispersion, et la propage d'une passe à l'autre avec le carré de ses poids.
+
+La passe de tracé n'écrit plus que l'estimation de la frame. La passe temporelle
+écrit le résultat accumulé dans la texture que le filtre reprend et que Dawn
+importe, avec la variance dans l'alpha. Deux réglages permettent de comparer :
+
+- `AURORA_RT_CLAMP_SIGMA` règle la largeur du cadrage ; 0 le coupe ;
+- `AURORA_RT_VARIANCE=0` rend au filtre sa dispersion 3×3.
+
+### Vérifié
+
+- **Test nul A/B** sur w01Dll : 0 pixel différent. Le banc trace une seule frame,
+  sans historique ; la passe temporelle ne doit rien y changer.
+- **Tous les runs passent**, plateau et mini-jeu, sans erreur de tracé.
+- **Vue de l'historique** (`AURORA_RT_DEBUG_MODE=11`) sur m416Dll, dernière de
+  quatre frames : 72,4 % des pixels acceptés, 0,1 % refusés par la normale, 0,0 %
+  par la distance, 27,4 % noirs. Le noir ne veut pas dire « pas d'historique »
+  seulement : dans les vues de débogage, le tracé écrit du noir là où le rayon
+  primaire ne touche rien. Ici, ce sont les parties du sol de la salle faites
+  d'une couche additive, que C1c laisse de côté.
+- **Coût**, rapport par rapport après chargement de la scène (tracé, passe
+  temporelle et filtre compris) :
+  - w01Dll : de −0,11 à +0,40 ms, les deux écarts forts sur les rapports du
+    début ;
+  - m401Dll : de +0,05 à +0,50 ms.
+
+### Une première comparaison ratée
+
+La référence de l'étape 3 ne se comparait pas à ces séquences, pour trois raisons :
+
+- la séquence du plateau a démarré six secondes plus tard, en plein survol de la
+  caméra ;
+- celle du mini-jeu est tombée sur m416Dll, et non sur m401Dll ;
+- la référence précède C1c, qui a retiré les rayons de lumière de m401Dll.
+
+Les écarts mesurés — plus de variation sur le plateau, bien moins sur le
+mini-jeu — ne disent donc rien de la passe temporelle.
+
+D'où deux changements pour mesurer :
+
+- `test_raytracing.ps1 -Scene` exige une scène précise et réessaie sinon ;
+- la mesure se fait sur un seul build, sur m401Dll, dont la caméra ne bouge pas,
+  en coupant tour à tour le cadrage (`AURORA_RT_CLAMP_SIGMA=0`) et la variance
+  (`AURORA_RT_VARIANCE=0`).
+
+### Mesuré, sur une scène et un build
+
+m401Dll, douze frames depuis l'armement du banc, dans un masque de pénombre
+commun aux cinq runs (72,5 % des pixels). La « pénombre calme » garde en plus les
+pixels sans saut de plus de 0,05 d'une frame à l'autre dans les cinq runs, soit
+59,5 % de l'image.
+
+| réglage | écart type temporel : moyenne (p90) | pénombre calme : médiane | grain | netteté |
+|---|---|---|---|---|
+| par défaut | 0,0127 (0,0207) | 0,00055 | 0,0229 | 0,466 |
+| par défaut, second run | 0,0156 (0,0380) | 0,00064 | 0,0220 | 0,458 |
+| sans cadrage | 0,0155 (0,0378) | 0,00033 | 0,0225 | 0,469 |
+| sans variance | 0,0148 (0,0354) | 0,00039 | 0,0218 | 0,460 |
+| ni l'un ni l'autre | 0,0134 (0,0255) | 0,00064 | 0,0221 | 0,463 |
+
+Le run sans variance a démarré à la frame 8100, les autres entre 6360 et 6420.
+
+**Aucun effet mesurable.** Les deux runs du même réglage diffèrent de 23 % en
+moyenne et de 83 % au 90e centile, plus que les réglages entre eux.
+
+Les cartes d'écart type montrent pourquoi. La variation vient de ce qui bouge :
+personnages, bulles, bords des rochers. Le reste de l'image tient déjà à 0,0005
+près dans tous les réglages. Sur ces pixels calmes, le cadrage ajoute un peu de
+bruit (médiane 0,00055, contre 0,00033 sans), le prix attendu d'un historique
+qu'on empêche de traîner, et il reste invisible.
+
+Ce banc ne mesure donc pas ce que la passe est venue régler : la traînée derrière
+ce qui bouge, et la séparation du grain et des bords. Il faudrait comparer chaque
+frame à une référence convergée, tracée sur la même frame ; l'erreur compterait
+alors bruit et retard ensemble. C'est l'outil à construire avant les vecteurs de
+mouvement (C4).
+
+La passe est gardée pour sa structure : un mélange qui lit les voisins, là où
+viendra la reprojection. Ses réglages permettent de revenir en arrière sans
+rebuild, pour 0,05 à 0,5 ms par rapport.
+
+### Ce que ça ne fait pas
+
+- Pas de vecteurs de mouvement. Un historique ne survit que là où la même surface
+  est au même pixel. Le cadrage empêche une traînée de s'installer ; il ne recolle
+  pas l'historique d'un objet qui bouge. C'est le lot C4.
