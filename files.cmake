@@ -98,6 +98,8 @@ set(PORT_FILES
         src/port/io.cpp
         src/port/iso_validate.cpp
         src/port/mem_diagnostics.cpp
+        src/port/mods.cpp
+        src/port/mods_test.inc
         src/port/netplay_transport.cpp
         src/port/netplay_runtime.cpp
         src/port/OS.c

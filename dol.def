@@ -58,6 +58,7 @@ EXPORTS
     PartyBoard_MemDiagCorruptionDetected
     PartyBoard_MemDiagLastGoodFrame
     PartyBoard_MemDiagFirstBadFrame
+    PartyBoard_ModsRunSelfTest
     BoardArcCos
     BoardArcSin
     BoardAudFXPlay
