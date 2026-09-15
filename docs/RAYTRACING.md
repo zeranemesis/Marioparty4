@@ -1461,3 +1461,39 @@ propre mesure.
 Au passage : un balayage de vérification s'est bloqué une fois à 12 images par
 seconde sur le dialogue du mode Mini-jeux, sans cause trouvée (coût de tracé
 normal, aucune seconde instance du jeu) ; il ne s'est pas reproduit.
+
+## Un banc A/B sur une même frame (15 septembre 2026)
+
+Toutes les comparaisons de réglages de ce projet opposaient deux exécutions
+scriptées, qui ne tombent jamais sur la même image. Quand l'effet était large,
+ça tenait ; quand il était de l'ordre de la variation d'une image à l'autre, la
+mesure ne concluait pas.
+
+`tools/test_raytracing.ps1 -AB "shadowSamples=4"` fait tracer une frame de la
+scène atteinte deux fois : B d'abord, en trace annexe qui n'avance ni le
+compteur de frames ni la parité des tampons d'historique, puis A, qui reste
+affiché. Les deux sans accumulation et avec le même motif d'échantillonnage ;
+les tampons sont comparés en flottants bruts par
+`tools/compare_raytracing_ab.ps1`. Réglables : aoSamples, shadowSamples,
+lightRadius, aoRadius, bounce, denoisePhi, denoisePasses, debugMode. Le banc
+compare des estimations d'une frame, pas des réglages d'accumulation.
+
+Validé sur w01Dll :
+
+| test | pixels différents | grain en pénombre |
+|---|---|---|
+| nul : B = A, 12 rayons d'ombre | 0 sur 1 228 800 | 0,02492 → 0,02492 |
+| réponse connue : 4 rayons contre 12, tampon brut | 242 628 | 0,03937 → 0,05787 (+47 %) |
+
+Deux leçons en chemin. Le premier déclencheur, un seuil de triangles, a écrit
+sa paire sur la séquence titre — 53 512 triangles, plus qu'aucun plateau — : la
+paire est maintenant armée par un fichier que le script crée une fois la scène
+atteinte. Et sur cette image titre, débruiteur actif, 4 rayons contre 12 ne
+déplaçaient le grain de l'image entière que de 0,03 % : le filtre lisse la
+différence et les zones plates noient le reste. D'où le grain mesuré sur la
+seule pénombre, et le tampon brut quand c'est l'échantillonnage qu'on mesure.
+La netteté, elle, monte avec le bruit sur un tampon brut (+25 % ici) : ne la
+comparer que sur des tampons débruités.
+
+Au passage, non corrigé : ray tracing actif, `AURORA_RT_DUMP_FRAME=N` vide dès
+la première frame et non à la frame N — `wantDump` ne vérifie jamais l'index.

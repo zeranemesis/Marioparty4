@@ -44,7 +44,12 @@ param(
     # Steps of actual play once the scene is up. Loading a board is not playing
     # one: the intro fly-through carries no interface, so the 2D mask is never
     # exercised until a turn starts and the HUD appears.
-    [int]$PlaySteps = 0
+    [int]$PlaySteps = 0,
+    # A/B bench: "name=value" traces one frame of the reached scene twice, B
+    # with that one setting changed, and compares the two buffers pixel for
+    # pixel. The null test -- B set to what A already has -- must find no
+    # differing pixel. See compare_raytracing_ab.ps1.
+    [string]$AB = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -206,6 +211,15 @@ $setup = @(
 function Invoke-Run {
     Remove-Item $channel, $logPath -ErrorAction SilentlyContinue
     $env:AURORA_RT_DEBUG = '1'
+    # A stale pair from an earlier run would compare as though this one had
+    # written it, so it goes before the game starts.
+    Remove-Item (Join-Path $binary 'rt_ab_a.pfm'), (Join-Path $binary 'rt_ab_b.pfm'),
+        (Join-Path $binary 'rt_ab_arm') -ErrorAction SilentlyContinue
+    if ($AB) {
+        $env:AURORA_RT_AB = $AB
+    } else {
+        Remove-Item Env:\AURORA_RT_AB -ErrorAction SilentlyContinue
+    }
     $process = Start-Process -FilePath $exe -WorkingDirectory $binary -PassThru `
         -RedirectStandardOutput $logPath -RedirectStandardError "$logPath.err"
     Start-Sleep -Seconds $BootSeconds
@@ -261,6 +275,13 @@ function Invoke-Run {
 
     if ($reached) {
         Start-Sleep -Seconds 4
+        if ($AB) {
+            # The game polls for this file and traces its A/B pair on the next
+            # frame it sees it. A triangle threshold cannot pick the scene: the
+            # title sequence alone crosses any threshold a board would.
+            New-Item -ItemType File -Path (Join-Path $binary 'rt_ab_arm') -Force | Out-Null
+            Start-Sleep -Seconds 3
+        }
         foreach ($k in 1..$Frames) { Save-Frame $window ('scene{0:d2}' -f $k) | Out-Null; Start-Sleep -Milliseconds 900 }
     }
     if ($reached -and $PlaySteps -gt 0) {
@@ -277,7 +298,7 @@ function Invoke-Run {
     $died = $process.HasExited
     if (-not $died) { $process.CloseMainWindow() | Out-Null; Start-Sleep -Seconds 3 }
     if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
-    Remove-Item $channel -ErrorAction SilentlyContinue
+    Remove-Item $channel, (Join-Path $binary 'rt_ab_arm') -ErrorAction SilentlyContinue
     return @{ Reached = $reached; Scene = $scene; DiedInScene = $died; Reason = 'max steps reached' }
 }
 
@@ -338,6 +359,23 @@ foreach ($line in $compositeLines) {
 Write-Host ("  composition : au plus {0} par rapport de 300 frames, {1} passes eligibles en trop" -f $compositeMax, $compositeExtra)
 
 $failures = @()
+if ($AB) {
+    # Searched in the whole log, not only the scene: the first frame past the
+    # triangle threshold can be a 3D menu, and then that is what was compared.
+    $pairHit = $lines | Select-String -Pattern 'A/B pair written' | Select-Object -Last 1
+    $pairA = Join-Path $binary 'rt_ab_a.pfm'
+    $pairB = Join-Path $binary 'rt_ab_b.pfm'
+    if ($pairHit -and (Test-Path $pairA) -and (Test-Path $pairB)) {
+        $linkBefore = $lines[0..($pairHit.LineNumber - 1)] | Select-String -Pattern 'Link DLL:(\S+)' | Select-Object -Last 1
+        $where = if ($linkBefore) { $linkBefore.Matches[0].Groups[1].Value } else { 'unknown' }
+        Copy-Item $pairA, $pairB -Destination $output -Force
+        Write-Host ''
+        Write-Host ("  A/B, frame in {0}: {1}" -f $where, ($pairHit.ToString() -replace '^\[INFO \| aurora::rt\] ', ''))
+        $abResult = & (Join-Path $PSScriptRoot 'compare_raytracing_ab.ps1') -A (Join-Path $output 'rt_ab_a.pfm') -B (Join-Path $output 'rt_ab_b.pfm')
+    } else {
+        $failures += "A/B pair requested ($AB) but not written after the scene was reached"
+    }
+}
 $errors = ($scene | Select-String -Pattern 'aurora::rt.*ERROR|device removed|DEVICE_HUNG').Count
 if ($errors -gt 0) { $failures += "$errors ray tracing errors" }
 if ($nonFinite -gt 0) { $failures += "$nonFinite reports with non-finite scene bounds" }

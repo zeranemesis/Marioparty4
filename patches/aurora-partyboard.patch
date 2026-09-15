@@ -2009,10 +2009,10 @@ index 0000000..d901137
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_capture.cpp b/lib/rt/rt_capture.cpp
 new file mode 100644
-index 0000000..075aa4f
+index 0000000..ead0d25
 --- /dev/null
 +++ b/lib/rt/rt_capture.cpp
-@@ -0,0 +1,1930 @@
+@@ -0,0 +1,2014 @@
 +#include "rt_capture.hpp"
 +
 +#include "rt_accel.hpp"
@@ -2034,6 +2034,8 @@ index 0000000..075aa4f
 +#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
++#include <filesystem>
++#include <string>
 +#include <string>
 +#include <vector>
 +
@@ -2098,6 +2100,14 @@ index 0000000..075aa4f
 +int32_t g_dumpFrame = -1;    // -1 disables frame-index capture
 +int32_t g_minTriangles = 0;  // >0 enables threshold capture
 +bool g_dumped = false;       // .obj is written once
++// A/B bench. On the dump frame, trace a second setting before the normal one,
++// on the same structures and with the same sampling pattern, and write both
++// buffers as raw floats. Two scripted runs never land on the same frame; this
++// compares two settings on one. AURORA_RT_AB="name=value".
++std::string g_abName;
++double g_abValue = 0.0;
++// Set once the test script signals that the scene it drove to is up.
++bool g_abArmed = false;
 +bool g_armed = false;
 +// Every call that reaches the hook, before any filtering: separates "the"
 +// geometry was rejected" from "the geometry never arrived".
@@ -3451,6 +3461,29 @@ index 0000000..075aa4f
 +      g_dumpFrame = std::atoi(env);
 +      Log.info("Geometry capture armed for frame {}", g_dumpFrame);
 +    }
++    if (const char* env = std::getenv("AURORA_RT_AB")) {
++      static constexpr const char* kAbNames[] = {"aoSamples", "shadowSamples", "lightRadius",
++                                                 "aoRadius",  "bounce",        "denoisePhi",
++                                                 "denoisePasses", "debugMode"};
++      bool known = false;
++      if (const char* eq = std::strchr(env, '='); eq != nullptr) {
++        const std::string name(env, eq);
++        for (const char* candidate : kAbNames) {
++          known = known || name == candidate;
++        }
++        if (known) {
++          g_abName = name;
++          g_abValue = std::atof(eq + 1);
++        }
++      }
++      if (known) {
++        Log.info("A/B bench armed: the dump frame is traced twice, B with {}={} "
++                 "(needs AURORA_RT_DUMP_FRAME or AURORA_RT_DUMP_MIN_TRIS)", g_abName, g_abValue);
++      } else {
++        Log.warn("AURORA_RT_AB ignored: expected name=value, name one of aoSamples, shadowSamples, "
++                 "lightRadius, aoRadius, bounce, denoisePhi, denoisePasses, debugMode");
++      }
++    }
 +    // Frame numbers are a poor handle: the counter runs uncapped through boot,
 +    // so a fixed index lands on a 2D loading screen. This arms every frame and
 +    // dumps the first one carrying real geometry instead.
@@ -3628,8 +3661,22 @@ index 0000000..075aa4f
 +    return;
 +  }
 +
-+  // Debug dump, once, when a threshold or frame index asked for it.
-+  const bool wantDump = !g_dumped && (g_minTriangles > 0 || g_dumpFrame >= 0) &&
++  // A/B bench armed from outside: the test script creates rt_ab_arm in the
++  // working directory once the scene it drove to is up. A triangle threshold
++  // cannot pick that frame -- the title sequence traces 53 512 triangles, more
++  // than any board, and the first pair landed there -- and a frame number
++  // drifts with every menu timing. Polled every 30 frames, and only while a
++  // pair is still wanted.
++  if (!g_abName.empty() && !g_abArmed && !g_dumped && (g_frameIndex % 30u) == 0u) {
++    std::error_code missing;
++    if (std::filesystem::exists("rt_ab_arm", missing)) {
++      g_abArmed = true;
++      Log.info("A/B bench armed by rt_ab_arm at frame {}", g_frameIndex);
++    }
++  }
++
++  // Debug dump, once, when a threshold, a frame index or the A/B bench asked.
++  const bool wantDump = !g_dumped && (g_minTriangles > 0 || g_dumpFrame >= 0 || g_abArmed) &&
 +                        static_cast<int32_t>(g_triangles.size() / 3) >= g_minTriangles;
 +  if (wantDump) {
 +    g_dumped = true;
@@ -3817,13 +3864,50 @@ index 0000000..075aa4f
 +    }
 +    g_maskCoverage = static_cast<double>(covered) / static_cast<double>(g_orthoMask.size());
 +  }
-+  if (!trace::run(params, wantDump ? "rt_ao.bmp" : nullptr)) {
++  // A/B bench: B first, as a side trace that advances nothing, so that A -- the
++  // normal setting -- is what gets displayed and what the history keeps. Both
++  // are single-frame: the same sampling pattern and no accumulation, so the two
++  // buffers differ by the setting and by nothing else. It compares estimates of
++  // one frame, not accumulation settings.
++  const bool abPair = wantDump && !g_abName.empty();
++  if (abPair) {
++    params.singleFrame = true;
++    trace::TraceParams probe = params;
++    probe.advanceState = false;
++    const double value = g_abValue;
++    if (g_abName == "aoSamples") {
++      probe.aoSamples = static_cast<uint32_t>(value);
++    } else if (g_abName == "shadowSamples") {
++      probe.shadowSamples = static_cast<uint32_t>(value);
++    } else if (g_abName == "lightRadius") {
++      probe.lightRadius = static_cast<float>(value);
++    } else if (g_abName == "aoRadius") {
++      probe.aoRadius = static_cast<float>(value);
++    } else if (g_abName == "bounce") {
++      probe.bounceStrength = static_cast<float>(value);
++    } else if (g_abName == "denoisePhi") {
++      probe.luminancePhi = static_cast<float>(value);
++    } else if (g_abName == "denoisePasses") {
++      probe.denoisePasses = static_cast<int32_t>(value);
++    } else if (g_abName == "debugMode") {
++      probe.debugMode = static_cast<uint32_t>(value);
++    }
++    if (!trace::run(probe, "rt_ab_b.pfm")) {
++      Log.error("A/B bench: the B trace failed");
++    }
++    report_device_removal();
++  }
++  if (!trace::run(params, wantDump ? (abPair ? "rt_ab_a.pfm" : "rt_ao.bmp") : nullptr)) {
 +    Log.error("Ray traced AO pass failed");
 +    report_device_removal();
 +    ++g_frameIndex;
 +    return;
 +  }
 +  report_device_removal();
++  if (abPair) {
++    Log.info("A/B pair written: rt_ab_a.pfm and rt_ab_b.pfm, {}x{}, {} triangles, B with {}={}",
++             params.width, params.height, g_triangles.size() / 3, g_abName, g_abValue);
++  }
 +
 +  // The copy bind groups are otherwise built long before this texture exists.
 +  if (interop::ensure_imported()) {
@@ -4684,10 +4768,10 @@ index 0000000..b805129
 +} // namespace aurora::rt::textures
 diff --git a/lib/rt/rt_trace.cpp b/lib/rt/rt_trace.cpp
 new file mode 100644
-index 0000000..fcb6c7e
+index 0000000..8499f29
 --- /dev/null
 +++ b/lib/rt/rt_trace.cpp
-@@ -0,0 +1,1056 @@
+@@ -0,0 +1,1091 @@
 +#include "rt_trace.hpp"
 +
 +#include "rt_accel.hpp"
@@ -5312,6 +5396,25 @@ index 0000000..fcb6c7e
 +  return f;
 +}
 +
++// Portable float map: the readback as it is, three float32 per pixel with no
++// clamp and no 8-bit rounding, for the A/B bench to compare. The negative scale
++// in the header declares little-endian, and rows run bottom-up as the format
++// requires.
++void write_pfm(const char* path, const std::vector<float>& pixels, uint32_t width,
++               uint32_t height) noexcept {
++  FILE* f = std::fopen(path, "wb");
++  if (f == nullptr) {
++    Log.error("Failed to open {} for writing", path);
++    return;
++  }
++  std::fprintf(f, "PF\n%u %u\n-1.0\n", width, height);
++  for (uint32_t y = 0; y < height; ++y) {
++    const size_t base = static_cast<size_t>(height - 1 - y) * width * 3;
++    std::fwrite(pixels.data() + base, sizeof(float), static_cast<size_t>(width) * 3, f);
++  }
++  std::fclose(f);
++}
++
 +// 24-bit BMP: opens natively on Windows, unlike PGM.
 +void write_bmp(const char* path, const std::vector<float>& pixels, uint32_t width,
 +               uint32_t height) noexcept {
@@ -5486,11 +5589,14 @@ index 0000000..fcb6c7e
 +                               params.debugMode == DebugOcclusion;
 +  // The history view needs the accumulation running to have anything to show.
 +  const bool wantsTemporal = filterableDebug || params.debugMode == DebugHistory;
-+  constants.temporalAlpha = wantsTemporal ? g_temporalAlpha : 1.0f;
++  constants.temporalAlpha = (wantsTemporal && !params.singleFrame) ? g_temporalAlpha : 1.0f;
 +  // Held still when nothing is accumulating: a pattern that moves without
-+  // converging is flicker, not detail.
++  // converging is flicker, not detail. It also makes two single-frame traces of
++  // the same frame sample identically, which the A/B bench relies on.
 +  constants.frameIndex = constants.temporalAlpha < 1.0f ? g_frameIndex : 0u;
-+  ++g_frameIndex;
++  if (params.advanceState) {
++    ++g_frameIndex;
++  }
 +  constants.maskCols = maskAddress != 0 ? params.maskCols : 0u;
 +  constants.maskRows = maskAddress != 0 ? params.maskRows : 0u;
 +
@@ -5526,7 +5632,13 @@ index 0000000..fcb6c7e
 +  // apart, so four cheap passes reach as far as a 31x31 filter would. An even
 +  // number of passes is required: the ping-pong has to end back in g_output,
 +  // which is the texture Dawn imports.
-+  if (g_denoisePso && g_denoisePasses > 0 && filterableDebug) {
++  // Rounded up to even like the global setting: the ping-pong has to finish in
++  // the texture Dawn imports.
++  const uint32_t denoisePasses = params.denoisePasses >= 0
++                                     ? static_cast<uint32_t>((params.denoisePasses + 1) & ~1)
++                                     : g_denoisePasses;
++  const float luminancePhi = params.luminancePhi >= 0.f ? params.luminancePhi : g_luminancePhi;
++  if (g_denoisePso && denoisePasses > 0 && filterableDebug) {
 +    const uint32_t stride =
 +        device()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 +    const D3D12_GPU_DESCRIPTOR_HANDLE heapBase = g_uavHeap->GetGPUDescriptorHandleForHeapStart();
@@ -5534,7 +5646,7 @@ index 0000000..fcb6c7e
 +    g_cmdList->SetComputeRootSignature(g_denoiseRootSig.Get());
 +    g_cmdList->SetPipelineState(g_denoisePso.Get());
 +
-+    for (uint32_t pass = 0; pass < g_denoisePasses; ++pass) {
++    for (uint32_t pass = 0; pass < denoisePasses; ++pass) {
 +      // The previous pass writes what this one reads, so the UAV writes have to
 +      // be visible before it starts.
 +      D3D12_RESOURCE_BARRIER uavBarrier{};
@@ -5554,7 +5666,7 @@ index 0000000..fcb6c7e
 +      // is trustworthy here because it comes from the primary ray itself.
 +      dc.normalSharpness = 12.0f;
 +      dc.depthTolerance = 0.04f;
-+      dc.luminancePhi = g_luminancePhi;
++      dc.luminancePhi = luminancePhi;
 +
 +      D3D12_GPU_DESCRIPTOR_HANDLE table = heapBase;
 +      // 12 and 15 for parity 0, 18 and 21 for parity 1.
@@ -5648,7 +5760,9 @@ index 0000000..fcb6c7e
 +
 +  const auto end = std::chrono::steady_clock::now();
 +
-+  g_frameParity ^= 1u;
++  if (params.advanceState) {
++    g_frameParity ^= 1u;
++  }
 +  if (!readback) {
 +    g_stats.traced = true;
 +    g_stats.width = width;
@@ -5682,7 +5796,12 @@ index 0000000..fcb6c7e
 +  D3D12_RANGE noWrite{0, 0};
 +  g_readback->Unmap(0, &noWrite);
 +
-+  write_bmp(dumpPath, pixels, width, height);
++  const size_t pathLength = std::strlen(dumpPath);
++  if (pathLength > 4 && std::strcmp(dumpPath + pathLength - 4, ".pfm") == 0) {
++    write_pfm(dumpPath, pixels, width, height);
++  } else {
++    write_bmp(dumpPath, pixels, width, height);
++  }
 +
 +  g_stats.traced = true;
 +  g_stats.width = width;
@@ -5746,10 +5865,10 @@ index 0000000..fcb6c7e
 +} // namespace aurora::rt::trace
 diff --git a/lib/rt/rt_trace.hpp b/lib/rt/rt_trace.hpp
 new file mode 100644
-index 0000000..6c68944
+index 0000000..2cfe986
 --- /dev/null
 +++ b/lib/rt/rt_trace.hpp
-@@ -0,0 +1,109 @@
+@@ -0,0 +1,121 @@
 +#pragma once
 +
 +#include <cstdint>
@@ -5818,6 +5937,17 @@ index 0000000..6c68944
 +  // the categorical ones bypass the denoiser, where averaging neighbours would
 +  // invent a value that means nothing.
 +  uint32_t debugMode = 0;
++  // A side trace that leaves nothing behind: it does not advance the frame
++  // counter that moves the sampling pattern, nor swap which history and guide
++  // buffers the next frame reads. The A/B bench traces its second setting this
++  // way, on the same frame and the same structures as the first.
++  bool advanceState = true;
++  // This frame's estimate alone: no temporal accumulation, and the sampling
++  // pattern held still, so two traces of one frame sample identically.
++  bool singleFrame = false;
++  // Per-trace denoiser overrides; negative keeps the global setting.
++  float luminancePhi = -1.f;
++  int32_t denoisePasses = -1;
 +};
 +
 +// The two diagnostic views that carry a continuous signal rather than a label.
@@ -5827,7 +5957,8 @@ index 0000000..6c68944
 +constexpr uint32_t DebugHistory = 11u;
 +
 +// Traces against the current TLAS and, when `dumpPath` is not null, writes the
-+// result as a BMP.
++// result: as raw floats when the path ends in .pfm, which the A/B bench
++// compares, otherwise as an 8-bit BMP clamped to [0, 1] for a quick look.
 +//
 +// Primary visibility is traced rather than rasterised, so nothing has to be
 +// shared with Dawn's device for this to run. Only perspective projections are
