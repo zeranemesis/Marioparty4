@@ -1534,3 +1534,38 @@ Dawn — n'est pas mesuré.
 p99 mesuré, 11,2 ms, tient dans la frame, et aucune frame tracée d'aucun rapport
 ne dépasse le double de la médiane. Une seule carte, cependant : sur une carte
 plus modeste, cet écart ne se transpose pas simplement.
+
+## Le balayage des mini-jeux : ce qu'il a couvert, et ce qu'il n'a pas pu (15 septembre 2026)
+
+Le balayage devait passer les 61 mini-jeux avec les nouveaux contrôles. Je l'ai
+arrêté après 39 runs, pour une raison que ses propres chiffres donnaient :
+
+- les index 0 à 14 atteignent 15 mini-jeux distincts, dans l'ordre du menu ;
+- à partir de l'index 15, 22 runs sur 24 tombent sur **m456Dll**, la dernière
+  entrée de la liste : le curseur bute en bas sans reboucler, et le script ne
+  sait pas changer de catégorie. Deux exceptions, l'index 23 sur m416Dll et
+  l'index 31 sur m401Dll, un parcours perdu.
+
+Donc **17 mini-jeux distincts sur 61**, pas 61 : m401, m402, m403, m405 à m416,
+m443 et m456. Les 22 runs restants auraient remesuré m456Dll pendant une heure.
+Atteindre les autres demande que le script change de catégorie dans le menu du
+mode Mini-jeux ; c'est un manque de l'outillage, noté pour la suite.
+
+Sur ce qui a été couvert, les contrôles tiennent :
+
+| | |
+|---|---|
+| runs arrivés en scène | 39 sur 39 |
+| rapports de bornes non finies ou absurdes | 0 |
+| composition par tranche de 300 frames | 300 partout |
+| coût de la passe de tracé | 0,59 à 5,58 ms |
+
+Dont m402Dll et m405Dll, qui produisaient des bornes NaN avant le correctif du
+lot A. Une valeur sort du lot : **m443Dll à 5,58 ms**, 2,6 fois le suivant
+(m414Dll, 2,12 ms). Une seule mesure, à regarder avant d'en conclure quoi que ce
+soit.
+
+Au passage, une fausse alerte de ma part : j'ai soupçonné que les grands index
+dépasseraient le plafond de 60 étapes de navigation. C'était faux : le script
+envoie tout le déplacement dans la liste en une étape, et chaque run atteint sa
+scène vers l'étape 38, quel que soit l'index.
