@@ -2106,10 +2106,10 @@ index 0000000..d901137
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_capture.cpp b/lib/rt/rt_capture.cpp
 new file mode 100644
-index 0000000..87388da
+index 0000000..cc82ef5
 --- /dev/null
 +++ b/lib/rt/rt_capture.cpp
-@@ -0,0 +1,2328 @@
+@@ -0,0 +1,2368 @@
 +#include "rt_capture.hpp"
 +
 +#include "rt_accel.hpp"
@@ -2205,6 +2205,14 @@ index 0000000..87388da
 +double g_abValue = 0.0;
 +// Set once the test script signals that the scene it drove to is up.
 +bool g_abArmed = false;
++// Sequence dump: once the test script arms the bench, the next
++// AURORA_RT_SEQUENCE frames' final output -- after the accumulation and the
++// filter, what gets composited -- as rt_seq_000.pfm and on. The A/B pair holds
++// the accumulation off to compare two settings on one frame; what the temporal
++// passes do takes a sequence to see.
++uint32_t g_sequenceFrames = 0;
++uint32_t g_sequenceWritten = 0;
++uint32_t g_sequenceStart = 0;
 +// Alpha testing of see-through candidates in the trace. On by default;
 +// AURORA_RT_ALPHA_TEST=0 turns it off, and the A/B bench can compare the two on
 +// one frame with AURORA_RT_AB=alphaTest=0. Kept apart from g_features, which
@@ -3853,6 +3861,19 @@ index 0000000..87388da
 +      g_tevTextures = env[0] != '0';
 +      Log.info("Textures read as the TEV stages combine them {}", g_tevTextures ? "on" : "off");
 +    }
++    if (const char* env = std::getenv("AURORA_RT_SEQUENCE")) {
++      const int frames = std::atoi(env);
++      g_sequenceFrames = frames <= 0 ? 0u : static_cast<uint32_t>(frames > 240 ? 240 : frames);
++      if (g_sequenceFrames > 0 && std::getenv("AURORA_RT_AB") != nullptr) {
++        // The pair's single-frame traces would break the accumulation the
++        // sequence is there to record.
++        Log.warn("AURORA_RT_SEQUENCE is ignored alongside AURORA_RT_AB");
++        g_sequenceFrames = 0;
++      }
++      if (g_sequenceFrames > 0) {
++        Log.info("Sequence dump of {} frames once armed by rt_ab_arm", g_sequenceFrames);
++      }
++    }
 +    if (const char* env = std::getenv("AURORA_RT_AB")) {
 +      static constexpr const char* kAbNames[] = {"aoSamples", "shadowSamples", "lightRadius",
 +                                                 "aoRadius",  "bounce",        "denoisePhi",
@@ -4068,7 +4089,9 @@ index 0000000..87388da
 +  // than any board, and the first pair landed there -- and a frame number
 +  // drifts with every menu timing. Polled every 30 frames, and only while a
 +  // pair is still wanted.
-+  if (!g_abName.empty() && !g_abArmed && !g_dumped && (g_frameIndex % 30u) == 0u) {
++  // A sequence is armed the same way.
++  if ((!g_abName.empty() || g_sequenceFrames > 0) && !g_abArmed && !g_dumped &&
++      (g_frameIndex % 30u) == 0u) {
 +    std::error_code missing;
 +    if (std::filesystem::exists("rt_ab_arm", missing)) {
 +      g_abArmed = true;
@@ -4077,7 +4100,8 @@ index 0000000..87388da
 +  }
 +
 +  // Debug dump, once, when a threshold, a frame index or the A/B bench asked.
-+  const bool wantDump = !g_dumped && (g_minTriangles > 0 || g_dumpFrame >= 0 || g_abArmed) &&
++  const bool wantDump = !g_dumped &&
++                        (g_minTriangles > 0 || g_dumpFrame >= 0 || (g_abArmed && !g_abName.empty())) &&
 +                        static_cast<int32_t>(g_triangles.size() / 3) >= g_minTriangles;
 +  if (wantDump) {
 +    g_dumped = true;
@@ -4301,13 +4325,29 @@ index 0000000..87388da
 +    }
 +    report_device_removal();
 +  }
-+  if (!trace::run(params, wantDump ? (abPair ? "rt_ab_a.pfm" : "rt_ao.bmp") : nullptr)) {
++  const char* dumpPath = wantDump ? (abPair ? "rt_ab_a.pfm" : "rt_ao.bmp") : nullptr;
++  // A sequence frame is the normal trace, accumulation and all, read back.
++  const bool sequenceFrame = dumpPath == nullptr && g_abArmed && g_abName.empty() &&
++                             g_sequenceWritten < g_sequenceFrames;
++  char sequencePath[24];
++  if (sequenceFrame) {
++    if (g_sequenceWritten == 0) {
++      g_sequenceStart = g_frameIndex;
++    }
++    std::snprintf(sequencePath, sizeof(sequencePath), "rt_seq_%03u.pfm", g_sequenceWritten);
++    dumpPath = sequencePath;
++  }
++  if (!trace::run(params, dumpPath)) {
 +    Log.error("Ray traced AO pass failed");
 +    report_device_removal();
 +    ++g_frameIndex;
 +    return;
 +  }
 +  report_device_removal();
++  if (sequenceFrame && ++g_sequenceWritten == g_sequenceFrames) {
++    Log.info("Sequence written: {} frames, rt_seq_000.pfm to rt_seq_{:03}.pfm, {}x{}, from frame {}",
++             g_sequenceFrames, g_sequenceFrames - 1, params.width, params.height, g_sequenceStart);
++  }
 +  if (abPair) {
 +    Log.info("A/B pair written: rt_ab_a.pfm and rt_ab_b.pfm, {}x{}, {} triangles, B with {}={}",
 +             params.width, params.height, g_triangles.size() / 3, g_abName, g_abValue);

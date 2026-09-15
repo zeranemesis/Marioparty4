@@ -1837,3 +1837,56 @@ Vérifié :
 
 Le cas d'une scène du mauvais type n'a pas été reproduit exprès : il dépend d'une
 erreur de navigation que le script ne sait pas provoquer.
+
+## Un banc pour les séquences : ce que l'accumulation fait d'une frame à l'autre (15 septembre 2026)
+
+Préalable aux lots C2 et C3, qui touchent l'accumulation temporelle. Le banc A/B
+ne peut rien en dire : pour comparer deux réglages sur une même frame, il trace
+les deux côtés sans historique. Or l'accumulation, le cadrage par le voisinage et
+la variance accumulée n'existent que d'une frame à l'autre.
+
+### Ce que fait le banc
+
+`AURORA_RT_SEQUENCE=N` écrit la sortie finale du tracé — après accumulation et
+filtre, ce qui est composé — pour N frames consécutives, `rt_seq_000.pfm` et
+suivantes. L'armement est celui du banc A/B : le fichier `rt_ab_arm`, créé par le
+script quand la scène est là. Les deux bancs s'excluent, car les tracés d'une
+seule frame de la paire casseraient l'accumulation que la séquence enregistre.
+
+`tools/test_raytracing.ps1 -Sequence N` pose la variable, arme le banc, vérifie
+que les N frames sont écrites, les copie dans le dossier du run et les mesure avec
+`tools/measure_raytracing_sequence.ps1` :
+
+- par frame, le grain sur l'image et sur la pénombre, défini comme dans
+  `compare_raytracing_ab.ps1` ;
+- par paire de frames consécutives, l'écart moyen de luminance et la part des
+  pixels qui bougent de plus de 0,02. Cette part compte le scintillement, mais
+  aussi tout ce qui bouge vraiment, et une scène scriptée bouge toujours ;
+- sur toute la séquence, l'écart type de chaque pixel dans le temps, moyenné sur
+  les pixels restés en pénombre à chaque frame.
+
+Deux runs ne tombent jamais sur les mêmes frames : on compare des séquences prises
+au même moment du script, et on lit un petit écart comme une absence d'écart.
+
+### La référence avant la passe temporelle
+
+Même build, avec l'accumulation actuelle : mélange à poids fixe, sans cadrage
+ni variance. Douze frames consécutives, prises au moment où le script arme le
+banc. Médianes sur les frames et sur les paires :
+
+| scène | grain | grain de pénombre | écart d'une frame à l'autre | part au-delà de 0,02 | écart type temporel en pénombre |
+|---|---|---|---|---|---|
+| w01Dll, dès la frame 7440 | 0,0216 | 0,0233 | 0,0211 | 11,5 % | 0,0441 sur 593 235 pixels |
+| m401Dll, dès la frame 7080 | 0,0217 | 0,0205 | 0,0083 | 3,2 % | 0,0237 sur 1 082 279 pixels |
+
+**Les deux scènes bougent.** Sur w01Dll, la caméra de l'introduction survole le
+plateau : l'écart grandit de paire en paire, de 0,0199 à 0,0245, et c'est surtout
+du mouvement. Sur m401Dll, la caméra dérive peu, mais personnages et bulles
+bougent. Écart et écart type mesurent donc bruit et mouvement ensemble. Ils ne se
+comparent qu'à des séquences prises au même moment du script, et quelques pour
+cent de différence n'y veulent rien dire.
+
+Vérifié aussi, avec le banc en place :
+
+- le test nul A/B reste à 0 pixel ;
+- les trois runs ont atteint la bonne sorte de scène au premier essai.

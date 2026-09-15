@@ -50,6 +50,11 @@ param(
     # pixel. The null test -- B set to what A already has -- must find no
     # differing pixel. See compare_raytracing_ab.ps1.
     [string]$AB = '',
+    # Consecutive frames of the final ray traced output -- accumulation and
+    # filter included -- written once the scene is up and measured with
+    # measure_raytracing_sequence.ps1. What the A/B pair cannot show: it holds
+    # the accumulation off. Not together with -AB.
+    [int]$Sequence = 0,
     # End-to-end frame period, as a distribution the game logs every 600
     # frames (AURORA_FRAME_STATS). Meaningless under vsync: pair it with
     # -Uncapped, which turns vsync off and asks for 240 FPS -- the ceiling the
@@ -236,6 +241,12 @@ function Invoke-Run {
     } else {
         Remove-Item Env:\AURORA_RT_AB -ErrorAction SilentlyContinue
     }
+    Remove-Item (Join-Path $binary 'rt_seq_*.pfm') -ErrorAction SilentlyContinue
+    if ($Sequence -gt 0) {
+        $env:AURORA_RT_SEQUENCE = "$Sequence"
+    } else {
+        Remove-Item Env:\AURORA_RT_SEQUENCE -ErrorAction SilentlyContinue
+    }
     if ($FrameStats) {
         $env:AURORA_FRAME_STATS = '1'
     } else {
@@ -303,12 +314,14 @@ function Invoke-Run {
 
     if ($reached) {
         Start-Sleep -Seconds 4
-        if ($AB) {
+        if ($AB -or $Sequence -gt 0) {
             # The game polls for this file and traces its A/B pair on the next
             # frame it sees it. A triangle threshold cannot pick the scene: the
             # title sequence alone crosses any threshold a board would.
             New-Item -ItemType File -Path (Join-Path $binary 'rt_ab_arm') -Force | Out-Null
             Start-Sleep -Seconds 3
+            # Each sequence frame waits for its readback.
+            if ($Sequence -gt 0) { Start-Sleep -Seconds ([math]::Ceiling($Sequence / 10)) }
         }
         foreach ($k in 1..$Frames) { Save-Frame $window ('scene{0:d2}' -f $k) | Out-Null; Start-Sleep -Milliseconds 900 }
     }
@@ -428,6 +441,22 @@ if ($AB) {
         }
     } else {
         $failures += "A/B pair requested ($AB) but not written after the scene was reached"
+    }
+}
+if ($Sequence -gt 0) {
+    $sequenceHit = $lines | Select-String -Pattern 'Sequence written' | Select-Object -Last 1
+    $written = @(Get-ChildItem (Join-Path $binary 'rt_seq_*.pfm') -ErrorAction SilentlyContinue | Sort-Object Name)
+    if ($sequenceHit -and $written.Count -eq $Sequence) {
+        $linkBefore = $lines[0..($sequenceHit.LineNumber - 1)] | Select-String -Pattern 'Link DLL:(\S+)' | Select-Object -Last 1
+        $where = if ($linkBefore) { $linkBefore.Matches[0].Groups[1].Value } else { 'unknown' }
+        $sequenceDir = Join-Path $output 'sequence'
+        New-Item -ItemType Directory -Path $sequenceDir -Force | Out-Null
+        $written | Copy-Item -Destination $sequenceDir -Force
+        Write-Host ''
+        Write-Host ("  sequence, in {0}: {1}" -f $where, ($sequenceHit.ToString() -replace '^\[INFO \| aurora::rt\] ', ''))
+        $sequenceResult = & (Join-Path $PSScriptRoot 'measure_raytracing_sequence.ps1') -Directory $sequenceDir
+    } else {
+        $failures += "sequence of $Sequence frames requested but $($written.Count) written after the scene was reached"
     }
 }
 $errors = ($scene | Select-String -Pattern 'aurora::rt.*ERROR|device removed|DEVICE_HUNG').Count
