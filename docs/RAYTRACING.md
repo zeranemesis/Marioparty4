@@ -1652,3 +1652,160 @@ scène, dont deux ou trois de période.
   matrices de texture avec lesquelles une planche de sprites choisit son image.
   C'est le lot suivant, C1b.
 - Une vignette 16×16 résout un disque de bulle, pas un grillage.
+
+## Lire les textures comme le TEV les combine (15 septembre 2026)
+
+Lot C1b, ouvert par ce que C1 laissait : sur m401Dll, les bulles et le corail sont
+bien classés découpés, mais leur alpha remplissait des blocs rectangulaires rayés
+au lieu de disques. Le test alpha lisait la vignette au mauvais endroit, et en
+fait, souvent, la mauvaise vignette.
+
+### Trois écarts avec ce que le jeu dessine
+
+La capture lisait, pour chaque draw :
+
+1. **la vignette de l'unité de texture 0**, alors que la classification regardait
+   déjà les cartes que nomment les étages TEV actifs ;
+2. **l'attribut TEX0 brut**, alors que l'étage peut lire une autre coordonnée ;
+3. **sans matrice de texture**. Or c'est avec elle qu'une particule choisit son
+   image dans une planche de sprites : échelle puis translation chargées dans
+   `GX_TEXMTX0` (`src/game/hsfanim.c`). Sans elle, toute la planche s'étalait
+   sur la bulle, d'où les bandes.
+
+### Première version : les coordonnées, pas encore les cartes
+
+Elle reproduisait le générateur de coordonnées du vertex shader d'aurora
+(`gx/shader.cpp`) : source de l'étage, matrice de texture fixe ou par sommet,
+matrice de post-transformation, division projective. Pour la carte, elle gardait
+« la plus transparente que nomment les étages ».
+
+Pour le vérifier, une vue de débogage lit la vignette touchée par le rayon
+primaire, là où la lisent le test alpha et les réflexions :
+`AURORA_RT_DEBUG_MODE=12`, ou `-AB "debugMode=12"` pour l'avoir sur la frame du
+banc pendant que la fenêtre montre le jeu. `AURORA_RT_TEV_TEXTURES=0` rend
+l'ancienne lecture sur le même binaire.
+
+Sur le plateau w01Dll, la vue v1 peignait en bleu uni l'anneau du looping, les
+bandes des rails et les poteaux. J'y ai d'abord lu une carte d'environnement
+prise pour la couleur de la surface. **Cette lecture était fragile** : le bleu
+était aussi la couleur que la vue donnait à une surface *sans* vignette. Les
+rayons de lumière de m401Dll, bleus eux aussi, sont très probablement de la
+géométrie sans texture, à qui l'ancienne lecture prêtait la texture qu'avait
+laissée le draw précédent dans l'unité 0. Le marqueur est maintenant fait de
+rayures magenta et noires, qu'aucune texture du jeu ne ressemble.
+
+### Ce que disent les étages du jeu
+
+Le code de dessin des modèles (`src/game/hsfdraw.c`) tranche la question des
+cartes. Quatre sortes d'étages échantillonnent une carte **sans lire son alpha** :
+ils reprennent celui de l'étage précédent.
+
+| étage | coordonnée | combineur d'alpha |
+|---|---|---|
+| toon | `GX_TG_SRTG` depuis `GX_TG_COLOR0` | `KONST × APREV` |
+| surbrillance | `GX_TG_NRM`, `GX_TEXMTX7` | `APREV × A0` |
+| reflet | `GX_TG_NRM`, `GX_TEXMTX8` | `APREV` |
+| ombre projetée | `GX_TG_POS`, `GX_TG_MTX3x4`, `GX_TEXMTX9` | `APREV` |
+
+Leurs cartes ne disent rien des trous. Et une surbrillance, presque transparente,
+peut gagner le « plus transparent » : ce choix décidait déjà du découpage avant
+C1. Sur w01Dll, 248 draws sur 396 étaient classés découpés.
+
+### Seconde version, livrée
+
+- **Couverture** (découpé, translucide, et donc la carte du test alpha) : la plus
+  transparente des cartes dont un combineur d'alpha lit l'alpha.
+- **Couleur** (albédo, réflexions) : la première carte qu'un combineur de couleur
+  lit à une coordonnée de texture. Une carte générée depuis la normale ne sert
+  qu'à défaut.
+- La vignette tracée est celle de la couverture sur une surface ajourée, celle de
+  la couleur partout ailleurs, lue à la coordonnée que son étage génère.
+- Une coordonnée impossible à reproduire (source couleur, relief) ne reçoit pas
+  de vignette : la moyenne de la texture vaut mieux qu'un texel pris au hasard.
+
+### Mesuré
+
+Test nul sur w01Dll, `alphaTest=1` contre lui-même : **0 pixel différent** sur
+1 228 800.
+
+Compteurs de la capture, par rapport de 300 frames :
+
+| scène, lecture | draws découpés | classés d'après une autre carte | ne nommant aucune carte |
+|---|---|---|---|
+| w01Dll, ancienne (état de C1) | 230 sur 367 | — | — |
+| w01Dll, première version | 248 sur 396 | — | — |
+| w01Dll, seconde version | 53 sur 402 ; 78 sur 726 | 202 ; 262 | 62 ; 73 |
+| m401Dll, ancienne | 96 sur 605 | — | — |
+| m401Dll, seconde version | 92 sur 605 | 8 | 142 |
+
+Les draws « ne nommant aucune carte » recevaient, dans l'ancienne lecture, la
+texture restée dans l'unité 0 depuis le draw précédent.
+
+Vues vignette, même binaire, ancienne lecture puis première et seconde versions :
+
+- **m401Dll.** Les rayons de lumière n'ont aucune texture : damier gris dans
+  l'ancienne lecture, la texture périmée de l'unité 0, rayures dans la seconde
+  version. Les bulles qui montent lisent de petits disques.
+- **w01Dll.** L'anneau du looping, les bandes des rails et les poteaux n'ont pas
+  de texture non plus : vert sombre dans l'ancienne lecture, bleu en v1, rayures
+  en v2. Le disque central lisait en v1 une carte générée depuis la normale
+  (anneaux, arcs) ; la v2 y relit l'arc-en-ciel de sa texture de base.
+
+Occlusion brute, test coupé contre allumé sur la même frame. Rouge : plus clair
+avec le test, un trou ouvert. Bleu : plus sombre, un texel qui bloque plus que la
+moyenne de sa texture.
+
+| scène, lecture | plus clair de plus de 0,1 | plus sombre | où |
+|---|---|---|---|
+| w01Dll, ancienne | 11,38 % des pixels | 2,55 % | les cases des rails, mais aussi les gobelets et la structure centrale : des objets pleins que le test perçait |
+| w01Dll, ancienne, second run | 9,28 % | 5,87 % | idem, et des gobelets assombris ; 317 draws découpés sur 726 |
+| w01Dll, seconde version | 6,44 % | 0,91 % | les cases des rails, presque seules ; 78 draws découpés sur 726 |
+| w01Dll, seconde version, second run | 6,56 % | 0,96 % | idem ; 65 draws découpés sur 404 |
+| m401Dll, première version | 0,76 % | 2,76 % | anneaux des bulles ; blocs sombres en haut |
+| m401Dll, seconde version | 0,81 % | 2,94 % | idem |
+
+Ce ne sont pas les mêmes frames d'un run à l'autre, et c'est l'image qui tranche.
+Sur le plateau, en ancienne lecture, le test ouvrait des objets pleins classés
+découpés à tort ; en seconde version, il n'ouvre plus que les découpes des cases.
+
+Sur m401Dll, les blocs sombres du haut viennent d'une couche de lumière du plafond,
+classée découpée. Pondérée par ses texels plutôt que par sa moyenne, elle bloque
+maintenant par ses cellules opaques de 16×16, et les sommets des rochers dessous
+s'assombrissent par blocs.
+
+Une paire du plateau est tombée sur une frame où aucun rayon ne touche rien : A et
+B uniformément blancs, zéro pixel différent. Elle ne prouvait rien et a été
+refaite ; le banc devrait signaler ce cas lui-même.
+
+### Coût
+
+Mesuré comme pour C1 (`-FrameStats -Uncapped`). Les rapports qui suivent le
+chargement de la scène sont alignés un à un sur le run de C1.
+
+| w01Dll | rapports | tracé GPU par rapport |
+|---|---|---|
+| C1, ancienne lecture | 6 | 0,74 · 0,73 · 0,72 · 2,15 · 2,42 · 1,84 ms |
+| C1b, seconde version | 7 | 0,71 · 0,68 · 0,68 · 1,95 · 2,06 · 1,99 · 1,71 ms |
+
+Aux mêmes moments du script, la seconde version coûte de 0,03 à 0,36 ms de moins,
+sauf un rapport à +0,15 ms. C'est cohérent avec cinq fois moins de groupes non
+opaques, mais cela reste dans l'ordre de ce qui varie d'un run à l'autre.
+
+Pas de chiffre pour le mini-jeu. Le run a atterri sur w01Dll, et le script l'a
+accepté : il prend n'importe quel plateau ou mini-jeu pour la scène visée. Ce
+défaut est corrigé au lot suivant.
+
+### Ce qui reste
+
+- **Les couches additives ne devraient pas occulter.** Le jeu les marque :
+  `HSF_MATERIAL_ADDCOL` règle `GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA,
+  GX_BL_ONE, …)` (`hsfdraw.c`), et les particules font de même (`hsfanim.c`).
+  Une surface qui ajoute de la lumière ne peut pas en retirer ; aurora expose
+  l'état de mélange, la capture pourrait s'en servir. C'est très probablement le
+  cas du plafond de m401Dll.
+- Les rayons de lumière de m401Dll, translucides par leur couleur de sommet et
+  sans texture, restent tracés opaques : rien dans leur texture ne les classe.
+- La vignette fait 16×16 ; la division projective se fait par sommet, exacte pour
+  les générateurs affines des sprites, approchée pour une projection.
+- Sur une surface ajourée à plusieurs cartes, les réflexions lisent la couleur de
+  la carte de couverture.

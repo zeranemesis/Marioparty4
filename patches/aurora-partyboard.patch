@@ -2106,10 +2106,10 @@ index 0000000..d901137
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_capture.cpp b/lib/rt/rt_capture.cpp
 new file mode 100644
-index 0000000..25397ef
+index 0000000..87388da
 --- /dev/null
 +++ b/lib/rt/rt_capture.cpp
-@@ -0,0 +1,2026 @@
+@@ -0,0 +1,2328 @@
 +#include "rt_capture.hpp"
 +
 +#include "rt_accel.hpp"
@@ -2210,6 +2210,12 @@ index 0000000..25397ef
 +// one frame with AURORA_RT_AB=alphaTest=0. Kept apart from g_features, which
 +// set_features rebuilds from the three settings and would clear.
 +bool g_alphaTest = true;
++// The textures the trace reads, chosen from what the TEV stages actually
++// combine and read at the coordinates the game's vertex shader generates for
++// them. On by default; AURORA_RT_TEV_TEXTURES=0 restores the old reading -- the
++// most transparent map any stage names for the classification, texture unit 0
++// at the raw TEX0 attribute for the rest -- to compare the two.
++bool g_tevTextures = true;
 +bool g_armed = false;
 +// Every call that reaches the hook, before any filtering: separates "the"
 +// geometry was rejected" from "the geometry never arrived".
@@ -2465,6 +2471,16 @@ index 0000000..25397ef
 +float g_uvMin = 0.f;
 +float g_uvMax = 0.f;
 +bool g_haveUv = false;
++// How the textured draws were read. A sprite sheet picks its frame through a
++// texture matrix, and a reflection or highlight stage samples a map that it
++// combines into the colour, never into the alpha.
++uint32_t g_coverageMoved = 0;     // classified from another map than the most transparent named
++uint32_t g_texgenMatrix = 0;      // the map read through a texture matrix, fixed or per vertex
++uint32_t g_texgenPostMatrix = 0;  // through a post-transform matrix
++uint32_t g_texgenOtherSource = 0; // another attribute than TEX0, a position or a normal
++uint32_t g_texgenUnusable = 0;    // a generator not reproduced here: no thumbnail
++uint32_t g_sampledOtherUnit = 0;  // the map read is not on texture unit 0
++uint32_t g_staleUnit0 = 0;        // no stage names a map, yet the old reading took unit 0's
 +// Mean saturation of the albedos actually used: averaging a whole texture pulls
 +// it towards grey, and grey cannot bleed colour however strong the bounce.
 +double g_albedoSaturation = 0.0;
@@ -2513,8 +2529,12 @@ index 0000000..25397ef
 +// Walks the vertex descriptor in attribute order, accumulating byte offsets.
 +// Mirrors calculate_last_vtx_size in command_processor.cpp, which computes the
 +// same walk but keeps only the total.
-+void compute_layout(GXVtxFmt fmt, AttrLayout& pos, AttrLayout& pnMtxIdx, AttrLayout& colour,
-+                    AttrLayout& normal, AttrLayout& texcoord) noexcept {
++// texAttr and texMtxAttr are the texture coordinate and the per-vertex texture
++// matrix index the map the trace reads comes through -- not necessarily TEX0 --
++// or -1.
++void compute_layout(GXVtxFmt fmt, int texAttr, int texMtxAttr, AttrLayout& pos,
++                    AttrLayout& pnMtxIdx, AttrLayout& colour, AttrLayout& normal,
++                    AttrLayout& texcoord, AttrLayout& texMtxIdx) noexcept {
 +  const auto& vtxFmt = g_gxState.vtxFmts[fmt];
 +  uint32_t offset = 0;
 +  for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
@@ -2532,8 +2552,10 @@ index 0000000..25397ef
 +      target = &colour;
 +    } else if (i == GX_VA_NRM) {
 +      target = &normal;
-+    } else if (i == GX_VA_TEX0) {
++    } else if (i == texAttr) {
 +      target = &texcoord;
++    } else if (i == texMtxAttr) {
++      target = &texMtxIdx;
 +    }
 +    if (target != nullptr) {
 +      target->type = desc;
@@ -2790,6 +2812,151 @@ index 0000000..25397ef
 +  };
 +}
 +
++// A map the active stages name, and the stage that names it for the purpose.
++struct MapChoice {
++  const gfx::TextureBind* map = nullptr;
++  uint8_t stage = 0;
++};
++
++// Whether a stage's alpha combiner reads its texture's alpha. The game's toon,
++// highlight, reflection and shadow stages (hsfdraw.c) sample a map but carry the
++// alpha of the stage before: their maps say nothing about holes.
++bool reads_texture_alpha(const gx::TevStage& stage) noexcept {
++  const auto& p = stage.alphaPass;
++  return p.a == GX_CA_TEXA || p.b == GX_CA_TEXA || p.c == GX_CA_TEXA || p.d == GX_CA_TEXA;
++}
++
++// Whether a stage's colour combiner reads its texture, as a colour or a factor.
++bool reads_texture_colour(const gx::TevStage& stage) noexcept {
++  const auto& p = stage.colorPass;
++  const auto texture = [](GXTevColorArg arg) { return arg == GX_CC_TEXC || arg == GX_CC_TEXA; };
++  return texture(p.a) || texture(p.b) || texture(p.c) || texture(p.d);
++}
++
++// The two ways a map lets the scene through, measured once when it was loaded.
++bool is_holed(const gfx::TextureBind& texture) noexcept {
++  return texture.ref->cutoutFraction > 0.05f;
++}
++bool is_hazy(const gfx::TextureBind& texture) noexcept {
++  return texture.ref->averageAlpha < 0.95f;
++}
++
++// Where the coordinate of the map the trace reads comes from, resolved once per
++// draw.
++struct Texgen {
++  enum class Source : uint8_t { None, Texcoord, Position, Normal };
++  Source source = Source::None;
++  int attr = -1;    // GX_VA_TEXn, for a texture coordinate source
++  int mtxAttr = -1; // GX_VA_TEXnMTXIDX, used when the vertex carries it
++  // The generator the source runs through; null reads the source raw.
++  const gx::TcgConfig* tcg = nullptr;
++};
++
++// The generator behind a TEV stage, as the vertex shader builds it
++// (gx/shader.cpp). What this does not reproduce -- a colour source, a tangent,
++// an emboss offset, a stage without a coordinate -- resolves to None, and the
++// draw is traced without a thumbnail rather than read at a coordinate that
++// means nothing.
++Texgen resolve_texgen(const gx::TevStage& stage) noexcept {
++  Texgen out;
++  if (stage.texCoordId == GX_TEXCOORD_NULL) {
++    return out;
++  }
++  const auto coord = static_cast<uint32_t>(stage.texCoordId);
++  if (coord >= g_gxState.numTexGens || coord >= g_gxState.tcgs.size()) {
++    return out;
++  }
++  const auto& tcg = g_gxState.tcgs[coord];
++  if (tcg.type != GX_TG_MTX2x4 && tcg.type != GX_TG_MTX3x4) {
++    return out;
++  }
++  if (tcg.src >= GX_TG_TEX0 && tcg.src <= GX_TG_TEX7) {
++    out.source = Texgen::Source::Texcoord;
++    out.attr = GX_VA_TEX0 + static_cast<int>(tcg.src - GX_TG_TEX0);
++  } else if (tcg.src == GX_TG_POS) {
++    out.source = Texgen::Source::Position;
++  } else if (tcg.src == GX_TG_NRM) {
++    out.source = Texgen::Source::Normal;
++  } else {
++    return out;
++  }
++  out.mtxAttr = GX_VA_TEX0MTXIDX + static_cast<int>(coord);
++  out.tcg = &tcg;
++  return out;
++}
++
++// A generator's matrix by the index the vertex shader uses: postex_mtx holds the
++// position matrices, then the texture matrices, and a GX matrix id over three
++// addresses it. Null past both.
++const Mat3x4<float>* texgen_matrix(uint32_t index) noexcept {
++  if (index < g_gxState.pnMtx.size()) {
++    return &g_gxState.pnMtx[index].pos;
++  }
++  if (index - g_gxState.pnMtx.size() < g_gxState.texMtxs.size()) {
++    return &g_gxState.texMtxs[index - g_gxState.pnMtx.size()];
++  }
++  return nullptr;
++}
++
++Vec3 apply_rows(const Mat3x4<float>& m, const Vec3& p) noexcept {
++  return Vec3{
++      m.m0.x() * p.x + m.m0.y() * p.y + m.m0.z() * p.z + m.m0.w(),
++      m.m1.x() * p.x + m.m1.y() * p.y + m.m1.z() * p.z + m.m1.w(),
++      m.m2.x() * p.x + m.m2.y() * p.y + m.m2.z() * p.z + m.m2.w(),
++  };
++}
++
++// Runs one source value through a generator the way the vertex shader does:
++// the texture matrix -- the vertex's own when it carries an index, passed as
++// vertexMtx, else UINT32_MAX -- then the post-transform matrix, then for a
++// projective generator the divide. Every source this is used for enters with
++// w = 1: a texture coordinate as (s, t, 1, 1), a position or a normal as itself.
++//
++// The divide is per vertex: exact for the affine generators sprites use, only
++// approximate across a triangle for a projective one -- and those project
++// lights and shadows onto surfaces rather than cutting holes in them.
++bool generate_texcoord(const gx::TcgConfig& tcg, uint32_t vertexMtx, Vec3 tc, float& u,
++                       float& v) noexcept {
++  const bool wantsMatrix = vertexMtx != UINT32_MAX || tcg.mtx != GX_IDENTITY;
++  if (wantsMatrix) {
++    const Mat3x4<float>* m = texgen_matrix(
++        vertexMtx != UINT32_MAX ? vertexMtx / 3u : static_cast<uint32_t>(tcg.mtx) / 3u);
++    if (m == nullptr) {
++      return false;
++    }
++    tc = apply_rows(*m, tc);
++  }
++  if (tcg.type == GX_TG_MTX2x4) {
++    tc.z = 1.f;
++  }
++  if (tcg.normalize) {
++    const float length = std::sqrt(tc.x * tc.x + tc.y * tc.y + tc.z * tc.z);
++    if (!(length > 0.f)) {
++      return false;
++    }
++    tc = Vec3{tc.x / length, tc.y / length, tc.z / length};
++  }
++  if (tcg.postMtx != GX_PTIDENTITY) {
++    const uint32_t index =
++        (static_cast<uint32_t>(tcg.postMtx) - static_cast<uint32_t>(GX_PTTEXMTX0)) / 3u;
++    if (index >= g_gxState.ptTexMtxs.size()) {
++      return false;
++    }
++    tc = apply_rows(g_gxState.ptTexMtxs[index], tc);
++  }
++  if (tcg.type == GX_TG_MTX3x4) {
++    if (!(std::abs(tc.z) > 1e-6f)) {
++      return false;
++    }
++    u = tc.x / tc.z;
++    v = tc.y / tc.z;
++  } else {
++    u = tc.x;
++    v = tc.y;
++  }
++  return std::isfinite(u) && std::isfinite(v);
++}
++
 +// Marks the tiles an orthographic draw covers. GX stores an orthographic
 +// projection as clip.x = m0[0]*x + m0[3], clip.y = m1[1]*y + m1[3] with w = 1
 +// (see command_processor.cpp), so the view-space vertices map to the screen
@@ -2950,12 +3117,90 @@ index 0000000..25397ef
 +    }
 +  }
 +
++  // The maps the trace reads for this draw, from what the active TEV stages
++  // combine -- and only the maps they name: the texture array keeps whatever
++  // was bound last, exactly as the texgen array does, and scanning all eight
++  // classified every draw in the mini-game as see-through at 0.1 alpha.
++  //
++  // Coverage decides cut-out and translucent: the most transparent map whose
++  // alpha an alpha combiner reads, the first on a tie. Colour, for the albedo
++  // and the reflections: the first map a colour combiner reads at a texture
++  // coordinate. A reflection or a highlight is generated from the normal and is
++  // not the surface; it stands in only where nothing better is combined.
++  MapChoice named; // the old choice: the most transparent map any stage names
++  MapChoice coverage;
++  MapChoice colour;
++  MapChoice generatedColour;
++  if (!ortho) {
++    for (uint8_t i = 0; i < g_gxState.numTevStages && i < g_gxState.tevStages.size(); ++i) {
++      const auto& stage = g_gxState.tevStages[i];
++      if (stage.texMapId == GX_TEXMAP_NULL) {
++        continue;
++      }
++      const auto slot = static_cast<size_t>(stage.texMapId) & 7u;
++      if (slot >= g_gxState.textures.size()) {
++        continue;
++      }
++      const auto& unit = g_gxState.textures[slot];
++      if (!unit.ref) {
++        continue;
++      }
++      const float alpha = unit.ref->averageAlpha;
++      if (named.map == nullptr || alpha < named.map->ref->averageAlpha) {
++        named = MapChoice{&unit, i};
++      }
++      if (reads_texture_alpha(stage) &&
++          (coverage.map == nullptr || alpha < coverage.map->ref->averageAlpha)) {
++        coverage = MapChoice{&unit, i};
++      }
++      if (reads_texture_colour(stage)) {
++        if (resolve_texgen(stage).source == Texgen::Source::Texcoord) {
++          if (colour.map == nullptr) {
++            colour = MapChoice{&unit, i};
++          }
++        } else if (generatedColour.map == nullptr) {
++          generatedColour = MapChoice{&unit, i};
++        }
++      }
++    }
++    if (colour.map == nullptr) {
++      colour = generatedColour.map != nullptr ? generatedColour : coverage;
++    }
++  }
++  // What classifies the surface, and so what the alpha test reads on a
++  // see-through one; the colour map everywhere else. With
++  // AURORA_RT_TEV_TEXTURES=0, the old reading: the most transparent map named,
++  // and texture unit 0 at the raw TEX0 attribute.
++  const gfx::TextureBind* seeThrough = g_tevTextures ? coverage.map : named.map;
++  const bool seeThroughSurface =
++      seeThrough != nullptr && (is_holed(*seeThrough) || is_hazy(*seeThrough));
++  const gfx::TextureBind* sampled = nullptr;
++  Texgen texgen;
++  if (!g_tevTextures) {
++    sampled = &g_gxState.textures[0];
++    texgen.source = Texgen::Source::Texcoord;
++    texgen.attr = GX_VA_TEX0;
++  } else {
++    const MapChoice& read = seeThroughSurface ? coverage : colour;
++    sampled = read.map;
++    if (read.map != nullptr) {
++      texgen = resolve_texgen(g_gxState.tevStages[read.stage]);
++    }
++  }
++
 +  AttrLayout posLayout;
 +  AttrLayout mtxLayout;
 +  AttrLayout colourLayout;
 +  AttrLayout normalLayout;
 +  AttrLayout texLayout;
-+  compute_layout(fmt, posLayout, mtxLayout, colourLayout, normalLayout, texLayout);
++  AttrLayout texMtxLayout;
++  compute_layout(fmt, texgen.attr, texgen.mtxAttr, posLayout, mtxLayout, colourLayout,
++                 normalLayout, texLayout, texMtxLayout);
++  // A source the vertex does not carry cannot be generated from either.
++  if (g_tevTextures && ((texgen.source == Texgen::Source::Texcoord && !texLayout.present) ||
++                        (texgen.source == Texgen::Source::Normal && !normalLayout.present))) {
++    texgen = Texgen{};
++  }
 +  if (!posLayout.present) {
 +    ++g_skippedDraws;
 +    return;
@@ -3011,37 +3256,19 @@ index 0000000..25397ef
 +  // The GX blend and alpha-compare state says nothing useful on its own: the
 +  // game leaves both enabled for solid geometry, so every draw looks
 +  // see-through. The texture's own alpha is the honest signal.
-+  // Not just unit 0: a sprite that binds its sheet elsewhere read as fully
-+  // opaque and was one of the draws still laying a rectangle over the scene.
-+  // Only the maps the active TEV stages actually name, though -- the texture
-+  // array keeps whatever was bound last, exactly as the texgen array does, and
-+  // scanning all eight classified every draw in the mini-game as see-through at
-+  // 0.1 alpha. The most transparent of the maps in use is the honest answer for
-+  // the surface as a whole.
-+  const gfx::TextureBind* seeThrough = nullptr;
-+  if (!ortho) {
-+    for (uint8_t i = 0; i < g_gxState.numTevStages && i < g_gxState.tevStages.size(); ++i) {
-+      const auto id = g_gxState.tevStages[i].texMapId;
-+      if (id == GX_TEXMAP_NULL) {
-+        continue;
-+      }
-+      const auto slot = static_cast<size_t>(id) & 7u;
-+      if (slot >= g_gxState.textures.size()) {
-+        continue;
-+      }
-+      const auto& unit = g_gxState.textures[slot];
-+      if (!unit.ref) {
-+        continue;
-+      }
-+      if (seeThrough == nullptr || unit.ref->averageAlpha < seeThrough->ref->averageAlpha) {
-+        seeThrough = &unit;
-+      }
-+    }
++  // That of the coverage map chosen above -- not unit 0's: a sprite that binds
++  // its sheet elsewhere read as fully opaque and was one of the draws still
++  // laying a rectangle over the scene.
++  if (!ortho && g_tevTextures && coverage.map != named.map) {
++    ++g_coverageMoved;
++  }
++  if (!ortho && g_tevTextures && named.map == nullptr && g_gxState.textures[0].ref) {
++    ++g_staleUnit0;
 +  }
 +  if (const auto* texPtr = seeThrough; texPtr != nullptr) {
 +    const auto& tex = *texPtr;
-+    const bool holed = tex.ref->cutoutFraction > 0.05f;
-+    const bool hazy = tex.ref->averageAlpha < 0.95f;
++    const bool holed = is_holed(tex);
++    const bool hazy = is_hazy(tex);
 +    if (holed) {
 +      material |= accel::MaterialCutout; // holes, rather than uniform haze
 +      ++g_drawsAlphaTested;
@@ -3084,12 +3311,40 @@ index 0000000..25397ef
 +  // what actually carries the tint. Indirect light is low frequency, so an
 +  // average is a close enough stand-in for sampling the texture per hit.
 +  Vec3 albedo{1.f, 1.f, 1.f};
-+  const auto& boundTexture = g_gxState.textures[0];
-+  if (boundTexture.ref && !ortho) {
-+    material |= (boundTexture.ref->rtThumbnail & accel::MaterialThumbnailMask)
-+                << accel::MaterialThumbnailShift;
-+    albedo = Vec3{boundTexture.ref->averageColour[0], boundTexture.ref->averageColour[1],
-+                  boundTexture.ref->averageColour[2]};
++  // The colour map. With AURORA_RT_TEV_TEXTURES=0, unit 0 as before, whether or
++  // not a stage samples it.
++  const gfx::TextureBind* albedoMap = g_tevTextures ? colour.map : &g_gxState.textures[0];
++  if (albedoMap != nullptr && albedoMap->ref && !ortho) {
++    // The thumbnail is the map the trace reads -- the coverage map on a
++    // see-through surface -- and none where its coordinate cannot be
++    // reproduced: a texel read at a coordinate that means nothing would decide
++    // a hole or a reflected colour at random, where the average is at least the
++    // right colour.
++    if (sampled != nullptr && sampled->ref && texgen.source != Texgen::Source::None) {
++      material |= (sampled->ref->rtThumbnail & accel::MaterialThumbnailMask)
++                  << accel::MaterialThumbnailShift;
++    }
++    if (g_tevTextures) {
++      if (texgen.source == Texgen::Source::None) {
++        ++g_texgenUnusable;
++      } else {
++        if (texgen.source != Texgen::Source::Texcoord || texgen.attr != GX_VA_TEX0) {
++          ++g_texgenOtherSource;
++        }
++        if ((texMtxLayout.present && texMtxLayout.type == GX_DIRECT) ||
++            texgen.tcg->mtx != GX_IDENTITY) {
++          ++g_texgenMatrix;
++        }
++        if (texgen.tcg->postMtx != GX_PTIDENTITY) {
++          ++g_texgenPostMatrix;
++        }
++      }
++      if (sampled != &g_gxState.textures[0]) {
++        ++g_sampledOtherUnit;
++      }
++    }
++    albedo = Vec3{albedoMap->ref->averageColour[0], albedoMap->ref->averageColour[1],
++                  albedoMap->ref->averageColour[2]};
 +    ++g_drawsWithTexture;
 +    const float hi = albedo.x > albedo.y ? (albedo.x > albedo.z ? albedo.x : albedo.z)
 +                                         : (albedo.y > albedo.z ? albedo.y : albedo.z);
@@ -3119,15 +3374,20 @@ index 0000000..25397ef
 +          : 0;
 +
 +  // Texture coordinates, for sampling the surface's own texture at a hit rather
-+  // than its whole-texture average.
-+  const auto& texFmt = g_gxState.vtxFmts[fmt].attrs[GX_VA_TEX0];
-+  const auto& texArray = g_gxState.arrays[GX_VA_TEX0];
++  // than its whole-texture average: the attribute the map read comes through.
++  const auto texAttr = static_cast<GXAttr>(texgen.attr >= 0 ? texgen.attr : GX_VA_TEX0);
++  const auto& texFmt = g_gxState.vtxFmts[fmt].attrs[texAttr];
++  const auto& texArray = g_gxState.arrays[texAttr];
 +  const bool texIndexed = texLayout.type == GX_INDEX8 || texLayout.type == GX_INDEX16;
 +  const size_t texBytes =
 +      texLayout.present
-+          ? static_cast<size_t>(gx::comp_type_size(GX_VA_TEX0, texFmt.type)) *
++          ? static_cast<size_t>(gx::comp_type_size(texAttr, texFmt.type)) *
 +                ((texFmt.cnt == GX_TEX_ST) ? 2u : 1u)
 +          : 0;
++  // The vertex's own texture matrix index, read the way the shader reads it:
++  // only as direct data.
++  const bool texMtxPerVertex =
++      texgen.tcg != nullptr && texMtxLayout.present && texMtxLayout.type == GX_DIRECT;
 +
 +  const bool measureCamera = rt_debug_logging();
 +  // Hash of the raw decoded positions, before any matrix. Stable means the mesh
@@ -3267,6 +3527,7 @@ index 0000000..25397ef
 +    // coordinate" and falls back to the average colour for.
 +    float u = 0.f;
 +    float v = 0.f;
++    bool haveCoordinate = false;
 +    if (!ortho && texLayout.present && texBytes != 0) {
 +      const uint8_t* tsrc = nullptr;
 +      bool tle = false;
@@ -3282,7 +3543,28 @@ index 0000000..25397ef
 +      } else if (texLayout.offset + texBytes <= vtxSize) {
 +        tsrc = vtx + texLayout.offset;
 +      }
-+      if (tsrc != nullptr && !decode_texcoord(tsrc, texFmt, tle, u, v)) {
++      haveCoordinate = tsrc != nullptr && decode_texcoord(tsrc, texFmt, tle, u, v);
++      if (!haveCoordinate) {
++        u = 0.f;
++        v = 0.f;
++      }
++    }
++    // Then through the stage's generator, as the vertex shader runs it
++    // (gx/shader.cpp). A vertex it fails on keeps zero, like one that carries
++    // no coordinate at all.
++    if (!ortho && texgen.tcg != nullptr) {
++      Vec3 tc{u, v, 1.f};
++      if (texgen.source == Texgen::Source::Position) {
++        tc = local;
++        haveCoordinate = true;
++      } else if (texgen.source == Texgen::Source::Normal) {
++        tc = normal;
++        haveCoordinate = haveNormal;
++      }
++      const uint32_t vertexMtx = texMtxPerVertex && texMtxLayout.offset < vtxSize
++                                     ? static_cast<uint32_t>(vtx[texMtxLayout.offset])
++                                     : UINT32_MAX;
++      if (!haveCoordinate || !generate_texcoord(*texgen.tcg, vertexMtx, tc, u, v)) {
 +        u = 0.f;
 +        v = 0.f;
 +      }
@@ -3567,6 +3849,10 @@ index 0000000..25397ef
 +      g_alphaTest = env[0] != '0';
 +      Log.info("Alpha testing of see-through surfaces {}", g_alphaTest ? "on" : "off");
 +    }
++    if (const char* env = std::getenv("AURORA_RT_TEV_TEXTURES")) {
++      g_tevTextures = env[0] != '0';
++      Log.info("Textures read as the TEV stages combine them {}", g_tevTextures ? "on" : "off");
++    }
 +    if (const char* env = std::getenv("AURORA_RT_AB")) {
 +      static constexpr const char* kAbNames[] = {"aoSamples", "shadowSamples", "lightRadius",
 +                                                 "aoRadius",  "bounce",        "denoisePhi",
@@ -3649,11 +3935,13 @@ index 0000000..25397ef
 +      const int mode = std::atoi(env);
 +      g_debugMode = mode < 0 ? 0u : static_cast<uint32_t>(mode);
 +      if (g_debugMode != 0u) {
-+        static constexpr const char* kNames[] = {"off",     "shadow",       "occlusion",
-+                                                 "normals", "depth",        "primitive id",
-+                                                 "material", "reflection"};
++        static constexpr const char* kNames[] = {
++            "off",        "shadow",   "occlusion", "normals",   "depth",   "primitive id",
++            "material",   "reflection", "texcoord", "mask",     "screen uv", "history",
++            "thumbnail"};
++        const uint32_t named = sizeof(kNames) / sizeof(kNames[0]);
 +        Log.info("Ray tracing diagnostic view: {} ({})", g_debugMode,
-+                 g_debugMode < 8u ? kNames[g_debugMode] : "unknown");
++                 g_debugMode < named ? kNames[g_debugMode] : "unknown");
 +      }
 +    }
 +    if (const char* env = std::getenv("AURORA_RT_BUILD_FRAMES")) {
@@ -3703,6 +3991,13 @@ index 0000000..25397ef
 +    g_drawsWithTexture = 0;
 +    g_drawsWithTexcoords = 0;
 +    g_haveUv = false;
++    g_coverageMoved = 0;
++    g_texgenMatrix = 0;
++    g_texgenPostMatrix = 0;
++    g_texgenOtherSource = 0;
++    g_texgenUnusable = 0;
++    g_sampledOtherUnit = 0;
++    g_staleUnit0 = 0;
 +    g_albedoSaturation = 0.0;
 +    g_drawsTotal = 0;
 +    g_haveProj = false;
@@ -4056,6 +4351,13 @@ index 0000000..25397ef
 +    Log.info("Texture coordinates on {} of {} draws; range {:.2f}..{:.2f}; {} thumbnails "
 +             "registered",
 +             g_drawsWithTexcoords, g_drawsTotal, g_uvMin, g_uvMax, textures::count() - 1);
++    Log.info("Textures read as the TEV stages combine them ({}): {} draws classified from "
++             "another map than the most transparent one named; the map read through a texture "
++             "matrix on {}, a post-transform matrix on {}, another source than TEX0 on {}; {} not "
++             "reproducible, traced without a thumbnail; {} reading another unit than 0; {} naming "
++             "no map at all, which the old reading gave unit 0's texture",
++             g_tevTextures ? "on" : "off", g_coverageMoved, g_texgenMatrix, g_texgenPostMatrix,
++             g_texgenOtherSource, g_texgenUnusable, g_sampledOtherUnit, g_staleUnit0);
 +    Log.info("Albedo sources: {} textured, {} vertex-coloured, of {} draws; mean saturation {:.3f}",
 +             g_drawsWithTexture, g_drawsWithColour, g_drawsTotal,
 +             g_drawsWithTexture > 0 ? g_albedoSaturation / g_drawsWithTexture : 0.0);
@@ -6105,10 +6407,10 @@ index 0000000..9063baf
 +} // namespace aurora::rt::trace
 diff --git a/lib/rt/shaders/rt_ao.hlsl b/lib/rt/shaders/rt_ao.hlsl
 new file mode 100644
-index 0000000..e2c7764
+index 0000000..f1a4267
 --- /dev/null
 +++ b/lib/rt/shaders/rt_ao.hlsl
-@@ -0,0 +1,763 @@
+@@ -0,0 +1,798 @@
 +// Ray traced ambient occlusion for PartyBoard.
 +//
 +// Primary visibility is traced rather than rasterised: with inline RayQuery the
@@ -6271,6 +6573,13 @@ index 0000000..e2c7764
 +// turned it away: green accepted, red the normal disagreed, blue the distance
 +// did, black no history at that pixel yet.
 +#define DEBUG_HISTORY 11u
++// The hit surface's thumbnail at the coordinate the capture generated for it,
++// over a grey checker where its alpha lets the background through: exactly
++// what the alpha test and the reflections read. Set beside the game's own
++// frame, a surface reading the wrong map, at the wrong place or at the wrong
++// scale shows at a glance. Magenta and black stripes, which no texture in the
++// game looks like, mark a surface with no thumbnail.
++#define DEBUG_THUMBNAIL 12u
 +
 +#define MATERIAL_REFLECTIVE 1u
 +#define MATERIAL_CUTOUT 2u
@@ -6281,12 +6590,11 @@ index 0000000..e2c7764
 +#define MATERIAL_THUMBNAIL_MASK 0xffffu
 +#define THUMBNAIL_EDGE 16u
 +
-+// The hit surface's own colour at the point the ray landed, rather than the
-+// average of its whole texture. Wraps, because GX coordinates tile and the
-+// capture measures them well outside 0..1. Returns false when the surface has
-+// no thumbnail, which leaves the caller on the average.
-+bool thumbnail_colour(uint material, float2 uv, out float3 colour) {
-+  colour = float3(0.0f, 0.0f, 0.0f);
++// The packed texel of a surface's 16x16 thumbnail at uv: red in the low byte,
++// alpha in the high one. Wraps, because GX coordinates tile and the capture
++// measures them well outside 0..1. False when the surface has no thumbnail.
++bool thumbnail_texel(uint material, float2 uv, out uint packed) {
++  packed = 0u;
 +  const uint index = (material >> MATERIAL_THUMBNAIL_SHIFT) & MATERIAL_THUMBNAIL_MASK;
 +  if (index == 0u || index >= gThumbnailCount) {
 +    return false;
@@ -6294,11 +6602,33 @@ index 0000000..e2c7764
 +  const float2 wrapped = frac(frac(uv) + 1.0f);
 +  const uint tx = min(uint(wrapped.x * float(THUMBNAIL_EDGE)), THUMBNAIL_EDGE - 1u);
 +  const uint ty = min(uint(wrapped.y * float(THUMBNAIL_EDGE)), THUMBNAIL_EDGE - 1u);
-+  const uint packed =
-+      gThumbnails[index * THUMBNAIL_EDGE * THUMBNAIL_EDGE + ty * THUMBNAIL_EDGE + tx];
-+  colour = float3(float(packed & 0xffu), float((packed >> 8) & 0xffu),
-+                  float((packed >> 16) & 0xffu)) * (1.0f / 255.0f);
++  packed = gThumbnails[index * THUMBNAIL_EDGE * THUMBNAIL_EDGE + ty * THUMBNAIL_EDGE + tx];
 +  return true;
++}
++
++float3 texel_colour(uint packed) {
++  return float3(float(packed & 0xffu), float((packed >> 8) & 0xffu),
++                float((packed >> 16) & 0xffu)) * (1.0f / 255.0f);
++}
++
++float texel_alpha(uint packed) {
++  return float((packed >> 24u) & 0xffu) * (1.0f / 255.0f);
++}
++
++// The capture's texture coordinate at a point inside a triangle.
++float2 hit_texcoord(uint prim, float2 bary) {
++  return (gTexcoords[prim * 3u + 0u] * (1.0f - bary.x - bary.y) +
++          gTexcoords[prim * 3u + 1u] * bary.x + gTexcoords[prim * 3u + 2u] * bary.y).xy;
++}
++
++// The hit surface's own colour at the point the ray landed, rather than the
++// average of its whole texture. Returns false when the surface has no
++// thumbnail, which leaves the caller on the average.
++bool thumbnail_colour(uint material, float2 uv, out float3 colour) {
++  uint packed;
++  const bool found = thumbnail_texel(material, uv, packed);
++  colour = found ? texel_colour(packed) : float3(0.0f, 0.0f, 0.0f);
++  return found;
 +}
 +
 +// How much of a hit surface actually blocks: the mean alpha of its texture,
@@ -6337,14 +6667,9 @@ index 0000000..e2c7764
 +  if ((material & MATERIAL_CUTOUT) == 0u || !has_thumbnail(material)) {
 +    return 1.0f;
 +  }
-+  const uint index = (material >> MATERIAL_THUMBNAIL_SHIFT) & MATERIAL_THUMBNAIL_MASK;
-+  const float3 uv = gTexcoords[prim * 3u + 0u] * (1.0f - bary.x - bary.y) +
-+                    gTexcoords[prim * 3u + 1u] * bary.x + gTexcoords[prim * 3u + 2u] * bary.y;
-+  const float2 wrapped = frac(frac(uv.xy) + 1.0f);
-+  const uint tx = min(uint(wrapped.x * float(THUMBNAIL_EDGE)), THUMBNAIL_EDGE - 1u);
-+  const uint ty = min(uint(wrapped.y * float(THUMBNAIL_EDGE)), THUMBNAIL_EDGE - 1u);
-+  const uint packed = gThumbnails[index * THUMBNAIL_EDGE * THUMBNAIL_EDGE + ty * THUMBNAIL_EDGE + tx];
-+  return float((packed >> 24u) & 0xffu) * (1.0f / 255.0f);
++  uint packed;
++  thumbnail_texel(material, hit_texcoord(prim, bary), packed);
++  return texel_alpha(packed);
 +}
 +
 +// For the rays that pick a surface -- the primary and the reflection -- a
@@ -6823,6 +7148,18 @@ index 0000000..e2c7764
 +      const bool none = all(gTexcoords[prim * 3u + 0u].xy == 0.0f) &&
 +                        all(gTexcoords[prim * 3u + 1u].xy == 0.0f);
 +      debugColour = none ? float3(0.0f, 0.0f, 1.0f) : float3(frac(uv.x), frac(uv.y), 0.0f);
++    } else if (gDebugMode == DEBUG_THUMBNAIL) {
++      uint packed;
++      if (thumbnail_texel(gMaterials[prim],
++                          hit_texcoord(prim, primary.CommittedTriangleBarycentrics()), packed)) {
++        const bool lightSquare = ((tid.x / 8u) + (tid.y / 8u)) % 2u == 0u;
++        const float3 checker =
++            lightSquare ? float3(0.8f, 0.8f, 0.8f) : float3(0.55f, 0.55f, 0.55f);
++        debugColour = lerp(checker, texel_colour(packed), texel_alpha(packed));
++      } else {
++        const bool stripe = ((tid.x + tid.y) / 6u) % 2u == 0u;
++        debugColour = stripe ? float3(1.0f, 0.0f, 1.0f) : float3(0.0f, 0.0f, 0.0f);
++      }
 +    } else if (gDebugMode == DEBUG_SCREEN_UV) {
 +      const float2 uv = (float2(tid.xy) + 0.5f) / float2(gDims);
 +      const bool grid = frac(uv.x * 8.0f) < 0.02f || frac(uv.y * 8.0f) < 0.02f;
