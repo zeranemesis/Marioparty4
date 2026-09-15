@@ -1497,3 +1497,40 @@ comparer que sur des tampons débruités.
 
 Au passage, non corrigé : ray tracing actif, `AURORA_RT_DUMP_FRAME=N` vide dès
 la première frame et non à la frame N — `wantDump` ne vérifie jamais l'index.
+
+## Le coût réel par frame, enfin mesuré (15 septembre 2026)
+
+Tous les coûts annoncés jusqu'ici étaient ceux de la passe de tracé seule,
+chronométrée par horodatages GPU, pendant que le jeu tournait sous vsync à
+60 Hz : les « 60 FPS » de toutes les captures étaient le plafond.
+
+`AURORA_FRAME_STATS` journalise la période de frame vue du thread principal,
+d'un `end_frame` au suivant — simulation, enregistrement des commandes, et
+l'attente que `begin_frame` impose quand le rendu prend du retard — sous forme de
+distribution toutes les 600 frames. `tools/test_raytracing.ps1 -FrameStats
+-Uncapped` coupe la vsync, demande 240 FPS, le maximum du régulateur de cadence,
+et remet les deux réglages d'origine une fois le jeu fermé.
+
+Sur la RTX 5090 :
+
+| scène | ray tracing | moyenne | p99 | max |
+|---|---|---|---|---|
+| w01Dll | éteint | 4,17 ms | 4,7–4,8 | 9,7 |
+| w01Dll | allumé | 6,8–7,0 ms | 7,8–8,2 | 12,0 |
+| m401Dll | éteint | 4,17 ms | 4,7–4,8 | 6,0 |
+| m401Dll | allumé | 7,0–8,9 ms | 8,1–11,2 | 12,2 |
+
+Ce que ça dit, et ce que ça ne dit pas. Éteint, la boucle bute sur le plafond :
+4,17 ms, c'est exactement 1/240 s, et la vraie période est inconnue et plus
+basse. L'écart est donc un **plancher** du coût, pas le coût. Même ce plancher
+vaut au moins 2,7 ms sur le plateau, où la passe isolée annonce 1,71 ms de GPU,
+et 2,8 à 4,7 ms sur le mini-jeu, où elle annonce 0,75 ms : le chiffre isolé que
+je citais sous-estime le coût réel d'au moins 1,6 fois sur l'un et 3,8 fois sur
+l'autre. Où passe la différence — construction des structures, capture des
+sommets sur le thread principal, synchronisation entre le périphérique privé et
+Dawn — n'est pas mesuré.
+
+À 60 Hz, soit 16,7 ms par frame, rien de tout ça ne gêne sur cette carte : le pire
+p99 mesuré, 11,2 ms, tient dans la frame, et aucune frame tracée d'aucun rapport
+ne dépasse le double de la médiane. Une seule carte, cependant : sur une carte
+plus modeste, cet écart ne se transpose pas simplement.

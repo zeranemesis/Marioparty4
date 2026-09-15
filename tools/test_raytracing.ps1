@@ -49,7 +49,13 @@ param(
     # with that one setting changed, and compares the two buffers pixel for
     # pixel. The null test -- B set to what A already has -- must find no
     # differing pixel. See compare_raytracing_ab.ps1.
-    [string]$AB = ''
+    [string]$AB = '',
+    # End-to-end frame period, as a distribution the game logs every 600
+    # frames (AURORA_FRAME_STATS). Meaningless under vsync: pair it with
+    # -Uncapped, which turns vsync off and asks for 240 FPS -- the ceiling the
+    # frame pacer allows -- and puts both settings back once the game is gone.
+    [switch]$FrameStats,
+    [switch]$Uncapped
 )
 
 $ErrorActionPreference = 'Stop'
@@ -149,6 +155,16 @@ $keys = @('video.enableRayTracedAo', 'video.enableRayTracedShadows', 'video.enab
 for ($i = 0; $i -lt 3; $i++) {
     $config | Add-Member -NotePropertyName $keys[$i] -NotePropertyValue $terms[$i] -Force
 }
+# Vsync and the frame-rate cap are the user's own settings, unlike the ray
+# tracing terms this script has always set: they are recorded here and put back
+# after the last attempt. An interrupted run leaves them changed.
+$savedVsync = $config.'video.enableVsync'
+$savedFrameRate = $config.'video.targetFrameRate'
+if ($Uncapped) {
+    $config | Add-Member -NotePropertyName 'video.enableVsync' -NotePropertyValue $false -Force
+    $config | Add-Member -NotePropertyName 'video.targetFrameRate' -NotePropertyValue 240 -Force
+    Write-Host "cadence : vsync coupee, 240 FPS demandes (reglages d'origine : vsync=$savedVsync, cible=$savedFrameRate)"
+}
 $config | ConvertTo-Json | Set-Content -Path $configPath -Encoding utf8
 Write-Host "ray tracing: AO=$($terms[0]) shadows=$($terms[1]) reflections=$($terms[2])"
 
@@ -219,6 +235,11 @@ function Invoke-Run {
         $env:AURORA_RT_AB = $AB
     } else {
         Remove-Item Env:\AURORA_RT_AB -ErrorAction SilentlyContinue
+    }
+    if ($FrameStats) {
+        $env:AURORA_FRAME_STATS = '1'
+    } else {
+        Remove-Item Env:\AURORA_FRAME_STATS -ErrorAction SilentlyContinue
     }
     $process = Start-Process -FilePath $exe -WorkingDirectory $binary -PassThru `
         -RedirectStandardOutput $logPath -RedirectStandardError "$logPath.err"
@@ -309,6 +330,15 @@ foreach ($attempt in 1..$Attempts) {
     if ($result.Reached) { Write-Host "reached $($result.Scene) on attempt $attempt"; break }
     Write-Host "attempt $attempt did not reach a $Target ($($result.Reason))"
 }
+if ($Uncapped) {
+    # Re-read rather than reuse: the game may have written its config on exit.
+    $restored = Get-Content $configPath -Raw | ConvertFrom-Json
+    foreach ($pair in @(@('video.enableVsync', $savedVsync), @('video.targetFrameRate', $savedFrameRate))) {
+        if ($null -eq $pair[1]) { $restored.PSObject.Properties.Remove($pair[0]) }
+        else { $restored | Add-Member -NotePropertyName $pair[0] -NotePropertyValue $pair[1] -Force }
+    }
+    $restored | ConvertTo-Json | Set-Content -Path $configPath -Encoding utf8
+}
 if (-not $result.Reached) { throw "never reached a $Target in $Attempts attempts" }
 if ($result.DiedInScene) { throw "the game died inside $($result.Scene)" }
 
@@ -325,6 +355,19 @@ foreach ($pattern in @('Ray tracing active', 'Composition ran', 'Perspective pro
                        'Scene extent', 'Of \d+ captured draws', 'Positions rejected', 'still running when')) {
     $hit = $scene | Select-String -Pattern $pattern | Select-Object -Last 1
     if ($hit) { Write-Host ("  " + ($hit.ToString() -replace '^\[INFO \| aurora::rt\] ', '')) }
+}
+
+if ($FrameStats) {
+    # The scene's reports only: the menus before it pace differently.
+    $intervalLines = @($scene | Select-String -Pattern 'Frame intervals over (\d+) frames: mean ([0-9.]+) ms, p50 ([0-9.]+), p95 ([0-9.]+), p99 ([0-9.]+), max ([0-9.]+); (\d+) over')
+    if ($intervalLines.Count -eq 0) {
+        Write-Host "  cadence : aucun rapport dans la scene (moins de 600 frames ?)"
+    } else {
+        foreach ($line in $intervalLines | Select-Object -Last 3) {
+            $g = $line.Matches[0].Groups
+            Write-Host ("  cadence : moyenne {0} ms, p50 {1}, p95 {2}, p99 {3}, max {4} ; {5} frames au-dela du double de la mediane" -f $g[2].Value, $g[3].Value, $g[4].Value, $g[5].Value, $g[6].Value, $g[7].Value)
+        }
+    }
 }
 
 # Scene bounds. The occlusion radius and the shadow range are derived from

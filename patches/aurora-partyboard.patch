@@ -111,6 +111,87 @@ index 61388d7..f49d92c 100644
  #ifdef __cplusplus
  }
  #endif
+diff --git a/lib/aurora.cpp b/lib/aurora.cpp
+index dc5ae5b..7b88288 100644
+--- a/lib/aurora.cpp
++++ b/lib/aurora.cpp
+@@ -19,6 +19,11 @@
+ #include <SDL3/SDL_filesystem.h>
+ #include <magic_enum.hpp>
+ 
++#include <algorithm>
++#include <chrono>
++#include <cstdlib>
++#include <vector>
++
+ #include "system_info.hpp"
+ #include "tracy/Tracy.hpp"
+ 
+@@ -30,6 +35,56 @@ char g_gameName[4];
+ namespace {
+ Module Log("aurora");
+ 
++// End-to-end frame period, on the main thread, from one end_frame to the next:
++// simulation, command recording, and the wait begin_frame imposes when the
++// render worker is behind -- so a GPU that cannot keep up shows here too. Only
++// under AURORA_FRAME_STATS. Summarised every 600 frames as a distribution
++// rather than a mean, because a mean hides exactly the hitches that matter.
++// Every figure the ray tracing work reported until this existed was the cost
++// of its own pass, measured in isolation, under a 60 Hz vsync cap.
++struct FrameIntervals {
++  bool enabled = std::getenv("AURORA_FRAME_STATS") != nullptr;
++  bool haveLast = false;
++  std::chrono::steady_clock::time_point last{};
++  std::vector<double> samples;
++};
++FrameIntervals g_frameIntervals;
++
++void record_frame_interval() noexcept {
++  auto& fi = g_frameIntervals;
++  if (!fi.enabled) {
++    return;
++  }
++  const auto now = std::chrono::steady_clock::now();
++  if (fi.haveLast) {
++    fi.samples.push_back(std::chrono::duration<double, std::milli>(now - fi.last).count());
++  }
++  fi.last = now;
++  fi.haveLast = true;
++
++  constexpr size_t kWindow = 600;
++  if (fi.samples.size() < kWindow) {
++    return;
++  }
++  std::vector<double> sorted = fi.samples;
++  fi.samples.clear();
++  std::sort(sorted.begin(), sorted.end());
++  double sum = 0.0;
++  for (const double v : sorted) {
++    sum += v;
++  }
++  const auto at = [&](double q) { return sorted[static_cast<size_t>(q * static_cast<double>(sorted.size() - 1))]; };
++  const double median = at(0.5);
++  size_t hitches = 0;
++  for (const double v : sorted) {
++    hitches += v > 2.0 * median ? 1u : 0u;
++  }
++  Log.info("Frame intervals over {} frames: mean {:.2f} ms, p50 {:.2f}, p95 {:.2f}, p99 {:.2f}, max {:.2f}; "
++           "{} over twice the median",
++           sorted.size(), sum / static_cast<double>(sorted.size()), median, at(0.95), at(0.99), sorted.back(),
++           hitches);
++}
++
+ #ifdef AURORA_ENABLE_GX
+ // GPU
+ using webgpu::g_device;
+@@ -228,6 +283,7 @@ bool begin_frame() noexcept {
+ 
+ void end_frame() noexcept {
+   ZoneScoped;
++  record_frame_interval();
+ #ifdef AURORA_ENABLE_GX
+   gx::fifo::drain();
+   gfx::finish();
 diff --git a/lib/dolphin/pad/pad.cpp b/lib/dolphin/pad/pad.cpp
 index 2d7f795..4997c20 100644
 --- a/lib/dolphin/pad/pad.cpp
