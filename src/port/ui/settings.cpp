@@ -490,10 +490,11 @@ SettingsWindow::SettingsWindow(bool prelaunch)
                             config::Save();
                         });
                 }
-                pane.add_rml("<br/>How much work the ray tracing pass does: the resolution it traces at and how many "
-                             "rays each pixel casts. Measured between 1.8 and 6.6 ms a frame at High on real boards, "
+                pane.add_rml("<br/>How much work the ray tracing pass does: how finely it traces, measured against "
+                             "the screen rather than Internal Resolution, and how many rays each pixel casts. "
+                             "Measured at 1.1 to 2.1 ms a frame at High on boards and mini-games with an RTX 5090, "
                              "so lower this first if the game does not hold its frame rate. Has no effect without a "
-                             "Windows PC and an RTX card.");
+                             "Windows PC and a graphics card that supports DirectX Raytracing.");
             });
         leftPane.register_control(leftPane.add_select_button({
                                       .key = "Frame Rate",

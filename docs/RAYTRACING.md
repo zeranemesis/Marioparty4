@@ -1396,3 +1396,68 @@ de l'ordre de la variation d'une image à l'autre, non, et c'est dit à chaque
 fois plutôt qu'arrondi dans le bon sens. Un banc déterministe — même séquence,
 même image, un seul processus qui bascule le réglage — reste à faire et rendrait
 la moitié de ces réserves inutiles.
+
+## Des bornes de scène NaN que mon « zéro erreur » ne voyait pas (15 septembre 2026)
+
+Le balayage du 11 annonçait « sept scènes distinctes, zéro erreur ». Il ne
+comptait que les lignes `ERROR`. En relisant les journaux, deux des huit scènes
+avaient des bornes NaN dans certains rapports : **m402Dll (2 sur 27) et m405Dll
+(2 sur 21)**, avec `AO radius -nan` et `shadow range -nan`. Un run plus ancien de
+m405Dll, lumière encore à 6,84°, porte les mêmes lignes : c'est antérieur au 11.
+Le regex d'entier du balayage échouait en silence sur `-nan`, et j'avais lu les
+cases vides comme « pas de lumière ».
+
+### Mécanisme et source
+
+Les bornes sont initialisées sur le premier sommet de la frame ; s'il n'est pas
+fini, toute comparaison suivante est fausse et elles restent NaN jusqu'à la frame
+d'après. Le rayon d'occlusion et la portée d'ombre en dérivent et partent au
+shader comme portée de chaque rayon.
+
+Un journal ponctuel du premier triangle rejeté a donné la source : un quad
+« cuit » dont la position décodée est parfaitement finie, (−600, 480, 1200), sort
+NaN par l'emplacement de matrice 0. Le rasteriseur téléverse ce même tableau
+`pnMtx` (`build_uniform`), donc — sauf si un draw fusionné garde un uniforme plus
+ancien, ce que je n'ai pas vérifié — le jeu dessine ces sommets en NaN lui aussi.
+Le quad fait 1200×960 et l'arène capturée paraît complète. Sur w01Dll, un autre
+cas : des positions `GX_F32` qui décodent en 4 294 967 296, soit 2³², par rafales
+de 100 à 1 400 triangles par tranche de 300 frames.
+
+### Le correctif, et sa première version fausse
+
+Un triangle est désormais écarté si une position n'est pas finie en espace vue,
+dépasse 5·10⁵ unités de la caméra (aucun rayon n'approche : le primaire s'arrête
+à 10⁵, ombre et occlusion à quelques milliers), ou n'est pas finie dans l'espace
+propre du draw. Les rayons dérivés retombent sur la dernière taille de scène
+finie, en seconde ligne.
+
+La première version bornait aussi l'espace propre du draw, et **retirait 20 191
+triangles réels** sur w01Dll : une bande `GX_F32` à z = 709 987 dans son propre
+espace, à 477 unités devant la caméra une fois sa transformation d'instance
+appliquée. Seule la finitude y est exigée maintenant ; le même plateau rejette
+2 800 triangles, tous dans les rafales de valeurs aberrantes.
+
+Retirer ces triangles ne coûte rien à l'ombrage : un triangle à sommet non fini
+est déjà inactif pour DXR, donc les triangles NaN n'occultaient rien. m402Dll
+traçait 25 747 triangles le 11 et 16 681 aujourd'hui, un écart du même ordre que
+la dizaine de milliers rejetés par frame. Ceux à 2³², eux, étaient actifs — des
+triangles larges de milliards d'unités.
+
+### Vérification, et ce qui reste
+
+Plateau w01Dll : aucune borne non finie ni absurde sur 10 rapports, composition
+300 fois par tranche de 300 frames, aucune passe éligible en double ; m402Dll et
+m405Dll : aucune borne invalide ; ray tracing éteint : PASS. Les scripts échouent
+maintenant sur des bornes non finies ou au-delà de 10⁶, et sur une composition
+en double.
+
+Pas corrigé : des étendues **finies mais absurdes** passent encore une fois par
+run, dans le menu de sélection de mode — 1620 × 103 840 × 127 050 dans une scène
+qui mesure sinon 1620 × 275 × 3056. Un seuil fixe ne distingue pas un grand
+plateau d'une valeur aberrante dans une petite scène ; il faut des bornes qui
+ignorent les valeurs isolées, ce qui changerait les rayons partout et mérite sa
+propre mesure.
+
+Au passage : un balayage de vérification s'est bloqué une fois à 12 images par
+seconde sur le dialogue du mode Mini-jeux, sans cause trouvée (coût de tracé
+normal, aucune seconde instance du jeu) ; il ne s'est pas reproduit.

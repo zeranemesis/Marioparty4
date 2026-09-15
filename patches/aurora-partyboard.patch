@@ -1140,10 +1140,10 @@ index 9e9d4eb..8c77d56 100644
                           gfx::PipelineRef pipeline, const char* label, gfx::BindGroupRef extraBindGroup = 0,
                           gfx::Range extraUniformRange = {}, bool extraBindGroupHasDynamicOffset = true,
 diff --git a/lib/rmlui/pipeline.cpp b/lib/rmlui/pipeline.cpp
-index e6dfab7..65c2ea3 100644
+index e6dfab7..5a0041b 100644
 --- a/lib/rmlui/pipeline.cpp
 +++ b/lib/rmlui/pipeline.cpp
-@@ -300,6 +300,19 @@ fn main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+@@ -300,6 +300,21 @@ fn main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
  }
  )"sv;
  
@@ -1153,17 +1153,19 @@ index e6dfab7..65c2ea3 100644
 +
 +@fragment
 +fn main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-+    // R32Float: sampling gives (ao, 0, 0, 1), and a componentwise multiply blend
-+    // would zero green and blue. Broadcast the occlusion across RGB instead.
-+    let ao = textureSample(t, s, uv).r;
-+    return vec4<f32>(ao, ao, ao, 1.0);
++    // All three channels. The target has not been R32Float since the indirect
++    // bounce started carrying colour: reading .r and broadcasting it multiplied
++    // the scene by its red channel alone, and a screen-space ramp written into
++    // the buffer (AURORA_RT_DEBUG_MODE=10) came back with its green gradient
++    // gone. Only reached with AURORA_RT_COMPOSITE=present now.
++    return vec4<f32>(textureSample(t, s, uv).rgb, 1.0);
 +}
 +)"sv;
 +
  constexpr std::string_view seedResampleFragmentSource = R"(
  struct SeedUniforms {
      sampler_mode: u32,
-@@ -526,6 +539,21 @@ wgpu::BlendState blend_state(BlendMode mode) {
+@@ -526,6 +541,21 @@ wgpu::BlendState blend_state(BlendMode mode) {
                  .dstFactor = wgpu::BlendFactor::Zero,
              },
      };
@@ -1185,7 +1187,7 @@ index e6dfab7..65c2ea3 100644
    case BlendMode::None:
    default:
      return {};
-@@ -557,6 +585,7 @@ const wgpu::PipelineLayout create_pipeline_layout(PipelineKind kind) {
+@@ -557,6 +587,7 @@ const wgpu::PipelineLayout create_pipeline_layout(PipelineKind kind) {
    case PipelineKind::Blit:
    case PipelineKind::OpaqueBlit:
    case PipelineKind::Opacity:
@@ -1193,7 +1195,7 @@ index e6dfab7..65c2ea3 100644
    default:
      layouts[layoutCount++] = g_imageBindGroupLayout;
      break;
-@@ -577,6 +606,8 @@ const std::string_view fragment_source(PipelineKind kind) {
+@@ -577,6 +608,8 @@ const std::string_view fragment_source(PipelineKind kind) {
      return gradientFragmentSource;
    case PipelineKind::OpaqueBlit:
      return opaqueBlitFragmentSource;
@@ -2007,10 +2009,10 @@ index 0000000..d901137
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_capture.cpp b/lib/rt/rt_capture.cpp
 new file mode 100644
-index 0000000..4fff321
+index 0000000..075aa4f
 --- /dev/null
 +++ b/lib/rt/rt_capture.cpp
-@@ -0,0 +1,1848 @@
+@@ -0,0 +1,1930 @@
 +#include "rt_capture.hpp"
 +
 +#include "rt_accel.hpp"
@@ -2107,6 +2109,20 @@ index 0000000..4fff321
 +// primary ray steps past anything under PRIMARY_OPACITY_FLOOR, and where that
 +// floor belongs is a property of the game's art rather than a matter of taste.
 +uint32_t g_opacityHistogram[10] = {};
++// Positions further than this from the camera, on any axis, are not geometry
++// the trace can use. The primary ray stops at 100 000 units and the largest
++// board measured spans 22 600, while the defect this screens came through as
++// 3 098 336 256. Half of the 1e6 at which the test scripts call an extent
++// absurd, so a frame that passes the screen cannot fail that check.
++constexpr float kMaxPositionMagnitude = 5.0e5f;
++// Triangles dropped for an unusable position. Cumulative rather than per frame:
++// the defect was intermittent, 2 reports in 27 on m402Dll, and a per-frame
++// count would have read zero in most of them.
++uint64_t g_rejectedTriangles = 0;
++bool g_loggedRejectedPosition = false;
++// Frames whose scene size was not finite and fell back to the last one that was.
++uint32_t g_unusableBoundsFrames = 0;
++float g_lastGoodDiagonal = 0.f;
 +uint32_t g_drawsAlphaTested = 0;
 +// Draws whose texture coordinates are generated from the normal: that is how
 +// the GameCube does environment mapping, so it is the game's own statement
@@ -3226,7 +3242,57 @@ index 0000000..4fff321
 +  const std::vector<Vec3>& outPositions = baked ? verts : locals;
 +  const std::vector<Vec3>& outNormals = baked ? nrmsView : nrmsLocal;
 +
++  // Two different questions. The view-space position feeds the scene bounds and
++  // decides what the trace can reach, so it has to be finite and within reach.
++  // The position that goes into the acceleration structure is in the draw's own
++  // space when the draw takes an instance, and there only finiteness matters.
++  // The first version bounded that one too and dropped 20 191 triangles on
++  // w01Dll: a GX_F32 strip whose own z ran to 709 987 while its instance
++  // transform put it 477 units in front of the camera.
++  const auto finiteComponents = [](const Vec3& p) {
++    return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
++  };
++  const auto withinReach = [](const Vec3& p) {
++    for (const float c : {p.x, p.y, p.z}) {
++      if (c > kMaxPositionMagnitude || c < -kMaxPositionMagnitude) {
++        return false;
++      }
++    }
++    return true;
++  };
++  const auto usable = [&](size_t idx) {
++    return finiteComponents(verts[idx]) && withinReach(verts[idx]) &&
++           finiteComponents(outPositions[idx]);
++  };
++
 +  const auto emit = [&](size_t ia, size_t ib, size_t ic) {
++    // A position that is not a usable number stops here, before it reaches the
++    // scene bounds or the acceleration structure. m402Dll and m405Dll produced
++    // them: GX_F32 components pass through decode_position unchecked, and a
++    // baked draw is transformed by whatever its matrix slot holds. The bounds
++    // are seeded from the first vertex of the frame, so one NaN there left them
++    // NaN for the whole frame, and the occlusion radius and shadow range derived
++    // from them went to the shader as the reach of every ray.
++    if (!usable(ia) || !usable(ib) || !usable(ic)) {
++      ++g_rejectedTriangles;
++      if (!g_loggedRejectedPosition) {
++        g_loggedRejectedPosition = true;
++        const size_t bad = !usable(ia) ? ia : (!usable(ib) ? ib : ic);
++        const char* reason = !finiteComponents(verts[bad]) ? "not finite in view space"
++                             : !withinReach(verts[bad])   ? "beyond reach in view space"
++                                                          : "not finite in the draw's own space";
++        Log.warn("Dropped a triangle with an unusable position, {} (first occurrence; the rest are "
++                 "counted in the periodic report): primitive {:#x}, vertex format {}, position type {} "
++                 "(0 U8, 1 S8, 2 U16, 3 S16, 4 F32) with {} fractional bits, {} data, matrix slot {} "
++                 "({}), {}; decoded ({:.1f}, {:.1f}, {:.1f}) -> view ({:.1f}, {:.1f}, {:.1f})",
++                 reason, static_cast<int>(prim), static_cast<int>(fmt), static_cast<int>(attrFmt.type),
++                 static_cast<int>(attrFmt.frac), indexed ? "indexed" : "direct",
++                 firstMtxIdx == UINT32_MAX ? -1 : static_cast<int>(firstMtxIdx),
++                 singleMatrix ? "one matrix" : "per-vertex matrices", baked ? "baked" : "instanced",
++                 locals[bad].x, locals[bad].y, locals[bad].z, verts[bad].x, verts[bad].y, verts[bad].z);
++      }
++      return;
++    }
 +    track(verts[ia]);
 +    track(verts[ib]);
 +    track(verts[ic]);
@@ -3655,10 +3721,25 @@ index 0000000..4fff321
 +    const float dy = g_boundsMax[1] - g_boundsMin[1];
 +    const float dz = g_boundsMax[2] - g_boundsMin[2];
 +    const float diagonal = std::sqrt(dx * dx + dy * dy + dz * dz);
-+    if (aoRadius <= 0.f) {
-+      aoRadius = diagonal * kAoRadiusFraction;
++    // Positions are screened before they reach the bounds, so this should not
++    // fire. It stays as the second line because what it guards is the reach of
++    // every occlusion and shadow ray, and a NaN there is outside what DXR
++    // defines for a ray. The last usable scene size is kept rather than
++    // inventing one; the test scripts still fail on the extent printed below,
++    // because this firing means the first line did not hold.
++    const bool usableDiagonal = std::isfinite(diagonal);
++    if (usableDiagonal) {
++      g_lastGoodDiagonal = diagonal;
++    } else {
++      ++g_unusableBoundsFrames;
 +    }
-+    shadowRange = diagonal * g_shadowRangeFactor;
++    if (usableDiagonal || g_lastGoodDiagonal > 0.f) {
++      const float sceneSize = usableDiagonal ? diagonal : g_lastGoodDiagonal;
++      if (aoRadius <= 0.f) {
++        aoRadius = sceneSize * kAoRadiusFraction;
++      }
++      shadowRange = sceneSize * g_shadowRangeFactor;
++    }
 +  }
 +
 +  // Did the camera move while the geometry stayed put? That is the case the
@@ -3789,6 +3870,9 @@ index 0000000..4fff321
 +    // rather than having to be inferred from a triangle count.
 +    Log.info("Draws seen by the hook: {}; rejected: {} unsupported layout, {} orthographic",
 +             g_drawsSeen, g_skippedDraws, g_orthoDrawsSkipped);
++    Log.info("Positions rejected as non-finite or out of range: {} triangles since start; "
++             "frames that fell back to the last usable scene size: {}",
++             g_rejectedTriangles, g_unusableBoundsFrames);
 +    Log.info("See-through draws by mean alpha (tenths, 0.0-0.1 first): "
 +             "{} {} {} {} {} {} {} {} {} {}",
 +             g_opacityHistogram[0], g_opacityHistogram[1], g_opacityHistogram[2],

@@ -50,25 +50,33 @@ foreach ($run in 1..$Runs) {
         $row.triangles = [int]$Matches[1]; $row.buildMs = [double]$Matches[3]
         $row.res = $Matches[4]; $row.traceMs = [double]$Matches[5]
     }
-    if ($text -match 'Orthographic coverage: ([0-9.]+)% .*?(\d+) full-screen 2D draws, (\d+) bounded') {
-        $row.mask = [double]$Matches[1]; $row.fullscreen2D = [int]$Matches[2]; $row.bounded2D = [int]$Matches[3]
+    # The 2D mask is gone; what matters now is that the bounds stay finite and
+    # the composition runs once a frame. Both are judged in the child script.
+    if ($text -match 'bornes de scene : (\d+) non finies et (\d+) absurdes sur (\d+) rapports') {
+        $row.badBounds = [int]$Matches[1] + [int]$Matches[2]; $row.boundReports = [int]$Matches[3]
     }
+    if ($text -match 'composition : au plus (\d+) par rapport de 300 frames, (\d+) passes') {
+        $row.compositeMax = [int]$Matches[1]; $row.compositeExtra = [int]$Matches[2]
+    }
+    if ($text -match 'Positions rejected as non-finite or out of range: (\d+)') { $row.rejectedTris = [int]$Matches[1] }
     if ($text -match 'Perspective projections this frame: (\d+)') { $row.projections = [int]$Matches[1] }
     if ($text -match 'Of (\d+) captured draws: (\d+) cut-out.*?(\d+) environment mapped') {
         $row.draws = [int]$Matches[1]
         $row.cutoutPct = [math]::Round(100.0 * [int]$Matches[2] / [int]$Matches[1], 1)
         $row.envMapPct = [math]::Round(100.0 * [int]$Matches[3] / [int]$Matches[1], 1)
     }
-    if ($text -match 'Scene extent (\d+) x (\d+) x (\d+).*?shadow range (\d+)') {
-        $row.extent = "$($Matches[1])x$($Matches[2])x$($Matches[3])"; $row.shadowRange = [int]$Matches[4]
+    # (\S+), not (\d+): the integer form failed silently on "-nan" and left
+    # the column blank, which read as "no light" rather than as a defect.
+    if ($text -match 'Scene extent (\S+) x (\S+) x (\S+);.*?shadow range (\S+)') {
+        $row.extent = "$($Matches[1])x$($Matches[2])x$($Matches[3])"; $row.shadowRange = $Matches[4]
     }
     $row.errors = if ($text -match 'PASS:') { 0 } else { 1 }
     $rows += [pscustomobject]$row
-    Write-Host "  $scene : trace $($row.traceMs) ms, masque $($row.mask)%, decoupe $($row.cutoutPct)%, envmap $($row.envMapPct)%"
+    Write-Host "  $scene : trace $($row.traceMs) ms, bornes invalides $($row.badBounds)/$($row.boundReports), composition max $($row.compositeMax), decoupe $($row.cutoutPct)%"
 }
 
 Write-Host ''
 Write-Host '===== recapitulatif ====='
-$rows | Format-Table -AutoSize scene, triangles, traceMs, buildMs, mask, bounded2D, projections, cutoutPct, envMapPct, shadowRange, errors
+$rows | Format-Table -AutoSize scene, triangles, traceMs, buildMs, badBounds, rejectedTris, compositeMax, projections, cutoutPct, envMapPct, shadowRange, errors
 $rows | ConvertTo-Json -Depth 3 | Set-Content (Join-Path $root "summary-$Target-$RayTracing.json") -Encoding utf8
 Write-Host "scenes distinctes : $(($rows.scene | Sort-Object -Unique) -join ', ')"

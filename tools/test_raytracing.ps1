@@ -300,24 +300,51 @@ $scene = $lines[($from - 1)..($lines.Count - 1)]
 
 Write-Host ''
 Write-Host "--- $($result.Scene), ray tracing $RayTracing ---"
-foreach ($pattern in @('Ray tracing active', 'Orthographic coverage', 'Perspective projections',
-                       'Scene extent', 'Of \d+ captured draws', 'still running when')) {
+foreach ($pattern in @('Ray tracing active', 'Composition ran', 'Perspective projections',
+                       'Scene extent', 'Of \d+ captured draws', 'Positions rejected', 'still running when')) {
     $hit = $scene | Select-String -Pattern $pattern | Select-Object -Last 1
     if ($hit) { Write-Host ("  " + ($hit.ToString() -replace '^\[INFO \| aurora::rt\] ', '')) }
 }
 
-# Did the 2D mask ever have anything to protect? Every capture taken at the
-# moment a board loads reports 0%, because the intro fly-through has no
-# interface -- which is why loading a board never validated the HUD fix.
-$maskLines = $scene | Select-String -Pattern 'Orthographic coverage: ([0-9.]+)% .*?(\d+) bounded'
-$engaged = @($maskLines | Where-Object { [double]$_.Matches[0].Groups[1].Value -gt 0 })
-Write-Host ("  masque 2D : engage sur {0} des {1} rapports de cette scene" -f $engaged.Count, $maskLines.Count)
-if ($engaged.Count -gt 0) {
-    Write-Host ("    " + ($engaged[-1].ToString() -replace '^\[INFO \| aurora::rt\] ', ''))
+# Scene bounds. The occlusion radius and the shadow range are derived from
+# them, so a non-finite or absurd extent means rays with a NaN or runaway reach.
+# That happened on m402Dll and m405Dll and passed this script regardless: it
+# only ever looked for ERROR lines, and the last report printed above can be a
+# clean one while earlier reports were not. So every report is checked.
+$extentLines = @($scene | Select-String -Pattern 'Scene extent (\S+) x (\S+) x (\S+);')
+$nonFinite = 0
+$absurd = 0
+foreach ($line in $extentLines) {
+    $groups = $line.Matches[0].Groups
+    $values = @($groups[1].Value, $groups[2].Value, $groups[3].Value)
+    if (($values -join ' ') -match 'nan|inf') { $nonFinite++; continue }
+    if (@($values | Where-Object { [double]$_ -gt 1e6 }).Count -gt 0) { $absurd++ }
 }
+Write-Host ("  bornes de scene : {0} non finies et {1} absurdes sur {2} rapports" -f $nonFinite, $absurd, $extentLines.Count)
 
+# One composition per frame. The 2D mask this used to report on is gone. A
+# second eligible pass is the direct signature of the term being applied twice;
+# the count per report is the coarse one -- reports come every 300 frames, and
+# the double application measured 600.
+$compositeLines = @($scene | Select-String -Pattern 'Composition ran (\d+) time\(s\) since the last report; (\d+) further passes')
+$compositeMax = 0
+$compositeExtra = 0
+foreach ($line in $compositeLines) {
+    $count = [int]$line.Matches[0].Groups[1].Value
+    if ($count -gt $compositeMax) { $compositeMax = $count }
+    # Cumulative in the engine, so the last report carries the total.
+    $compositeExtra = [int]$line.Matches[0].Groups[2].Value
+}
+Write-Host ("  composition : au plus {0} par rapport de 300 frames, {1} passes eligibles en trop" -f $compositeMax, $compositeExtra)
+
+$failures = @()
 $errors = ($scene | Select-String -Pattern 'aurora::rt.*ERROR|device removed|DEVICE_HUNG').Count
+if ($errors -gt 0) { $failures += "$errors ray tracing errors" }
+if ($nonFinite -gt 0) { $failures += "$nonFinite reports with non-finite scene bounds" }
+if ($absurd -gt 0) { $failures += "$absurd reports with scene bounds past 1e6" }
+if ($compositeExtra -gt 0) { $failures += "$compositeExtra passes eligible for a second composition" }
+if ($compositeMax -gt 450) { $failures += "composition ran $compositeMax times in one 300-frame report" }
 Write-Host ''
-if ($errors -gt 0) { throw "$errors ray tracing errors in $($result.Scene)" }
+if ($failures.Count -gt 0) { throw "$($result.Scene): $($failures -join '; ')" }
 Write-Host "PASS: $($result.Scene) rendered with ray tracing $RayTracing, no errors."
 Write-Host "Frames and log in $output"
