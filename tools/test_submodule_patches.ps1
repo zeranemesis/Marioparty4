@@ -39,6 +39,33 @@ $pairs = @(
 $failures = New-Object Collections.Generic.List[string]
 function Say([string]$text) { Write-Output $text }
 
+# The change a submodule carries, including files it does not track yet.
+#
+# `git diff` alone only reports tracked files, and that is how this guard was
+# blind to the one drift it could not afford to miss: the MusyX patch creates
+# src/musyx/runtime/synth_wait.h, synthmacros.c includes it, and regenerating
+# the patch from a working tree where that file was untracked dropped its
+# creation while keeping the include. The patch still applied, so nothing here
+# complained, and every CI build failed to compile.
+#
+# Staging into a throwaway index keeps the submodule's own index untouched and
+# still honours .gitignore, so build output stays out of the comparison.
+function Get-SubmoduleChange([string]$submodule, [string[]]$diffArgs) {
+    $index = Join-Path ([IO.Path]::GetTempPath()) ("cubeshelf-index-" + [Guid]::NewGuid().ToString('N'))
+    $previous = $env:GIT_INDEX_FILE
+    try {
+        $env:GIT_INDEX_FILE = $index
+        & git -C $submodule read-tree HEAD
+        & git -C $submodule add --all
+        return @(& git -C $submodule -c core.safecrlf=false diff --cached @diffArgs)
+    }
+    finally {
+        if ($null -eq $previous) { Remove-Item env:GIT_INDEX_FILE -ErrorAction SilentlyContinue }
+        else { $env:GIT_INDEX_FILE = $previous }
+        Remove-Item -LiteralPath $index -Force -ErrorAction SilentlyContinue
+    }
+}
+
 foreach ($pair in $pairs) {
     $submodule = Join-Path $projectPath $pair.Submodule
     $patch = Join-Path $projectPath $pair.Patch
@@ -65,7 +92,7 @@ foreach ($pair in $pairs) {
     }
     Say ("  base commit {0}, matching the superproject" -f $actual.Substring(0, 12))
 
-    $live = (& git -C $submodule -c core.safecrlf=false diff) -join "`n"
+    $live = (Get-SubmoduleChange $submodule @()) -join "`n"
     $stored = (Get-Content -LiteralPath $patch -Raw)
 
     # Compare content, not line endings: git's autocrlf rewrites the file on
@@ -74,7 +101,7 @@ foreach ($pair in $pairs) {
     $storedNormal = ($stored -replace "`r`n", "`n").TrimEnd("`n")
 
     if ($liveNormal -eq $storedNormal) {
-        $files = @(& git -C $submodule -c core.safecrlf=false diff --name-only).Count
+        $files = @(Get-SubmoduleChange $submodule @('--name-only')).Count
         Say ("  ok    the patch describes the submodule exactly ({0} files, {1:n0} bytes)" -f $files, $storedNormal.Length)
         continue
     }
@@ -89,7 +116,7 @@ foreach ($pair in $pairs) {
     Say      "        CI applies the patch, not your working tree. Whatever is missing from"
     Say      "        the patch is missing from every build CI produces."
     # Naming the files is what turns this from a puzzle into a two-minute fix.
-    $liveFiles = @(& git -C $submodule -c core.safecrlf=false diff --name-only)
+    $liveFiles = @(Get-SubmoduleChange $submodule @('--name-only'))
     $storedFiles = @([regex]::Matches($storedNormal, '(?m)^\+\+\+ b/(.+)$') | ForEach-Object { $_.Groups[1].Value.Trim() })
     $onlyLive = @($liveFiles | Where-Object { $storedFiles -notcontains $_ })
     $onlyStored = @($storedFiles | Where-Object { $liveFiles -notcontains $_ })
