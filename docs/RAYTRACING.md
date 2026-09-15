@@ -1890,3 +1890,111 @@ Vérifié aussi, avec le banc en place :
 
 - le test nul A/B reste à 0 pixel ;
 - les trois runs ont atteint la bonne sorte de scène au premier essai.
+
+## Une couche additive n'occulte pas (15 septembre 2026)
+
+Lot C1c, ouvert par ce que C1b laissait visible. Sur m401Dll, une couche de lumière
+du plafond, classée découpée, assombrissait les rochers dessous par blocs de
+16×16 : pondérée par ses texels depuis C1, elle bloquait par ses cellules opaques.
+Or cette couche ne retire pas de lumière, elle en ajoute.
+
+### Le signal que le jeu donne déjà
+
+Le mélange additif garde la destination entière : le résultat vaut la source
+multipliée par son alpha, plus ce qui était déjà dessous. Une telle surface ajoute
+de la lumière et ne peut rien cacher. Le jeu dessine ainsi ses halos, ses rayons de
+lumière et ses caustiques :
+
+- les matériaux `HSF_MATERIAL_ADDCOL` règlent
+  `GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_ONE, …)` (`src/game/hsfdraw.c`) ;
+- les particules font de même (`src/game/hsfanim.c`).
+
+L'état de mélange ne dit pas en général si une surface est pleine : le jeu laisse
+le mélange actif sur de la géométrie opaque. Mais un facteur de destination égal à
+un dit sans ambiguïté que rien derrière n'est caché.
+
+### Ce qui change
+
+- La capture lit l'état de mélange de chaque draw. Un draw en `GX_BM_BLEND` avec
+  `GX_BL_ONE` en destination reçoit le bit `MaterialAdditive`.
+- Deux draws consécutifs ne sont plus fusionnés en un groupe si l'un est additif
+  et l'autre non.
+- Chaque groupe est une instance du TLAS. Les groupes additifs portent le masque
+  0x02, les autres 0x01.
+- Sous `FEATURE_SKIP_ADDITIVE`, les quatre rayons — primaire, ombre, occlusion,
+  reflet — n'incluent que 0x01.
+
+Le rayon primaire aussi, et c'est voulu. Le terme tracé multiplie l'image pixel
+par pixel, et le rendu du jeu ajoute la couche de lumière par-dessus. Le terme qui
+revient à ce pixel est donc celui de la surface derrière la couche.
+
+`AURORA_RT_ADDITIVE=0` rend l'ancien comportement. Le banc compare les deux sur une
+même frame avec `-AB "additive=0"`. La vue des matériaux peint les surfaces
+additives en jaune.
+
+### Mesuré
+
+Occlusion brute, surfaces additives tracées contre laissées de côté, sur la même
+frame. Rouge : plus clair une fois la couche retirée. Bleu : plus sombre, là où le
+rayon primaire atteint maintenant la surface derrière la couche.
+
+| scène | draws additifs | plus clair de plus de 0,1 | plus sombre |
+|---|---|---|---|
+| m401Dll | 15 sur 605 | 8,28 % des pixels | 2,75 % |
+| w01Dll | 5 sur 382 | 1,28 % | 1,06 % |
+
+- **m401Dll.** La vue des matériaux, surfaces additives tracées, les peint en
+  jaune : ce sont les rayons de lumière et la grande lueur du plafond, 25,9 % des
+  impacts primaires. Une fois retirées, les dalles des rayons de lumière
+  disparaissent de l'occlusion, la bande sombre des sommets de rochers s'éclaircit,
+  et les blocs du plafond partent. Le bleu se trouve derrière les rayons de
+  lumière : on y voit désormais le fond, plus occulté que la couche ne l'était.
+  Les rayons de lumière que je croyais « translucides par leur couleur de sommet »
+  sont en fait additifs : C1c les règle aussi.
+- **w01Dll.** Quelques lueurs sur la structure centrale et sur le chapiteau en
+  haut à gauche ; les cases et le reste du plateau ne bougent pas.
+- **Test nul** sur w01Dll : 0 pixel différent.
+
+Coût, rapport par rapport après chargement de la scène : sur w01Dll, 0,68 à
+2,06 ms contre 0,68 à 2,06 ms pour C1b (écarts de 0 à 0,05 ms). Sur m401Dll,
+0,60 à 1,15 ms contre 0,83 à 1,76 ms pour le run de C1. Mais C1b s'intercale
+entre ces deux builds, et seul le plateau isole C1c : aucun coût mesurable.
+
+### Un plantage au démarrage, qui ne vient pas du rendu
+
+Pendant la validation, le premier essai du test nul a planté au démarrage :
+violation d'accès dans `HuMemMemoryFree` (`src/game/memory.c:133`), l'allocateur
+du jeu, en lisant le bloc suivant d'un bloc. C'est le seul plantage du jeu que
+Windows a enregistré aujourd'hui, et il est tombé sur ce build.
+
+La cause est dans `NintendoDataDecode` (`src/REL/bootDll/main.c`). Sur PC,
+`nintendoData` appelle `GetRelIncludeData`, qui charge le logo dans un tampon
+alloué par `HuMemDirectMalloc`. La fonction lit ensuite deux entiers en avançant
+`src`, puis appelle `HuMemDirectFree(src)` : elle libère ce tampon **8 octets
+après son début**. L'allocateur lit donc un en-tête de bloc décalé de 8 octets,
+dont le champ `magic` tombe dans un pointeur du vrai en-tête, et la valeur de ce
+pointeur dépend de l'adresse où le tas a été placé.
+
+- D'habitude, cet octet ne vaut pas 165. L'allocateur écrit alors
+  « HuMem>memory free error », s'arrête, et le tampon n'est jamais libéré. C'est
+  le cas dans les 148 journaux de runs d'aujourd'hui, ray tracing coupé compris.
+- Quand l'adresse du tas donne 165 à cet octet, le contrôle passe, et
+  l'allocateur suit des pointeurs faux jusqu'à la violation d'accès.
+
+Dix démarrages de ce même build, journaux conservés, ont donné un plantage : le
+quatrième, à la même adresse. Son journal s'arrête juste après le chargement de
+`bootDll`, là où les autres écrivent « memory free error ». Au total, ce build a
+planté deux fois en dix-sept lancements. Le journal de Windows ne compte aucun
+autre plantage du jeu depuis le matin, sur plusieurs dizaines de lancements des
+builds précédents. Pourquoi ce build tombe plus souvent sur 165 n'est pas établi.
+
+C'est un bug du portage, hors du ray tracing. Le correctif tient en une ligne :
+libérer le pointeur rendu par `nintendoData`, et non `src` avancé de 8 octets.
+Mais il touche au code du jeu, et il rejoint donc les bugs du lot D, qui attendent
+une décision.
+
+### Limites
+
+- Seul le mélange additif est reconnu. Les couches soustractives (`GX_BM_SUBTRACT`)
+  et multiplicatives assombrissent l'image sans être solides, et restent tracées.
+- La décision se prend par draw, sur l'état de mélange au moment de la capture.

@@ -1311,10 +1311,10 @@ index 7ec451d..4eb8f1c 100644
  enum class DrawKind : uint32_t {
 diff --git a/lib/rt/rt_accel.cpp b/lib/rt/rt_accel.cpp
 new file mode 100644
-index 0000000..04e886b
+index 0000000..42b33ba
 --- /dev/null
 +++ b/lib/rt/rt_accel.cpp
-@@ -0,0 +1,680 @@
+@@ -0,0 +1,682 @@
 +#include "rt_accel.hpp"
 +
 +#include "rt_device.hpp"
@@ -1861,7 +1861,9 @@ index 0000000..04e886b
 +      instance = {};
 +      std::memcpy(&instance.Transform[0][0], groups[i].transform, 12 * sizeof(float));
 +      instance.InstanceID = groups[i].firstTriangle;
-+      instance.InstanceMask = 0xFF;
++      // 0x02 for additive light, 0x01 for everything else: a ray that
++      // includes only 0x01 goes straight through a glow or a light shaft.
++      instance.InstanceMask = groups[i].additive ? 0x02 : 0x01;
 +      instance.InstanceContributionToHitGroupIndex = 0;
 +      instance.AccelerationStructure = blasAddress + g_blasOffsets[i];
 +    }
@@ -1997,10 +1999,10 @@ index 0000000..04e886b
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_accel.hpp b/lib/rt/rt_accel.hpp
 new file mode 100644
-index 0000000..d901137
+index 0000000..20409f5
 --- /dev/null
 +++ b/lib/rt/rt_accel.hpp
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,110 @@
 +#pragma once
 +
 +#include <cstddef>
@@ -2051,6 +2053,9 @@ index 0000000..d901137
 +  MaterialCutout = 1u << 1,
 +  // Bound texture is uniformly translucent rather than holed.
 +  MaterialTranslucent = 1u << 2,
++  // Blended additively: the surface adds light and cannot occlude. Its draw
++  // group is kept out of the rays through the instance mask.
++  MaterialAdditive = 1u << 3,
 +};
 +
 +// The high byte of the same word carries how much of a cut-out surface is
@@ -2083,6 +2088,10 @@ index 0000000..d901137
 +  uint32_t firstTriangle = 0;
 +  uint32_t triangleCount = 0;
 +  float transform[12] = {1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f};
++  // Every draw in the group is blended additively. Groups never mix the two,
++  // since the instance mask that leaves additive light out of the rays is per
++  // group.
++  bool additive = false;
 +};
 +
 +bool build(const float* positions, const float* colours, const float* normals,
@@ -2106,10 +2115,10 @@ index 0000000..d901137
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_capture.cpp b/lib/rt/rt_capture.cpp
 new file mode 100644
-index 0000000..cc82ef5
+index 0000000..de41472
 --- /dev/null
 +++ b/lib/rt/rt_capture.cpp
-@@ -0,0 +1,2368 @@
+@@ -0,0 +1,2401 @@
 +#include "rt_capture.hpp"
 +
 +#include "rt_accel.hpp"
@@ -2224,6 +2233,10 @@ index 0000000..cc82ef5
 +// most transparent map any stage names for the classification, texture unit 0
 +// at the raw TEX0 attribute for the rest -- to compare the two.
 +bool g_tevTextures = true;
++// Additive surfaces left out of the rays: they add light and cannot occlude.
++// On by default; AURORA_RT_ADDITIVE=0 traces them like any other surface, and
++// the A/B bench compares the two on one frame with AURORA_RT_AB=additive=0.
++bool g_skipAdditive = true;
 +bool g_armed = false;
 +// Every call that reaches the hook, before any filtering: separates "the"
 +// geometry was rejected" from "the geometry never arrived".
@@ -2231,6 +2244,8 @@ index 0000000..cc82ef5
 +// Draws whose GX state says they are not solid. Both are traced as opaque
 +// today, so this is the size of that approximation, not a rejection count.
 +uint32_t g_drawsBlended = 0;
++// Draws blended additively, which the rays leave out while g_skipAdditive holds.
++uint32_t g_drawsAdditive = 0;
 +// How the see-through draws are spread across mean alpha, in tenths. The
 +// primary ray steps past anything under PRIMARY_OPACITY_FLOOR, and where that
 +// floor belongs is a property of the game's art rather than a matter of taste.
@@ -3261,6 +3276,16 @@ index 0000000..cc82ef5
 +      break;
 +    }
 +  }
++  // Blended with the destination kept whole: the draw adds light to what is
++  // behind it and cannot take any away. The blend state does not say whether a
++  // surface is solid -- the game leaves blending on for solid geometry -- but a
++  // destination factor of one does say that nothing behind is hidden. The
++  // game's glows, light shafts and caustics are drawn this way
++  // (HSF_MATERIAL_ADDCOL in hsfdraw.c, and the particles in hsfanim.c).
++  if (!ortho && g_gxState.blendMode == GX_BM_BLEND && g_gxState.blendFacDst == GX_BL_ONE) {
++    material |= accel::MaterialAdditive;
++    ++g_drawsAdditive;
++  }
 +  // The GX blend and alpha-compare state says nothing useful on its own: the
 +  // game leaves both enabled for solid geometry, so every draw looks
 +  // see-through. The texture's own alpha is the honest signal.
@@ -3729,6 +3754,7 @@ index 0000000..cc82ef5
 +    group.firstTriangle = static_cast<uint32_t>(trianglesBefore);
 +    group.triangleCount = triangles;
 +    std::memcpy(group.transform, drawTransform, sizeof(group.transform));
++    group.additive = (material & accel::MaterialAdditive) != 0u;
 +
 +    // Consecutive draws of one model share its matrix, and their triangles are
 +    // already adjacent, so they can share a structure. Each group costs a BLAS
@@ -3736,7 +3762,10 @@ index 0000000..cc82ef5
 +    // one large one -- measured at 186 ms for 1296 of them.
 +    if (!g_groups.empty()) {
 +      accel::DrawGroup& last = g_groups.back();
++      // Additive light is never merged with a solid draw: the instance mask
++      // that keeps it out of the rays belongs to the whole group.
 +      if (last.firstTriangle + last.triangleCount == group.firstTriangle &&
++          last.additive == group.additive &&
 +          std::memcmp(last.transform, group.transform, sizeof(group.transform)) == 0) {
 +        last.triangleCount += group.triangleCount;
 +        if (measureCamera) {
@@ -3861,6 +3890,10 @@ index 0000000..cc82ef5
 +      g_tevTextures = env[0] != '0';
 +      Log.info("Textures read as the TEV stages combine them {}", g_tevTextures ? "on" : "off");
 +    }
++    if (const char* env = std::getenv("AURORA_RT_ADDITIVE")) {
++      g_skipAdditive = env[0] != '0';
++      Log.info("Additive surfaces {}", g_skipAdditive ? "left out of the rays" : "traced");
++    }
 +    if (const char* env = std::getenv("AURORA_RT_SEQUENCE")) {
 +      const int frames = std::atoi(env);
 +      g_sequenceFrames = frames <= 0 ? 0u : static_cast<uint32_t>(frames > 240 ? 240 : frames);
@@ -3877,7 +3910,8 @@ index 0000000..cc82ef5
 +    if (const char* env = std::getenv("AURORA_RT_AB")) {
 +      static constexpr const char* kAbNames[] = {"aoSamples", "shadowSamples", "lightRadius",
 +                                                 "aoRadius",  "bounce",        "denoisePhi",
-+                                                 "denoisePasses", "debugMode", "alphaTest"};
++                                                 "denoisePasses", "debugMode", "alphaTest",
++                                                 "additive"};
 +      bool known = false;
 +      if (const char* eq = std::strchr(env, '='); eq != nullptr) {
 +        const std::string name(env, eq);
@@ -3894,7 +3928,8 @@ index 0000000..cc82ef5
 +                 "(needs AURORA_RT_DUMP_FRAME or AURORA_RT_DUMP_MIN_TRIS)", g_abName, g_abValue);
 +      } else {
 +        Log.warn("AURORA_RT_AB ignored: expected name=value, name one of aoSamples, shadowSamples, "
-+                 "lightRadius, aoRadius, bounce, denoisePhi, denoisePasses, debugMode, alphaTest");
++                 "lightRadius, aoRadius, bounce, denoisePhi, denoisePasses, debugMode, alphaTest, "
++                 "additive");
 +      }
 +    }
 +    // Frame numbers are a poor handle: the counter runs uncapped through boot,
@@ -3997,6 +4032,7 @@ index 0000000..cc82ef5
 +    g_perspAfterLast = 0;
 +    g_lastDrawOrtho = false;
 +    g_drawsBlended = 0;
++    g_drawsAdditive = 0;
 +    for (uint32_t& bucket : g_opacityHistogram) {
 +      bucket = 0;
 +    }
@@ -4276,7 +4312,8 @@ index 0000000..cc82ef5
 +  params.aoRadius = aoRadius;
 +  params.aoSamples = g_samples;
 +  params.shadowSamples = g_shadowSamples;
-+  params.features = g_features | (g_alphaTest ? trace::FeatureAlphaTest : 0u);
++  params.features = g_features | (g_alphaTest ? trace::FeatureAlphaTest : 0u) |
++                    (g_skipAdditive ? trace::FeatureSkipAdditive : 0u);
 +  params.reflectionRange = shadowRange; // the scene's own size bounds both
 +  params.debugMode = g_debugMode;
 +  if (g_maskEnabled) {
@@ -4319,6 +4356,10 @@ index 0000000..cc82ef5
 +    } else if (g_abName == "alphaTest") {
 +      probe.features = value != 0.0 ? (probe.features | trace::FeatureAlphaTest)
 +                                    : (probe.features & ~static_cast<uint32_t>(trace::FeatureAlphaTest));
++    } else if (g_abName == "additive") {
++      probe.features = value != 0.0
++                           ? (probe.features | trace::FeatureSkipAdditive)
++                           : (probe.features & ~static_cast<uint32_t>(trace::FeatureSkipAdditive));
 +    }
 +    if (!trace::run(probe, "rt_ab_b.pfm")) {
 +      Log.error("A/B bench: the B trace failed");
@@ -4447,9 +4488,10 @@ index 0000000..cc82ef5
 +             g_staticTriangles, seen);
 +    Log.info("Of {} captured draws: {} cut-out, occluding by their solid fraction; {} "
 +             "uniformly translucent, still traced as opaque; {} environment mapped; {} "
-+             "baked for want of a usable matrix",
++             "baked for want of a usable matrix; {} additive, {}",
 +             g_drawsTotal, g_drawsAlphaTested, g_drawsBlended, g_drawsReflective,
-+             g_drawsSingularMatrix);
++             g_drawsSingularMatrix, g_drawsAdditive,
++             g_skipAdditive ? "left out of the rays" : "traced");
 +    // More than one means part of the picture is being traced through a
 +    // projection it was not drawn with, which lands the occlusion in the wrong
 +    // place across everything that used the other one.
@@ -6316,10 +6358,10 @@ index 0000000..8499f29
 +} // namespace aurora::rt::trace
 diff --git a/lib/rt/rt_trace.hpp b/lib/rt/rt_trace.hpp
 new file mode 100644
-index 0000000..9063baf
+index 0000000..8915252
 --- /dev/null
 +++ b/lib/rt/rt_trace.hpp
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,129 @@
 +#pragma once
 +
 +#include <cstdint>
@@ -6357,6 +6399,10 @@ index 0000000..9063baf
 +  // counting them whole. Off, every candidate counts, which is how the geometry
 +  // behaved while it was flagged opaque -- the A/B bench compares the two.
 +  FeatureAlphaTest = 1u << 3,
++  // Leave additive surfaces out of every ray. Off, they are traced like any
++  // other surface, which is how they behaved before -- the A/B bench compares
++  // the two.
++  FeatureSkipAdditive = 1u << 4,
 +};
 +
 +struct TraceParams {
@@ -6447,10 +6493,10 @@ index 0000000..9063baf
 +} // namespace aurora::rt::trace
 diff --git a/lib/rt/shaders/rt_ao.hlsl b/lib/rt/shaders/rt_ao.hlsl
 new file mode 100644
-index 0000000..f1a4267
+index 0000000..06c2f34
 --- /dev/null
 +++ b/lib/rt/shaders/rt_ao.hlsl
-@@ -0,0 +1,798 @@
+@@ -0,0 +1,812 @@
 +// Ray traced ambient occlusion for PartyBoard.
 +//
 +// Primary visibility is traced rather than rasterised: with inline RayQuery the
@@ -6582,6 +6628,14 @@ index 0000000..f1a4267
 +#define FEATURE_SHADOWS 2u
 +#define FEATURE_REFLECTIONS 4u
 +#define FEATURE_ALPHA_TEST 8u
++#define FEATURE_SKIP_ADDITIVE 16u
++
++// Which instances a ray visits. Additive groups carry mask 0x02 and everything
++// else 0x01 (rt_accel.cpp): light that is only added to the picture neither
++// occludes nor casts a shadow, and a primary ray lands on the surface behind it.
++uint ray_mask() {
++  return (gFeatures & FEATURE_SKIP_ADDITIVE) != 0u ? 0x01u : 0xFFu;
++}
 +
 +// How much of a reflective surface the traced reflection replaces. The game
 +// already draws its own environment map, so this stays well short of a mirror:
@@ -6624,6 +6678,7 @@ index 0000000..f1a4267
 +#define MATERIAL_REFLECTIVE 1u
 +#define MATERIAL_CUTOUT 2u
 +#define MATERIAL_TRANSLUCENT 4u
++#define MATERIAL_ADDITIVE 8u
 +#define MATERIAL_OPACITY_SHIFT 8u
 +#define MATERIAL_OPACITY_MASK 0xffu
 +#define MATERIAL_THUMBNAIL_SHIFT 16u
@@ -6845,7 +6900,7 @@ index 0000000..f1a4267
 +  [loop] for (uint skip = 0u; skip < MAX_PRIMARY_SKIPS; ++skip) {
 +    RayDesc stepRay = ray;
 +    stepRay.TMin = primaryFrom;
-+    primary.TraceRayInline(gScene, RAY_FLAG_NONE, 0xFF, stepRay);
++    primary.TraceRayInline(gScene, RAY_FLAG_NONE, ray_mask(), stepRay);
 +    [loop] while (primary.Proceed()) {
 +      if (candidate_is_solid(primary.CandidateInstanceID() + primary.CandidatePrimitiveIndex(),
 +                             primary.CandidateTriangleBarycentrics())) {
@@ -7003,7 +7058,7 @@ index 0000000..f1a4267
 +        shadowRay.TMax = reach;
 +
 +        RayQuery<TRAVERSAL_FLAGS | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> occluder;
-+        occluder.TraceRayInline(gScene, RAY_FLAG_NONE, 0xFF, shadowRay);
++        occluder.TraceRayInline(gScene, RAY_FLAG_NONE, ray_mask(), shadowRay);
 +        // Light through textured cut-outs loses what each texel covers, layer
 +        // by layer. The product does not depend on the order the traversal
 +        // meets the layers in, and an opaque blocker still ends the search and
@@ -7051,7 +7106,7 @@ index 0000000..f1a4267
 +    aoRay.TMax = gRayLength;
 +
 +    RayQuery<TRAVERSAL_FLAGS> aoQuery;
-+    aoQuery.TraceRayInline(gScene, RAY_FLAG_NONE, 0xFF, aoRay);
++    aoQuery.TraceRayInline(gScene, RAY_FLAG_NONE, ray_mask(), aoRay);
 +    [loop] while (aoQuery.Proceed()) {
 +      // The nearest texel that is not a hole, weighed by its own alpha below
 +      // rather than counted whole.
@@ -7107,7 +7162,7 @@ index 0000000..f1a4267
 +    reflRay.TMax = gReflectionRange;
 +
 +    RayQuery<TRAVERSAL_FLAGS> reflQuery;
-+    reflQuery.TraceRayInline(gScene, RAY_FLAG_NONE, 0xFF, reflRay);
++    reflQuery.TraceRayInline(gScene, RAY_FLAG_NONE, ray_mask(), reflRay);
 +    [loop] while (reflQuery.Proceed()) {
 +      if (candidate_is_solid(reflQuery.CandidateInstanceID() + reflQuery.CandidatePrimitiveIndex(),
 +                             reflQuery.CandidateTriangleBarycentrics())) {
@@ -7175,6 +7230,11 @@ index 0000000..f1a4267
 +                           (m & MATERIAL_REFLECTIVE) != 0u ? 1.0f : 0.0f);
 +      if (m == 0u) {
 +        debugColour = float3(0.35f, 0.35f, 0.35f);
++      }
++      // Yellow additive: red and green together, which a cut-out and a
++      // translucent surface never are at once.
++      if ((m & MATERIAL_ADDITIVE) != 0u) {
++        debugColour = float3(1.0f, 1.0f, 0.0f);
 +      }
 +    } else if (gDebugMode == DEBUG_MASK) {
 +      debugColour = float3(0.0f, 0.0f, 0.0f);
