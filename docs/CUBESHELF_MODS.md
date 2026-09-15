@@ -6,11 +6,19 @@ is rewritten: enabling, disabling or reordering mods only costs a relaunch.
 
 ## Runtime contract
 
-CubeShelf starts `partyboard.exe` with a single environment variable:
+CubeShelf starts `partyboard.exe` with two environment variables:
 
 ```text
 PARTYBOARD_MOD_LIST=<absolute path to active-mods.txt>
+PARTYBOARD_DISC_IMAGE=<absolute path to the disc image>
 ```
+
+`PARTYBOARD_DISC_IMAGE` names the copy of the game the launcher is starting, and
+therefore the one the mods were installed against. It takes precedence over the
+remembered `backend.isoPath` and skips the pre-launch picker, so a second disc
+cannot quietly play unmodded. An online session's own disc still wins over both,
+and a path that names no readable file is ignored with a warning. The log says
+which source was used.
 
 `active-mods.txt` is UTF-8 text, one absolute mod content root per line, sorted
 **highest priority first**. Blank lines and lines starting with `#` are ignored,

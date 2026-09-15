@@ -459,6 +459,31 @@ extern "C" int port_main(int argc, char* argv[]) {
         }
     }
 #endif
+
+    // The launcher knows which copy of the game it is starting, and it is the
+    // one the player's mods were installed against. Without this the game boots
+    // whatever backend.isoPath last remembered, so a second disc quietly plays
+    // unmodded. Ignored unless it names a file that exists.
+    std::string launcherDisc;
+    {
+#ifdef _WIN32
+        const auto *raw = _wgetenv(L"PARTYBOARD_DISC_IMAGE");
+#else
+        const auto *raw = std::getenv("PARTYBOARD_DISC_IMAGE");
+#endif
+        if (raw != nullptr && *raw != 0) {
+            const std::filesystem::path candidate(raw);
+            std::error_code error;
+            if (std::filesystem::is_regular_file(candidate, error)) {
+                const auto utf8 = candidate.u8string();
+                launcherDisc.assign(reinterpret_cast<const char *>(utf8.c_str()));
+            }
+            else {
+                PartyBoardMainLog.warn("PARTYBOARD_DISC_IMAGE does not name a readable file, ignoring it");
+            }
+        }
+    }
+
     EnsureInitialPipelineCache(PartyBoard_ConfigPath);
     // TODO: How to handle this?
     //PADSetDefaultMapping(&defaultPadMapping, PAD_TYPE_STANDARD);
@@ -547,7 +572,7 @@ extern "C" int port_main(int argc, char* argv[]) {
         partyboard::getSettings().backend.isoPath.getValue(),
         partyboard::getSettings().backend.isoVerification.getValue());
 
-    if (partyboard::getSettings().backend.isoPath.getValue().empty()) {
+    if (partyboard::getSettings().backend.isoPath.getValue().empty() && launcherDisc.empty()) {
         forcePreLaunchUI = true;
     }
     if (forcePreLaunchUI && partyboard::getSettings().backend.skipPreLaunchUI.getValue()) {
@@ -559,7 +584,7 @@ extern "C" int port_main(int argc, char* argv[]) {
         partyboard::config::Save();
     }
 
-    if (onlineDisc.empty() && !partyboard::getSettings().backend.skipPreLaunchUI) {
+    if (onlineDisc.empty() && launcherDisc.empty() && !partyboard::getSettings().backend.skipPreLaunchUI) {
         partyboard::ui::push_document(std::make_unique<partyboard::ui::Prelaunch>(), true);
 
         // pre game launch ui main loop
@@ -575,10 +600,22 @@ extern "C" int port_main(int argc, char* argv[]) {
         }
     }
 
-     std::string dvd_path = onlineDisc.empty() ? partyboard::getSettings().backend.isoPath.getValue() : onlineDisc;
+    const char *dvd_source = "the saved path";
+    std::string dvd_path = partyboard::getSettings().backend.isoPath.getValue();
+    if (!launcherDisc.empty()) {
+        dvd_path = launcherDisc;
+        dvd_source = "the launcher";
+    }
+    if (!onlineDisc.empty()) {
+        dvd_path = onlineDisc;
+        dvd_source = "the online session";
+    }
 
     if (dvd_path.empty()) {
         PartyBoardMainLog.error("No DVD image specified, unable to boot!");
+    }
+    else {
+        PartyBoardMainLog.info("DVD image chosen by {}", dvd_source);
     }
     if (!PartyBoard_IsGameLaunched &&
         partyboard::iso::inspect(dvd_path.c_str(), discInfo) != partyboard::iso::ValidationError::Success)
