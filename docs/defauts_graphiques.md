@@ -296,3 +296,299 @@ Des facettes blanches à arêtes dures, c'est la signature d'une géométrie des
 **sans sa texture**, prenant la couleur du matériau. À confirmer en instrumentant
 le chemin de dessin de cet objet plutôt qu'en le supposant : quatre hypothèses
 « plausibles » ont déjà été écartées sur ce seul mini-jeu aujourd'hui.
+
+## Relevé externe du 2026-09-16 — premier testeur qui n'est pas Valentin
+
+`GerasSB` a ouvert trois tickets après avoir joué **tous** les Free-for-All et
+1v3 en mode mini-jeu, en 4:3 verrouillé et ombres 8x, hors ligne :
+[#1](https://github.com/zeranemesis/Marioparty4/issues/1),
+[#2](https://github.com/zeranemesis/Marioparty4/issues/2),
+[#3](https://github.com/zeranemesis/Marioparty4/issues/3).
+
+C'est la première fois que cette page reçoit des observations d'un œil
+extérieur, et deux d'entre elles retombent exactement sur des lignes déjà
+inscrites ici. G1 et G2 sont donc **reproduits par un second testeur, sur une
+autre machine, sans concertation** :
+
+| ligne existante | ce que GerasSB décrit |
+|---|---|
+| G1 — feux d'artifice de Slime Time | « Slime Time light/confetti at the end displays big white solid boxes » |
+| G2 — Avalanche! | « Avalanche has several visual bugs that make geometry pop in front of the game » |
+
+Le reste de son relevé est nouveau : ombres qui disparaissent dans Stamp Out!,
+bords de l'eau de Makin' Waves, gros carré noir autour du joueur en prenant la
+banane de Tree Stomp, géométrie parasite d'une frame dans Hop or Pop.
+
+## La colonne « module » n'a plus à rester supposée
+
+Cette page portait des « ? » depuis le début, avec cette justification : *« la
+matrice de ce dépôt utilise les noms de développement japonais, qui ne
+correspondent pas aux noms localisés »*. C'était vrai de `selmenuDll/main.c`,
+qui ne connaît que `402:PURURUN! BIGSLIME`.
+
+Mais la correspondance existe ailleurs, et elle est écrite noir sur blanc :
+**`configure.py` commente chaque `Rel(...)` avec le nom localisé**. Elle n'a
+jamais eu besoin d'être devinée.
+
+| module | nom localisé | nom de développement |
+|---|---|---|
+| `m401Dll` | Manta Rings | 401:WAKUGURI DIVING |
+| `m402Dll` | Slime Time | 402:PURURUN! BIGSLIME |
+| `m404Dll` | Trace Race | 404:CRAYON RUNNER |
+| `m406Dll` | Avalanche! | 406:SKI RACE |
+| `m412Dll` | Mr. Blizzard's Brigade | 412:SNOW THROW |
+| `m415Dll` | Stamp Out! | 415:PYONPYON STAMP |
+| `m417Dll` | Makin' Waves | 417:MARIO SURFER |
+| `m419Dll` | Tree Stomp | 419:BANANA DE KOROBASE |
+| `m421Dll` | Hop or Pop | 421:BODY BALOON |
+| `m423Dll` | GOOOOOOOAL!! | 423:GOAL AND GOAL |
+| `m425Dll` | The Great Deflate | 425:AIR DOSSUN |
+| `m427Dll` | Right Oar Left? | 427:BOAT RACE |
+| `m430Dll` | Pair-a-sailing | 430:PARASAILING GO |
+| `m441Dll` | Butterfly Blitz | 441:HIRAHIRA CHOUCHO |
+
+### Ce que cela corrige
+
+**G2 était attribué au mauvais module.** La ligne supposait `m412Dll SNOW
+THROW` par ressemblance de nom ; or `m412Dll` est **Mr. Blizzard's Brigade**, et
+**Avalanche! est `m406Dll`**. La corrélation horodatée du 2026-09-13, qui avait
+placé la session dans le contexte 14 = `m406Dll`, avait donc raison contre la
+supposition — et c'est maintenant établi par lecture, plus par coïncidence.
+
+Les autres suppositions se vérifient : G1 `m402Dll`, G3 `m427Dll`, G4
+`m430Dll`, G5 `m404Dll`, G7 `m441Dll`. Les nouvelles lignes de GerasSB
+s'attribuent directement : Stamp Out! `m415Dll`, Makin' Waves `m417Dll`,
+Tree Stomp `m419Dll`, Hop or Pop `m421Dll`, Manta Rings `m401Dll`.
+
+## Le défaut qui n'est pas un défaut de mini-jeu
+
+GerasSB ouvre son ticket par une observation qui vaut pour **tout le jeu** :
+
+> *The game does not seem to pre-compile any shaders, so nearly every new scene
+> has missing textures and geometry for a few seconds when started up for the
+> first time.*
+
+Celui-là se lit entièrement dans le code, sans instrumentation et sans
+reproduire quoi que ce soit.
+
+1. `lib/gfx/pipeline_cache.cpp` — `find_pipeline_impl()` ne construit un
+   pipeline immédiatement que si aucun fil de compilation n'existe et que le
+   quota `BuildPipelinesPerFrame` de la frame n'est pas épuisé. Sinon il place
+   la demande dans `g_priorityPipelines` / `g_backgroundPipelines` et rend la
+   main aussitôt.
+2. `lib/gfx/pipeline_cache.cpp:1090` — `get_pipeline()` échoue tant que le
+   pipeline n'est pas dans `g_pipelines`.
+3. `lib/gfx/common.cpp:1447` — `bind_pipeline()` propage cet échec.
+4. `lib/gx/pipeline.cpp:18` — `render()` fait alors `return;`.
+
+**Un pipeline pas encore compilé ne retarde donc pas le dessin : il le
+supprime.** La géométrie concernée n'est pas affichée du tout, jusqu'à ce que
+le fil de compilation rattrape son retard. C'est exactement « missing textures
+and geometry for a few seconds », et c'est pire dans une scène neuve, où tous
+les pipelines sont neufs en même temps — d'où Manta Rings, cité comme le cas le
+plus visible.
+
+### Le remède est déjà écrit, et n'est jamais livré
+
+Les deux moitiés du mécanisme existent :
+
+- `src/port/portmain.cpp:323` — `EnsureInitialPipelineCache()`, appelée depuis
+  `portmain.cpp:487`, copie `initial_pipeline_cache.db` depuis le dossier de
+  l'exécutable vers `pipeline_cache.db` du dossier de configuration, au premier
+  lancement seulement.
+- `lib/gfx/pipeline_cache.cpp:522` — `seed_pipeline_cache()` fusionne une base
+  fournie dans le cache local.
+
+Il manque la base elle-même. **Aucun `initial_pipeline_cache.db` n'est présent
+dans les paquets distribués** — vérifié sur `PartyBoard-win-x64.zip` (212
+entrées) et `partyboard_alpha_0.2.0_x64.zip` (99 entrées) — et **rien dans
+`CMakeLists.txt`, `ci/`, `dist/` ni `tools/` ne la produit ni ne la copie**. Le
+seul effet observable aujourd'hui est la ligne d'erreur
+« No bundled initial pipeline cache found at '…' » au premier lancement.
+
+Chaque joueur part donc d'un cache vide et paie la compilation de chaque
+pipeline la première fois qu'il voit chaque scène. Le deuxième passage est
+propre — ce que GerasSB décrit aussi (« when started up for the first time »),
+et ce qui distingue ce défaut des huit autres de cette page, qui eux
+**persistent aux relectures**.
+
+Produire cette base est un travail de build, pas de rendu : il faut parcourir
+une fois les scènes, récupérer le `pipeline_cache.db` engendré, et le livrer
+sous le nom attendu à côté de `partyboard.exe`. Ce n'est pas fait, et rien dans
+le plan ne le prévoit.
+
+## Statut, mis à jour
+
+G10 reste le seul corrigé-et-vérifié. G1 et G2 sont désormais **confirmés par
+deux testeurs indépendants**. La colonne module n'est plus une supposition. Le
+défaut de compilation de pipelines est **diagnostiqué de bout en bout et non
+corrigé**, et il est le seul de cette page dont la cause soit établie sans
+avoir eu besoin de le reproduire.
+
+## La copie de framebuffer — une famille, et un défaut prouvé dedans
+
+Quatre des six défauts de mini-jeu signalés par GerasSB tombent dans des modules
+qui font une **copie de l'EFB re-liée en texture** (`GXCopyTex`) : Stamp Out!
+(`m415Dll`), Makin' Waves (`m417Dll/water.c:885`), Tree Stomp
+(`m419Dll/main.c:246`), Hop or Pop (`m421Dll/player.c:1740`). Deux lignes de
+cette page s'y ajoutent : Right Oar Left? (`m427Dll`, qui porte déjà un
+`// TODO PC why do we need to skip the clear?`) et Pair-a-sailing (`m430Dll`).
+
+Vingt modules sur soixante et un utilisent `GXCopyTex` : six défauts sur dix
+dans un tiers des modules, c'est une **piste**, pas une démonstration. Ce qui
+suit en est une.
+
+### Ce que `GXCopyTex` fait réellement sur PC
+
+`extern/aurora/lib/dolphin/gx/GXFrameBuffer.cpp:150` — le paramètre `dest`
+n'est **qu'une clé de cache** (`CopyTextureKey{.dest = dest, …}`). Aurora
+résout l'EFB dans une texture GPU et **n'écrit jamais un octet dans `dest`**.
+
+Conséquence directe : tout code de jeu qui **relit ces octets côté CPU** lit de
+la mémoire non initialisée sur PC. Le port le sait — `m415Dll/main.c:1585` le
+documente et contourne le problème en faisant pointer le bitmap du canevas sur
+le même `Hu3DShadowData.buf`, pour que l'identité du pointeur retrouve la
+texture résolue :
+
+```c
+// Hu3DShadowData was copied by GXCopyTex and Aurora doesn't actually copy it there
+// it just holds a reference to the pointer
+// TODO PC does this fix cause issues?
+temp_r31->data = Hu3DShadowData.buf;
+```
+
+Mais **`m415Dll/main.c:433`, mille lignes plus haut, fait toujours la relecture
+brute**, sans `#ifdef TARGET_PC` :
+
+```c
+memcpy((*temp_r3)->bmp->data, OSCachedToUncached(Hu3DShadowData.buf), temp_r29);
+```
+
+Deux relectures sœurs dans le même fichier, une corrigée pour PC et l'autre
+non. Elle s'exécute dans `fn_1_1960` **case 1**, juste avant le `case 2` qui
+bascule la carte d'ombre sur le canevas — c'est-à-dire exactement au moment que
+GerasSB décrit, *« before the game begins »*. Le mécanisme est prouvé ; le fait
+qu'il produise précisément la disparition des ombres ne l'est pas.
+
+### Tree Stomp : défaut prouvé de bout en bout, dans Aurora
+
+Tree Stomp est le seul des modules cités à copier la **profondeur** :
+
+```c
+GXSetTexCopySrc(sp8.x, sp8.y, 192, 192);
+GXSetTexCopyDst(96, 96, GX_TF_Z24X8, 1);
+GXCopyTex(lbl_1_bss_64[lbl_1_bss_60], 0);   // m419Dll/main.c:249
+```
+
+Le chemin se lit sans ambiguïté :
+
+1. `tex_copy_conv.cpp:270` — `DepthConvPipelines` ne contient **qu'une seule
+   entrée, `GX_TF_Z16`**. Il n'existe aucun pipeline pour `GX_TF_Z24X8`, donc
+   `needs_conversion(GX_TF_Z24X8)` est faux.
+2. `gx.hpp:431` — `is_depth_format(GX_TF_Z24X8)` est **vrai**.
+3. `common.cpp:1332` — pas de conversion, mais 192→96 impose une mise à
+   l'échelle, donc l'appel part dans `tex_copy_conv::blit()`.
+4. `tex_copy_conv.cpp:508` — `blit()` exécute **`g_blitPipeline`**, construit
+   ligne 393 avec `g_bindGroupLayout` (sampler @0, texture @1, uniforme @2).
+5. `tex_copy_conv.cpp:441` — mais `execute()` choisit son bind group sur le seul
+   critère `is_depth_format(req.fmt)`, et fabrique donc un groupe au layout
+   **`g_depthBindGroupLayout`** (texture @0, uniforme @1, pas de sampler).
+
+**Le bind group et le pipeline n'ont pas le même layout** — ni le même nombre
+d'entrées. WebGPU rejette le `SetBindGroup`, la passe est invalidée, et la copie
+ne produit rien. La texture que l'effet échantillonne ensuite reste vide, donc
+noire : *« Grabbing the Tree Stomp speedup banana causes major visual glitch,
+huge black box around the player »*.
+
+Le défaut vaut pour **tous les formats de profondeur sauf `GX_TF_Z16`** — le
+seul qui dispose d'un pipeline de conversion, et donc le seul qui n'emprunte
+jamais `blit()`. `Z16` marche par accident de couverture, pas par conception.
+
+Deux corrections possibles, toutes deux dans `tex_copy_conv.cpp` :
+
+- créer un `g_depthBlitPipeline` avec `g_depthBindGroupLayout` et
+  `DepthShaderPreamble`, et le sélectionner dans `blit()` — corrige la famille
+  entière ;
+- ou ajouter une entrée `GX_TF_Z24X8` à `DepthConvPipelines`, ce qui rend
+  `needs_conversion` vrai et fait passer par `run()` avec le bon pipeline —
+  corrige `Z24X8` seul, mais c'est la conversion que ce format réclame de toute
+  façon.
+
+**Ces deux fichiers sont dans le sous-module `extern/aurora`, qui pointe sur
+`encounter/aurora` en amont.** Le correctif ne peut donc pas être porté par une
+PR de ce dépôt seul : il faut une PR amont, ou un fork, puis un relèvement du
+sous-module.
+
+### Ce que cela ne dit pas
+
+Slime Time (`m402Dll`), Avalanche! (`m406Dll`), Trace Race (`m404Dll`) et
+Butterfly Blitz (`m441Dll`) **n'appellent pas `GXCopyTex`**. Leurs défauts ont
+une autre cause, et le raisonnement ci-dessus ne s'y applique pas.
+
+## Un défaut prédit, dans un mini-jeu que personne n'a encore testé
+
+En cherchant l'origine de G1 (Slime Time) du côté du *reflection mapping*, une
+autre chose est tombée — sans rapport avec G1, mais réelle.
+
+`hsfman.c:1983`, `Hu3DReflectMapSet()`, l'API qui installe une carte de
+réflexion, est écrite ainsi :
+
+```c
+void Hu3DReflectMapSet(ANIMDATA* arg0) {
+#ifndef BYTESWAPPING
+    ...  reflectAnim[0] = HuSprAnimRead(arg0);  ...
+#else
+    assert(0 == 1);
+    OSReport("PC TODO: Hu3DReflectMapSet ran which tries to reallocate an anim
+");
+#endif
+    reflectMapNo = 0;
+}
+```
+
+**`BYTESWAPPING` est défini par toutes les cibles qui compilent ce fichier** —
+`CMakeLists.txt:207` (`dol`) et `:339` (les DLL de REL). Seul `partyboard`
+(ligne 279), qui ne compile pas le code du jeu, ne le définit pas. La branche
+utile n'existe donc dans aucun binaire livré : sur PC la fonction se réduit à
+
+```c
+assert(0 == 1);
+reflectMapNo = 0;
+```
+
+La carte demandée, `arg0`, est **purement ignorée**. En build `Release` /
+`RelWithDebInfo` (où `NDEBUG` supprime l'`assert`) la fonction échoue en
+silence ; en `Debug` elle **avorte le processus**.
+
+Un seul appelant : `m444dll/main.c:1262` — **Reversal of Fortune** :
+
+```c
+Hu3DReflectMapSet(HuDataSelHeapReadNum(DATA_MAKE_NUM(DATADIR_M444, 0x23),
+                                       MEMORY_DEFAULT_NUM, HEAP_DATA));
+```
+
+Deux conséquences, toutes deux non observées à ce jour parce que **personne n'a
+rapporté avoir joué ce mini-jeu** : la réflexion propre à Reversal of Fortune
+n'est jamais installée (la scène garde la carte 0 chargée au démarrage), et
+l'`ANIMDATA` lue dans `HEAP_DATA` juste avant n'est jamais relâchée — **une
+fuite à chaque appel**.
+
+C'est la première ligne de cette page à être **prédite avant d'être vue**.
+Elle se vérifie en une partie : lancer Reversal of Fortune et regarder.
+
+### Ce que cela règle au passage, et ce que cela ne règle pas
+
+Le même motif existe dans `Hu3DAllKill()` (`hsfman.c:375-386`), avec le
+commentaire *« the game expects this to be executed »* — et il est lui aussi
+compilé hors du binaire. **Ce n'en est pas un défaut** : ce rechargement
+n'existait que pour défaire `Hu3DReflectMapSet()`, qui est inerte sur PC.
+`reflectAnim[0]` garde donc sur PC la valeur posée à l'initialisation, ce qui
+est cohérent. Les deux blocs se neutralisent l'un l'autre ; la question est
+close, il n'y a pas de piste de ce côté.
+
+**G1 et G2 restent sans mécanisme.** Slime Time (`m402Dll`) et Hop or Pop
+(`m421Dll`) sont, avec `m438Dll`, les trois seuls modules à appeler
+`Hu3DModelReflectTypeSet()`, et deux des trois sont dans la liste de GerasSB —
+mais aucun n'appelle `Hu3DReflectMapSet()`, donc cette corrélation **n'a aucun
+mécanisme derrière elle** à ce stade. Elle est notée ici pour ne pas être
+recherchée deux fois, pas comme une piste établie.
