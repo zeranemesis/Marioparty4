@@ -373,7 +373,7 @@ index 2d7f795..4997c20 100644
  }
  
 diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
-index eff0c65..a313f8f 100644
+index eff0c65..432ac44 100644
 --- a/lib/gfx/common.cpp
 +++ b/lib/gfx/common.cpp
 @@ -1,6 +1,7 @@
@@ -436,13 +436,16 @@ index eff0c65..a313f8f 100644
    bool captureDepthSnapshot = false;
    bool sealed = false;
    std::vector<tex_palette_conv::ConvRequest> paletteConvs;
-@@ -333,6 +358,17 @@ static FrameOp capture_frame_op(FramePacket& frame, FrameOpType type, uint32_t i
+@@ -333,6 +358,20 @@ static FrameOp capture_frame_op(FramePacket& frame, FrameOpType type, uint32_t i
    return op;
  }
  
 +// Diagnostic only: says which passes the composition lands in, which is how the
 +// double application was found.
 +static const bool g_rtCompositeTrace = std::getenv("AURORA_RT_COMPOSITE_TRACE") != nullptr;
++// Composition allowed into a pass that drew no 3D itself, as it was before. Only
++// for comparison: see the eligibility test in seal_pass.
++static const bool g_rtCompositeAnyPass = std::getenv("AURORA_RT_COMPOSITE_ANY_PASS") != nullptr;
 +// The ray tracing terms multiply, so applying them twice squares them: measured
 +// at 2 per frame before the guard below, and the scene came out 20 to 30 luma
 +// darker for it. One per frame, in the pass that ends up on screen.
@@ -454,7 +457,7 @@ index eff0c65..a313f8f 100644
  static void seal_pass(FramePacket& frame, uint32_t passIndex) {
    if (passIndex >= frame.renderPasses.size()) {
      return;
-@@ -341,6 +377,45 @@ static void seal_pass(FramePacket& frame, uint32_t passIndex) {
+@@ -341,6 +380,65 @@ static void seal_pass(FramePacket& frame, uint32_t passIndex) {
    if (pass.sealed) {
      return;
    }
@@ -469,8 +472,28 @@ index eff0c65..a313f8f 100644
 +  // A pass with a resolve target is an EFB copy into a game texture, not the
 +  // frame: shading it would bake the terms into a texture the game then draws
 +  // with. Offscreen passes are the same story.
-+  const bool eligible = boundary != SIZE_MAX && boundary <= pass.commands.size() && !pass.offscreen &&
-+                        !pass.resolveTarget;
++  // And the pass has to have drawn 3D itself. One that only carries the 2D
++  // boundary can be showing the scene through textures copied out of earlier
++  // passes: m423Dll draws its pitch into three copies and puts them on screen as
++  // quads, and the terms -- traced for the camera's screen -- landed wherever the
++  // quads put the picture, a player's shadow blown up across the whole field and
++  // over the scoreboard. A pass that draws 3D and also copies some of it, as
++  // m401Dll does in every frame, is still composited.
++  const bool eligible = (pass.rtHasScene || g_rtCompositeAnyPass) && boundary != SIZE_MAX &&
++                        boundary <= pass.commands.size() && !pass.offscreen && !pass.resolveTarget;
++  // Every pass, not only the one that gets the composition: a frame that draws
++  // its scene into one pass and shows it through another is only visible as a
++  // sequence -- which pass had the 3D, which copied itself into a texture and at
++  // what rectangle, which carried the 2D boundary and under what viewport.
++  if (g_rtCompositeTrace) {
++    Log.info("Pass {} ('{}') sealed: {} commands, target {}x{}, 3D {}, boundary {} at viewport {}x{}+{}+{}, "
++             "offscreen {}, resolve {} rect {}x{}+{}+{}, eligible {}",
++             passIndex, pass.label, pass.commands.size(), pass.targetSize.width, pass.targetSize.height,
++             pass.rtHasScene, pass.rtBoundary == SIZE_MAX ? -1 : static_cast<int>(pass.rtBoundary),
++             pass.rtBoundaryViewport.width, pass.rtBoundaryViewport.height, pass.rtBoundaryViewport.left,
++             pass.rtBoundaryViewport.top, pass.offscreen, pass.resolveTarget != nullptr, pass.resolveRect.width,
++             pass.resolveRect.height, pass.resolveRect.x, pass.resolveRect.y, eligible);
++  }
 +  if (eligible && g_rtComposited) {
 +    ++g_rtCompositeSkipped;
 +    if (g_rtCompositeTrace) {
@@ -500,7 +523,7 @@ index eff0c65..a313f8f 100644
    pass.sealed = true;
  }
  
-@@ -550,6 +625,29 @@ void set_scissor(const ClipRect& cmd) noexcept {
+@@ -550,6 +648,29 @@ void set_scissor(const ClipRect& cmd) noexcept {
    }
  }
  
@@ -530,7 +553,7 @@ index eff0c65..a313f8f 100644
  template <>
  void push_draw_command(clear::DrawData data) {
    push_draw_command(ShaderDrawCommand{.type = ShaderType::Clear, .clear = data});
-@@ -1031,7 +1129,11 @@ static std::optional<size_t> acquire_mapped_staging_buffer() {
+@@ -1031,7 +1152,11 @@ static std::optional<size_t> acquire_mapped_staging_buffer() {
  }
  
  bool begin_frame() {
@@ -542,7 +565,7 @@ index eff0c65..a313f8f 100644
    const size_t frameSlot = acquire_frame_slot();
    const auto stagingSlot = acquire_mapped_staging_buffer();
    if (!stagingSlot) {
-@@ -1108,6 +1210,9 @@ void finish() {
+@@ -1108,6 +1233,9 @@ void finish() {
  
  void end_frame(EndFrameCallback callback) {
    ZoneScoped;
@@ -552,7 +575,7 @@ index eff0c65..a313f8f 100644
    ASSERT(!g_inOffscreen, "end_frame called while offscreen rendering is active");
    ASSERT(g_currentRenderPass == UINT32_MAX, "end_frame called before finish finalized the current render pass");
    auto& frame = current_frame_packet();
-@@ -1424,6 +1529,27 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
+@@ -1424,6 +1552,27 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
        pass.InsertDebugMarker(wgpu::StringView(g_debugMarkers[cmd.data.debugMarkerIndex]));
  #endif
      } break;

@@ -2724,3 +2724,89 @@ près avant d'en conclure quoi que ce soit.
 - **Le coût de m429Dll, m439Dll et m443Dll**, sur plusieurs runs.
 - **L'onglet « etc. »** n'entre pas dans le cycle de la liste ; ce qu'il contient
   reste hors de portée du balayage.
+
+## Une silhouette géante sur le terrain de m423Dll, et une hypothèse fausse avant la bonne (16 septembre 2026)
+
+Le balayage des 48 mini-jeux n'a signalé qu'un écart de composition : m423Dll,
+212 compositions par tranche de 300 frames au lieu de 300. Les captures en jeu
+ont montré pire qu'un compte : **une ombre en forme de personnage, grande comme
+le terrain**, qui part du but vers les joueurs et déborde jusque sur le tableau
+d'affichage.
+
+### Ce que ce n'était pas
+
+Le rapport de ce mini-jeu donnait deux projections perspectives par frame — 7 767
+et 29 128 triangles — et la même petite projection revient dans la plupart des
+mini-jeux, avec des tailles qui se répètent d'un jeu à l'autre (7 123 triangles
+dans quatre d'entre eux, 5 635 dans trois). L'hypothèse était tentante : une
+géométrie dessinée par une autre caméra, placée par la capture juste devant celle
+qu'on trace, et qui jette son ombre sur toute la scène.
+
+Elle a été écrite, construite et mesurée : écarter des rayons les groupes de
+l'autre projection change **26 pixels** de la vue de l'ombre sur 1 228 800, 918
+de l'image composée, et rien sur le plateau, qui n'en a qu'une. Le terme d'ombre
+tracé de cette frame, regardé directement, était juste : de petites ombres
+portées, celles du but et du public, aucune silhouette. Le changement a été
+retiré ; il n'avait pas d'effet mesuré.
+
+Et la vérification qui aurait dû venir en premier : **sans ray tracing, pas de
+silhouette**. Le défaut venait donc de là où le terme est appliqué, pas de ce
+qu'il contient.
+
+### Ce que c'était
+
+`AURORA_RT_COMPOSITE_TRACE` ne journalisait que la passe qui recevait la
+composition. Il journalise maintenant chaque passe à sa clôture : taille, 3D ou
+non, frontière 2D et son viewport, copie dans une texture et son rectangle. Une
+frame de m423Dll, 1 065 fois sur 1 070 :
+
+| passe | 3D | copiée dans une texture | reçoit la composition |
+|---|---|---|---|
+| 0 | oui | 1 536 × 1 536 | non |
+| 1 | oui | 1 280 × 960 | non |
+| 2 | oui | 2 560 × 1 920 | non |
+| 3, affichée | **non** | — | **oui** |
+
+Le jeu dessine son terrain dans trois copies et les affiche comme des quads dans
+la passe 3, qui ne contient plus aucune 3D. La composition, insérée à la
+frontière 2D de cette passe, multipliait le terme — tracé pour l'écran de la
+caméra — sur une image recomposée ailleurs : les ombres des joueurs agrandies et
+décalées sur tout le terrain.
+
+### La règle, et pourquoi elle est étroite
+
+Refuser toute frame dont la 3D passe par une copie aurait été plus simple, et
+faux : m401Dll copie de sa 3D dans 685 frames sur 686 et dessine pourtant sa
+scène dans la passe affichée. Même relevé sur quatre scènes :
+
+| scène | 3D copiée | composée dans une passe avec 3D | dans une passe sans |
+|---|---|---|---|
+| w01Dll | 0 | 1 344 | 2 |
+| m401Dll | 685 sur 686 | 686 | 0 |
+| m443Dll | 0 | 682 | 2 |
+| m423Dll | 1 065 sur 1 070 | 36 | **794** |
+
+La règle retenue : **une passe ne reçoit la composition que si elle a dessiné de
+la 3D elle-même**. `AURORA_RT_COMPOSITE_ANY_PASS` rend l'ancienne.
+
+Après correction, sur les mêmes scènes :
+
+- m423Dll : plus aucune composition dans une passe sans 3D ; 29 frames composées
+  dans une passe qui en a, 1 041 pas du tout. **La silhouette a disparu** des
+  quatre captures, et l'image est celle du jeu sans ray tracing ;
+- m401Dll : 686 sur 686, inchangé ;
+- w01Dll : 1 341 frames composées ; les 2 frames de transition autrefois
+  composées dans une passe sans 3D ne le sont plus.
+
+Le test nul A/B sur le plateau reste à 0 pixel sur 1 228 800 : la règle ne
+touche que la composition, pas le tracé.
+
+### Ce qui reste
+
+- **m423Dll n'a plus de ray tracing.** C'est honnête — le terme ne correspond pas
+  à l'image montrée — mais ce n'est pas une solution : il faudrait savoir quelle
+  copie devient quel morceau de l'écran, et composer dans la copie.
+- **Les 29 frames encore composées** dans m423Dll, dans une passe qui dessine un
+  peu de 3D par-dessus les copies, peuvent encore montrer le défaut par éclairs.
+- **Les autres mini-jeux qui passent par le même chemin** ne sont pas encore
+  connus : le balayage des 48 avec la trace des passes les listera.
