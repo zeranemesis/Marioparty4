@@ -978,3 +978,64 @@ tromper de moitié coûte une journée — c'est exactement ce qui vient d'arriv
 avec D6.
 
 **Statut : module identifié, mécanisme inconnu, hypothèse antérieure écartée.**
+
+## G2 — corrigé et VÉRIFIÉ, 2026-09-16
+
+*« Avalanche est parfait ! »* — Valentin, sur une build compilée à l'instant
+contenant le correctif.
+
+C'est le **deuxième défaut de cette page à passer de rapporté à
+corrigé-et-vérifié**, après G10, et la vérification est celle qui compte : un
+œil humain devant l'écran. G2 était ouvert depuis le 2026-09-12, confirmé par
+deux testeurs sur deux machines, et avait résisté à **cinq hypothèses**. Il a
+cédé le jour où quelqu'un a regardé une capture agrandie.
+
+La méthode, pour mémoire : décrire précisément *quoi* (la masse de neige) et
+*quand* (dès la première image) ; capturer ; agrandir ; lire le display list.
+Trois quarts d'heure. Les cinq hypothèses précédentes avaient coûté plusieurs
+sessions de lecture de code.
+
+Également vérifié dans la même session : **la fin buggée de G6 n'est plus là**.
+Bowser's Bigger Blast se termine normalement. Seule l'accélération de
+l'explosion subsiste.
+
+## G7 — Butterfly Blitz : ce n'est pas « les papillons »
+
+Relevé initial : *« les papillons n'ont pas d'ombre »*. La capture montre autre
+chose, et c'est beaucoup plus net : **aucun objet de la scène n'a d'ombre** —
+ni les papillons, ni Mario, ni Luigi, ni Yoshi, ni Peach. Le sol carrelé est
+uniformément non ombré.
+
+Ce n'est donc pas un défaut d'un modèle particulier : **toute la passe d'ombre
+est éteinte** dans ce mini-jeu.
+
+### Ce que cela élimine
+
+`m441Dll` fait exactement les mêmes appels que `m406Dll`, qui lui **a** des
+ombres (l'ombre du sapin est visible sur `aval-05.png`, quoique à arêtes
+franches) :
+
+| | `m406Dll` (ombres OK) | `m441Dll` (aucune ombre) |
+|---|---|---|
+| `Hu3DShadowCreate` | `(45.0f, 1000.0f, 250000.0f)` | `(30, 20, 20000)` |
+| `Hu3DShadowTPLvlSet` | oui | oui |
+| `Hu3DShadowPosSet` | oui | oui |
+| `Hu3DModelShadowMapSet` | oui | oui |
+| `Hu3DModelShadowSet` | — | 3 sites |
+
+Aucun appel ne manque. Le dessin est conditionné à
+`Hu3DShadowF != 0 && Hu3DShadowCamBit != 0` (`hsfdraw.c`, cinq sites) : **l'un
+des deux vaut zéro**, et lequel ne se déduit pas du code.
+
+Hypothèses écartées en chemin : le filtrage par layer (`Hu3DShadowExec` itère
+tous les modèles sans regarder le layer) ; l'asymétrie du compteur
+(`Hu3DModelShadowReset` décrémente inconditionnellement là où `...Set`
+incrémente sous condition) — réelle, mais `m441Dll` n'appelle jamais `Reset`,
+et dans `m415Dll` les `Reset` sont **appariés** à des `Set`. `hsfman.c` étant un
+objet `Matching`, cette asymétrie est de toute façon du code d'origine, à ne pas
+toucher.
+
+### Ce qu'il faut maintenant
+
+Une sonde de deux lignes qui dit lequel des deux drapeaux est nul. C'est
+désormais possible : cette machine compile depuis aujourd'hui.
