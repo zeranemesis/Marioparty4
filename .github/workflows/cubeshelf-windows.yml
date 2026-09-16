@@ -231,10 +231,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # Every release keeps its own tag, and no published artifact is ever
-          # deleted. The previous version replaced a single rolling
-          # "cubeshelf-nightly" release on each run, which left no download URL
-          # that stayed valid and nothing to bisect when a tester reported a
-          # crash against a build that no longer existed.
+          # deleted. Replacing a single rolling release on each run left no
+          # download URL that stayed valid and nothing to bisect when a tester
+          # reported a crash against a build that no longer existed. The rolling
+          # release still exists, refreshed further down, because that is the
+          # one URL CubeShelf knows how to ask for - but it is a pointer now,
+          # not the archive.
           $shortSha = "${{ github.sha }}".Substring(0, 12)
           $releaseTag = if ("${{ github.ref_type }}" -eq "tag") {
             "${{ github.ref_name }}"
@@ -265,5 +267,39 @@ jobs:
               --target "${{ github.sha }}" `
               --title "PartyBoard Windows - $releaseTag" `
               --notes-file "release-notes.txt" `
+              --prerelease
+          }
+
+          # CubeShelf asks for one fixed URL. Its Manifest source builds
+          # releases/download/<GitHubReleaseTag>/manifest.json, and every
+          # catalog in the wild carries "cubeshelf-nightly" there, so dropping
+          # that release stopped every launcher update dead: CubeShelf kept
+          # installing the last build published under it and overwrote anything
+          # newer on its own startup check.
+          #
+          # The per-tag release above stays the archive - nothing is deleted,
+          # every build keeps a URL that never moves. This one is the moving
+          # pointer the launcher reads, refreshed from the same four files.
+          $ErrorActionPreference = "Continue"
+          gh release view cubeshelf-nightly *> $null
+          $nightlyExists = ($LASTEXITCODE -eq 0)
+          $ErrorActionPreference = "Stop"
+
+          if ($nightlyExists) {
+            gh release upload cubeshelf-nightly `
+              "PartyBoard-win-x64.zip" `
+              "manifest.json" `
+              "checksums.txt" `
+              "release-notes.txt" `
+              --clobber
+          } else {
+            gh release create cubeshelf-nightly `
+              "PartyBoard-win-x64.zip" `
+              "manifest.json" `
+              "checksums.txt" `
+              "release-notes.txt" `
+              --target "${{ github.sha }}" `
+              --title "PartyBoard Windows - latest for CubeShelf" `
+              --notes "Moving pointer for the CubeShelf launcher. It always carries the most recent build; $releaseTag keeps this one under its own tag." `
               --prerelease
           }
