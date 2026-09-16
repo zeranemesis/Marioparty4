@@ -2112,3 +2112,96 @@ rebuild, pour 0,05 à 0,5 ms par rapport.
 - Pas de vecteurs de mouvement. Un historique ne survit que là où la même surface
   est au même pixel. Le cadrage empêche une traînée de s'installer ; il ne recolle
   pas l'historique d'un objet qui bouge. C'est le lot C4.
+
+## Une référence convergée à côté de chaque frame (16 septembre 2026)
+
+Le banc de séquences mesurait de combien un pixel bouge d'une frame à l'autre.
+Cela mélange le bruit et le mouvement, et surtout cela ne voit pas le retard :
+une accumulation qui traîne est parfaitement stable. Or c'est la traînée que le
+cadrage de C3 est censé empêcher, et c'est pour cela que la mesure de C2+C3 n'a
+rien pu conclure.
+
+### Ce que fait le banc
+
+`AURORA_RT_SEQUENCE_REF=<échantillons>` trace chaque frame de la séquence une
+seconde fois : beaucoup d'échantillons, une seule frame, sans accumulation ni
+filtre, écrite dans `rt_seq_ref_000.pfm` et les suivantes. Cette référence passe
+avant le tracé de la frame, comme la sonde du banc A/B, pour que ce qui
+s'affiche et ce qui nourrit l'historique reste le tracé normal.
+
+L'erreur entre l'image affichée et cette référence compte d'un seul coup le bruit
+d'échantillonnage et le retard de l'accumulation.
+
+`tools/test_raytracing.ps1 -SequenceReference <n>` pose la variable, vérifie
+qu'il y a autant de références que de frames et les copie dans le dossier du run.
+`tools/measure_raytracing_sequence.ps1` en donne l'erreur par frame, sur l'image
+et sur la pénombre de la référence, puis la médiane.
+
+Ce que la référence n'est pas :
+
+- elle garde un seul motif d'échantillonnage, puisqu'elle est tracée « une seule
+  frame » : son propre grain est le même à chaque frame ;
+- à 32 échantillons, ce grain existe encore : elle borne la mesure par le bas ;
+- elle coûte cher, chaque frame vidée étant tracée deux fois.
+
+### Ce qu'il montre sur m401Dll
+
+Quatre réglages de la passe temporelle, douze frames chacun, plus un second run
+du réglage par défaut pour borner le bruit de la mesure. Erreur moyenne contre la
+référence, sur un masque commun aux cinq runs, séparé en pixels **calmes** (aucun
+saut de plus de 0,05 d'une frame à l'autre dans aucun run, 46,3 % de l'image) et
+pixels **qui bougent** :
+
+| réglage | pixels calmes : moyenne (médiane) | ce qui bouge : moyenne |
+|---|---|---|
+| par défaut | 0,00562 (0,00439) | 0,01820 |
+| par défaut, second run | 0,00798 (0,00534) | 0,02062 |
+| sans cadrage | 0,00661 (0,00516) | 0,02979 |
+| sans variance | 0,00573 (0,00439) | 0,01892 |
+| ni l'un ni l'autre | 0,00434 (0,00303) | 0,01835 |
+
+Deux enseignements, l'un solide, l'autre non :
+
+- **la variance sans le cadrage coûte cher sur ce qui bouge** : 0,0298 contre
+  0,018 à 0,021 partout ailleurs, bien au-delà de l'écart entre deux runs du même
+  réglage (0,0182 contre 0,0206). Cela se comprend : un historique qui traîne
+  garde une variance faussement basse, le filtre lui fait confiance et lisse trop.
+  Les deux morceaux de C2 et C3 vont ensemble ;
+- **sur les pixels calmes, le cadrage coûte un peu** : 0,0056 avec, 0,0043 sans.
+  C'est le prix attendu d'un historique qu'on empêche de s'installer. Sur cette
+  scène à caméra fixe, il ne rend rien en échange.
+
+### Et sur le plateau, caméra en mouvement
+
+Le survol de l'introduction de w01Dll, où la caméra ne s'arrête jamais : c'est là
+qu'un historique périmé se voit. Masque commun aux runs retenus, 15,9 % de
+l'image — il est petit parce que les runs ne tombent pas au même instant du
+survol.
+
+| réglage | erreur moyenne | pixels calmes | ce qui bouge |
+|---|---|---|---|
+| par défaut | 0,0325 | 0,0168 | 0,0382 |
+| par défaut, second run | 0,0339 | 0,0143 | 0,0410 |
+| sans cadrage | 0,0728 | 0,0269 | 0,0897 |
+| ni cadrage ni variance | 0,0734 | 0,0272 | 0,0904 |
+| ni l'un ni l'autre, second run | 0,0657 | 0,0312 | 0,0784 |
+
+**Le cadrage divise l'erreur par deux dès que la caméra bouge.** Avec lui, 0,0325
+et 0,0339 ; sans lui, 0,0657 à 0,0734 dans les trois runs qui s'en passent. Les
+deux runs du réglage par défaut ne diffèrent que de 4 % : l'écart est bien réel.
+La variance, elle, ne change rien ici — sans cadrage, avec ou sans elle, c'est la
+même erreur.
+
+C'est l'exact inverse du mini-jeu à caméra fixe, où le cadrage coûtait 0,0013 sur
+les pixels calmes. Le compromis est donc celui qu'on attendait d'un cadrage, et il
+penche du bon côté : petit quand rien ne bouge, décisif quand la caméra bouge.
+
+**Ce que cela dit de C2 et C3 :** la mesure précédente, qui concluait « aucun
+effet », se trompait faute d'outil. La passe temporelle vaut ce que vaut son
+cadrage, et son cadrage vaut cher au bon moment.
+
+Un run a dû être refait : sa séquence est sortie uniformément blanche, le banc
+ayant armé pendant une transition, et son erreur médiane valait zéro. Les paires
+A/B refusaient déjà ce cas ; les séquences ne le voyaient pas. L'outil de mesure
+signale maintenant une séquence sans aucune pénombre, et le script fait échouer le
+run — vérifié sur la séquence blanche et sur une bonne.

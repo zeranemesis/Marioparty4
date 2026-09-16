@@ -91,6 +91,26 @@ public static class RtSeq {
         return Math.Sqrt(Math.Max(sq / n - mean * mean, 0.0));
     }
 
+    // Mean absolute error against the reference traced on the same frame, over
+    // the whole frame and over the pixels the reference shows in penumbra. It
+    // counts sampling noise and an accumulation's lag in one number, which is
+    // what a spread from frame to frame cannot do: a history that trails is
+    // perfectly steady.
+    public static void Error(float[] shown, float[] reference, out double meanAll,
+                             out double meanPenumbra, out long counted) {
+        double all = 0, penumbra = 0;
+        long n = 0;
+        for (int p = 0; p < shown.Length; ++p) {
+            double d = Math.Abs(shown[p] - reference[p]);
+            all += d;
+            float v = reference[p];
+            if (v > 0.02f && v < 0.98f) { penumbra += d; ++n; }
+        }
+        meanAll = all / shown.Length;
+        meanPenumbra = n > 0 ? penumbra / n : 0.0;
+        counted = n;
+    }
+
     public static void Change(float[] a, float[] b, out double meanAbs, out double overThreshold) {
         double sum = 0;
         long over = 0;
@@ -139,7 +159,8 @@ function Get-Median([double[]]$Values) {
     return ([double]$sorted[$mid - 1] + [double]$sorted[$mid]) / 2.0
 }
 
-$files = @(Get-ChildItem (Join-Path (Resolve-Path $Directory).Path 'rt_seq_*.pfm') | Sort-Object Name)
+$files = @(Get-ChildItem (Join-Path (Resolve-Path $Directory).Path 'rt_seq_[0-9]*.pfm') | Sort-Object Name)
+$referenceFiles = @(Get-ChildItem (Join-Path (Resolve-Path $Directory).Path 'rt_seq_ref_*.pfm') -ErrorAction SilentlyContinue | Sort-Object Name)
 if ($files.Count -lt 2) { throw "$Directory holds $($files.Count) frame(s); a sequence needs at least two" }
 
 $frames = New-Object 'System.Collections.Generic.List[float[]]'
@@ -156,6 +177,9 @@ foreach ($file in $files) {
 $grains = @()
 $penumbraGrains = @()
 $counted = [long]0
+# A frame where no primary ray hit anything is uniform, and a sequence of those
+# measures nothing at all. It happens when the bench arms during a transition.
+$penumbraMost = [long]0
 Write-Host "Sequence de $($frames.Count) frames, ${w}x${h}"
 Write-Host "  frame   luminance   grain (image)   grain (penombre)   pixels en penombre"
 for ($t = 0; $t -lt $frames.Count; ++$t) {
@@ -163,6 +187,7 @@ for ($t = 0; $t -lt $frames.Count; ++$t) {
     $penumbra = [RtSeq]::Grain($frames[$t], $w, $h, $true, [ref]$counted)
     $grains += $grain
     $penumbraGrains += $penumbra
+    if ($counted -gt $penumbraMost) { $penumbraMost = $counted }
     Write-Host ("  {0,5}   {1,9:F5}   {2,13:F5}   {3,16:F5}   {4,18}" -f $t, [RtSeq]::Mean($frames[$t]), $grain, $penumbra, $counted)
 }
 
@@ -178,6 +203,30 @@ for ($t = 1; $t -lt $frames.Count; ++$t) {
     Write-Host ("  {0,2}-{1,-2}   {2,11:F6}   {3,19:P3}" -f ($t - 1), $t, $meanAbs, $share)
 }
 
+$errors = @()
+if ($referenceFiles.Count -eq $frames.Count) {
+    Write-Host "  frame   erreur contre la reference   sur la penombre de la reference   pixels"
+    for ($t = 0; $t -lt $frames.Count; ++$t) {
+        $rw = 0
+        $rh = 0
+        $reference = [RtSeq]::LoadLuminance($referenceFiles[$t].FullName, [ref]$rw, [ref]$rh)
+        if ($rw -ne $w -or $rh -ne $h) { throw "$($referenceFiles[$t].Name) is ${rw}x${rh}, the frames ${w}x${h}" }
+        $meanAll = 0.0
+        $meanPenumbra = 0.0
+        $counted = [long]0
+        [RtSeq]::Error($frames[$t], $reference, [ref]$meanAll, [ref]$meanPenumbra, [ref]$counted)
+        $errors += $meanPenumbra
+        Write-Host ("  {0,5}   {1,26:F5}   {2,32:F5}   {3,6}" -f $t, $meanAll, $meanPenumbra, $counted)
+    }
+    Write-Host ("  erreur mediane contre la reference : {0:F5} sur la penombre" -f (Get-Median $errors))
+} elseif ($referenceFiles.Count -gt 0) {
+    Write-Host ("  {0} references pour {1} frames : erreur non mesuree" -f $referenceFiles.Count, $frames.Count)
+}
+
+if ($penumbraMost -eq 0) {
+    Write-Host "  ATTENTION : aucune frame ne montre de penombre. Rien n'a ete touche : cette sequence ne mesure rien."
+}
+
 $stable = [long]0
 $deviation = [RtSeq]::TemporalDeviation($frames.ToArray(), [ref]$stable)
 $summary = [pscustomobject]@{
@@ -187,6 +236,9 @@ $summary = [pscustomobject]@{
     ChangeMedian = Get-Median $changes
     ShareOverThresholdMedian = Get-Median $shares
     TemporalDeviation = $deviation
+    ReferenceErrorMedian = if ($errors.Count -gt 0) { Get-Median $errors } else { $null }
+    ReferenceFrames = $referenceFiles.Count
+    Uniform = ($penumbraMost -eq 0)
     PenumbraPixelsThroughout = $stable
 }
 Write-Host ("  medianes : grain {0:F5}, grain de penombre {1:F5}, ecart d'une frame a l'autre {2:F6}, part au-dela de 0,02 {3:P3}" -f $summary.GrainMedian, $summary.PenumbraGrainMedian, $summary.ChangeMedian, $summary.ShareOverThresholdMedian)

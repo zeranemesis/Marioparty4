@@ -55,6 +55,11 @@ param(
     # measure_raytracing_sequence.ps1. What the A/B pair cannot show: it holds
     # the accumulation off. Not together with -AB.
     [int]$Sequence = 0,
+    # Samples for a converged reference traced beside each sequence frame. The
+    # error against it counts noise and lag together, where the spread from one
+    # frame to the next counts noise and motion. Costly: every dumped frame is
+    # traced twice, the reference at this many samples.
+    [int]$SequenceReference = 0,
     # One exact scene, such as m401Dll: any other attempt fails and is retried.
     # Two sequences only compare on the same scene; the target alone accepts any
     # board or any mini-game.
@@ -251,6 +256,11 @@ function Invoke-Run {
     } else {
         Remove-Item Env:\AURORA_RT_SEQUENCE -ErrorAction SilentlyContinue
     }
+    if ($Sequence -gt 0 -and $SequenceReference -gt 0) {
+        $env:AURORA_RT_SEQUENCE_REF = "$SequenceReference"
+    } else {
+        Remove-Item Env:\AURORA_RT_SEQUENCE_REF -ErrorAction SilentlyContinue
+    }
     if ($FrameStats) {
         $env:AURORA_FRAME_STATS = '1'
     } else {
@@ -327,7 +337,11 @@ function Invoke-Run {
             New-Item -ItemType File -Path (Join-Path $binary 'rt_ab_arm') -Force | Out-Null
             Start-Sleep -Seconds 3
             # Each sequence frame waits for its readback.
-            if ($Sequence -gt 0) { Start-Sleep -Seconds ([math]::Ceiling($Sequence / 10)) }
+            # Each frame waits for its readback, twice over with a reference.
+            if ($Sequence -gt 0) {
+                $perFrame = if ($SequenceReference -gt 0) { 1 } else { 10 }
+                Start-Sleep -Seconds ([math]::Ceiling($Sequence / $perFrame))
+            }
         }
         foreach ($k in 1..$Frames) { Save-Frame $window ('scene{0:d2}' -f $k) | Out-Null; Start-Sleep -Milliseconds 900 }
     }
@@ -451,16 +465,24 @@ if ($AB) {
 }
 if ($Sequence -gt 0) {
     $sequenceHit = $lines | Select-String -Pattern 'Sequence written' | Select-Object -Last 1
-    $written = @(Get-ChildItem (Join-Path $binary 'rt_seq_*.pfm') -ErrorAction SilentlyContinue | Sort-Object Name)
+    $written = @(Get-ChildItem (Join-Path $binary 'rt_seq_[0-9]*.pfm') -ErrorAction SilentlyContinue | Sort-Object Name)
+    $references = @(Get-ChildItem (Join-Path $binary 'rt_seq_ref_*.pfm') -ErrorAction SilentlyContinue | Sort-Object Name)
+    if ($SequenceReference -gt 0 -and $references.Count -ne $Sequence) {
+        $failures += "$($references.Count) references written for $Sequence frames"
+    }
     if ($sequenceHit -and $written.Count -eq $Sequence) {
         $linkBefore = $lines[0..($sequenceHit.LineNumber - 1)] | Select-String -Pattern 'Link DLL:(\S+)' | Select-Object -Last 1
         $where = if ($linkBefore) { $linkBefore.Matches[0].Groups[1].Value } else { 'unknown' }
         $sequenceDir = Join-Path $output 'sequence'
         New-Item -ItemType Directory -Path $sequenceDir -Force | Out-Null
         $written | Copy-Item -Destination $sequenceDir -Force
+        $references | Copy-Item -Destination $sequenceDir -Force
         Write-Host ''
         Write-Host ("  sequence, in {0}: {1}" -f $where, ($sequenceHit.ToString() -replace '^\[INFO \| aurora::rt\] ', ''))
         $sequenceResult = & (Join-Path $PSScriptRoot 'measure_raytracing_sequence.ps1') -Directory $sequenceDir
+        if ($sequenceResult -and $sequenceResult.Uniform) {
+            $failures += "sequence written where nothing was hit in ${where}: every frame is uniform, so it measures nothing"
+        }
     } else {
         $failures += "sequence of $Sequence frames requested but $($written.Count) written after the scene was reached"
     }

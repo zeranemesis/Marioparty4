@@ -2126,10 +2126,10 @@ index 0000000..20409f5
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_capture.cpp b/lib/rt/rt_capture.cpp
 new file mode 100644
-index 0000000..de41472
+index 0000000..e8a43cd
 --- /dev/null
 +++ b/lib/rt/rt_capture.cpp
-@@ -0,0 +1,2401 @@
+@@ -0,0 +1,2436 @@
 +#include "rt_capture.hpp"
 +
 +#include "rt_accel.hpp"
@@ -2231,6 +2231,9 @@ index 0000000..de41472
 +// the accumulation off to compare two settings on one frame; what the temporal
 +// passes do takes a sequence to see.
 +uint32_t g_sequenceFrames = 0;
++// Samples for the converged reference traced beside each sequence frame, 0 for
++// none. AURORA_RT_SEQUENCE_REF sets it.
++uint32_t g_sequenceReference = 0;
 +uint32_t g_sequenceWritten = 0;
 +uint32_t g_sequenceStart = 0;
 +// Alpha testing of see-through candidates in the trace. On by default;
@@ -3918,6 +3921,14 @@ index 0000000..de41472
 +        Log.info("Sequence dump of {} frames once armed by rt_ab_arm", g_sequenceFrames);
 +      }
 +    }
++    if (const char* env = std::getenv("AURORA_RT_SEQUENCE_REF")) {
++      const int samples = std::atoi(env);
++      g_sequenceReference = samples <= 0 ? 0u : static_cast<uint32_t>(samples > 256 ? 256 : samples);
++      if (g_sequenceReference > 0) {
++        Log.info("Each sequence frame also traced at {} samples as a reference",
++                 g_sequenceReference);
++      }
++    }
 +    if (const char* env = std::getenv("AURORA_RT_AB")) {
 +      static constexpr const char* kAbNames[] = {"aoSamples", "shadowSamples", "lightRadius",
 +                                                 "aoRadius",  "bounce",        "denoisePhi",
@@ -4389,6 +4400,25 @@ index 0000000..de41472
 +    std::snprintf(sequencePath, sizeof(sequencePath), "rt_seq_%03u.pfm", g_sequenceWritten);
 +    dumpPath = sequencePath;
 +  }
++  // The converged reference for this frame, before the frame's own pass so that
++  // what is displayed and what the history keeps is the normal one. Many
++  // samples, one frame, no accumulation and no filter: the error of the
++  // displayed frame against it counts the noise and the lag together, which the
++  // spread from frame to frame cannot separate.
++  if (sequenceFrame && g_sequenceReference > 0u) {
++    trace::TraceParams reference = params;
++    reference.advanceState = false;
++    reference.singleFrame = true;
++    reference.denoisePasses = 0;
++    reference.aoSamples = g_sequenceReference;
++    reference.shadowSamples = g_sequenceReference;
++    char referencePath[28];
++    std::snprintf(referencePath, sizeof(referencePath), "rt_seq_ref_%03u.pfm", g_sequenceWritten);
++    if (!trace::run(reference, referencePath)) {
++      Log.error("Sequence reference trace failed");
++    }
++    report_device_removal();
++  }
 +  if (!trace::run(params, dumpPath)) {
 +    Log.error("Ray traced AO pass failed");
 +    report_device_removal();
@@ -4399,6 +4429,11 @@ index 0000000..de41472
 +  if (sequenceFrame && ++g_sequenceWritten == g_sequenceFrames) {
 +    Log.info("Sequence written: {} frames, rt_seq_000.pfm to rt_seq_{:03}.pfm, {}x{}, from frame {}",
 +             g_sequenceFrames, g_sequenceFrames - 1, params.width, params.height, g_sequenceStart);
++    if (g_sequenceReference > 0u) {
++      Log.info("A reference beside each: rt_seq_ref_000.pfm to rt_seq_ref_{:03}.pfm, {} samples, "
++               "unfiltered",
++               g_sequenceFrames - 1, g_sequenceReference);
++    }
 +  }
 +  if (abPair) {
 +    Log.info("A/B pair written: rt_ab_a.pfm and rt_ab_b.pfm, {}x{}, {} triangles, B with {}={}",
