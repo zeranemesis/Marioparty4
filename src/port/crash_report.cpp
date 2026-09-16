@@ -18,6 +18,7 @@
 #include "port/crash_report.h"
 
 #include "port/coroutine_stack.h"
+#include "port/crash_manifest.h"
 #include "port/netplay_runtime.h"
 #include "partyboard_version.h"
 
@@ -766,6 +767,24 @@ void reportAbnormalAndExit(const char *reason, const char *detail)
     _exit(3);
 }
 
+// Section 4 of docs/crash_report_user_pipeline.md promises a report that
+// carries no personal path. The sanitiser was written and tested, but nothing
+// on the live path ever called it, so every report shipped the Windows account
+// name and the full ISO path out of the command line -- in the one file a
+// player is asked to send to strangers.
+//
+// It runs at init, never at crash time: it allocates, and the whole design of
+// this file is that a handler must not depend on an allocator a heap
+// corruption may already have destroyed. Only fields that are printed are
+// rewritten; sessionDir is left alone because buildPath() opens files with it.
+void sanitiseInPlace(char *text, std::size_t capacity)
+{
+    if (text == nullptr || text[0] == 0) return;
+    char scratch[kPathChars];
+    if (PartyBoard_CrashSanitizeText(text, scratch, sizeof(scratch)) == 0) return;
+    copyString(text, capacity, scratch);
+}
+
 void terminateHandler() { reportAbnormalAndExit("STD_TERMINATE", nullptr); }
 
 void abortSignalHandler(int) { reportAbnormalAndExit("ABORT", nullptr); }
@@ -802,6 +821,8 @@ extern "C" void PartyBoard_CrashReportInit(const char *sessionDir, s32 peerIndex
     gIdentity.processId = GetCurrentProcessId();
     GetModuleFileNameA(nullptr, gIdentity.executable, sizeof(gIdentity.executable) - 1);
     copyString(gIdentity.commandLine, sizeof(gIdentity.commandLine), GetCommandLineA());
+    sanitiseInPlace(gIdentity.executable, sizeof(gIdentity.executable));
+    sanitiseInPlace(gIdentity.commandLine, sizeof(gIdentity.commandLine));
 
     if (sessionDir && *sessionDir) {
         copyString(gIdentity.sessionDir, sizeof(gIdentity.sessionDir), sessionDir);
