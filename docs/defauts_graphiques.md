@@ -807,3 +807,86 @@ GPU **Intel(R) Graphics (integré)**, D3D12, 1280×960. Sur un GPU intégré la
 compilation de pipelines est nettement plus lente que sur une carte dédiée, ce
 qui rend l'absence de graine d'autant plus visible — et explique qu'un défaut
 décrit comme « quelques secondes » puisse durer plus longtemps ici.
+
+## G2 — Avalanche! : diagnostiqué et corrigé le 2026-09-16
+
+Ouvert depuis le 2026-09-12, confirmé par deux testeurs, **cinq hypothèses
+écartées**. Résolu en trois quarts d'heure le jour où quelqu'un a regardé
+l'image. C'est la leçon de cette page, et `tools/capture_fenetre.ps1` la disait
+déjà en tête de fichier.
+
+### Ce que l'image a donné, et que le code n'avait pas donné
+
+Valentin a précisé : **la masse de neige, dès la première image**. Cela élimine
+d'un coup le cache de pipelines (qui se corrige tout seul) et toute piste de
+texture (cette géométrie n'en a pas). Une capture agrandie de la coulée montre
+alors des **rubans parallèles réguliers à arêtes franches**, plus un grand
+triangle blanc étiré — signature d'indices de sommets hors de leur fenêtre, pas
+d'un défaut d'éclairage.
+
+### La preuve
+
+`map.c:941` construit le display list de la coulée :
+
+```c
+GXBegin(GX_TRIANGLESTRIP, GX_VTXFMT0, 70);
+for (var_r29 = 0; var_r29 < 35; var_r29++) {
+    GXPosition1x16(var_r29 + 35);   /* indices 35..69 */
+    GXNormal1x16(var_r29 + 35);
+    GXColor1x16(var_r29 + 35);
+    GXPosition1x16(var_r29);        /* indices 0..34  */
+    ...
+}
+```
+
+**70 sommets, indices 0 à 69.** Chaque appel dessine la bande *entre* deux
+rangées de 35. C'est cohérent avec tout le reste : 1050 sommets = 30 rangées, et
+la boucle de dessin fait 29 appels — un par intervalle.
+
+Or la boucle rebase les tableaux par fenêtres de **35** :
+
+```c
+GXSETARRAY(GX_VA_POS, &var_r31->unk_84[var_r29], 35 * sizeof(Vec), sizeof(Vec), TRUE);
+```
+
+Les indices 35 à 69 — **la rangée supérieure de chaque bande** — tombent hors de
+la fenêtre déclarée.
+
+### Pourquoi ça ne se voyait que sur PC
+
+`GXSetArray` du vrai GX ne prend **pas de taille** : base et pas, rien d'autre.
+Le matériel lit `base + index × stride` sans borne, donc sortir de 35 ne
+signifie rien pour lui. La macro le dit :
+
+```c
+#define GXSETARRAY(attr, data, size, stride, le) GXSetArray((attr), (data), (size), (stride), (le))  /* Aurora */
+#define GXSETARRAY(attr, data, size, stride, le) GXSetArray((attr), (data), (stride))                /* GameCube */
+```
+
+Le paramètre `size` est une **invention du port**, et Aurora s'en sert pour de
+bon : `push_storage(array.data, array.size)`
+(`command_processor.cpp:1639`) téléverse exactement ces octets. Le décompilateur
+a dû inventer une taille à chacun des ~159 sites d'appel, et ici il a écrit la
+hauteur d'une rangée au lieu de deux.
+
+Détail qui confirme : le **premier** appel, hors boucle, passe le tableau entier
+(`unk_80 * sizeof(Vec)`). Une seule bande était donc correcte, les vingt-huit
+autres tronquées — ce que l'image montre, un bord lisse et le reste en rubans.
+
+### Le correctif
+
+Chaque fenêtre reçoit le reste du tableau, `unk_80 - var_r29`, ce que le
+matériel autorise de fait. À la dernière itération cela vaut exactement 70, soit
+le strict nécessaire. **Aucun risque pour les builds *matching* : la macro
+GameCube ignore l'argument.**
+
+### Ce que cela ouvre
+
+Le motif est systémique, pas local. Une taille sous-estimée ne produit ni
+erreur ni avertissement : elle tronque la géométrie en silence. D'autres sites
+déclarent une fenêtre d'**un seul élément** — `m421Dll/player.c:1809` (Hop or
+Pop), `m423Dll/main.c:5367` (GOOOOOOOAL!!), `m425Dll/thwomp.c:2135` (The Great
+Deflate), `m428Dll/player.c:2194`. C'est **légitime** si le display list n'y
+indexe que 0, et ces trois-là sont précisément des mini-jeux signalés. Rien ne
+prouve qu'ils soient fautifs ; il suffit de lire leur display list comme on
+vient de le faire ici.

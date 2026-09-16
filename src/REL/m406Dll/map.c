@@ -1152,11 +1152,23 @@ void fn_1_45BC(HU3DMODEL *arg0, Mtx arg1)
         GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
         GXSETARRAY(GX_VA_CLR0, var_r31->unk_90, var_r31->unk_80 * sizeof(GXColor), sizeof(GXColor), TRUE);
         GXCallDisplayList(var_r31->unk_A4, var_r31->unk_A0);
+        /* 29 display list calls cover 30 rows of 35, so each one draws the band
+         * BETWEEN two rows and the list indexes 70 vertices, not 35. The last
+         * iteration proves it: 1050 - 980 leaves exactly 70. A real GXSetArray
+         * takes no size and simply reads on, which is why this went unnoticed;
+         * Aurora uploads exactly the bytes declared here (push_storage in
+         * command_processor.cpp), so half of every band was never sent and the
+         * avalanche rendered as hard-edged parallel ribbons. Give each window
+         * the rest of the array, which is what the hardware effectively allows.
+         * The size argument does not exist on the GameCube macro, so this
+         * changes nothing in a matching build. */
         for (var_r30 = 1; var_r30 < 29; var_r30++) {
+            s32 remain;
             var_r29 = var_r30 * 35;
-            GXSETARRAY(GX_VA_POS, &var_r31->unk_84[var_r29], 35 * sizeof(Vec), sizeof(Vec), TRUE);
-            GXSETARRAY(GX_VA_NRM, &var_r31->unk_88[var_r29], 35 * sizeof(Vec), sizeof(Vec), TRUE);
-            GXSETARRAY(GX_VA_CLR0, &var_r31->unk_90[var_r29], 35 * sizeof(GXColor), sizeof(GXColor), TRUE);
+            remain = var_r31->unk_80 - var_r29;
+            GXSETARRAY(GX_VA_POS, &var_r31->unk_84[var_r29], remain * sizeof(Vec), sizeof(Vec), TRUE);
+            GXSETARRAY(GX_VA_NRM, &var_r31->unk_88[var_r29], remain * sizeof(Vec), sizeof(Vec), TRUE);
+            GXSETARRAY(GX_VA_CLR0, &var_r31->unk_90[var_r29], remain * sizeof(GXColor), sizeof(GXColor), TRUE);
             GXCallDisplayList(var_r31->unk_A4, var_r31->unk_A0);
         }
     }
