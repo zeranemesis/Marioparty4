@@ -30,6 +30,12 @@ struct CheckpointFixture {
     u32 corrections = 0, replayed = 0;
     size_t bytes = 0;
 };
+#ifdef _WIN32
+// The fixture drives a PE module built by hand, and om_dll_data only
+// carries hModule on Windows (game/object.h names it handle elsewhere).
+// PartyBoard_RollbackCheckpointSelfTest is already #ifdef _WIN32 and this
+// is its only caller, so the guard simply had one function too few: the
+// Linux and macOS jobs stopped compiling here.
 bool runCheckpointFixture(void *context, u32 *taskState) {
     auto &fixture = *static_cast<CheckpointFixture *>(context);
     try {
@@ -232,6 +238,7 @@ bool runCheckpointFixture(void *context, u32 *taskState) {
         return ok;
     } catch (...) { return false; }
 }
+#endif
 }
 
 extern "C" bool PartyBoard_RollbackCheckpointSelfTest(void) {
