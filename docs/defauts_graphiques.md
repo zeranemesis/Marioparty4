@@ -592,3 +592,129 @@ close, il n'y a pas de piste de ce côté.
 mais aucun n'appelle `Hu3DReflectMapSet()`, donc cette corrélation **n'a aucun
 mécanisme derrière elle** à ce stade. Elle est notée ici pour ne pas être
 recherchée deux fois, pas comme une piste établie.
+
+## Correction — Tree Stomp : la copie n'était que la moitié du problème
+
+Écrit plus haut : *« la copie ne produit rien […] donc noire »*. C'est exact mais
+**insuffisant**, et présenté comme une cause complète, ce qui était une erreur.
+En lisant l'effet en entier, le coupable dominant est ailleurs.
+
+### Ce que l'effet fait réellement
+
+`m419Dll` est une **traînée de mouvement**. Il garde un anneau de huit couples de
+textures — une copie couleur (`lbl_1_bss_84[]`, RGB5A3) et une copie de
+profondeur (`lbl_1_bss_64[]`, Z24X8) — et redessine les sept dernières frames
+par-dessus la scène. Chaque fantôme est **un quad plein écran** :
+
+```c
+sp2C = {0,0,0};  sp20 = {640,0,0};  sp14 = {640,480,0};  sp8 = {0,480,0};
+```
+
+Ce qui empêche ce quad de recouvrir tout l'écran, c'est uniquement la ligne :
+
+```c
+GXSetZTexture(GX_ZT_REPLACE, GX_TF_Z24X8, 0);   // m419Dll/main.c:279
+```
+
+La profondeur du fragment est **remplacée** par le texel de TEXMAP1, c'est-à-dire
+la profondeur capturée au moment de la frame fantôme ; combinée à
+`GXSetZMode(GX_TRUE, GX_LEQUAL, GX_FALSE)`, elle confine chaque fantôme à la
+silhouette qu'avait la géométrie. La traînée *est* ce test de profondeur.
+
+### Le vrai coupable
+
+`extern/aurora/lib/dolphin/gx/GXTev.cpp:171` :
+
+```cpp
+void GXSetZTexture(GXZTexOp op, GXTexFmt fmt, u32 bias) {
+  // TODO
+}
+```
+
+**Un stub vide.** Et `ztex` n'apparaît nulle part dans le générateur de shaders
+(`lib/gx/shader.cpp`, `shader_info.cpp`) : le Z-texturing n'existe pas dans
+Aurora, ni comme état, ni comme écriture de `frag_depth`.
+
+Sans lui, les sept quads ne sont plus confinés à rien et couvrent 640×480
+chacun, empilés, devant la scène. **C'est la grosse boîte.** La copie de
+profondeur défaillante y contribue, mais même une copie parfaite ne changerait
+rien : sans `GX_ZT_REPLACE`, la texture de profondeur n'est lue par personne.
+
+### Ce qui a quand même été corrigé, et pourquoi
+
+`GX_TF_Z24X8` a été ajouté à `DepthConvPipelines` (`tex_copy_conv.cpp`). Ce
+n'est pas suffisant pour Tree Stomp, mais ce n'est pas cosmétique non plus :
+sans cette entrée, chaque frame de l'effet soumettait un `SetBindGroup` au
+layout incompatible, ce qui **invalide la passe de rendu entière** — et donc
+potentiellement des dessins qui n'ont rien à voir avec cet effet. Supprimer une
+passe invalide par frame vaut d'être fait, et c'est de toute façon un
+prérequis à toute implémentation future du Z-texturing.
+
+`GX_TF_Z24X8` est le **seul** format de copie de profondeur employé par le jeu
+entier, et uniquement ici (`m419Dll/main.c:248`, `:279`, `:305`). Le décalage de
+layout de `blit()` subsiste pour les autres formats de profondeur, mais il est
+désormais **inatteignable dans ce jeu**.
+
+### Ce qui n'a pas été tenté
+
+Implémenter `GXSetZTexture` demande d'ajouter au générateur de shaders une
+écriture de `@builtin(frag_depth)` depuis un texel, et l'état de pipeline qui va
+avec. C'est une fonctionnalité, pas un correctif ; elle est dans un sous-module
+amont ; et rien ici ne peut la compiler. L'écrire à l'aveugle serait pire que de
+ne rien faire. **Tree Stomp reste non corrigé**, et sa cause est maintenant
+nommée.
+
+## Ce qui a été corrigé, et ce qui ne l'est pas
+
+Aucun de ces changements n'a été compilé : la machine où ils ont été écrits n'a
+pas de compilateur C/C++. À lire comme des propositions étayées, pas comme des
+correctifs validés.
+
+| | fichier | état |
+|---|---|---|
+| Reversal of Fortune : carte de réflexion ignorée + fuite | `src/game/hsfman.c` | **corrigé** |
+| Copie de profondeur `Z24X8` : passe invalidée chaque frame | `extern/aurora/lib/gfx/tex_copy_conv.cpp` | **corrigé**, dans le sous-module |
+| Cache de pipelines jamais livré | `CMakeLists.txt`, `tools/capture_pipeline_cache.ps1` | **plomberie posée**, la base reste à enregistrer |
+| Tree Stomp : `GXSetZTexture` non implémenté | — | **non corrigé**, cause nommée |
+| Stamp Out! : relecture CPU non corrigée | `src/REL/m415Dll/main.c:433` | **non corrigé**, délibérément |
+| Slime Time, Avalanche! | — | **sans mécanisme** |
+
+### Reversal of Fortune
+
+`Hu3DReflectMapSet()` installe maintenant la carte demandée. La raison pour
+laquelle l'original ne le pouvait pas est que `HuMemDirectFree(reflectAnim[0])`
+ne libère que l'`ANIMDATA` en laissant fuir les tableaux `bank`/`pat`/`bmp`
+alloués à côté sur un build `BYTESWAPPING`. `HuSprAnimKill()` les libère tous et
+respecte `useNum` : c'est le bon destructeur, il existait déjà.
+
+`Hu3DAllKill()` restaure la carte de démarrage au lieu de relire `refMapData0` —
+une relecture construirait une seconde `ANIMDATA` à partir de la même source et
+perdrait la première. Un pointeur capturé à l'initialisation suffit. Les chemins
+`__MWERKS__` et non-`BYTESWAPPING` ne sont pas touchés, pour ne pas casser les
+builds *matching*.
+
+### Le cache de pipelines
+
+La base ne peut pas être fabriquée par le build : c'est un **enregistrement**,
+produit en jouant. Ce qui manquait n'était donc pas seulement le fichier mais le
+chemin pour le fabriquer et le livrer. Les deux existent maintenant :
+`tools/capture_pipeline_cache.ps1` prélève le `pipeline_cache.db` du dossier de
+configuration, et `CMakeLists.txt` l'installe `OPTIONAL` à côté de
+l'exécutable — un arbre sans base compile toujours.
+
+Le script refuse de travailler si un `-wal` traîne (le jeu est encore ouvert, ou
+s'est mal fermé, et la copie manquerait ses lignes les plus récentes) et refuse
+d'écraser une base par une plus petite sans `-AllowShrink`. Reste à faire, et
+cela demande quelqu'un devant le jeu : parcourir les scènes, capturer, et
+**commiter le fichier** — sinon la CI continuera de livrer des paquets sans
+graine. À refaire à chaque changement de schéma, qu'Aurora rejette en clair
+(*« does not use schema version »*).
+
+### Stamp Out! : pourquoi rien n'a été touché
+
+Le correctif évident serait de refléter `fn_1_66AC` — remplacer le `memcpy` de
+`fn_1_1960` case 1 par l'aliasing du pointeur. Il n'a pas été appliqué : le lien
+entre cette relecture et la disparition des ombres **n'est pas démontré**, et
+l'aliasing transfère la propriété d'un tampon (qui le libère ?) dans un fichier
+que rien ici ne peut compiler ni exécuter. Un correctif spéculatif, non testé,
+sur un symptôme non reproduit, vaut moins qu'une ligne dans ce registre.
