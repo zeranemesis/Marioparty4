@@ -104,6 +104,40 @@ extern "C" bool PartyBoard_ModsRunSelfTest(void) {
         MOD_CHECK(name.starts_with("/") && name.find('\\') == std::string_view::npos);
     }
 
+    // Placement of files a pack shipped with no path at all. The rule is driven
+    // here with a disc described by hand, because it otherwise needs a mounted
+    // disc image and so never ran in CI.
+    {
+        DiscIndex disc;
+        disc.byName["board_e.dat"] = "/mess/board_e.dat";   // one place on the disc
+        disc.byName["opening.bnr"] = "/opening.bnr";        // already at the root
+        disc.rootFiles.insert("/opening.bnr");
+        // "board.bin" occurs twice on the disc, so it is absent from byName.
+
+        ModOverlay placed;
+        placed.files.push_back(ModFile{"a", "/board_e.dat", 1});   // placed
+        placed.files.push_back(ModFile{"b", "/opening.bnr", 1});   // left: the disc has it here
+        placed.files.push_back(ModFile{"c", "/board.bin", 1});     // left: ambiguous
+        placed.files.push_back(ModFile{"d", "/stranger.dat", 1});  // left: unknown to the disc
+        placed.files.push_back(ModFile{"e", "/data/board.bin", 1});// left: the author gave a path
+        PlaceLooseFiles(placed, disc);
+
+        MOD_CHECK(placed.files[0].virtualPath == "/mess/board_e.dat");
+        MOD_CHECK(placed.files[1].virtualPath == "/opening.bnr");
+        MOD_CHECK(placed.files[2].virtualPath == "/board.bin");
+        MOD_CHECK(placed.files[3].virtualPath == "/stranger.dat");
+        MOD_CHECK(placed.files[4].virtualPath == "/data/board.bin");
+
+        // A higher priority mod already holding the target keeps it, and the
+        // loose file stays where its author put it rather than overwriting.
+        ModOverlay contested;
+        contested.files.push_back(ModFile{"f", "/mess/board_e.dat", 1});
+        contested.files.push_back(ModFile{"g", "/board_e.dat", 1});
+        PlaceLooseFiles(contested, disc);
+        MOD_CHECK(contested.files[0].virtualPath == "/mess/board_e.dat");
+        MOD_CHECK(contested.files[1].virtualPath == "/board_e.dat");
+    }
+
     // An empty list, or one with no usable root, must leave the disc untouched.
     { std::ofstream(listPath, std::ios::binary); }
     const ModOverlay empty = BuildOverlay(listPath);

@@ -212,8 +212,19 @@ void CollectRoot(const std::filesystem::path& root, ModOverlay& overlay, std::un
     }
 }
 
-// Records where each file name occurs on the disc. A name seen twice is marked
-// ambiguous and is never placed automatically.
+// What the placement rule needs to know about the disc. Separating it from the
+// FST is what lets the self-test drive the rule, which otherwise needs a
+// mounted disc image and so never ran in CI.
+struct DiscIndex {
+    // Lowercased file name -> its one path on the disc. A name that occurs
+    // twice is absent from here: nothing ambiguous is ever placed.
+    std::unordered_map<std::string, std::string> byName;
+    // Lowercased paths of the files the disc keeps at its own root.
+    std::unordered_set<std::string> rootFiles;
+};
+
+// Records where each file name occurs on the disc. A name seen twice is dropped
+// rather than kept, so only unambiguous names survive.
 void IndexDiscNames(const std::string& directory, int depth,
                     std::unordered_map<std::string, std::string>& byName,
                     std::unordered_set<std::string>& ambiguous, int& budget) {
@@ -259,25 +270,19 @@ void IndexDiscNames(const std::string& directory, int depth,
 // board_e.dat belongs under mess/. When the disc carries exactly one file of
 // that name, that is where it goes. A name the disc does not carry, carries
 // twice, or already carries at its root is left exactly where the author put it.
-void PlaceLooseFiles(ModOverlay& overlay) {
+void PlaceLooseFiles(ModOverlay& overlay, const DiscIndex& disc) {
     std::vector<ModFile*> loose;
     std::unordered_set<std::string> taken;
     for (ModFile& file : overlay.files) {
-        taken.insert(AsciiLower(file.virtualPath));
+        const std::string lowered = AsciiLower(file.virtualPath);
+        taken.insert(lowered);
         const bool atDiscRoot = file.virtualPath.find('/', 1) == std::string::npos;
-        if (atDiscRoot && DVDConvertPathToEntrynum(file.virtualPath.c_str()) < 0) {
+        if (atDiscRoot && !disc.rootFiles.contains(lowered)) {
             loose.push_back(&file);
         }
     }
-    if (loose.empty()) {
-        return;
-    }
 
-    std::unordered_map<std::string, std::string> byName;
-    std::unordered_set<std::string> ambiguous;
-    int budget = 8192;
-    IndexDiscNames("/", 0, byName, ambiguous, budget);
-
+    const std::unordered_map<std::string, std::string>& byName = disc.byName;
     for (ModFile* file : loose) {
         const std::string name = AsciiLower(file->virtualPath.substr(1));
         const auto match = byName.find(name);
@@ -295,6 +300,27 @@ void PlaceLooseFiles(ModOverlay& overlay) {
                                file->virtualPath, match->second);
         file->virtualPath = match->second;
     }
+}
+
+// Reads the mounted disc and applies the rule above.
+void PlaceLooseFiles(ModOverlay& overlay) {
+    DiscIndex disc;
+    std::unordered_set<std::string> ambiguous;
+    int budget = 8192;
+    IndexDiscNames("/", 0, disc.byName, ambiguous, budget);
+
+    DVDDir root{};
+    if (DVDOpenDir("/", &root)) {
+        DVDDirEntry entry{};
+        while (DVDReadDir(&root, &entry)) {
+            if (entry.name != nullptr && !entry.isDir) {
+                disc.rootFiles.insert(AsciiLower("/" + std::string(entry.name)));
+            }
+        }
+        DVDCloseDir(&root);
+    }
+
+    PlaceLooseFiles(overlay, disc);
 }
 
 ModOverlay BuildOverlay(const std::filesystem::path& listPath) {
