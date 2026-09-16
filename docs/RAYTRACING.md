@@ -2328,3 +2328,69 @@ quelques centaines de groupes côté processeur, et rien de cela ne se voit.
   qui apparaît ou disparaît décale la liste et fait échouer la mesure pour cette
   frame. Les apparier par identité la rendrait disponible pendant les
   transitions.
+
+## Le poids de l'historique, vérifié contre une intuition fausse (16 septembre 2026)
+
+Le lot C4 laissait une piste : à cadrage identique, l'erreur semblait tomber de
+0,0386 à 0,0322 quand l'historique pèse plus longtemps. Un réglage par défaut à
+changer, gratuitement, aurait été une bonne affaire.
+
+Les deux chiffres venaient de lots lancés à des moments différents du survol.
+Mis dans le même outil, ils ne partagent aucun pixel : le masque commun — les
+pixels que la référence montre entre l'ombre et la lumière dans toutes les
+frames de tous les runs — est vide. La comparaison ne disait rien.
+
+### Refaite comme il faut
+
+Trois poids, entrelacés dans un même lot pour qu'ils subissent la même dérive du
+survol, deux runs chacun, et un seul masque pour les six. Tout le reste est au
+réglage livré, cadrage et reprojection compris.
+
+| poids | erreur moyenne | pixels calmes | ce qui bouge |
+|---|---|---|---|
+| 0,15 — livré | 0,0266 et 0,0271 | 0,0102 et 0,0094 | 0,0327 et 0,0338 |
+| 0,10 | 0,0284 et 0,0301 | 0,0122 et 0,0111 | 0,0345 et 0,0372 |
+| 0,05 | 0,0322 et 0,0319 | 0,0133 et 0,0140 | 0,0392 et 0,0387 |
+
+Les paires ne se chevauchent pas d'un réglage à l'autre : le pire run à 0,15
+reste meilleur que le meilleur à 0,10, et de même entre 0,10 et 0,05. C'est
+l'inverse de l'intuition — plus l'historique remonte loin, pire c'est, de 9 %
+puis de 20 % — et cela vaut aussi bien sur les pixels calmes que sur ce qui
+bouge.
+
+Le détecteur de retard ne départage pas : k = 0 et k = 1 sont à moins de
+0,0005 l'un de l'autre à tous les poids. Sur un survol qui bouge sans arrêt, le
+retard est inférieur à la frame partout.
+
+### Et là où la caméra tient en place
+
+Le survol bouge sans arrêt, et un historique long ne peut qu'y perdre. La même
+question sur un mini-jeu, m401Dll, quatre runs, masque commun à 67 % des pixels
+dont la moitié calmes :
+
+| poids | erreur moyenne | pixels calmes | ce qui bouge |
+|---|---|---|---|
+| 0,15 — livré | 0,00694 et 0,00632 | 0,00426 et 0,00379 | 0,0133 et 0,0123 |
+| 0,05 | 0,00763 et 0,00724 | 0,00473 et 0,00438 | 0,0145 et 0,0140 |
+
+Même sens : l'écart entre les moyennes des deux paires, 0,0008, soit 12 %,
+dépasse la dispersion interne de chacune — 0,0006 et 0,0004 — mais de peu. Le
+mini-jeu confirme donc le plateau sans le durcir. Il ajoute en revanche ceci : même
+sur les pixels calmes d'une caméra immobile, l'historique long ne gagne rien. La
+moyenne courante a convergé bien avant vingt frames, et ce qui est gagné ensuite
+sur le bruit est perdu sur la fraîcheur. Ici le retard se voit nettement : le
+minimum tombe sur k = 0, et l'erreur contre la référence d'une frame plus tôt est
+presque le double.
+
+Le premier des quatre runs est tombé sur m416Dll quand les autres ont eu
+m401Dll ; l'outil d'analyse l'a écarté de lui-même, et le run manquant a été
+relancé avec la scène imposée.
+
+### Ce que ça change
+
+Rien dans le code : le poids reste à 0,15. Ce qui change est la méthode. Une
+erreur contre référence ne se compare qu'à l'intérieur d'un lot entrelacé qui
+partage son masque ; deux chiffres venus de deux lots ne se comparent pas, même
+quand la scène porte le même nom. Le banc le dit maintenant de lui-même — il
+refuse un run dont la séquence n'a pas de pénombre, ce qui a écarté deux des six
+premiers runs de ce lot.
