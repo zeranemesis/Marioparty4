@@ -56,8 +56,14 @@ $extraArguments = @{
 # test_direct_connection exits 2 when a VPN owns the priority route: it refuses
 # to probe the router or open a port through someone's VPN, which is the correct
 # thing to do and must not be reported as a failing test.
+# A script exiting with its code here is saying "this environment cannot run
+# me", which is not failing and must not block a release. Each prints what it
+# is missing first, so the summary names the reason rather than a bare code.
 $notApplicableExit = @{
     'test_direct_connection' = 2
+    'test_generate_input'    = 2   # needs a human recording under work/netplay-recordings
+    'test_crash_pipeline'    = 2   # needs a configured build tree for nlohmann/json
+    'test_audio_wait'        = 2   # needs a MusyX regression source that is in no commit
 }
 
 # Most scripts compile and run their own standalone test with cl.exe and never

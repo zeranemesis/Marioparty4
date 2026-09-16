@@ -16,9 +16,16 @@ $sdkVersion = (Get-ChildItem "$sdkPath\Include" -Directory | Sort-Object Name -D
 
 # nlohmann/json comes from the CMake build tree; the modules are header-only
 # consumers of it, so a configured build directory is all this needs.
-$json = Join-Path $projectPath 'build/aexp/_deps/json-src/include'
-if (-not (Test-Path -LiteralPath $json)) {
-    throw "nlohmann/json headers not found at $json. Configure build/aexp first."
+# Any configured build tree carries them, and naming one meant this failed
+# wherever that particular directory did not exist - CI configures into
+# build/x-windows-ci-msvc, so it never ran there at all.
+$json = Get-ChildItem -Path (Join-Path $projectPath 'build') -Directory -ErrorAction SilentlyContinue |
+    ForEach-Object { Join-Path $_.FullName '_deps/json-src/include' } |
+    Where-Object { Test-Path -LiteralPath $_ } |
+    Select-Object -First 1
+if (-not $json) {
+    Write-Output 'No configured build directory carries nlohmann/json; configure one first.'
+    exit 2
 }
 
 $output = Join-Path $projectPath 'build/crash-pipeline-test'
