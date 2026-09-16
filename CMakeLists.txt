@@ -505,6 +505,18 @@ if (NOT APPLE)
     install(DIRECTORY ${CMAKE_SOURCE_DIR}/res DESTINATION ${CMAKE_INSTALL_PREFIX})
 endif ()
 
+# EnsureInitialPipelineCache() (src/port/portmain.cpp) looks for this beside the
+# executable and copies it into the config directory on first run. Without it every
+# player starts from an empty cache, and a pipeline that is still compiling does not
+# delay its draw -- it drops it (extern/aurora/lib/gx/pipeline.cpp), so a scene seen
+# for the first time is missing geometry for a few seconds.
+#
+# OPTIONAL because the file is a recording, not a build product: produce one with
+# tools/capture_pipeline_cache.ps1 after playing through the scenes worth seeding.
+# A tree without one still builds, and the port logs that none was found.
+install(FILES ${CMAKE_SOURCE_DIR}/initial_pipeline_cache.db
+        DESTINATION ${CMAKE_INSTALL_PREFIX} OPTIONAL)
+
 # TODO uncomment
 if (CMAKE_BUILD_TYPE STREQUAL Debug) #OR CMAKE_BUILD_TYPE STREQUAL RelWithDebInfo)
     set(DEBUG_FILES_LIST "")
