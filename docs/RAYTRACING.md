@@ -2542,3 +2542,66 @@ mesurable.
   demi-angle, la pénombre reste sous le pixel partout où l'occultant est proche.
   L'élargir donnerait des ombres franchement douces — et c'est là que la
   stratification paierait le plus. Cela regarde le rendu voulu, pas le banc.
+
+## Le budget de rayons, et une mesure qui aurait fait couper à tort (16 septembre 2026)
+
+Le lot C5 a montré une ombre sans pénombre sur un mini-jeu — douze rayons qui
+tombent toujours d'accord — pendant que l'occlusion porte tout le grain. La
+question suivait : les douze rayons d'ombre sont-ils au bon endroit ?
+
+### Ce que disait le grain
+
+La même frame tracée deux fois, image composée, filtre compris :
+
+| A/B | plateau : grain image / pénombre | mini-jeu |
+|---|---|---|
+| AO à 16 rayons au lieu de 8 | −0,27 % / −0,29 % | −0,25 % / −0,28 % |
+| AO à 4 au lieu de 8 | +0,58 % / +0,73 % | — |
+| ombre à 4 au lieu de 12 | +0,61 % / +0,75 % | 0,00 % / 0,00 % |
+
+Moins d'un pour cent partout. Lue telle quelle, cette table dit qu'on peut
+couper l'ombre des deux tiers sans rien perdre.
+
+### Ce que dit la référence
+
+Ce grain est ce qu'un flou 3×3 enlève — exactement ce que le filtre à trous
+enlève aussi. Une mesure qui ne voit que ça ne peut pas voir ce que le filtre
+laisse : les taches plus larges qu'un pixel, et le flou lui-même. L'erreur contre
+une référence convergée voit les deux, et ici la comparaison est équitable : la
+référence est tracée avec ses propres 32 échantillons d'occlusion et d'ombre,
+quel que soit le budget du run comparé.
+
+Plateau en jeu, trois budgets entrelacés, deux runs chacun, un masque commun :
+
+| budget (AO / ombre) | erreur moyenne | pixels calmes | ce qui bouge | trace, médiane |
+|---|---|---|---|---|
+| 8 / 12 — livré | **0,0283 et 0,0280** | 0,0134 et 0,0133 | 0,0343 et 0,0339 | 1,80 ms |
+| 8 / 4 | 0,0317 et 0,0311 | 0,0154 et 0,0164 | 0,0382 et 0,0370 | **1,23 ms** |
+| 16 / 4 | 0,0291 et 0,0291 | 0,0131 et 0,0143 | 0,0355 et 0,0350 | 1,84 ms |
+
+- **Couper l'ombre à quatre rayons** économise un tiers de la trace, et coûte
+  **12 % d'erreur**. Les paires ne se chevauchent pas : le pire run du budget
+  livré reste meilleur que le meilleur à quatre rayons. Le grain annonçait moins
+  d'un pour cent.
+- **Rendre ces huit rayons à l'occlusion** coûte autant que le budget livré et
+  fait 3 % moins bien, là encore sans chevauchement.
+
+Le budget livré est le meilleur des trois, et rien ne change dans le code.
+
+### Ce que ça change à la méthode
+
+Le grain d'un pixel ne juge pas un nombre de rayons. Il mesure le travail du
+filtre plus que celui des rayons, et il aurait fait couper ce qui sert. Toute
+comparaison de budget passe désormais par la référence, et le grain ne sert plus
+qu'à ce qu'il mesure vraiment : ce que le filtre aura à enlever.
+
+### Ce qui reste
+
+L'ombre binaire du mini-jeu reste vraie : là, quatre rayons donnent la même
+image que douze, au pixel près. Un nombre de rayons qui s'adapte au pixel —
+quelques rayons d'abord, les autres seulement s'ils ne sont pas d'accord —
+prendrait le tiers de trace là où l'ombre est franche et garderait les douze là
+où la pénombre existe. Il faudrait pour cela que les premiers rayons couvrent le
+disque à eux seuls : avec les strates actuelles, les quatre premiers occupent
+quatre anneaux consécutifs — un tiers d'un seul tenant de la surface du disque,
+décalé par pixel — et laissent le reste vide.
