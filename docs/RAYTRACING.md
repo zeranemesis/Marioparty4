@@ -2205,3 +2205,126 @@ ayant armé pendant une transition, et son erreur médiane valait zéro. Les pai
 A/B refusaient déjà ce cas ; les séquences ne le voyaient pas. L'outil de mesure
 signale maintenant une séquence sans aucune pénombre, et le script fait échouer le
 run — vérifié sur la séquence blanche et sur une bonne.
+
+## Reprojection : chercher l'historique là où le pixel était (16 septembre 2026)
+
+Lot C4, première moitié. La mesure contre référence a montré que le cadrage
+divisait l'erreur par deux dès que la caméra bouge. C'était le signe que
+l'historique était jeté presque partout : le test de normale et de distance
+compare le pixel courant au même pixel de la frame d'avant, et dès que la caméra
+tourne, ce n'est plus la même surface. Le vrai remède est de le chercher au bon
+endroit.
+
+### Le mouvement de caméra, mesuré depuis la géométrie
+
+La capture travaille en espace vue : un objet qui ne bouge pas ne change de
+transformation que si la caméra bouge. Pour chaque groupe présent dans les deux
+frames avec le même nombre de triangles, composer l'inverse de sa transformation
+courante avec celle de la frame précédente donne ce mouvement. Les objets qui ont
+bougé donnent une autre réponse : la médiane, composante par composante, tranche.
+Cela demande que les immobiles soient majoritaires ; là où ils ne le sont pas, le
+test de normale et de distance rejette ce que la reprojection a ramené, et on
+retombe sur le comportement d'avant.
+
+**Sur combien de frames ?** Le rapport le compte : 6 525 frames tracées sur
+6 745 pour un run complet, menus compris. Par tranches de 300 frames, c'est 98 à
+100 % tant que la liste de draws garde la même forme, et 40 % sur la tranche où
+la scène change — 1 221 draws avant, 399 après. Là, faute de correspondance, la
+passe temporelle relit le même pixel, c'est-à-dire fait ce qu'elle faisait avant
+ce lot ; jamais pire.
+
+Aucune matrice de caméra n'est demandée au jeu : rien n'est supposé de sa manière
+de bouger la vue.
+
+### Ce que fait la passe temporelle
+
+Pour chaque pixel : la position en espace vue, depuis le rayon et la distance
+d'impact ; la transformation vers l'espace vue précédent ; la projection avec les
+paramètres de projection de cette frame-là. L'historique, les moments et le guide
+sont lus à ce pixel. La normale est tournée avec la caméra avant d'être comparée,
+et la distance attendue est celle du point reprojeté, pas celle du pixel courant.
+
+`AURORA_RT_REPROJECT=0` rend la lecture au même pixel.
+
+### Ce que montre la vue de l'historique
+
+Sur le survol de w01Dll, dernière frame d'une séquence de quatre
+(`AURORA_RT_DEBUG_MODE=11`, vert accepté, rouge refusé par la normale, bleu par la
+distance) :
+
+| | accepté | refusé par la normale | par la distance |
+|---|---|---|---|
+| lecture au même pixel | 91,5 % | 8,0 % | 0,5 % |
+| lecture reprojetée | 97,9 % | 2,0 % | 0,1 % |
+
+L'image dit mieux que les chiffres : sans reprojection, **chaque silhouette du
+plateau est soulignée de rouge** — rails, anneau, structures, bords de tout ce qui
+se découpe. C'est exactement la signature d'un historique lu au mauvais pixel
+pendant que la caméra bouge. Avec la reprojection, ces liserés disparaissent
+presque tous. Elle vise donc juste.
+
+### Ce que dit l'erreur contre la référence
+
+Toutes les mesures sur le survol de w01Dll, douze frames, référence à 32
+échantillons.
+
+**Avec le cadrage, celui qui est livré :** 0,0386 avec la reprojection, 0,0387 et
+0,0393 sans. Le grain et l'écart type temporel ne bougent pas davantage. Le
+cadrage ramène l'historique dans la boîte du voisinage à chaque frame ; son
+origine ne change alors plus grand-chose.
+
+**Sans le cadrage,** là où l'historique est cru sur parole :
+
+| | erreur moyenne | pixels calmes | ce qui bouge |
+|---|---|---|---|
+| lecture reprojetée | 0,0694 et 0,0607 | 0,0226 et 0,0185 | 0,0837 et 0,0736 |
+| lecture au même pixel | 0,0741 et 0,0706 | 0,0281 et 0,0368 | 0,0881 et 0,0809 |
+
+La reprojection gagne alors environ 10 % sur l'image entière et un tiers sur les
+pixels calmes, dans le même sens pour les deux paires.
+
+**Et le retard se mesure.** En comparant chaque frame affichée à la référence de
+la frame t−k :
+
+- avec le cadrage, le minimum tombe sur k = 0 dans tous les runs : rien ne traîne ;
+- sans lui, il passe à k = 1 ou 2. L'image ressemble davantage à ce que la scène
+  était une ou deux frames plus tôt. C'est la traînée, mesurée.
+
+Le cadrage fait donc aujourd'hui le travail que la reprojection devait rendre
+inutile, et il le fait bien. La reprojection ne le remplace pas : elle améliore
+l'historique là où il est cru.
+
+**Là où l'historique pèse davantage**, poids 0,05 au lieu de 0,15, soit une
+vingtaine de frames de passé au lieu de sept : 0,0322 et 0,0328 avec la
+reprojection, 0,0336 et 0,0335 sans. Trois pour cent, dans le même sens pour les
+deux paires et au-delà de l'écart interne à chaque paire. Petit, mais réel.
+
+### Ce qu'elle coûte
+
+Deux runs sur le plateau, `-FrameStats -Uncapped`, comparés rapport par rapport.
+Le temps GPU mesuré couvre le tracé, la passe temporelle et le filtre.
+
+| | premiers rapports | rapports suivants |
+|---|---|---|
+| lecture reprojetée | 0,71 / 0,71 / 0,70 ms | 1,95 / 1,98 / 1,75 ms |
+| lecture au même pixel | 0,73 / 0,74 / 0,72 ms | 1,95 / 1,98 / 2,07 / 1,75 ms |
+
+L'écart va dans le sens qui ne peut pas être vrai — le run qui fait le travail en
+plus est le plus rapide — et il vaut deux à trois centièmes de milliseconde : il
+est sous le bruit de la mesure. La période de frame dit la même chose, 7,05 ms de
+moyenne médiane contre 7,69 ms. Les deux runs ne tombent pas sur les mêmes
+frames, donc la comparaison est grossière ; mais le calcul ajouté est d'une
+trentaine d'opérations par pixel sur une seule passe, plus une médiane sur
+quelques centaines de groupes côté processeur, et rien de cela ne se voit.
+
+### Ce qui reste
+
+- **Les objets qui bougent** gardent un historique rejeté : il faudrait un
+  identifiant d'instance par pixel pour suivre chacun. C'est la seconde moitié
+  de C4.
+- La lecture reprojetée prend le pixel le plus proche, sans interpolation.
+- La médiane suppose une majorité de géométrie immobile dans la frame.
+- Les groupes sont appariés par leur rang et leur nombre de triangles : un draw
+  qui apparaît ou disparaît décale la liste et fait échouer la mesure pour cette
+  frame. Les apparier par identité la rendrait disponible pendant les
+  transitions.

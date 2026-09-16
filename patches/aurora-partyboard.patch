@@ -2126,10 +2126,10 @@ index 0000000..20409f5
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_capture.cpp b/lib/rt/rt_capture.cpp
 new file mode 100644
-index 0000000..e8a43cd
+index 0000000..7f0ac38
 --- /dev/null
 +++ b/lib/rt/rt_capture.cpp
-@@ -0,0 +1,2436 @@
+@@ -0,0 +1,2520 @@
 +#include "rt_capture.hpp"
 +
 +#include "rt_accel.hpp"
@@ -2147,6 +2147,8 @@ index 0000000..e8a43cd
 +#endif
 +#include "../logging.hpp"
 +
++#include <algorithm>
++#include <array>
 +#include <cmath>
 +#include <cstdio>
 +#include <cstdlib>
@@ -2234,6 +2236,20 @@ index 0000000..e8a43cd
 +// Samples for the converged reference traced beside each sequence frame, 0 for
 +// none. AURORA_RT_SEQUENCE_REF sets it.
 +uint32_t g_sequenceReference = 0;
++// The previous frame's groups, its projection, and the transform from this
++// frame's view space to that one: what the temporal pass needs to look a pixel
++// up where it was rather than where it is.
++std::vector<accel::DrawGroup> g_prevGroups;
++float g_prevProjParams[4] = {0.f, 0.f, 0.f, 0.f};
++bool g_havePrevProj = false;
++float g_viewDelta[12] = {1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f};
++bool g_haveViewDelta = false;
++// Frames where that motion could be measured, against those where the trace ran
++// at all: a frame whose draw list changed shape has nothing to match against.
++// Cumulative since start, like the other frame counters of that report -- per
++// frame they would only ever read one of one.
++uint32_t g_framesWithDelta = 0;
++uint32_t g_framesTraced = 0;
 +uint32_t g_sequenceWritten = 0;
 +uint32_t g_sequenceStart = 0;
 +// Alpha testing of see-through candidates in the trace. On by default;
@@ -2823,6 +2839,18 @@ index 0000000..e8a43cd
 +                    m[1] * (m[4] * m[10] - m[6] * m[8]) +
 +                    m[2] * (m[4] * m[9] - m[5] * m[8]);
 +  return det > 1e-9f || det < -1e-9f;
++}
++
++// out = a applied after b, both row-major 3x4 affines.
++void compose_affine(const float a[12], const float b[12], float out[12]) noexcept {
++  for (uint32_t row = 0; row < 3; ++row) {
++    for (uint32_t col = 0; col < 3; ++col) {
++      out[row * 4 + col] = a[row * 4 + 0] * b[0 * 4 + col] + a[row * 4 + 1] * b[1 * 4 + col] +
++                           a[row * 4 + 2] * b[2 * 4 + col];
++    }
++    out[row * 4 + 3] = a[row * 4 + 0] * b[3] + a[row * 4 + 1] * b[7] +
++                       a[row * 4 + 2] * b[11] + a[row * 4 + 3];
++  }
 +}
 +
 +Vec3 apply_affine(const float m[12], const Vec3& p) noexcept {
@@ -4272,6 +4300,54 @@ index 0000000..e8a43cd
 +    }
 +  }
 +
++  // How the camera moved since the last frame, measured from the geometry
++  // itself. Everything is captured in view space, so a group that did not move
++  // differs from its last frame only by the camera: this frame's transform
++  // inverted, composed with the previous frame's, is that motion. Groups that
++  // did move give a different answer, so the median over the groups decides --
++  // it asks that the still ones be the majority, and where they are not, the
++  // guide test in the temporal pass rejects what the reprojection brought back.
++  g_haveViewDelta = false;
++  if (g_prevGroups.size() == g_groups.size() && !g_groups.empty()) {
++    std::vector<std::array<float, 12>> candidates;
++    candidates.reserve(g_groups.size());
++    for (size_t i = 0; i < g_groups.size(); ++i) {
++      if (g_groups[i].triangleCount != g_prevGroups[i].triangleCount) {
++        continue;
++      }
++      float inverse[12];
++      if (!invert_affine(g_groups[i].transform, inverse)) {
++        continue;
++      }
++      std::array<float, 12> delta{};
++      compose_affine(g_prevGroups[i].transform, inverse, delta.data());
++      bool finite = true;
++      for (const float value : delta) {
++        finite = finite && std::isfinite(value);
++      }
++      if (finite) {
++        candidates.push_back(delta);
++      }
++    }
++    if (candidates.size() >= 4) {
++      for (uint32_t component = 0; component < 12; ++component) {
++        std::vector<float> column;
++        column.reserve(candidates.size());
++        for (const auto& candidate : candidates) {
++          column.push_back(candidate[component]);
++        }
++        const size_t middle = column.size() / 2;
++        std::nth_element(column.begin(), column.begin() + middle, column.end());
++        g_viewDelta[component] = column[middle];
++      }
++      g_haveViewDelta = true;
++    }
++  }
++  ++g_framesTraced;
++  if (g_haveViewDelta) {
++    ++g_framesWithDelta;
++  }
++
 +  // Did the camera move while the geometry stayed put? That is the case the
 +  // reference-space baking exists for, and the only honest way to know whether
 +  // it earns its complexity on a given scene.
@@ -4285,6 +4361,9 @@ index 0000000..e8a43cd
 +  }
 +  g_prevViewHash = g_viewHash;
 +  g_prevContentHash = g_contentHash;
++  g_prevGroups = g_groups;
++  std::memcpy(g_prevProjParams, g_projParams, sizeof(g_prevProjParams));
++  g_havePrevProj = g_haveProj;
 +
 +  // How much of the scene is actually in motion. Draws are keyed by their
 +  // position in the frame, which holds while the game issues them in a stable
@@ -4336,6 +4415,9 @@ index 0000000..e8a43cd
 +  params.shadowSamples = g_shadowSamples;
 +  params.features = g_features | (g_alphaTest ? trace::FeatureAlphaTest : 0u) |
 +                    (g_skipAdditive ? trace::FeatureSkipAdditive : 0u);
++  std::memcpy(params.viewDelta, g_viewDelta, sizeof(params.viewDelta));
++  std::memcpy(params.prevProj, g_prevProjParams, sizeof(params.prevProj));
++  params.haveViewDelta = g_haveViewDelta && g_havePrevProj;
 +  params.reflectionRange = shadowRange; // the scene's own size bounds both
 +  params.debugMode = g_debugMode;
 +  if (g_maskEnabled) {
@@ -4532,6 +4614,8 @@ index 0000000..e8a43cd
 +             seen > 0 ? 100.0 * static_cast<double>(g_staticTriangles) / static_cast<double>(seen)
 +                      : 0.0,
 +             g_staticTriangles, seen);
++    Log.info("Camera motion measured from the geometry on {} of {} traced frames",
++             g_framesWithDelta, g_framesTraced);
 +    Log.info("Of {} captured draws: {} cut-out, occluding by their solid fraction; {} "
 +             "uniformly translucent, still traced as opaque; {} environment mapped; {} "
 +             "baked for want of a usable matrix; {} additive, {}",
@@ -5307,10 +5391,10 @@ index 0000000..b805129
 +} // namespace aurora::rt::textures
 diff --git a/lib/rt/rt_trace.cpp b/lib/rt/rt_trace.cpp
 new file mode 100644
-index 0000000..e07d650
+index 0000000..0661f23
 --- /dev/null
 +++ b/lib/rt/rt_trace.cpp
-@@ -0,0 +1,1224 @@
+@@ -0,0 +1,1239 @@
 +#include "rt_trace.hpp"
 +
 +#include "rt_accel.hpp"
@@ -5397,6 +5481,10 @@ index 0000000..e07d650
 +// Width of the history clamp, in standard deviations of this frame's 3x3
 +// neighbourhood; 0 turns it off. AURORA_RT_CLAMP_SIGMA overrides.
 +float g_clampSigma = 2.0f;
++// Whether the temporal pass looks the history up where the pixel was, using the
++// camera motion the capture measures, rather than at the same pixel.
++// AURORA_RT_REPROJECT=0 goes back to the same pixel.
++bool g_reproject = true;
 +// Whether the filter weighs signal agreement by the variance the temporal pass
 +// carries, or by its own 3x3 spread as before. AURORA_RT_VARIANCE=0 falls back.
 +bool g_varianceGuided = true;
@@ -5477,10 +5565,13 @@ index 0000000..e07d650
 +  float alpha;
 +  float clampSigma;
 +  uint32_t debugMode;
-+  float pad0;
-+  float pad1[2];
++  uint32_t reproject;
++  float pad0[2];
++  float proj[4];
++  float prevProj[4];
++  float viewDelta[12];
 +};
-+static_assert(sizeof(TemporalConstants) == 32, "temporal constants must stay 8 DWORDs");
++static_assert(sizeof(TemporalConstants) == 112, "temporal constants must stay 28 DWORDs");
 +
 +ID3D12Device5* device() noexcept { return static_cast<ID3D12Device5*>(native_device()); }
 +
@@ -5511,6 +5602,10 @@ index 0000000..e07d650
 +  if (const char* env = std::getenv("AURORA_RT_CLAMP_SIGMA")) {
 +    g_clampSigma = static_cast<float>(std::atof(env));
 +    Log.info("Temporal history clamp {:.2f} sigma{}", g_clampSigma, g_clampSigma > 0.f ? "" : " (off)");
++  }
++  if (const char* env = std::getenv("AURORA_RT_REPROJECT")) {
++    g_reproject = env[0] != '0';
++    Log.info("History looked up {}", g_reproject ? "where the pixel was" : "at the same pixel");
 +  }
 +  if (const char* env = std::getenv("AURORA_RT_VARIANCE")) {
 +    g_varianceGuided = env[0] != '0';
@@ -6281,6 +6376,10 @@ index 0000000..e07d650
 +    tc.alpha = constants.temporalAlpha;
 +    tc.clampSigma = g_clampSigma;
 +    tc.debugMode = params.debugMode;
++    tc.reproject = (g_reproject && params.haveViewDelta && !params.singleFrame) ? 1u : 0u;
++    std::memcpy(tc.proj, params.proj, sizeof(tc.proj));
++    std::memcpy(tc.prevProj, params.prevProj, sizeof(tc.prevProj));
++    std::memcpy(tc.viewDelta, params.viewDelta, sizeof(tc.viewDelta));
 +
 +    const uint32_t temporalStride =
 +        device()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -6537,10 +6636,10 @@ index 0000000..e07d650
 +} // namespace aurora::rt::trace
 diff --git a/lib/rt/rt_trace.hpp b/lib/rt/rt_trace.hpp
 new file mode 100644
-index 0000000..8915252
+index 0000000..871c0df
 --- /dev/null
 +++ b/lib/rt/rt_trace.hpp
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,135 @@
 +#pragma once
 +
 +#include <cstdint>
@@ -6625,6 +6724,12 @@ index 0000000..8915252
 +  // This frame's estimate alone: no temporal accumulation, and the sampling
 +  // pattern held still, so two traces of one frame sample identically.
 +  bool singleFrame = false;
++  // From this frame's view space to the previous frame's, row major 3x4, with
++  // that frame's projection parameters: where a pixel was, for the temporal
++  // pass to find its history there. False leaves the history at the same pixel.
++  float viewDelta[12] = {1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f};
++  float prevProj[4] = {0.f, 0.f, 0.f, 0.f};
++  bool haveViewDelta = false;
 +  // Per-trace denoiser overrides; negative keeps the global setting.
 +  float luminancePhi = -1.f;
 +  int32_t denoisePasses = -1;
@@ -7621,10 +7726,10 @@ index 0000000..fad188a
 +}
 diff --git a/lib/rt/shaders/rt_temporal.hlsl b/lib/rt/shaders/rt_temporal.hlsl
 new file mode 100644
-index 0000000..7860570
+index 0000000..1cb65be
 --- /dev/null
 +++ b/lib/rt/shaders/rt_temporal.hlsl
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,204 @@
 +// Temporal accumulation for the ray traced terms, between the trace -- which
 +// writes this frame's raw estimate -- and the a-trous filter.
 +//
@@ -7664,9 +7769,61 @@ index 0000000..7860570
 +  // turns it off.
 +  float gClampSigma;
 +  uint gDebugMode;
-+  float gPad0;
-+  float2 gPad1;
++  // Whether to look the history up where this pixel was in the previous frame.
++  uint gReproject;
++  float2 gPad0;
++  // Projection parameters of this frame and of the previous one, as rt_ao.hlsl
++  // uses them to build a view ray.
++  float4 gProj;
++  float4 gProjPrev;
++  // This frame's view space to the previous frame's, row major 3x4: the
++  // camera's own motion, measured by the capture from the draws that held
++  // still.
++  float4 gDeltaRow0;
++  float4 gDeltaRow1;
++  float4 gDeltaRow2;
 +};
++
++// Where this pixel was in the previous frame. Everything is traced in view
++// space, so a surface that did not move is displaced by the camera alone, and
++// that displacement is one affine transform. False when the pixel had no
++// previous position on screen -- behind the camera, or outside the frame -- and
++// then the history is read where it is, as it was before.
++bool reproject(uint2 pixel, float distance, out int2 source, out float previousDistance) {
++  source = int2(pixel);
++  previousDistance = distance;
++  if (gReproject == 0u || abs(gProj.x) < 1e-8f || abs(gProj.z) < 1e-8f ||
++      abs(gProjPrev.x) < 1e-8f || abs(gProjPrev.z) < 1e-8f || distance <= 0.0f) {
++    return false;
++  }
++  const float2 uv = (float2(pixel) + 0.5f) / float2(gDims);
++  const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
++  const float3 direction =
++      normalize(float3((ndc.x + gProj.y) / gProj.x, (ndc.y + gProj.w) / gProj.z, -1.0f));
++  const float3 here = direction * distance;
++  const float3 there = float3(dot(gDeltaRow0.xyz, here) + gDeltaRow0.w,
++                              dot(gDeltaRow1.xyz, here) + gDeltaRow1.w,
++                              dot(gDeltaRow2.xyz, here) + gDeltaRow2.w);
++  if (there.z > -1e-4f) {
++    return false;
++  }
++  const float2 ndcPrevious = float2((there.x / -there.z) * gProjPrev.x - gProjPrev.y,
++                                    (there.y / -there.z) * gProjPrev.z - gProjPrev.w);
++  const float2 uvPrevious = float2(ndcPrevious.x * 0.5f + 0.5f, 0.5f - ndcPrevious.y * 0.5f);
++  const int2 pixelPrevious = int2(floor(uvPrevious * float2(gDims)));
++  if (any(pixelPrevious < int2(0, 0)) || any(pixelPrevious >= int2(gDims))) {
++    return false;
++  }
++  source = pixelPrevious;
++  previousDistance = length(there);
++  return true;
++}
++
++// A normal turns with the camera as well.
++float3 turn_with_camera(float3 normal) {
++  return float3(dot(gDeltaRow0.xyz, normal), dot(gDeltaRow1.xyz, normal),
++                dot(gDeltaRow2.xyz, normal));
++}
 +
 +#define DEBUG_OFF 0u
 +#define DEBUG_SHADOW 1u
@@ -7728,21 +7885,26 @@ index 0000000..7860570
 +  // Same surface at the same pixel: the normal and the hit distance both have
 +  // to agree. Distance alone lets a silhouette slide over a background at the
 +  // same depth; normal alone lets a wall inherit the floor it meets.
-+  const float4 previousGuide = gGuidePrev[tid.xy];
++  int2 source;
++  float previousDistance;
++  const bool reprojected = reproject(tid.xy, guide.w, source, previousDistance);
++  const float3 previousNormal = reprojected ? turn_with_camera(guide.xyz) : guide.xyz;
++  const float4 previousGuide = gGuidePrev[source];
 +  const bool haveHistory = previousGuide.w > 0.0f;
-+  const bool normalAgrees = dot(guide.xyz, previousGuide.xyz) > 0.9f;
-+  const bool distanceAgrees = abs(guide.w - previousGuide.w) <= 0.02f * guide.w;
++  const bool normalAgrees = dot(previousNormal, previousGuide.xyz) > 0.9f;
++  const bool distanceAgrees =
++      abs(previousDistance - previousGuide.w) <= 0.02f * previousDistance;
 +  const bool guideAccepts = haveHistory && normalAgrees && distanceAgrees;
 +  const bool accepted = gAlpha < 1.0f && guideAccepts;
 +
-+  const float4 previousMoments = gMomentsIn[tid.xy];
++  const float4 previousMoments = gMomentsIn[source];
 +  const float historyLength = accepted ? min(previousMoments.b + 1.0f, 255.0f) : 1.0f;
 +  // A true running average until the history is as long as the fixed weight
 +  // implies, then the exponential blend. A fresh pixel settles in a few frames
 +  // instead of carrying its first noisy estimate for twenty.
 +  const float alpha = accepted ? max(gAlpha, 1.0f / historyLength) : 1.0f;
 +
-+  float3 history = gHistoryIn[tid.xy].rgb;
++  float3 history = gHistoryIn[source].rgb;
 +  if (accepted && gClampSigma > 0.0f) {
 +    history = clamp(history, mean - gClampSigma * sigma, mean + gClampSigma * sigma);
 +  }
