@@ -18,6 +18,10 @@ param(
     [string]$BoardIndices = '0',
     # Same idea for mini-games: how far down the list each run goes.
     [string]$MinigameIndices = '0',
+    # And which category of the list each run takes first, walked in step with
+    # the indices -- run n uses the n-th entry of both. The list stops at the
+    # bottom of a category, so the indices alone never leave the first one.
+    [string]$MinigameCategories = '0',
     [string]$OutputDirectory = 'work/raytracing-sweep'
 )
 $ErrorActionPreference = 'Continue'
@@ -31,10 +35,12 @@ foreach ($run in 1..$Runs) {
     $boardIndex = $indices[($run - 1) % $indices.Count]
     $mgIndices = @($MinigameIndices -split ',' | ForEach-Object { [int]$_.Trim() })
     $mgIndex = $mgIndices[($run - 1) % $mgIndices.Count]
+    $mgCategories = @($MinigameCategories -split ',' | ForEach-Object { [int]$_.Trim() })
+    $mgCategory = $mgCategories[($run - 1) % $mgCategories.Count]
     $dir = Join-Path $root "$Target-$RayTracing-$run"
-    Write-Host "=== run $run / $Runs (plateau +$boardIndex, mini-jeu +$mgIndex) ==="
+    Write-Host "=== run $run / $Runs (plateau +$boardIndex, mini-jeu categorie $mgCategory +$mgIndex) ==="
     $out = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test_raytracing.ps1') `
-        -Target $Target -RayTracing $RayTracing -OutputDirectory $dir -Attempts 2 -BoardIndex $boardIndex -MinigameIndex $mgIndex 2>&1
+        -Target $Target -RayTracing $RayTracing -OutputDirectory $dir -Attempts 2 -BoardIndex $boardIndex -MinigameIndex $mgIndex -MinigameCategory $mgCategory 2>&1
     $text = $out -join "`n"
     $scene = if ($text -match 'reached (\S+) on attempt') { $Matches[1] } else { 'none' }
     # Echo what the child said about walking the carousel: without this the run
@@ -45,7 +51,7 @@ foreach ($run in 1..$Runs) {
         $out | Select-Object -Last 4 | ForEach-Object { Write-Host "    $_" }
         continue
     }
-    $row = [ordered]@{ scene = $scene }
+    $row = [ordered]@{ scene = $scene; category = $mgCategory; index = $mgIndex }
     if ($text -match '(\d+) triangles, BLAS (\d+) KB, build (?:reused, )?([0-9.]+) ms, (\d+x\d+) ([0-9.]+) ms GPU') {
         $row.triangles = [int]$Matches[1]; $row.buildMs = [double]$Matches[3]
         $row.res = $Matches[4]; $row.traceMs = [double]$Matches[5]
@@ -77,6 +83,6 @@ foreach ($run in 1..$Runs) {
 
 Write-Host ''
 Write-Host '===== recapitulatif ====='
-$rows | Format-Table -AutoSize scene, triangles, traceMs, buildMs, badBounds, rejectedTris, compositeMax, projections, cutoutPct, envMapPct, shadowRange, errors
+$rows | Format-Table -AutoSize scene, category, index, triangles, traceMs, buildMs, badBounds, rejectedTris, compositeMax, projections, cutoutPct, envMapPct, shadowRange, errors
 $rows | ConvertTo-Json -Depth 3 | Set-Content (Join-Path $root "summary-$Target-$RayTracing.json") -Encoding utf8
 Write-Host "scenes distinctes : $(($rows.scene | Sort-Object -Unique) -join ', ')"

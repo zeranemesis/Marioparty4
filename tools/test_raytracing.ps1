@@ -41,6 +41,12 @@ param(
     # How far down the mini-game list to go before confirming. The list is
     # vertical, unlike the board carousel.
     [int]$MinigameIndex = 0,
+    # Which category of that list to take first, counted to the right of the
+    # first one. The cursor stops at the bottom of a category without wrapping
+    # into the next, so without this only the first category can be reached;
+    # left and right switch it, wrapping around, and put the cursor back at the
+    # top (free_play.c in mgmodedll).
+    [int]$MinigameCategory = 0,
     # Steps of actual play once the scene is up. Loading a board is not playing
     # one: the intro fly-through carries no interface, so the 2D mask is never
     # exercised until a turn starts and the HUD appears.
@@ -272,18 +278,27 @@ function Invoke-Run {
     if ($process.HasExited) { return @{ Reached = $false; Reason = 'exited during boot' } }
 
     $window = $process.MainWindowHandle
-    $index = 0; $moved = 0; $boards = 0; $games = 0; $previous = ''; $reached = $false; $found = ''
+    $index = 0; $moved = 0; $boards = 0; $games = 0; $categories = 0; $previous = ''; $reached = $false; $found = ''
     $script:onCarousel = $false
     $script:onMinigameList = $false
+    # Once the list has been recognised in an overlay, it stays recognised until
+    # the overlay changes. The test reads the preview panel's colour, and some
+    # previews are grey -- Mario Speedwagons is a road under a pale sky -- so a
+    # frame of the list could stop matching, and the step fell through to the
+    # generic cycle, whose push right changed the category.
+    $onList = $false
+    $listSteps = 0
     foreach ($step in 1..$MaxSteps) {
         $overlay = Get-CurrentOverlay
         if ($overlay -ne $previous) {
-            $previous = $overlay; $index = 0
+            $previous = $overlay; $index = 0; $onList = $false; $listSteps = 0
             # A freshly linked overlay is not ready for input; a press sent into
             # that gap is lost, and losing one shifts everything after it.
             Start-Sleep -Seconds 3
         }
         $banner = Save-Frame $window ('step{0:d3}_{1}' -f $step, ($overlay -replace '\.dll', ''))
+        if ($script:onMinigameList) { $onList = $true }
+        if ($onList) { $listSteps++ }
         if ($overlay -match '^w\d' -or $overlay -match '^m\d') {
             # Only the kind of scene asked for counts. The menus take a wrong
             # turn now and then, and a mini-game run that landed on w01Dll was
@@ -303,7 +318,26 @@ function Invoke-Run {
             if ($banner -ge 50 -and $moved -lt $cardsRight) { $moved++; Send-Pad 0 100 0 }
             else { Send-Pad $A }
         }
-        elseif ($script:onMinigameList -and $games -lt $MinigameIndex) {
+        elseif ($onList -and $listSteps -lt 2) {
+            # Nothing on the first frame the list is recognised: it may still be
+            # sliding in, and reads no input while it does. Moves sent then were
+            # lost, the run believed them made, and it confirmed the first game
+            # of the first category -- which is how a BATTLE run measured
+            # m401Dll.
+        }
+        elseif ($onList -and $categories -lt $MinigameCategory) {
+            # Before any move down the list: a change of category puts the
+            # cursor back at the top. Right on the stick and the d-pad together,
+            # one frame each, as for the moves down; the R trigger would do the
+            # same, but the game reads it from the analog value, which the
+            # automation channel does not carry. Each change slides the list in
+            # over twenty frames, so the presses are spaced to land after it.
+            $want = $MinigameCategory - $categories
+            Write-Host "  mini-jeu : $want categories vers la droite"
+            foreach ($i in 1..$want) { Send-Pad 0x0002 100 0 1; Start-Sleep -Milliseconds 900 }
+            $categories = $MinigameCategory
+        }
+        elseif ($onList -and $games -lt $MinigameIndex) {
             $want = $MinigameIndex - $games
             Write-Host "  mini-jeu : $want crans vers le bas"
             # Stick and d-pad together, one frame each. The menus in this
@@ -325,7 +359,19 @@ function Invoke-Run {
             foreach ($i in 1..$want) { Send-Pad 0 100 0; Start-Sleep -Milliseconds 250 }
             $boards = $BoardIndex
         }
-        else { $e = $setup[$index % $setup.Count]; Send-PadAllPorts $e[0] $e[1] $e[2]; $index++ }
+        else {
+            # On the mini-game list, once its moves are made, the same cycle
+            # without its stick deflections: a push right changed the category
+            # and put the cursor on the first 1vs3 game, a push up or down moved
+            # it one entry, which is how runs meant for the 4P list kept landing
+            # on m416Dll. Only the sticks go -- pressing A alone on the list, on
+            # one port or on four, left three runs out of four on the rules screen
+            # without ever taking START, where this cycle's rhythm had passed
+            # every time.
+            $e = $setup[$index % $setup.Count]
+            if ($onList) { Send-PadAllPorts $e[0] 0 0 } else { Send-PadAllPorts $e[0] $e[1] $e[2] }
+            $index++
+        }
 
         Start-Sleep -Milliseconds 1500
         if ($process.HasExited) { return @{ Reached = $false; Reason = "process died at step $step after $overlay" } }

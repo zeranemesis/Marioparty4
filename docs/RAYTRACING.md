@@ -2605,3 +2605,122 @@ où la pénombre existe. Il faudrait pour cela que les premiers rayons couvrent 
 disque à eux seuls : avec les strates actuelles, les quatre premiers occupent
 quatre anneaux consécutifs — un tiers d'un seul tenant de la surface du disque,
 décalé par pixel — et laissent le reste vide.
+
+## Le balayage atteint enfin les autres catégories : 48 mini-jeux (16 septembre 2026)
+
+Le balayage du 15 septembre s'était arrêté à 17 mini-jeux distincts : le curseur
+de la liste bute en bas de la première catégorie sans passer à la suivante, et
+le script ne savait pas en changer.
+
+### Ce que fait la liste
+
+`src/REL/mgmodedll/free_play.c` le dit directement : haut et bas déplacent le
+curseur dans la catégorie courante ; **gauche et droite, ou les gâchettes L et R,
+changent de catégorie**, en rebouclant, et remettent le curseur en haut de la
+liste. Le script envoie donc d'abord les pas vers la droite, puis les pas vers le
+bas.
+
+Deux détails ont compté :
+
+- la gâchette R ferait l'affaire, mais le jeu la déduit de la valeur analogique
+  (`triggerRight & 0xC0` dans `pad.c`), que le canal d'automatisation ne
+  transmet pas. La droite du stick et de la croix, une frame chacune, comme pour
+  les pas vers le bas, suffit ;
+- chaque changement fait glisser la liste pendant vingt frames, donc les pressions
+  sont espacées de 900 ms pour tomber après.
+
+### Ce que contient la liste avec cette sauvegarde
+
+Un run par catégorie, premier mini-jeu de chacune, vérifié sur les captures :
+
+| catégorie | entrées | premier mini-jeu |
+|---|---|---|
+| 0 — 4P | 16 | m401Dll, Manta Rings |
+| 1 — 1vs3 | 9 | m416Dll, Candlelight Flight |
+| 2 — 2vs2 | 9 | m425Dll |
+| 3 — BATTLE | 6 | m404Dll, Trace Race |
+| 4 — BOWSER | 3 | m435Dll, Darts of Doom |
+| 5 — STORY | 5 | m445Dll, Bowser Bop |
+
+Six pas vers la droite ramènent à 4P : l'onglet « etc. » est affiché mais n'entre
+pas dans le cycle. **48 mini-jeux atteignables**, pas 61 — le reste n'est pas
+proposé par ce menu avec cette sauvegarde.
+
+Deux fautes d'outillage en route, rattrapées avant de coûter : une liste
+`2,3,4,5,6` passée à un paramètre `[int[]]` à travers `powershell -File` est
+arrivée comme l'entier 23456 — le piège que `sweep_raytracing.ps1` documentait
+déjà, et dans lequel je suis retombé ; le run a été arrêté avant son premier pas.
+Et une chaîne `"category $c: …"` que PowerShell lit comme une portée de variable.
+
+### Trois fautes de navigation, trouvées par le balayage lui-même
+
+Le premier passage a mesuré trois fois m416Dll depuis la liste 4P, puis laissé
+trois runs sur quatre sur l'écran de règles d'un mini-jeu. Chaque fois, les
+captures ont dit ce qui se passait.
+
+1. **Le cycle générique poussait le stick sur la liste.** Une fois ses pas faits,
+   le script retombait sur son cycle d'entrées par défaut, qui contient une
+   poussée à droite, une vers le haut et une vers le bas. À droite, la catégorie
+   changeait et le curseur revenait sur le premier jeu de 1vs3 — m416Dll. La
+   reconnaissance de la liste lit en plus la couleur de l'aperçu, et celui de
+   Mario Speedwagons, une route grise, ne passait pas : le script croyait avoir
+   quitté la liste. Correction : une liste reconnue le reste jusqu'au changement
+   d'overlay, et sur la liste le cycle garde ses boutons mais perd ses poussées.
+2. **Presser A seul sur la liste laissait l'écran de règles sourd à START.** Mon
+   premier correctif n'envoyait que A — sur un port, puis sur quatre — et trois
+   runs sont restés bloqués sur l'écran de règles, qui n'attend que START
+   (`btnDown == PAD_BUTTON_START` dans `instDll/main.c`). Revenir au rythme du
+   cycle, poussées exceptées, a réglé le cas : un seul pas sur l'écran de règles,
+   comme avant. **La cause exacte n'est pas établie** ; ce qui est établi, c'est
+   que le cycle passe et que A seul ne passait pas.
+3. **Les pas envoyés pendant que la liste glisse sont perdus.** Un run BATTLE a
+   mesuré m401Dll : ses captures montrent la liste 4P immobile, curseur en haut,
+   jusqu'à la confirmation. Les pas étaient partis au premier pas où la liste
+   était reconnue, pendant son entrée. Correction : rien n'est envoyé avant la
+   deuxième reconnaissance.
+
+Vérifié après coup sur les trois cas qui avaient failli : BATTLE +5 atteint
+m455Dll, 1vs3 +1 atteint m417Dll et en sort, 4P +14 atteint m443Dll.
+
+### Ce que les 48 mini-jeux disent du ray tracing
+
+Les runs qui ont dérapé sont écartés ; chaque mini-jeu est mesuré depuis sa
+place dans la liste.
+
+| | |
+|---|---|
+| mini-jeux atteints et mesurés | **48 sur 48** |
+| rapports de bornes non finies ou absurdes | **0** |
+| composition par tranche de 300 frames | 300 partout, **sauf m423Dll : 212** |
+| coût de la passe de tracé | 0,77 à 4,99 ms, médiane 1,54 ms |
+
+Par catégorie, trace en millisecondes :
+
+- **4P** — m401 1,21 · m402 1,48 · m403 1,65 · m405 0,98 · m406 1,45 · m407 1,30 ·
+  m408 1,80 · m409 1,00 · m410 1,27 · m411 0,83 · m412 1,96 · m413 1,59 ·
+  m414 2,38 · m415 1,01 · m443 3,45 · m456 1,06
+- **1vs3** — m416 0,77 · m417 1,55 · m418 1,88 · m419 1,00 · m420 1,86 ·
+  m421 1,90 · m422 2,77 · m423 1,97 · m424 1,43
+- **2vs2** — m425 1,07 · m426 1,27 · m427 2,20 · m428 1,90 · m429 4,99 ·
+  m430 1,59 · m431 1,69 · m432 1,88 · m434 1,75
+- **BATTLE** — m404 1,32 · m438 2,20 · m439 4,38 · m440 1,54 · m441 1,84 ·
+  m455 0,78
+- **BOWSER** — m435 1,51 · m436 1,32 · m437 1,31
+- **STORY** — m445 0,85 · m446 0,88 · m447 1,11 · m448 1,37 · m449 2,56
+
+Chaque chiffre vient d'un seul run, sur les frames où il est tombé : m443Dll a
+donné 3,45 ms dans ce balayage, 5,95 ms à la vérification et 5,58 ms le 15
+septembre. Les plus coûteux, m429Dll, m439Dll et m443Dll, sont à regarder de
+près avant d'en conclure quoi que ce soit.
+
+### Ce qui reste
+
+- **m423Dll ne compose pas à chaque frame.** Ses rapports donnent 148 puis 212
+  compositions par tranche de 300. Dans les premières, le seul draw 2D tombe au
+  draw 123 sur 567 et 440 draws 3D le suivent : la composition, insérée à cette
+  frontière, passerait sous l'essentiel de la scène. Et une frame sans passe
+  éligible n'est pas composée du tout. À regarder avec
+  `AURORA_RT_COMPOSITE_TRACE`, qui journalise chaque passe.
+- **Le coût de m429Dll, m439Dll et m443Dll**, sur plusieurs runs.
+- **L'onglet « etc. »** n'entre pas dans le cycle de la liste ; ce qu'il contient
+  reste hors de portée du balayage.
