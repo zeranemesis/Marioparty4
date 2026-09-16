@@ -858,6 +858,53 @@ s32 msmStreamGetStatus(int streamNo)
 
 /* Stub backend: the same canonical surface as the MusyX build, so a session
  * started with one backend cannot silently compare against the other. */
+/*
+ * The logical stream clock and the voice walk belong to the MusyX backend, and
+ * the game calls them unconditionally - PadReadSimulationTick advances the
+ * clock once per accepted tick, and the audio lifetime detector walks the
+ * voices at every free. files.cmake swaps this file out for game/audio.c and
+ * msm/*.c when PARTYBOARD_EXPERIMENTAL_MUSYX_AUDIO is on, so without these the
+ * default configuration of the project stopped linking altogether.
+ *
+ * This backend plays nothing, so there is no clock to advance and no voice to
+ * walk, and each of these is a no-op that keeps the callers honest.
+ */
+void msmStreamLogicalTick(void)
+{
+}
+
+/*
+ * Nothing here has a logical clock, so there is nothing to check. Reported as
+ * passing rather than failing: a component that is not built cannot be broken,
+ * and the netplay self-test names the sub-test either way.
+ */
+BOOL msmStreamLogicalSelfTest(void)
+{
+    return TRUE;
+}
+
+/*
+ * Refused on purpose. The probe measures a real stream table against the
+ * logical clock, and this backend has neither, so an audio probe run against
+ * it would measure nothing and report success.
+ */
+BOOL msmStreamLogicalProbeInstall(void)
+{
+    return FALSE;
+}
+
+void msmStreamLogicalProbeStart(s32 channel, s32 samples, s32 frequency)
+{
+    (void)channel;
+    (void)samples;
+    (void)frequency;
+}
+
+void msmStreamLogicalProbeFinishPhysical(s32 channel)
+{
+    (void)channel;
+}
+
 void PartyBoard_NetplayAudioState(PartyBoardNetplayStateSink sink, void *context)
 {
     int i;
