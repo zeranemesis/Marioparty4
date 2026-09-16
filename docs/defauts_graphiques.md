@@ -890,3 +890,36 @@ Deflate), `m428Dll/player.c:2194`. C'est **légitime** si le display list n'y
 indexe que 0, et ces trois-là sont précisément des mini-jeux signalés. Rien ne
 prouve qu'ils soient fautifs ; il suffit de lire leur display list comme on
 vient de le faire ici.
+
+### Le même défaut ailleurs : deux autres cas, deux faux positifs
+
+Le motif de G2 n'était pas isolé. Quatre autres sites déclaraient une fenêtre
+`CLR0` d'**un seul élément** ; les lire un par un les départage sans ambiguïté —
+il suffit de retrouver le display list qui les consomme et de regarder ses
+indices.
+
+| module | mini-jeu | indices `CLR0` du display list | verdict |
+|---|---|---|---|
+| `m421Dll/player.c:1809,1825` | **Hop or Pop** | `GXColor1x8(1)` autant que 0 | **fautif** |
+| `m423Dll/main.c:5367` | **GOOOOOOOAL!!** | `GXColor1x16(i)`, i < unk26 | **fautif** |
+| `m425Dll/thwomp.c:2135` | The Great Deflate | `GXColor1x16(0)` seul | correct |
+| `m428Dll/player.c:2194` | Cliffhangers | `GXColor1x16(0)` seul | correct |
+
+**Hop or Pop.** L'éventail est un dégradé radial : `unk_40[0]` a un alpha de
+0x40, `unk_40[1]` un alpha de 0. La fenêtre d'un élément laissait la couleur de
+bord hors du téléversement — le bord ne s'efface donc jamais. GerasSB décrit
+*« random geometry appears in front of the screen for a frame »*, ce qui est
+compatible, sans que cela le prouve.
+
+**GOOOOOOOAL!!** Le display list construit autour de `main.c:5118` émet une
+couleur par quad, `GXColor1x16(i)` pour les `unk26` quads. La fenêtre de
+position juste au-dessus compte bien `unk26 * 4` sommets ; celle des couleurs en
+comptait une. Seul le premier quad recevait la sienne.
+
+Aucun des deux ne peut planter : WebGPU borne les lectures hors d'un buffer de
+stockage. Ce sont des défauts d'image, et cela **n'explique pas** le crash de
+l'issue #3 sur ce même mini-jeu.
+
+Les deux correctifs suivent la règle de G2 : donner à la fenêtre ce que le
+display list indexe réellement. Et comme la macro GameCube jette l'argument,
+aucun n'a d'effet sur un build *matching*.
