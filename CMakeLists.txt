@@ -505,8 +505,12 @@ if (NOT APPLE)
     install(DIRECTORY ${CMAKE_SOURCE_DIR}/res DESTINATION ${CMAKE_INSTALL_PREFIX})
 endif ()
 
-# EnsureInitialPipelineCache() (src/port/portmain.cpp) looks for this beside the
-# executable and copies it into the config directory on first run. Without it every
+# Aurora's seed_pipeline_cache() reads this from beside the executable and merges
+# it into the live cache. (src/port/portmain.cpp has an EnsureInitialPipelineCache()
+# that copies it too, but into SDL_GetPrefPath("MarioPartyRD", ...) while Aurora
+# keeps its cache in SDL_GetPrefPath(nullptr, ...) -- one level shallower -- so that
+# copy lands where nothing reads it. Aurora's own path is the one that works.)
+# Without a seed every
 # player starts from an empty cache, and a pipeline that is still compiling does not
 # delay its draw -- it drops it (extern/aurora/lib/gx/pipeline.cpp), so a scene seen
 # for the first time is missing geometry for a few seconds.

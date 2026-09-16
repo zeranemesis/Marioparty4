@@ -1,10 +1,13 @@
 param(
-    # Where the port keeps its live cache. PartyBoard_ConfigPath comes from
-    # SDL_GetPrefPath("MarioPartyRD", "Party Board"), which on Windows is
-    # %APPDATA%\MarioPartyRD\Party Board\.
-    [string]$ConfigDir = (Join-Path $env:APPDATA 'MarioPartyRD\Party Board'),
-    # Where the seed has to land: CMakeLists.txt installs it from the source root,
-    # and EnsureInitialPipelineCache() then looks for it beside partyboard.exe.
+    # Aurora owns the live cache, not the port, and it resolves its directory with
+    # SDL_GetPrefPath(nullptr, "Party Board") -- a NULL organisation, so the path
+    # is %APPDATA%\Party Board\, one level shallower than the port's own config
+    # directory (%APPDATA%\MarioPartyRD\Party Board\). Verified on a live run:
+    # pipeline_cache.db and dawn_cache.db both sit in the former.
+    [string]$ConfigDir = (Join-Path $env:APPDATA 'Party Board'),
+    # Where the seed has to land: CMakeLists.txt installs it from the source root
+    # to sit beside partyboard.exe, which is where Aurora's seed_pipeline_cache()
+    # reads it from (g_config.resourcesPath) and merges it into the live cache.
     [string]$Destination = (Join-Path (Split-Path $PSScriptRoot -Parent) 'initial_pipeline_cache.db'),
     # Refuse to overwrite a larger seed with a smaller one. A short play session
     # records fewer pipelines than a thorough one, and silently replacing a good

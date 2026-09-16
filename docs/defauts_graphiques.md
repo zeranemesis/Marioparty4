@@ -763,3 +763,47 @@ avec la sienne.
 Cinq hypothèses écartées sur ce seul mini-jeu. G2 reste **non diagnostiqué**, et
 la piste « texture manquante » qui l'accompagnait depuis le début est à
 abandonner.
+
+## Le cache de pipelines : deux dossiers, et une graine qui atterrissait dans le mauvais
+
+Vérifié en lançant le jeu le 2026-09-16, log à l'appui. Le démarrage réclame la
+graine **deux fois**, une par moitié du mécanisme :
+
+```
+[error] [partyboard::main] No bundled initial pipeline cache found at
+        'C:\…\partyboard\initial_pipeline_cache.db'
+[INFO | aurora::gfx::pipeline_cache] No bundled initial pipeline cache found at
+        'C:\…\partyboard\initial_pipeline_cache.db'
+```
+
+Confirmation directe de ce qui n'était jusque-là qu'une lecture de code. Mais
+l'inspection des dossiers a montré autre chose :
+
+| | appel | dossier réel |
+|---|---|---|
+| cache vivant (Aurora) | `SDL_GetPrefPath(nullptr, "Party Board")` | `%APPDATA%\Party Board\` |
+| config du port | `SDL_GetPrefPath("MarioPartyRD", "Party Board")` | `%APPDATA%\MarioPartyRD\Party Board\` |
+
+`pipeline_cache.db` (1,8 Mo) et `dawn_cache.db` sont dans le **premier**.
+`config.json` et la carte mémoire sont dans le **second**.
+
+Or `EnsureInitialPipelineCache()` (`portmain.cpp:323`) copie la graine vers
+`PartyBoard_ConfigPath / "pipeline_cache.db"`, c'est-à-dire le **second**. Aurora
+ne lit jamais là. **Cette fonction est donc inerte**, indépendamment du fait que
+la graine n'existe pas : même livrée, sa copie atterrirait où rien ne regarde.
+
+Ce n'est pas bloquant, parce que la moitié qui compte marche : Aurora lit
+`initial_pipeline_cache.db` **à côté de l'exécutable** (`g_config.resourcesPath`)
+et le fusionne elle-même dans son cache (`seed_pipeline_cache()`). Livrer le
+fichier près de `partyboard.exe` suffit donc, et c'est ce que fait la règle
+`install()` ajoutée à `CMakeLists.txt`.
+
+`tools/capture_pipeline_cache.ps1` visait initialement le mauvais dossier, pour
+la même raison. Corrigé.
+
+### Ce que la machine de test ajoute au tableau
+
+GPU **Intel(R) Graphics (integré)**, D3D12, 1280×960. Sur un GPU intégré la
+compilation de pipelines est nettement plus lente que sur une carte dédiée, ce
+qui rend l'absence de graine d'autant plus visible — et explique qu'un défaut
+décrit comme « quelques secondes » puisse durer plus longtemps ici.
