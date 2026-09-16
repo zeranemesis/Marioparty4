@@ -130,6 +130,17 @@ void ObjectSetup(void)
          HuWindowInit();
          MGSeqInit();
          HuWinInit(1);
+         /*
+          * The boot sequence loads the sample banks in two steps, and only
+          * the second one was reproduced here. HuAudSndGrpSet(0) is the only
+          * path that reaches msmSysLoadBaseGroup(): a group set deliberately
+          * skips every base group (msmSysCheckBaseGroupNo, called from
+          * msmSysLoadGroupSet), so without this call the common sound effect
+          * banks are never resident and every SE stays silent. Base groups
+          * first, exactly as the sequence below does before its own
+          * HuAudSndGrpSetSet(0).
+          */
+         HuAudSndGrpSet(0);
          HuAudSndGrpSetSet(0);
          SystemInitF = TRUE;
      }
