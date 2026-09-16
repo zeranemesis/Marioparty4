@@ -923,3 +923,58 @@ l'issue #3 sur ce même mini-jeu.
 Les deux correctifs suivent la règle de G2 : donner à la fenêtre ce que le
 display list indexe réellement. Et comme la macro GameCube jette l'argument,
 aucun n'a d'effet sur un build *matching*.
+
+## G6 — Bowser's Bigger Blast : module identifié, hypothèse du registre invalidée
+
+Valentin, 2026-09-16, sur la build fraîche : *« dans le jeu Bowser's Bigger
+Blast l'explosion est accélérée »*. La ligne G6 portait « module non identifié »
+depuis le 2026-09-12 ; c'est **`m440Dll`**.
+
+### L'hypothèse inscrite ici était fausse
+
+Cette page disait de G6 : *« l'accélération de l'explosion est la signature
+d'une animation pilotée par le nombre d'images affichées plutôt que par les
+ticks de simulation — exactement le mécanisme de D14 et de D6 »*.
+
+Le détecteur de D6 dit l'inverse, dans son propre commentaire
+(`src/game/main.c:301`) :
+
+> *a frame that batches two simulation ticks advances the animation clock
+> **once, for both**. Below 61 frames per second frame_pacer_simulation_tick
+> always returns 1 and this can never fire.*
+
+D6 fait donc **perdre** des pas d'animation, pas en gagner : il **ralentit**, et
+uniquement au-dessus de 60 images par seconde. La machine de test tourne à 60
+(`video.targetFrameRate: 60`, surimpression FPS à 60). **D6 est éliminé pour
+G6**, dans les deux sens : mauvaise direction, et hors de sa plage.
+
+### Ce qui est établi
+
+`m440Dll/main.c:795`, dans l'état 3 de la séquence :
+
+```c
+Hu3DModelAttrReset(object->model[3], HU3D_MOTATTR_PAUSE);
+Hu3DMotionSpeedSet(object->model[3], 2.0f);
+```
+
+L'explosion est jouée à **vitesse 2× par le jeu d'origine**. Elle est donc
+rapide par conception, et la question n'est pas « pourquoi est-elle rapide »
+mais « pourquoi est-elle **plus** rapide qu'elle ne devrait ».
+
+Les deux hooks de dessin du module (`fn_1_806C`, `fn_1_9C04`) n'avancent aucun
+état — ils ne font que dessiner. Le mécanisme du correctif de `m417Dll`
+(`if (HuSysVWaitGet(0) == 0) return;`, qui empêche un hook de faire avancer la
+simulation à la cadence d'affichage) **ne s'applique pas ici** : il n'y a rien à
+garder.
+
+### Ce qu'il reste à trancher, et qui ne se lit pas dans le code
+
+G6 a deux moitiés : l'explosion accélérée **et** *« la fin est buggée avec le
+jeu qui continue malgré être le gagnant »*. Si les deux tiennent encore, il faut
+savoir si c'est **tout le mini-jeu** qui tourne trop vite ou **seulement**
+l'explosion. Le premier cas désigne l'horloge de simulation du module ; le
+second, cette animation-là. Aucune lecture de code ne le départage, et se
+tromper de moitié coûte une journée — c'est exactement ce qui vient d'arriver
+avec D6.
+
+**Statut : module identifié, mécanisme inconnu, hypothèse antérieure écartée.**
