@@ -36,6 +36,13 @@ SHARED_SYM HU3DCAMERA Hu3DCamera[HU3D_CAM_MAX];
 static s16 layerNum[8];
 static void (*layerHook[8])(s16);
 ANIMDATA *reflectAnim[5];
+#ifdef BYTESWAPPING
+/* The reflection map installed at start-up. Hu3DReflectMapSet() may replace
+ * reflectAnim[0] for one scene; keeping the original lets Hu3DAllKill() put it
+ * back without re-reading refMapData0, which on this build would parse a second
+ * ANIMDATA out of the same source and leak the first. */
+static ANIMDATA *reflectAnimBase0;
+#endif
 SHARED_SYM ANIMDATA *hiliteAnim[4];
 HU3DPROJECTION Hu3DProjection[4];
 SHARED_SYM HU3DSHADOW Hu3DShadowData;
@@ -143,6 +150,9 @@ void Hu3DInit(void) {
         dvd_data = HuDvdDataRead(DATADIR_PREFIX"/hiliteData4.anm");
         hiliteAnim[3] = HuSprAnimRead(dvd_data);
     }
+#endif
+#ifdef BYTESWAPPING
+    reflectAnimBase0 = reflectAnim[0];
 #endif
     Hu3DFogClear();
     Hu3DAnimInit();
@@ -383,6 +393,15 @@ void Hu3DAllKill(void) {
 #else
     reflectAnim[0] = HuSprAnimRead(refMapData0);
 #endif
+#else
+    /* Same intent as the branch above -- a scene must not inherit the previous
+     * one's reflection map -- reached by restoring the start-up map instead of
+     * parsing refMapData0 again, which would build a second ANIMDATA from the
+     * same source and leak the first. */
+    if (reflectAnim[0] != reflectAnimBase0) {
+        HuSprAnimKill(reflectAnim[0]);
+        reflectAnim[0] = reflectAnimBase0;
+    }
 #endif
     if(Hu3DShadowData.buf) {
         HuMemDirectFree(Hu3DShadowData.buf);
@@ -1993,8 +2012,20 @@ void Hu3DReflectMapSet(ANIMDATA* arg0) {
     reflectAnim[0] = HuSprAnimRead(arg0);
 #endif
 #else
-    assert(0 == 1);
-    OSReport("PC TODO: Hu3DReflectMapSet ran which tries to reallocate an anim\n");
+    /* HuSprAnimRead() allocates a fresh ANIMDATA here and leaves the source
+     * untouched, so installing a map is safe; what the old code could not do
+     * was release the previous one, because freeing the ANIMDATA alone leaks
+     * the bank/pat/bmp arrays allocated beside it. HuSprAnimKill() frees all
+     * of them and honours useNum, so it is the right destructor. The start-up
+     * map is never killed: Hu3DAllKill() restores it. */
+    {
+        ANIMDATA *prev = reflectAnim[0];
+        ANIMDATA *next = HuSprAnimRead(arg0);
+        if (prev != next && prev != reflectAnimBase0) {
+            HuSprAnimKill(prev);
+        }
+        reflectAnim[0] = next;
+    }
 #endif
     reflectMapNo = 0;
 }
