@@ -11,6 +11,7 @@
 
 #include <aurora/dvd.h>
 #include <aurora/lib/logging.hpp>
+#include <dolphin/dvd.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -22,6 +23,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -210,6 +212,91 @@ void CollectRoot(const std::filesystem::path& root, ModOverlay& overlay, std::un
     }
 }
 
+// Records where each file name occurs on the disc. A name seen twice is marked
+// ambiguous and is never placed automatically.
+void IndexDiscNames(const std::string& directory, int depth,
+                    std::unordered_map<std::string, std::string>& byName,
+                    std::unordered_set<std::string>& ambiguous, int& budget) {
+    constexpr int k_maxDepth = 8;
+
+    DVDDir dir{};
+    if (!DVDOpenDir(directory.c_str(), &dir)) {
+        return;
+    }
+
+    DVDDirEntry entry{};
+    while (budget > 0 && DVDReadDir(&dir, &entry)) {
+        if (entry.name == nullptr) {
+            continue;
+        }
+        --budget;
+        const std::string child = directory == "/" ? "/" + std::string(entry.name)
+                                                   : directory + "/" + entry.name;
+        if (entry.isDir) {
+            if (depth < k_maxDepth) {
+                IndexDiscNames(child, depth + 1, byName, ambiguous, budget);
+            }
+            continue;
+        }
+        const std::string name = AsciiLower(entry.name);
+        if (ambiguous.contains(name)) {
+            continue;
+        }
+        if (const auto existing = byName.find(name); existing != byName.end()) {
+            byName.erase(existing);
+            ambiguous.insert(name);
+            continue;
+        }
+        byName.emplace(name, child);
+    }
+
+    DVDCloseDir(&dir);
+}
+
+// A pack that ships its files loose, with no folders at all, says nothing about
+// where they belong, so they land at the root of the disc where nothing reads
+// them - the shape of the first real pack this was tried against, whose
+// board_e.dat belongs under mess/. When the disc carries exactly one file of
+// that name, that is where it goes. A name the disc does not carry, carries
+// twice, or already carries at its root is left exactly where the author put it.
+void PlaceLooseFiles(ModOverlay& overlay) {
+    std::vector<ModFile*> loose;
+    std::unordered_set<std::string> taken;
+    for (ModFile& file : overlay.files) {
+        taken.insert(AsciiLower(file.virtualPath));
+        const bool atDiscRoot = file.virtualPath.find('/', 1) == std::string::npos;
+        if (atDiscRoot && DVDConvertPathToEntrynum(file.virtualPath.c_str()) < 0) {
+            loose.push_back(&file);
+        }
+    }
+    if (loose.empty()) {
+        return;
+    }
+
+    std::unordered_map<std::string, std::string> byName;
+    std::unordered_set<std::string> ambiguous;
+    int budget = 8192;
+    IndexDiscNames("/", 0, byName, ambiguous, budget);
+
+    for (ModFile* file : loose) {
+        const std::string name = AsciiLower(file->virtualPath.substr(1));
+        const auto match = byName.find(name);
+        if (match == byName.end()) {
+            PartyBoardModsLog.warn("{} matches no file on the disc, leaving it at the root",
+                                   file->virtualPath);
+            continue;
+        }
+        if (!taken.insert(AsciiLower(match->second)).second) {
+            PartyBoardModsLog.warn("{} belongs at {}, already claimed by a higher priority mod",
+                                   file->virtualPath, match->second);
+            continue;
+        }
+        PartyBoardModsLog.info("{} shipped without a path, placing it at {}",
+                               file->virtualPath, match->second);
+        file->virtualPath = match->second;
+    }
+}
+
 ModOverlay BuildOverlay(const std::filesystem::path& listPath) {
     ModOverlay overlay;
     if (listPath.empty()) {
@@ -296,6 +383,10 @@ extern "C" int PartyBoard_InitMods(void) {
         PartyBoardModsLog.warn("Every mod root is empty, booting the original disc");
         return 0;
     }
+
+    // Needs the disc's own FST, so it happens here rather than in BuildOverlay,
+    // which the self-test drives with no disc open.
+    PlaceLooseFiles(s_overlay);
 
     const AuroraOverlayCallbacks callbacks{ModOpen, ModClose, ModRead, ModSeek};
     aurora_dvd_overlay_callbacks(&callbacks);

@@ -56,6 +56,12 @@ Rules applied while collecting:
 - **New files** — a mod may add a file the disc does not contain; Aurora assigns
   it a fresh entry number and creates the parent directories.
 - **`cubeshelf-mod.json`** — launcher metadata, never exposed to the game.
+- **Loose files** — a pack that ships files with no folders at all says nothing
+  about where they belong, so they would land at the disc root where nothing
+  reads them. A file at the root that the disc does not carry there, but does
+  carry at exactly one other path, is placed at that path; the log says so. A
+  name the disc does not carry, or carries twice, or that a higher priority mod
+  already claims, is left where the author put it.
 - **Limits** — files above 4 GiB are skipped, and collection stops at 65 536
   files so a runaway directory tree cannot stall the boot.
 
