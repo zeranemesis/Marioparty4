@@ -718,3 +718,48 @@ entre cette relecture et la disparition des ombres **n'est pas démontré**, et
 l'aliasing transfère la propriété d'un tampon (qui le libère ?) dans un fichier
 que rien ici ne peut compiler ni exécuter. Un correctif spéculatif, non testé,
 sur un symptôme non reproduit, vaut moins qu'une ligne dans ce registre.
+
+## G2 (Avalanche!) — une cinquième hypothèse écartée
+
+L'avalanche est un **maillage procédural**, pas un modèle : `m406Dll/map.c:1104`
+dessine trente bandes de trente-cinq sommets, sans texture (`GX_TEXMAP_NULL`,
+`GX_REPLACE`), éclairées avec spéculaire, en re-pointant les tableaux de sommets
+entre chaque appel d'un **même** display list :
+
+```c
+GXCallDisplayList(var_r31->unk_A4, var_r31->unk_A0);
+for (var_r30 = 1; var_r30 < 29; var_r30++) {
+    var_r29 = var_r30 * 35;
+    GXSETARRAY(GX_VA_POS, &var_r31->unk_84[var_r29], ...);
+    GXSETARRAY(GX_VA_NRM, &var_r31->unk_88[var_r29], ...);
+    GXSETARRAY(GX_VA_CLR0, &var_r31->unk_90[var_r29], ...);
+    GXCallDisplayList(var_r31->unk_A4, var_r31->unk_A0);
+}
+```
+
+Deux choses en découlent, et la première est un **avertissement** : *« facettes
+blanches à arêtes dures, prenant la couleur du matériau »* ne peut pas être la
+signature d'une texture manquante ici — cette géométrie n'a **jamais** de
+texture, par conception. `GXSetChanMatColor(GX_COLOR0A0, lbl_1_data_88F)` pose
+sa couleur, et l'aspect vient entièrement de l'éclairage et des couleurs par
+sommet. L'hypothèse inscrite plus haut sur cette page (« géométrie dessinée sans
+sa texture ») est donc **fausse pour G2**.
+
+La seconde était prometteuse : `GXCallDisplayList` **ne draine pas** la FIFO —
+sa variante `GXCallDisplayListLE` le fait explicitement, en disant pourquoi
+(*« so that any pending CP register writes (VCD, VAT, etc.) are processed into
+g_gxState before the display list's draw commands reference them »*). Si les
+`GXSETARRAY` écrivaient directement `g_gxState` pendant que les trente display
+lists s'empilaient dans la FIFO, les trente bandes seraient dessinées avec le
+**dernier** pointeur : la même bande répétée trente fois, à arêtes dures, au
+lieu d'une masse continue. Cela décrivait exactement la capture.
+
+**Écartée.** `GXSetArray` (`lib/dolphin/gx/GXGeometry.cpp:218`) écrit dans la
+FIFO — `GX_WRITE_AURORA(GX_LOAD_AURORA_ARRAYBASE | cpIdx)` puis le pointeur, la
+taille et le stride — et non dans `g_gxState`. L'ordre entre les liaisons de
+tableaux et les display lists est donc préservé, et chaque bande est dessinée
+avec la sienne.
+
+Cinq hypothèses écartées sur ce seul mini-jeu. G2 reste **non diagnostiqué**, et
+la piste « texture manquante » qui l'accompagnait depuis le début est à
+abandonner.

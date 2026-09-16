@@ -232,3 +232,117 @@ occurrences**, pas cent issues.
 | backend et GitHub App | hors périmètre pour l'instant |
 
 Rien de tout cela ne doit retarder la validation du jeu.
+
+---
+
+## État réel au 2026-09-16 — ce que ce document décrivait de travers
+
+Le tableau du §7 laissait entendre que le jeu n'écrit encore rien. **C'est
+faux, et cette erreur a directement coûté du temps sur
+[l'issue #3](https://github.com/zeranemesis/Marioparty4/issues/3)** : un
+testeur a rapporté deux crashes qu'il ne pouvait pas reproduire, alors que les
+preuves étaient déjà sur son disque et que personne ne savait où regarder.
+
+### Ce qui fonctionne aujourd'hui
+
+`entry.cpp:30` appelle `PartyBoard_CrashReportInit(nullptr, -1, nullptr)` à
+**chaque** lancement, en ligne comme hors ligne. Le gestionnaire est donc armé
+en permanence (`AddVectoredExceptionHandler` + `SetUnhandledExceptionFilter`),
+et `writeCrashArtifacts()` produit **trois fichiers** :
+
+```
+crash-report-pid-<PID>-<horodatage>.txt     identité, exception, simulation,
+                                            piles de coroutines, trace, fil d'événements
+crash-pid-<PID>-<horodatage>.dmp            minidump (si le contexte existe)
+stack-usage-pid-<PID>-<horodatage>.txt      consommation de pile par coroutine
+```
+
+Le rapport texte est **écrit deux fois** : une version partielle avant la
+`StackWalk64`, puis la version complète si la marche des piles survit. Le
+faulting address, l'offset de module et la frame ne sont donc jamais perdus,
+même si le reste échoue. C'est déjà largement exploitable.
+
+### Où ils atterrissent réellement
+
+**Pas** dans `%LOCALAPPDATA%\PartyBoard\crashes\`. `buildPath()` ne préfixe un
+dossier que si `gIdentity.sessionDir` est renseigné, ce qui n'arrive qu'avec
+`PARTYBOARD_CRASH_DIR`, `PARTYBOARD_NET_DIAGNOSTIC`, ou un `sessionDir` passé
+par le lanceur. Un joueur ordinaire n'a aucun des trois : le chemin est alors un
+**nom de fichier nu**, donc relatif au **répertoire courant du processus** —
+à côté de `partyboard.exe`, ou là où le lanceur l'a placé.
+
+C'est la ligne la plus importante de cette page pour quiconque demande des
+preuves à un joueur.
+
+### Ce qui existe mais n'est branché sur rien
+
+`crash_manifest.cpp` implémente **entièrement** le manifeste, le nettoyage des
+chemins (`PartyBoard_CrashSanitizeText`), le fingerprint, la file et ses bornes.
+`crash_uploader.cpp` implémente l'abstraction d'uploader.
+
+Mais `PartyBoard_CrashWriteManifest()` et `PartyBoard_CrashQueueAdd()` **ne sont
+appelés que depuis l'auto-test** de `crash_uploader.cpp`. `writeCrashArtifacts()`
+ne les appelle pas. Conséquences, toutes vérifiables :
+
+- aucun `manifest.json` n'est jamais écrit par le jeu ;
+- `%LOCALAPPDATA%\PartyBoard\crashes\` reste **vide** — le dossier n'est créé
+  que par le code de file, que rien n'appelle ;
+- **le nettoyage des chemins ne s'applique donc à rien.** Le rapport texte
+  contient la ligne de commande telle quelle, chemin de l'ISO compris, et le
+  chemin de l'exécutable. Ce n'est pas un problème tant que le joueur envoie le
+  fichier lui-même en connaissance de cause, mais cela doit être dit avant de
+  lui demander : **la promesse d'anonymisation du §4 n'est pas tenue
+  aujourd'hui.**
+
+### Tableau du §7, corrigé
+
+| étape | statut réel |
+|---|---|
+| format du manifeste | ce document |
+| fingerprint partagé avec la campagne | fait, `tools/netplay_session.ps1` |
+| écriture du rapport texte et du minidump par le jeu | **fait**, non documenté jusqu'ici |
+| nettoyage des chemins | **code écrit, jamais exécuté** |
+| écriture du manifeste par le jeu | **code écrit, non branché** |
+| file locale et ses bornes | **code écrit, non branché** |
+| interface de consentement au lancement | à faire — rien n'existe |
+| abstraction d'uploader | **code écrit**, aucun transport |
+| backend et GitHub App | hors périmètre |
+
+### Ce qu'il faut demander à un joueur, en attendant
+
+Le `.txt` seul suffit à nommer un défaut : code d'exception, module et offset,
+symbole, overlay, frame de simulation, et le fil d'événements qui précède. Le
+`.dmp` contient les piles de tous les threads et la mémoire qu'elles
+référencent — il ne doit être demandé qu'explicitement, et jamais par défaut.
+
+### Où regarder quand le rapport de l'issue #3 arrivera
+
+Deux choses ont été vérifiées en cherchant la cause à l'aveugle, et méritent
+d'être notées pour ne pas être refaites :
+
+**Ce n'est pas le cycle de vie des séquences de fin.** `MGSeqMain()` contient
+une condition inversée — `if (!work->data) { HuMemDirectFree(work->data); }`,
+qui ne libère que lorsque le pointeur est déjà nul. C'est une **fuite bornée**,
+pas un plantage : `HuMemMemoryFree()` rejette `NULL` d'entrée de jeu, et
+`CreateSeq()` libère la donnée périmée à la réutilisation du créneau. Surtout,
+`game/minigame_seq.c` est un objet **`Matching`** dans `configure.py` : ce
+comportement est celui du jeu d'origine, et le corriger casserait le build de
+correspondance. **À ne pas « réparer ».**
+
+**Le premier endroit à regarder est le drain audio.** `HuAudSndGrpWait()`
+(`game/audio.c`) attend hors ligne que `msmMusGetNumPlay` et `msmSeGetNumPlay`
+retombent à zéro, mais **abandonne au bout de 500 ms** (`SNDGRP_TIMEOUT`) en se
+contentant d'un `OSReport("Timed Out! …")` — puis `HuAudSndGrpSetSet()` charge
+le nouveau jeu de banques, ce qui fait `msmSysDelGroupAll()` et libère les
+échantillons. C'est **mot pour mot** la classe de défaut que le §3 de ce
+document donne en exemple :
+
+    AUDIO_UAF:overlay84:ensureADPCMBlockDecoded@hw_pc.c:711
+    "AUDIO sample 1191 of bank 19 freed while voice 12 still reads it"
+
+Les deux mini-jeux incriminés lancent une fanfare juste avant de rendre la main,
+et le changement d'overlay recharge les banques dans la foulée. Ce n'est **pas**
+une preuve : rien ne dit que le drain expire, et `HuAudFadeOut()` peut très bien
+avoir tout arrêté à temps. Mais si le rapport dit `EXCEPTION_ACCESS_VIOLATION`
+dans le code MusyX, c'est là qu'il faut commencer, et la ligne `Timed Out!` du
+fil d'événements le confirmera ou l'infirmera immédiatement.
