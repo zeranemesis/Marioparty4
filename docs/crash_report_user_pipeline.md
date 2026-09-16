@@ -346,3 +346,49 @@ une preuve : rien ne dit que le drain expire, et `HuAudFadeOut()` peut très bie
 avoir tout arrêté à temps. Mais si le rapport dit `EXCEPTION_ACCESS_VIOLATION`
 dans le code MusyX, c'est là qu'il faut commencer, et la ligne `Timed Out!` du
 fil d'événements le confirmera ou l'infirmera immédiatement.
+
+### Pourquoi un crash peut ne laisser aucun fichier — trouvé le 2026-09-16
+
+Valentin reproduit un plantage en revenant au menu du mode mini-jeu, et **aucun
+artefact n'existe nulle part sur sa machine**. Le gestionnaire est pourtant armé.
+L'explication est dans ce qu'il accepte.
+
+`isFatalCode()` ne reconnaît que des codes de faute matérielle, et **rejette
+explicitement `0xE06D7363`**, le code des exceptions C++ — l'auto-test du fichier
+en fait même une assertion. Par ailleurs `crash_report.cpp` n'installait
+**ni `std::set_terminate`, ni gestionnaire `SIGABRT`, ni
+`_set_invalid_parameter_handler`**.
+
+Toute une famille de morts passait donc à côté sans rien écrire :
+
+- une exception C++ non rattrapée → `std::terminate` → `abort()` ;
+- un `assert()` qui échoue — il y en avait un dans `Hu3DReflectMapSet()` ;
+- un `Log.fatal()` d'Aurora, dont `tex_copy_conv` et `pipeline_cache` sont
+  friands ;
+- un paramètre invalide passé à la CRT.
+
+Et `abort()`, tant que `_CALL_REPORTFAULT` est armé, part directement chez
+Windows Error Reporting **sans jamais traverser un filtre d'exception**.
+
+**Corrigé** : les trois gestionnaires sont installés et convergent vers
+`dispatchToWriter()`, la même route que le reste, avec une raison explicite
+(`STD_TERMINATE`, `ABORT`, `CRT_INVALID_PARAMETER`) qui apparaît dans la section
+`[TERMINATION]` du rapport. `_set_abort_behavior(0, _CALL_REPORTFAULT)` rend la
+main à notre `SIGABRT` avant WER.
+
+### En attendant une build qui contienne ce correctif
+
+`OSReport()` écrit sur **stdout** (`src/port/stubs.c:51`, `vprintf` +
+`fflush`). Lancer le jeu avec la sortie redirigée capture donc tout le fil de
+diagnostic jusqu'à la mort, y compris le message d'un `assert` ou d'un
+`Log.fatal` — c'est-à-dire exactement ce que le rapport manquant aurait dit :
+
+```
+cd /c/Users/BEAVSN/Downloads/partyboard
+mkdir -p crashlogs
+PARTYBOARD_CRASH_DIR="C:\Users\BEAVSN\Downloads\partyboard\crashlogs"     ./partyboard.exe > crashlogs/console.log 2>&1
+```
+
+`PARTYBOARD_CRASH_DIR` est lu par `PartyBoard_CrashReportInit()` : si la mort
+*est* une faute SEH, les fichiers atterrissent là au lieu du répertoire courant.
+Les deux filets sont tendus en même temps.

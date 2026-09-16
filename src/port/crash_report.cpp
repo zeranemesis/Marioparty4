@@ -30,6 +30,8 @@ extern "C" bool PartyBoard_IsRunning;
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <csignal>
+#include <exception>
 #ifdef _WIN32
 #include <float.h>
 #include <xmmintrin.h>
@@ -739,6 +741,44 @@ LONG WINAPI unhandledFilter(EXCEPTION_POINTERS *pointers)
 
 } // namespace
 
+#ifdef _WIN32
+namespace {
+
+// A fault is not the only way this process dies. An uncaught C++ exception, a
+// failed assert, an aurora Log.fatal and a CRT invalid parameter all end in
+// terminate() or abort(), and none of them raises an exception this file
+// accepts -- isFatalCode() rejects 0xE06D7363 on purpose, and abort() with
+// _CALL_REPORTFAULT set goes straight to Windows Error Reporting without ever
+// passing an exception filter. That whole family used to die in silence, which
+// is precisely the shape of a crash for which nobody can produce a report.
+std::atomic<bool> gAbnormalClaimed { false };
+
+void reportAbnormalAndExit(const char *reason, const char *detail)
+{
+    bool expected = false;
+    if (gAbnormalClaimed.compare_exchange_strong(expected, true)) {
+        PartyBoard_IsRunning = false;
+        dispatchToWriter(nullptr, reason, detail);
+    }
+    // Never return. Returning from a terminate handler is undefined, and
+    // _exit skips the very handlers this just ran through, so a report cannot
+    // trigger a second one.
+    _exit(3);
+}
+
+void terminateHandler() { reportAbnormalAndExit("STD_TERMINATE", nullptr); }
+
+void abortSignalHandler(int) { reportAbnormalAndExit("ABORT", nullptr); }
+
+void invalidParameterHandler(const wchar_t *, const wchar_t *, const wchar_t *,
+    unsigned int, uintptr_t)
+{
+    reportAbnormalAndExit("CRT_INVALID_PARAMETER", nullptr);
+}
+
+} // namespace
+#endif
+
 extern "C" void PartyBoard_CrashReportInit(const char *sessionDir, s32 peerIndex, const char *role)
 {
     bool expected = false;
@@ -783,6 +823,13 @@ extern "C" void PartyBoard_CrashReportInit(const char *sessionDir, s32 peerIndex
     }
     AddVectoredExceptionHandler(1, vectoredHandler);
     SetUnhandledExceptionFilter(unhandledFilter);
+    // See reportAbnormalAndExit: these cover the deaths that never reach an
+    // exception filter. Clearing _CALL_REPORTFAULT is what lets abort() raise
+    // SIGABRT into the handler below instead of being taken by WER first.
+    std::set_terminate(terminateHandler);
+    std::signal(SIGABRT, abortSignalHandler);
+    _set_invalid_parameter_handler(invalidParameterHandler);
+    _set_abort_behavior(0, _CALL_REPORTFAULT);
 #else
     (void)sessionDir;
 #endif
