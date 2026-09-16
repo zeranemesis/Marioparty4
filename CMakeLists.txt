@@ -179,6 +179,17 @@ add_subdirectory(extern/musyx EXCLUDE_FROM_ALL)
 # the submodule keeps building on its own.
 target_include_directories(musyx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# dol is a SHARED library, so every static library linked into it has to be
+# position independent. The submodule's own CMakeLists does not ask for that,
+# and on Linux the link fails the moment MusyX's objects are really pulled in:
+#
+#   libmusyxRD.a(hw_pc.c.o): relocation R_X86_64_PC32 against symbol
+#   `salAudioDumpFrameCount' can not be used when making a shared object
+#
+# Set from here, like the include path above, so the submodule keeps building
+# on its own. A no-op on Windows.
+set_property(TARGET musyx PROPERTY POSITION_INDEPENDENT_CODE ON)
+
 # The pinned Tracy dependency already provides stb_image, which is used by the
 # portable THP movie player for the JPEG video component.
 FetchContent_GetProperties(tracy)
