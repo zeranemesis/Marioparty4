@@ -272,7 +272,7 @@ function Invoke-Run {
     if ($process.HasExited) { return @{ Reached = $false; Reason = 'exited during boot' } }
 
     $window = $process.MainWindowHandle
-    $index = 0; $moved = 0; $boards = 0; $games = 0; $previous = ''; $reached = $false; $scene = ''
+    $index = 0; $moved = 0; $boards = 0; $games = 0; $previous = ''; $reached = $false; $found = ''
     $script:onCarousel = $false
     $script:onMinigameList = $false
     foreach ($step in 1..$MaxSteps) {
@@ -288,7 +288,10 @@ function Invoke-Run {
             # Only the kind of scene asked for counts. The menus take a wrong
             # turn now and then, and a mini-game run that landed on w01Dll was
             # once measured and passed as though it were the mini-game.
-            $scene = $overlay
+            # Not $scene: PowerShell does not distinguish it from the $Scene
+            # parameter, and assigning the overlay to it made the test below
+            # compare the overlay with itself -- which always passed.
+            $found = $overlay
             $wanted = if ($Scene) { '^' + [regex]::Escape($Scene) }
                       elseif ($Target -eq 'minigame') { '^m\d' } else { '^w\d' }
             $reached = $overlay -match $wanted
@@ -360,8 +363,8 @@ function Invoke-Run {
     if (-not $died) { $process.CloseMainWindow() | Out-Null; Start-Sleep -Seconds 3 }
     if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
     Remove-Item $channel, (Join-Path $binary 'rt_ab_arm') -ErrorAction SilentlyContinue
-    $reason = if ($scene -and -not $reached) { "landed on $scene" } else { 'max steps reached' }
-    return @{ Reached = $reached; Scene = $scene; DiedInScene = $died; Reason = $reason }
+    $reason = if ($found -and -not $reached) { "landed on $found" } else { 'max steps reached' }
+    return @{ Reached = $reached; Scene = $found; DiedInScene = $died; Reason = $reason }
 }
 
 # The menu sequence is timing sensitive and misses roughly one run in three.
@@ -388,19 +391,19 @@ if ($result.DiedInScene) { throw "the game died inside $($result.Scene)" }
 # how the settings behave where the game is played.
 $lines = Get-Content $logPath
 $from = ($lines | Select-String -Pattern "Link DLL:$($result.Scene)" | Select-Object -Last 1).LineNumber
-$scene = $lines[($from - 1)..($lines.Count - 1)]
+$sceneLines = $lines[($from - 1)..($lines.Count - 1)]
 
 Write-Host ''
 Write-Host "--- $($result.Scene), ray tracing $RayTracing ---"
 foreach ($pattern in @('Ray tracing active', 'Composition ran', 'Perspective projections',
                        'Scene extent', 'Of \d+ captured draws', 'Positions rejected', 'still running when')) {
-    $hit = $scene | Select-String -Pattern $pattern | Select-Object -Last 1
+    $hit = $sceneLines | Select-String -Pattern $pattern | Select-Object -Last 1
     if ($hit) { Write-Host ("  " + ($hit.ToString() -replace '^\[INFO \| aurora::rt\] ', '')) }
 }
 
 if ($FrameStats) {
     # The scene's reports only: the menus before it pace differently.
-    $intervalLines = @($scene | Select-String -Pattern 'Frame intervals over (\d+) frames: mean ([0-9.]+) ms, p50 ([0-9.]+), p95 ([0-9.]+), p99 ([0-9.]+), max ([0-9.]+); (\d+) over')
+    $intervalLines = @($sceneLines | Select-String -Pattern 'Frame intervals over (\d+) frames: mean ([0-9.]+) ms, p50 ([0-9.]+), p95 ([0-9.]+), p99 ([0-9.]+), max ([0-9.]+); (\d+) over')
     if ($intervalLines.Count -eq 0) {
         Write-Host "  cadence : aucun rapport dans la scene (moins de 600 frames ?)"
     } else {
@@ -416,7 +419,7 @@ if ($FrameStats) {
 # That happened on m402Dll and m405Dll and passed this script regardless: it
 # only ever looked for ERROR lines, and the last report printed above can be a
 # clean one while earlier reports were not. So every report is checked.
-$extentLines = @($scene | Select-String -Pattern 'Scene extent (\S+) x (\S+) x (\S+);')
+$extentLines = @($sceneLines | Select-String -Pattern 'Scene extent (\S+) x (\S+) x (\S+);')
 $nonFinite = 0
 $absurd = 0
 foreach ($line in $extentLines) {
@@ -431,7 +434,7 @@ Write-Host ("  bornes de scene : {0} non finies et {1} absurdes sur {2} rapports
 # second eligible pass is the direct signature of the term being applied twice;
 # the count per report is the coarse one -- reports come every 300 frames, and
 # the double application measured 600.
-$compositeLines = @($scene | Select-String -Pattern 'Composition ran (\d+) time\(s\) since the last report; (\d+) further passes')
+$compositeLines = @($sceneLines | Select-String -Pattern 'Composition ran (\d+) time\(s\) since the last report; (\d+) further passes')
 $compositeMax = 0
 $compositeExtra = 0
 foreach ($line in $compositeLines) {
@@ -487,7 +490,7 @@ if ($Sequence -gt 0) {
         $failures += "sequence of $Sequence frames requested but $($written.Count) written after the scene was reached"
     }
 }
-$errors = ($scene | Select-String -Pattern 'aurora::rt.*ERROR|device removed|DEVICE_HUNG').Count
+$errors = ($sceneLines | Select-String -Pattern 'aurora::rt.*ERROR|device removed|DEVICE_HUNG').Count
 if ($errors -gt 0) { $failures += "$errors ray tracing errors" }
 if ($nonFinite -gt 0) { $failures += "$nonFinite reports with non-finite scene bounds" }
 if ($absurd -gt 0) { $failures += "$absurd reports with scene bounds past 1e6" }

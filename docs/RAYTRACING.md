@@ -2394,3 +2394,38 @@ partage son masque ; deux chiffres venus de deux lots ne se comparent pas, même
 quand la scène porte le même nom. Le banc le dit maintenant de lui-même — il
 refuse un run dont la séquence n'a pas de pénombre, ce qui a écarté deux des six
 premiers runs de ce lot.
+
+## Le garde-fou de scène ne gardait rien (16 septembre 2026)
+
+Le 15 septembre, l'option `-Scene` avait été ajoutée pour qu'une comparaison qui
+demande une scène précise refuse les runs tombés ailleurs, et je l'avais déclarée
+vérifiée. Elle n'a jamais rien refusé.
+
+En PowerShell, `$scene` et `$Scene` sont la même variable. La boucle de
+navigation écrivait l'overlay trouvé dans `$scene` juste avant de construire le
+motif attendu à partir de `$Scene` :
+
+```powershell
+$scene = $overlay                                        # écrase la scène demandée
+$wanted = if ($Scene) { '^' + [regex]::Escape($Scene) }  # ... et le motif en vient
+$reached = $overlay -match $wanted                       # l'overlay contre lui-même
+```
+
+Le test comparait donc l'overlay à lui-même, et passait toujours. Ce qui l'a
+révélé : un run du lot C5, lancé avec `-Scene w01Dll`, a atterri sur **w10Dll** —
+un autre plateau — et a affiché « reached w10Dll.dll ». C'est l'outil d'analyse,
+qui compare la scène de chaque run à celle du premier, qui l'a écarté ; le script
+de test, lui, avait dit oui.
+
+La variable locale s'appelle maintenant `$found`, et les lignes de journal que le
+rapport découpe ne s'appellent plus `$scene` non plus, pour que le paramètre ne
+puisse plus être recouvert. Vérifié en demandant `-Scene m401Dll` sur une cible
+`board` : « attempt 1 did not reach a board (landed on w01Dll.dll) », puis échec,
+là où l'ancienne version aurait mesuré le plateau et affiché PASS.
+
+Ce que cela change aux mesures déjà publiées : rien qui ait été affirmé sur la
+foi de `-Scene` seul. Les comparaisons contre référence passent toutes par
+l'outil d'analyse, qui refuse un run dont la scène diffère de celle des autres —
+c'est lui qui a attrapé le run m416Dll du balayage des poids, et celui-ci. Mais
+la phrase du 15 septembre qui présentait `-Scene` comme un verrou était fausse :
+le verrou n'existait pas.
