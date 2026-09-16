@@ -2429,3 +2429,116 @@ l'outil d'analyse, qui refuse un run dont la scène diffère de celle des autres
 c'est lui qui a attrapé le run m416Dll du balayage des poids, et celui-ci. Mais
 la phrase du 15 septembre qui présentait `-Scene` comme un verrou était fausse :
 le verrou n'existait pas.
+
+## Le disque de la lumière en strates, et ce que la mesure a appris de l'ombre (16 septembre 2026)
+
+Lot C5, première moitié. L'hémisphère de l'AO est échantillonné proprement
+depuis longtemps : l'échantillon *i* prend sa propre strate, et une rotation par
+pixel empêche les voisins de tirer la même chose. Le disque du cône de lumière,
+lui, tirait deux nombres au hasard par échantillon et par pixel. Des tirages
+indépendants se groupent : avec douze rayons, un pixel peut en envoyer huit vers
+l'occultant quand son voisin en envoie huit à côté, et c'est le gros grain de la
+pénombre.
+
+La correction est le même procédé que l'hémisphère : rayon stratifié — un
+échantillon par anneau —, angle par inverse radicale, les deux tournés par pixel
+par un bruit à gradient entrelacé pris ailleurs sur l'écran que celui de l'AO.
+`AURORA_RT_SHADOW_STRATIFY=0` rend le bruit blanc, et le banc A/B compare les
+deux sur une même frame avec `AURORA_RT_AB=shadowStratify=0`.
+
+### La première mesure n'a rien montré, et c'était le plus instructif
+
+Sur la frame d'ouverture de m401Dll : **zéro pixel différent sur 1 228 800**.
+Pas un bug — la vue de l'ombre n'y prend que trois valeurs :
+
+| valeur | part des pixels | ce que c'est |
+|---|---|---|
+| 0,5498 | 59,8 % | entièrement à l'ombre |
+| 1,0000 | 37,7 % | en pleine lumière |
+| 0,0000 | 2,4 % | le fond |
+
+Aucun pixel entre les deux : les douze rayons d'un pixel sont toujours d'accord,
+et un disque dont tous les tirages donnent la même réponse ne peut pas être mieux
+échantillonné. Vérifié en le prenant par l'autre bout : sur cette même frame, **un
+seul rayon d'ombre donne exactement la même image que douze**, zéro pixel
+différent. Onze douzièmes du budget d'ombre n'y achètent rien.
+
+Pour situer, la vue d'occlusion du lot C1c sur la même scène compte un millier de
+valeurs distinctes et 47 % de pixels strictement entre l'ombre et la lumière.
+Tout le grain de cette scène est dans l'AO, aucun dans l'ombre.
+
+### Sur le plateau en jeu, la pénombre existe
+
+Même banc, w01Dll après six pas de jeu — l'interface est en place, la caméra
+regarde le plateau :
+
+| A/B sur une même frame, vue de l'ombre, sans filtre | grain de pénombre A | B | pixels différents |
+|---|---|---|---|
+| stratifié contre bruit blanc | **0,0351** | 0,0468 | 200 789 |
+| douze rayons contre un seul | 0,0360 | 0,1375 | 246 748 |
+
+La stratification enlève **un quart du grain** de la pénombre — du terme brut,
+avant le filtre ; la suite dit ce qu'il en reste dans l'image finie. Et les douze
+rayons, ici, ne sont pas du gaspillage : un seul quadruple le grain. La
+différence entre les deux scènes tient à la distance entre ce qui fait de l'ombre
+et ce qui la reçoit : le cône ne fait qu'un degré et demi de demi-angle, donc la
+pénombre ne s'ouvre que là où l'occultant est loin.
+
+### Dans l'image que le joueur voit
+
+La même frame tracée deux fois, filtre compris — une paire A/B tient
+l'accumulation à l'arrêt par construction :
+
+| | grain (image) | grain (pénombre) |
+|---|---|---|
+| stratifié | 0,02723 | 0,03178 |
+| bruit blanc | 0,02737 | 0,03199 |
+
+Un demi pour cent. Le filtre à trous enlevait déjà presque tout ce que la
+stratification enlève. Sur m401Dll en jeu, l'écart tombe à 0,01 % et 0,05 %,
+ce qui est cohérent avec une ombre sans pénombre.
+
+### Sur douze frames, filtre et accumulation compris
+
+Deux paires entrelacées sur le plateau en jeu, masque commun aux quatre runs :
+
+| | erreur contre référence | grain | grain de pénombre |
+|---|---|---|---|
+| stratifié | 0,0290 et 0,0287 | 0,02295 | 0,02567 |
+| bruit blanc | 0,0321 et 0,0322 | 0,02354 | 0,02604 |
+
+Onze pour cent d'erreur en moins, les paires ne se chevauchant pas. **Mais cette
+colonne-là ne se lit pas telle quelle** : la référence de chaque run est tracée
+avec l'échantillonnage de ce run. Mesuré sur les références elles-mêmes, leur
+grain vaut 0,0328 et 0,0328 côté stratifié contre 0,0359 et 0,0360 côté bruit
+blanc — neuf pour cent. La référence stratifiée est simplement plus propre, et
+l'essentiel des onze pour cent vient de là, pas de l'image montrée.
+
+Ce que le banc peut affirmer sans cette réserve, ce sont ses mesures sans
+référence : 2,5 % de grain en moins sur l'image, 1,4 % sur la pénombre. C'est
+petit, c'est constant, et c'est l'ordre de grandeur de l'A/B sur l'image
+composée. Le quart de grain gagné sur le terme brut ne se retrouve pas dans
+l'image finale : le débruiteur en avait déjà pris la plus grande part.
+
+### Ce que ça coûte
+
+Deux runs sur le plateau, `-FrameStats -Uncapped`, rapport par rapport :
+0,71 / 0,74 / 0,70 ms puis 1,79 à 1,84 avec la stratification, 0,72 / 0,74 /
+0,73 / 0,70 puis 1,79 à 1,81 sans. Médiane de trace identique des deux côtés,
+1,79 ms. La période de frame donne 6,56 ms de moyenne médiane avec contre 7,29
+sans — encore une fois dans le sens qui ne peut pas être vrai, donc du bruit de
+mesure. Deux divisions et une inverse radicale par échantillon : rien de
+mesurable.
+
+### Ce qui reste
+
+- **Le nombre de rayons d'ombre pourrait suivre la scène.** Là où l'ombre est
+  binaire, onze rayons sur douze ne servent à rien ; là où elle ne l'est pas, ils
+  servent tous. Rien ne les compte aujourd'hui.
+- **Le banc ne peut pas comparer proprement deux échantillonnages contre
+  référence**, puisque chaque run trace la sienne avec le sien. Il faudrait que
+  la référence soit tracée d'une manière fixe, indépendante du réglage comparé.
+- **La largeur du cône est un choix, pas une mesure.** À 1,72 degrés de
+  demi-angle, la pénombre reste sous le pixel partout où l'occultant est proche.
+  L'élargir donnerait des ombres franchement douces — et c'est là que la
+  stratification paierait le plus. Cela regarde le rendu voulu, pas le banc.
