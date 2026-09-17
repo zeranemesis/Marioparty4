@@ -1018,8 +1018,27 @@ void Hu3DModelShadowReset(s16 arg0) {
 
     temp_r31 = &Hu3DData[(s16) arg0];
     temp_r30 = temp_r31->hsf;
+#ifdef TARGET_PC
+    /* Hu3DModelShadowSet only increments when the flag was clear, and the kill
+     * path only decrements when it was set. This one decremented every time it
+     * was called, so a caller that resets the same model on consecutive frames
+     * drove the counter down without end. m415Dll/main.c:438 does exactly that:
+     * fn_1_1960 case 2 resets two models, and the case runs once per frame.
+     *
+     * Measured with a probe: the count went 10, 8, 6, 4, 2, 0, -2, -4 ... at two
+     * per frame, and Hu3DExec gates Hu3DShadowExec on Hu3DShadowCamBit != 0, so
+     * the whole scene loses its shadows the moment it passes zero. With the guard
+     * the same run holds at 8 and the shadow pass keeps running.
+     *
+     * The flag has to be tested before it is cleared. */
+    if ((temp_r31->attr & HU3D_ATTR_SHADOW) != 0) {
+        Hu3DShadowCamBit -= 1;
+    }
+    temp_r31->attr &= ~HU3D_ATTR_SHADOW;
+#else
     temp_r31->attr &= ~HU3D_ATTR_SHADOW;
     Hu3DShadowCamBit -= 1;
+#endif
     var_r27 = temp_r30->object;
     for (var_r28 = 0; var_r28 < temp_r30->objectNum; var_r28++, var_r27++) {
         constDataFlagReset(var_r27, 0x400);
