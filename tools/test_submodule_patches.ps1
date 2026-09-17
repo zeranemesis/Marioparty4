@@ -50,16 +50,27 @@ function Say([string]$text) { Write-Output $text }
 #
 # Staging into a throwaway index keeps the submodule's own index untouched and
 # still honours .gitignore, so build output stays out of the comparison.
+#
+# Git writes the diff as UTF-8 bytes, and PowerShell decodes a native command's
+# output with the console code page -- ibm850 on a French Windows -- while
+# Get-Content reads a file as Windows-1252. The aurora patch carries four
+# em-dashes in comments; decoded two different ways, the same bytes gave two
+# strings of equal length that did not compare equal, and -Update would have
+# written the mis-decoded one back over a correct patch. Both sides are read as
+# UTF-8 now.
 function Get-SubmoduleChange([string]$submodule, [string[]]$diffArgs) {
     $index = Join-Path ([IO.Path]::GetTempPath()) ("cubeshelf-index-" + [Guid]::NewGuid().ToString('N'))
     $previous = $env:GIT_INDEX_FILE
+    $previousEncoding = [Console]::OutputEncoding
     try {
+        [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false
         $env:GIT_INDEX_FILE = $index
         & git -C $submodule read-tree HEAD
         & git -C $submodule add --all
         return @(& git -C $submodule -c core.safecrlf=false diff --cached @diffArgs)
     }
     finally {
+        [Console]::OutputEncoding = $previousEncoding
         if ($null -eq $previous) { Remove-Item env:GIT_INDEX_FILE -ErrorAction SilentlyContinue }
         else { $env:GIT_INDEX_FILE = $previous }
         Remove-Item -LiteralPath $index -Force -ErrorAction SilentlyContinue
@@ -93,7 +104,7 @@ foreach ($pair in $pairs) {
     Say ("  base commit {0}, matching the superproject" -f $actual.Substring(0, 12))
 
     $live = (Get-SubmoduleChange $submodule @()) -join "`n"
-    $stored = (Get-Content -LiteralPath $patch -Raw)
+    $stored = [IO.File]::ReadAllText($patch, (New-Object Text.UTF8Encoding $false))
 
     # Compare content, not line endings: git's autocrlf rewrites the file on
     # checkout and that is not a difference in the change being described.
