@@ -1039,3 +1039,68 @@ toucher.
 
 Une sonde de deux lignes qui dit lequel des deux drapeaux est nul. C'est
 désormais possible : cette machine compile depuis aujourd'hui.
+
+## Références console, 2026-09-17 — la page cesse d'être aveugle
+
+Cette page s'ouvre sur : *« une classe entière de défauts échappe à tout ce que
+ce dépôt a construit pour se valider »*, et `tools/capture_fenetre.ps1` ajoute :
+*« every rendering defect was reported by a human describing what he saw, and
+answered by someone reading code and guessing »*.
+
+Il manquait la moitié de la comparaison : **à quoi cela ressemble sur la
+console**. Valentin a fourni une vidéo de référence — *Mario Party 4 - All Mini
+Games*, Typhlosion4President, 1:07:05 — et elle a été lue image par image dans
+le navigateur intégré, en mettant la lecture en pause aux horodatages voulus.
+
+Trois comparaisons en sont sorties, et l'une d'elles **retire** un défaut.
+
+### Avalanche! — 3:57 — défaut d'ombre CONFIRMÉ
+
+| console | port |
+|---|---|
+| chaque sapin porte une **petite ombre sombre et compacte** près du tronc | **quadrilatère bleu clair à arêtes franches** |
+
+Le sol est lisse dans les deux cas. L'écart ne porte donc pas sur le terrain
+mais sur la **forme** de l'ombre projetée : une silhouette contre un bloc uni.
+
+### Makin' Waves — 14:40 — défaut CONFIRMÉ
+
+| console | port |
+|---|---|
+| eau bleu clair **uniforme**, ondulations fines | **sombre, marbrée** de noir et de marine |
+| bord du bassin **net et régulier** | traînées sales, concentrées sur les bords |
+
+C'est la signature d'une distorsion **beaucoup trop ample**. L'eau emploie trois
+étages de texturage indirect (`m417Dll/water.c:810-826`) avec des exposants
+d'échelle **négatifs** (`-2`, `0`, `-3`). `GXSetIndTexMtx` d'Aurora encode
+pourtant correctement (`scaleExp + 17`, conforme au SDK) : c'est donc
+l'**application** du facteur dans le shader qu'il faut instruire, pas son
+encodage.
+
+### Slime Time — 1:28 — défaut PARTIELLEMENT RETIRÉ
+
+**Les confettis sont blancs et gris sur la console.** Ils sont donc **corrects
+dans le port**, et la ligne G1 les accusait à tort — moi le premier, en les
+décrivant comme « des rectangles gris au lieu d'être colorés ».
+
+L'écart réel est ailleurs, et il est net : les **projecteurs** sont des cônes
+**roses/magenta à dégradé doux** sur la console, et des cônes **blancs et
+pleins** dans le port. Perte de teinte et de dégradé.
+
+Cela resserre beaucoup la cible. Le chemin de particules prend sa couleur de
+`GX_CC_RASC` — la **couleur du sommet** — avec la texture en simple masque
+alpha (`hsfanim.c:770-775`). Un cône blanc et plein, c'est une couleur de
+sommet blanche au lieu de rose, et un alpha qui sature.
+
+### Ce que la méthode change
+
+Deux défauts passent de *supposé* à *confirmé par comparaison*, un troisième est
+amputé de sa moitié fausse, et une cible de plusieurs jours se réduit à deux
+valeurs à mesurer. En un quart d'heure.
+
+La leçon de G2 se répète : **regarder l'image coûte moins cher que raisonner
+sur le code.** Il aura suffi d'ajouter la référence à côté de la capture.
+
+**Toujours manquant : Stamp Out!.** Personne n'a encore vu si le cahier, les
+crayons et les jouets portent une ombre sur la console. Tant que cette image
+n'existe pas, on ne sait pas s'il y a un défaut à corriger.
