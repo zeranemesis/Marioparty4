@@ -1104,3 +1104,55 @@ sur le code.** Il aura suffi d'ajouter la référence à côté de la capture.
 **Toujours manquant : Stamp Out!.** Personne n'a encore vu si le cahier, les
 crayons et les jouets portent une ombre sur la console. Tant que cette image
 n'existe pas, on ne sait pas s'il y a un défaut à corriger.
+
+## G1 — Slime Time : les projecteurs, pas les confettis
+
+Mesuré le 2026-09-17 avec une sonde dans `particleFunc` (`hsfanim.c`), sur une
+build compilée localement. La sonde imprime, pour chaque système de particules,
+le format du bitmap, la branche TEV choisie et la couleur du premier sommet.
+
+Trois systèmes tournent pendant la fin de Slime Time :
+
+| système | format | branche TEV | couleur sommet |
+|---|---|---|---|
+| confettis | `bmpFmt=8` | `RASC-only` | gris, 126,126,125 → 88,88,68, alpha 250 → 155 |
+| éclat/bulles | `bmpFmt=8` | `RASC-only` | blanc bleuté, 237,233,251, alpha 98-170 |
+| **projecteurs** | **`bmpFmt=3`** | **`RASC*TEXC`** | **255,255,255,255** |
+
+### Ce que cela règle
+
+Les **confettis fonctionnent** : 150 particules, couleur qui s'assombrit, alpha
+qui décroît — un fondu propre. Et la référence console montre des confettis
+blancs et gris. Ils n'ont jamais eu de défaut.
+
+Les **projecteurs** sont un système de dix particules dont la couleur de sommet
+est **blanc opaque**, avec un TEV en `RASC*TEXC` : le blanc est neutre, donc la
+couleur affichée est **entièrement celle de la texture**. Console : cônes roses
+à dégradé. Port : cônes blancs. **La texture est donc échantillonnée en blanc.**
+
+### Où chercher
+
+`ANIM_BMP_C8 = 3` (`include/game/animdata.h:9`) : c'est une texture
+**palettisée 8 bits**, chargée avec une palette RGB5A3 —
+`GXInitTlutObj(..., GX_TL_RGB5A3, palNum)` puis `GXLoadTlut(tlut_obj, slot)` et
+`GXInitTexObjCI(..., GX_TF_C8, ..., slot)` (`sprput.c:243-251`).
+
+Deux détails rendent ce chemin suspect sur PC, et aucun n'est vérifié :
+
+1. **`HuSprTexLoad` a une implémentation dédiée sous `OPTIMIZED_TEXTURE_LOADING`,
+   drapeau posé par le port** (`CMakeLists.txt`). Elle met en cache le `GXTexObj`
+   et le `GXTlutObj` par bitmap et par slot (`tex_initialized`,
+   `tlut_initialized`), et ne les réinitialise jamais ensuite.
+2. **L'indice de TLUT est le numéro de slot de texture** — `0` pour les
+   particules. Toute autre texture palettisée chargée dans le même slot écrase
+   la palette, et l'ordre de dessin d'un port n'est pas celui de la console.
+
+### Ce qui est acquis, et ce qui ne l'est pas
+
+Acquis : le défaut est dans la **texture** des projecteurs, pas dans la couleur
+de sommet, pas dans les confettis, pas dans le texgen — tout cela est mesuré.
+C8 palettisé est le format en cause.
+
+Non acquis : **pourquoi** elle sort blanche. Les deux pistes ci-dessus sont des
+lectures, pas des mesures, et cette page a assez d'exemples d'hypothèses
+plausibles réfutées par la première mesure venue.
