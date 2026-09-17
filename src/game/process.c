@@ -4,6 +4,8 @@
 
 #ifdef TARGET_PC
 #include <string.h>
+#include "port/coroutine_stack.h"
+#include "port/crash_report.h"
 #endif
 
 #ifdef __MWERKS__
@@ -108,7 +110,30 @@ Process *HuPrcCreate(void (*func)(void), u16 prio, u32 stack_size, s32 extra_siz
         stack_size = 2048;
     }
 #ifdef TARGET_PC
-    stack_size *= 2;
+    /* The sizes above are PowerPC constants, and they do not predict what the
+     * same code needs as x86-64 at /Od. Measured peaks over a full Big Boo
+     * session, with the original constant on the left:
+     *
+     *     2048 -> 280      4096 -> 8200     8192 -> 6552
+     *    14336 -> 6696    16384 -> 6312    24576 -> 8552
+     *
+     * The requirement is a property of the call chain, near 8.5 KB at its
+     * deepest, and is almost unrelated to the constant. Doubling therefore gave
+     * the 4096 processes 8192 bytes for a need of 8200: the Big Boo event
+     * process fn_1_30A4 (src/REL/w04Dll/boo_event.c:343) overflowed by exactly
+     * eight bytes, the return address of one call, and took the session with it
+     * every time.
+     *
+     * So a multiplier alone is the wrong model. The floor is what makes this
+     * safe: every coroutine gets at least 32 KB, which is 3.8 times the deepest
+     * depth ever measured, and the multiplier is kept so the relative ordering
+     * the original constants express still means something. A coroutine stack
+     * costs address space, not committed pages beyond what it touches, and the
+     * failure it prevents is silent and fatal. */
+    stack_size *= 4;
+    if (stack_size < 32768) {
+        stack_size = 32768;
+    }
     alloc_size = HuMemMemoryAllocSizeGet(sizeof(Process)) + HuMemMemoryAllocSizeGet(extra_size);
 #else
     alloc_size = HuMemMemoryAllocSizeGet(sizeof(Process)) + HuMemMemoryAllocSizeGet(stack_size) + HuMemMemoryAllocSizeGet(extra_size);
@@ -127,6 +152,13 @@ Process *HuPrcCreate(void (*func)(void), u16 prio, u32 stack_size, s32 extra_siz
 #ifdef TARGET_PC
     process->thread = co_create(stack_size, func);
     process->thread_size = stack_size;
+    // The stack libco just allocated is guarded and measurable; tell the meter
+    // which process owns it so a guard-page fault can name the culprit and the
+    // peak depth can be attributed. See include/port/coroutine_stack.h.
+    PartyBoard_CoroutineStackArm(process->thread, stack_size, (const void *)func);
+    PartyBoard_CrashBreadcrumb(PARTYBOARD_CRASH_CAT_PROCESS,
+        "create prio=%u stack=%u(game %u) thread=%p", prio, stack_size, stack_size / 2,
+        process->thread);
 #else
     process->base_sp = ((uintptr_t)HuMemMemoryAlloc(heap, stack_size, FAKE_RETADDR)) + stack_size - 8;
     gcsetjmp(&process->jump);
@@ -312,6 +344,12 @@ void HuPrcCall(s32 tick)
         ret = thread_arg;
         switch (ret) {
             case 2:
+                // Fold this stack's high-water mark into the worst case for its
+                // process before libco hands the memory back.
+                PartyBoard_CrashBreadcrumb(PARTYBOARD_CRASH_CAT_PROCESS,
+                    "destroy thread=%p peak=%u of %u", processcur->thread,
+                    PartyBoard_CoroutineStackPeak(processcur->thread, processcur->thread_size),
+                    processcur->thread_size);
                 co_delete(processcur->thread);
 #else
     ret = gcsetjmp(&processjmpbuf);
@@ -656,6 +694,65 @@ void HuPrcAllUPause(s32 flag)
 }
 
 #include "process_snapshot_test.inc"
+
+#ifdef TARGET_PC
+#include "port/netplay_state.h"
+
+/* Read-only head of the scheduler list, for canonical exporters that need to
+ * find a specific process without keeping a second registry of their own. */
+Process *PartyBoard_PrcListHead(void)
+{
+    return processtop;
+}
+
+/* Canonical index of a process in the scheduler list, or -1. Addresses differ
+ * legitimately between two machines; the position in the list does not. */
+static s32 HuPrcCanonicalIndex(const Process *target)
+{
+    Process *process;
+    s32 index = 0;
+    if (target == NULL) {
+        return -1;
+    }
+    for (process = processtop; process != NULL; process = process->next, ++index) {
+        if (process == target) {
+            return index;
+        }
+    }
+    return -2; /* Reachable only from a corrupt or foreign descriptor. */
+}
+
+void PartyBoard_NetplayProcessState(PartyBoardNetplayStateSink sink, void *context)
+{
+    Process *process;
+    s32 index = 0;
+#define WORD(value) sink(context, #value, (uint32_t)(value))
+    WORD(processcnt);
+    WORD(thread_arg);
+    WORD(HuPrcCanonicalIndex(processcur));
+    for (process = processtop; process != NULL; process = process->next, ++index) {
+        WORD(index);
+        WORD(process->exec);
+        WORD(process->stat);
+        WORD(process->prio);
+        WORD(process->sleep_time);
+        WORD(process->thread_size);
+        WORD(HuPrcCanonicalIndex(process->parent));
+        WORD(HuPrcCanonicalIndex(process->child));
+        WORD(HuPrcCanonicalIndex(process->next_child));
+        WORD(HuPrcCanonicalIndex(process->first_child));
+        /* Pointers are never hashed; only whether the slot is populated. */
+        WORD(process->dtor != NULL);
+        WORD(process->user_data != NULL);
+        WORD(process->heap != NULL);
+        if (index > 4096) {
+            break; /* Corrupt list: stop instead of walking forever. */
+        }
+    }
+    WORD(index);
+#undef WORD
+}
+#endif
 
 #ifdef TARGET_PC
 #include "port/rollback_scene.h"

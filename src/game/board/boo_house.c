@@ -18,6 +18,7 @@
 
 #include "game/board/tutorial.h"
 #include "game/hsfex.h"
+#include "port/board_coverage.h"
 
 // bss
 static s16 houseMdl[6];
@@ -169,6 +170,7 @@ void BoardBooHouseKill(void)
 
 void BoardBooHouseExec(s32 arg0)
 {
+    PARTYBOARD_BOARD_COVERAGE("BOO_HOUSE");
     currPlayer = arg0;
     if (BoardPlayerSizeGet(currPlayer) != 2) {
         BoardRollDispSet(0);

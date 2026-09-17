@@ -1,0 +1,149 @@
+PartyBoard — Mario Party 4 sur PC
+=================================
+
+Version         @VERSION@
+Commit          @COMMIT@
+Empreinte       @BUILD_HASH@
+Paquet créé le  @DATE@
+
+
+CE QUE CE DOSSIER CONTIENT
+--------------------------
+Le jeu (partyboard.exe), le salon en ligne (PartyBoardOnline.exe), les
+overlays et les ressources. Tout ce qui est nécessaire pour lancer le jeu
+est déjà là : il n'y a rien à installer.
+
+Il ne contient PAS le disque Mario Party 4. Vous fournissez votre propre
+fichier .iso.
+
+
+LES TROIS RÈGLES, À LIRE AVANT DE COMMENCER
+-------------------------------------------
+1. LES DEUX PC EXTRAIENT CE MÊME ZIP.
+   Le salon calcule une empreinte de tous les fichiers du dossier et la
+   compare avec celle de l'autre PC. Un seul fichier différent d'un côté et
+   le départ est refusé, avec le message « Les versions du jeu sont
+   différentes. Copiez le même dossier PartyBoard sur les deux PC. »
+   L'empreinte attendue est celle inscrite en haut de ce fichier, et vous
+   pouvez la vérifier à tout moment avec « Verifier le dossier.cmd ».
+
+2. LES DEUX PC ONT LE MÊME FICHIER .ISO, OCTET POUR OCTET.
+   Le salon calcule le SHA-256 complet du disque des deux côtés et bloque le
+   départ s'ils diffèrent. Copiez le fichier d'un PC à l'autre ; ne le
+   ré-extrayez pas une seconde fois depuis la galette, une deuxième
+   extraction ne redonne pas toujours les mêmes octets.
+
+3. EXTRAYEZ AILLEURS QUE DANS « Program Files ».
+   Par exemple C:\Jeux\PartyBoard. Le jeu écrit son cache à côté de lui et
+   Windows bloque l'écriture dans Program Files.
+
+
+INSTALLATION SUR LE SECOND PC
+------------------------------
+1. Copier le zip sur le second PC et l'extraire, par exemple dans
+   C:\Jeux\PartyBoard.
+2. Copier votre fichier .iso sur ce PC (n'importe où).
+3. Lancer « Verifier le dossier.cmd ». Il doit afficher exactement
+   l'empreinte inscrite en haut de ce fichier. Si elle diffère, l'extraction
+   est incomplète : recommencez.
+4. Double-cliquer sur « Jouer en ligne.cmd ».
+
+
+JOUER À DEUX
+------------
+Sur les DEUX PC :
+  - Ouvrir « Jouer en ligne.cmd ».
+  - Saisir un pseudo.
+  - Cliquer « Choisir le disque » et sélectionner votre .iso. Le salon
+    vérifie le fichier ; cela prend quelques secondes la première fois.
+
+Sur le PC QUI INVITE :
+  - Cliquer « Créer un salon ».
+  - Windows peut demander l'autorisation d'ouvrir un port : accepter.
+  - Cliquer « Copier l'invitation » et envoyer le texte à l'autre joueur
+    (messagerie, e-mail, peu importe).
+  - GARDER LA FENÊTRE OUVERTE. L'invitation expire si le salon se ferme.
+
+Sur le PC QUI REJOINT :
+  - Coller l'invitation dans la grande zone de texte (bouton « Coller
+    l'invitation »), puis cliquer « Rejoindre ».
+
+Quand les deux joueurs apparaissent dans la liste, seul le PC qui invite
+peut lancer la partie. Les deux jeux démarrent ensemble.
+
+
+SI ÇA NE MARCHE PAS
+-------------------
+« Windows a protégé votre ordinateur » (écran bleu SmartScreen)
+    Les exécutables ne sont pas signés. Cliquer « Informations
+    complémentaires » puis « Exécuter quand même ».
+
+« Les versions du jeu sont différentes »
+    Les deux dossiers ne sont pas identiques. Comparer la sortie de
+    « Verifier le dossier.cmd » sur les deux PC. Ré-extraire le zip du côté
+    qui diffère.
+
+Le départ reste grisé alors que les deux joueurs sont là
+    Les deux .iso ne sont pas identiques. Recopier le fichier d'un PC vers
+    l'autre.
+
+« Réseau virtuel / VPN détecté »
+    Le salon refuse de passer par un adaptateur VPN ou virtuel, parce que
+    l'adresse annoncée à l'autre joueur serait injoignable. Désactiver le
+    VPN, ou choisir la carte réseau réelle.
+
+Le jeu ne démarre pas du tout, ou une fenêtre parle d'une DLL manquante
+    Installer « Microsoft Visual C++ 2015-2022 Redistributable (x64) »
+    depuis le site de Microsoft, puis réessayer. Les bibliothèques sont
+    normalement fournies dans ce dossier, ce message ne devrait pas
+    apparaître.
+
+Le salon ne s'ouvre pas
+    Il demande .NET Framework 4.8, inclus dans Windows 10 (mise à jour de
+    mai 2019) et Windows 11. Sur une installation plus ancienne, l'installer
+    depuis le site de Microsoft.
+
+Le bouton de mise à jour
+    Il est sans effet aujourd'hui : la version publiée et celle de ce paquet
+    portent le même numéro. Ne l'utilisez pas : la version publiée est plus
+    ANCIENNE que celle-ci, et l'installer casserait l'égalité des deux
+    dossiers.
+
+
+ÉTAT DE VALIDATION — À LIRE
+----------------------------
+Ce paquet est une version de TEST, pas une version finie.
+
+Ce qui est établi :
+  - Le moteur de synchronisation a été exercé plus de cent fois entre deux
+    instances sur une même machine, sans divergence sur les trajets
+    couverts.
+  - Le plateau Boo's Haunted Bash et 14 mini-jeux sur 61 ont été parcourus
+    automatiquement.
+
+Ce qui ne l'est PAS :
+  - Aucune partie n'a jamais été jouée entre DEUX MACHINES PHYSIQUES. C'est
+    précisément ce que ce paquet sert à tenter pour la première fois.
+  - Aucune partie complète n'a jamais été menée par des joueurs humains
+    jusqu'à son classement final.
+  - Trois défauts restent ouverts et non corrigés : une divergence
+    d'animation intermittente lors d'une seconde entrée sur un plateau, une
+    divergence d'objets au chargement d'un mini-jeu, et une libération
+    mémoire intermittente au démarrage.
+  - 47 mini-jeux sur 61 et 8 plateaux sur 9 n'ont jamais été testés.
+
+Attendez-vous à des plantages et à des désynchronisations. Quand cela
+arrive, le bouton « Enregistrer le diagnostic » du salon produit un
+fichier : gardez-le des deux côtés, c'est lui qui permet de comprendre.
+
+
+LICENCE ET DIFFUSION
+--------------------
+Ce paquet est destiné à vos propres machines. Il n'est pas prévu pour une
+diffusion publique : le dépôt n'a pas encore de fichier LICENSE, le backend
+audio expérimental demande une revue de licence écrite dans
+DOLPHIN_AX_NOTICE.md, et le dossier contient une table DSP et une police de
+caractères commerciale dont le statut n'a pas été tranché.
+
+Le jeu lui-même ne vous est pas fourni : vous devez posséder votre propre
+exemplaire de Mario Party 4 et en faire l'image vous-même.

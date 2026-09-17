@@ -16,7 +16,13 @@
 #include "port/rollback_sequence.h"
 #include "port/rollback_scene.h"
 #include "port/settings.h"
+#include "port/crash_report.h"
 #include "port/config.hpp"
+#include <filesystem> // port/main.h declares a std::filesystem::path global.
+#include <map>
+#include "port/main.h"
+#include "port/port_version.h"
+#include "partyboard_version.h"
 
 extern "C" {
 #include "game/gamework.h"
@@ -33,6 +39,22 @@ extern "C" {
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#if defined(_WIN32)
+// For the D30 heap census only: a return address must be reported relative to
+// its module, and that needs GetModuleHandleEx. NOMINMAX because this file
+// uses std::min/std::max and windows.h would shadow them with macros.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#elif defined(__unix__) || defined(__APPLE__)
+#include <dlfcn.h>   // dladdr, pour la meme resolution d adresse hors Windows
+#endif
+#include <ctime>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -64,6 +86,15 @@ extern "C" BOOL omDLLSnapshotSave(void *destination, std::size_t capacity);
 extern "C" std::size_t HuPadSnapshotSizeGet(void);
 extern "C" BOOL HuPadSnapshotSave(void *destination, std::size_t capacity);
 extern "C" BOOL HuPadSnapshotSelfTest(void);
+extern "C" BOOL msmStreamLogicalSelfTest(void);
+extern "C" BOOL PartyBoard_RetraceCounterSelfTest(void);
+extern "C" BOOL PartyBoard_ThpLogicalSelfTest(void);
+extern "C" s32 msmMusGetStatus(int musNo);
+extern "C" void msmStreamLogicalTick(void);
+extern "C" bool msmStreamLogicalProbeInstall(void);
+extern "C" void msmStreamLogicalProbeStart(int channel, int samples, int frequency);
+extern "C" void msmStreamLogicalProbeFinishPhysical(int channel);
+extern "C" s32 msmStreamGetStatus(int streamNo);
 
 namespace partyboard::netplay {
 namespace {
@@ -72,7 +103,19 @@ constexpr std::uint32_t kSessionId = 0x4d503452u; // "MP4R"
 constexpr std::uint32_t kRuntimeConfigMagic = 0x4e500000u; // "NP" + delay
 constexpr std::uint32_t kRuntimeFullGameFlag = 0x00010000u;
 constexpr std::uint32_t kRuntimeRollbackFlag = 0x00020000u;
-constexpr std::uint32_t kRuntimeConfigMagicMask = 0xfffc0000u;
+// D23. The hook tick gate changes simulation behaviour, so two peers that
+// disagree about it are not playing the same game. The mask gives up bit 18
+// to carry it, which makes a gate-enabled peer unreadable to an older binary
+// - the right outcome, and better than a silent divergence ten minutes in.
+// Overlay indices of the minigame modules, from include/ovl_table.h: the
+// m3xx/m4xx entries sit between _minigameDLL/bootDll/instDll below and the
+// mode and board modules above.
+// D23: defini dans src/game/hsfanim.c, diagnostic uniquement, jamais hache.
+extern "C" u32 partyboardParManHookRuns;
+constexpr int kFirstMinigameOverlay = 4;
+constexpr int kLastMinigameOverlay = 70;
+constexpr std::uint32_t kRuntimeHookGateFlag = 0x00040000u;
+constexpr std::uint32_t kRuntimeConfigMagicMask = 0xfff80000u;
 constexpr std::size_t kHistorySize = 256;
 constexpr std::uint8_t kDefaultInputDelay = 3;
 constexpr std::uint8_t kMaximumInputDelay = 8;
@@ -94,7 +137,10 @@ struct Runtime {
     UdpTransport transport;
     SessionProgress progress;
     StateHistory states;
-    std::array<CanonicalState, kStateHistorySize> canonicalHistory {};
+    // Field-level evidence for the frames a divergence can still be reported
+    // at. Digests cover the full 256-frame stream; only the detail is shorter.
+    std::array<CanonicalState, kDetailHistorySize> detailHistory {};
+    std::array<std::uint32_t, kDetailHistorySize> detailFrames {};
     bool lockstepPrepared = false;
     bool desyncProbe = false;
     bool menuProbe = false;
@@ -104,6 +150,51 @@ struct Runtime {
     bool disconnectProbe = false;
     bool contextMismatchProbe = false;
     bool realtimeProbe = false;
+    bool audioProbe = false;
+    bool walkProbe = false;
+    // Overlay-aware walk. The free-running beat below picks the game mode
+    // and the board by accident: how many of its horizontal pulses land in
+    // a menu depends on how long that menu happens to stay open, which
+    // moves by hundreds of frames with the input that preceded it. On
+    // 2026-09-12 the same beat settled on Party mode in one run and Story
+    // mode in another. With a plan, the walk reacts to the overlay instead:
+    // silent where a stray pulse would change the mode, and spending an
+    // exact number of cursor moves where the board is chosen.
+    bool walkPlan = false;
+    // Which entry of the mode list to confirm: 0 Party, 1 Story,
+    // 2 the minigame mode (src/REL/modeseldll/main.c:210-243).
+    int walkMode = 0;
+    int walkModeLeft = 0;
+    // Cursor moves to spend in the board list once it says it is reading
+    // the stick. Signed: the cursor starts on w01 at index 2 of
+    // {1,2,0,3,4,5}, so +1 is w04 and -1 is w03.
+    int walkNotches = 0;
+    int walkNotchesLeft = 0;
+    std::uint32_t walkPulseStart = UINT32_MAX;
+    std::uint32_t walkPulseEnd = 0;
+    // Set by the menu itself, through PartyBoard_NetplayWalkMenu. A frame
+    // number cannot stand in for this: the list only accepts a move once its
+    // six panels have settled, and when that happens depends on load times.
+    bool walkMenuReady = false;
+    // Test-only override of the party turn count. A twenty-turn game takes
+    // over two hours, so the end of a game - final turn, bonus stars, results,
+    // ending sequence - had never once run. Shortening the game exercises all
+    // of it. Recorded in every result: a ten-turn game must never be read
+    // later as a twenty-turn one.
+    int maxTurnsOverride = 0;
+    // Test-only, see --netplay-inject-heap.
+    int injectHeapFrame = 0;
+    int injectHeapBlocks = 0;
+    std::uint32_t contextEntryFrame = 0;
+    // Input recording and replay. A recording is raw pad samples keyed by the
+    // frame they are APPLIED on, so the same file replays correctly at any
+    // input delay. Both seats are stored, and each peer replays its own.
+    std::string recordPath;
+    std::string replayPath;
+    std::FILE *recordFile = nullptr;
+    std::vector<std::array<PartyBoardRollbackInput, 2>> replaySamples;
+    std::vector<bool> replayPresent;
+    std::uint32_t replayExhaustedFrame = UINT32_MAX;
     std::array<InputSlot, kHistorySize> localHistory {};
     std::array<InputSlot, kHistorySize> remoteHistory {};
     PartyBoardRollbackInput lastRemote {};
@@ -120,6 +211,11 @@ struct Runtime {
     std::uint64_t lastRepairRequestMs = 0;
     std::uint64_t lastDiagnosticMs = 0;
     unsigned diagnosticLines = 0;
+    // Named events are budgeted apart from the periodic heartbeat: they are
+    // rare, they arrive late, and sharing one cap made the heartbeat silence
+    // them. See the 2026-09-13 board run that hit 3000 lines before its
+    // final turn.
+    unsigned diagnosticEventLines = 0;
     std::uint32_t stalledTicks = 0;
     std::uint32_t consecutiveStalledTicks = 0;
     std::uint32_t maximumStalledTicks = 0;
@@ -165,7 +261,12 @@ void writeDiagnostic(const char *event, bool force = false)
 {
 #ifdef _WIN32
     const auto now = monotonicMs();
-    if (gRuntime.diagnosticLines >= 3000 || (!force && gRuntime.lastDiagnosticMs && now - gRuntime.lastDiagnosticMs < 2000)) return;
+    if (force) {
+        if (gRuntime.diagnosticEventLines >= 20000) return;
+    } else {
+        if (gRuntime.diagnosticLines >= 3000) return;
+        if (gRuntime.lastDiagnosticMs && now - gRuntime.lastDiagnosticMs < 2000) return;
+    }
     gRuntime.lastDiagnosticMs = now;
     const auto *path = _wgetenv(L"PARTYBOARD_NET_DIAGNOSTIC");
     if (!path || !*path) return;
@@ -185,7 +286,7 @@ void writeDiagnostic(const char *event, bool force = false)
     u32 available[2] {};
     for (unsigned i = 0; i < 64; ++i)
         if (GWMGAvailGet(401 + i)) available[i / 32] |= 1u << (i % 32);
-    std::fprintf(file, "utc_ms=%lld event=%s player=%u frame=%u context=%d wire_frame=%u local_ready=%d remote_ready=%d local_context=%u remote_context=%u received=%u rejected=%u repaired=%u send_errors=%u packet_age_ms=%llu rng_sync=%d seeds=%08x/%08x mismatch=%d context_skew=%u live_rng=%08x/%08x global_counter=%u tx_sequence=%u mg_available=%08x/%08x mg_next=%d language=%d message_speed=%d rollback_active=%d rollback_base=%u rollback_current=%u rollback_confirmed=%u rollback_count=%u rollback_replayed=%u rollback_max=%u rollback_predicted=%u rollback_late=%u\n",
+    std::fprintf(file, "utc_ms=%lld event=%s player=%u frame=%u context=%d wire_frame=%u local_ready=%d remote_ready=%d local_context=%u remote_context=%u received=%u rejected=%u repaired=%u send_errors=%u packet_age_ms=%llu rng_sync=%d seeds=%08x/%08x mismatch=%d context_skew=%u live_rng=%08x/%08x global_counter=%u tx_sequence=%u mg_available=%08x/%08x mg_next=%d language=%d message_speed=%d rollback_active=%d rollback_base=%u rollback_current=%u rollback_confirmed=%u rollback_count=%u rollback_replayed=%u rollback_max=%u rollback_predicted=%u rollback_late=%u parman_runs=%u rendered=%u turn=%d max_turn=%d board=%d\n",
         static_cast<long long>(utc), event, gRuntime.localPlayer, gRuntime.frame, gRuntime.observedContext,
         gRuntime.lastWireFrame, local.valid && local.frame == gRuntime.frame, remote.valid && remote.frame == gRuntime.frame,
         local.captureContext, remote.captureContext, gRuntime.receivedPackets, gRuntime.rejectedPackets,
@@ -196,9 +297,18 @@ void writeDiagnostic(const char *event, bool force = false)
         gRuntime.rollbackSession != nullptr, gRuntime.rollbackBaseFrame,
         rollbackStats.currentFrame, rollbackConfirmed, rollbackStats.rollbackCount,
         rollbackStats.resimulatedFrames, rollbackStats.maximumRollback,
-        rollbackStats.predictedFrames, rollbackStats.lateInputs);
+        rollbackStats.predictedFrames, rollbackStats.lateInputs,
+        partyboardParManHookRuns, PartyBoard_RenderedFrames,
+        /* Progress, not just motion. minFrames cannot tell "played twelve
+           turns" from "sat in a menu for twelve minutes", and that is how
+           nine runs stuck on the end-of-game statistics screens were filed
+           for days as a defect of the GAME. A run that reaches its frame
+           budget without reaching turns is an ABNORMAL_EXIT, and nothing
+           could say so because no log carried the turn. Now every line
+           does. */
+        GWSystem.turn, GWSystem.max_turn, GWSystem.board);
     std::fclose(file);
-    ++gRuntime.diagnosticLines;
+    if (force) { ++gRuntime.diagnosticEventLines; } else { ++gRuntime.diagnosticLines; }
 #else
     (void)event; (void)force;
 #endif
@@ -288,7 +398,11 @@ void resetOverlayTimeline(std::uint8_t contextId)
     gRuntime.rollbackBaseFrame = 0;
     gRuntime.rollbackSessionContext = -1;
     gRuntime.states = {};
-    for (auto &state : gRuntime.canonicalHistory) state.fields.clear();
+    for (auto &state : gRuntime.detailHistory) state.reset();
+    gRuntime.detailFrames.fill(kNoHashFrame);
+    // A network timeline owns its own RNG consumption baseline, exactly like
+    // the seeds it agrees on: counters must start at zero on both peers.
+    PartyBoard_NetplayRandomCountersReset();
     gRuntime.lockstepPrepared = false;
     gRuntime.lastStateRepairMs = 0;
     gRuntime.localHistory = {};
@@ -389,6 +503,503 @@ SnapshotProbeResult runRollbackSnapshotProbe()
     return SnapshotProbeResult::Captured;
 }
 
+// ---------------------------------------------------------------------------
+// Forced rollback probe
+//
+// SAVE at frame F, let the game run D frames, SAVE again, RESTORE F, replay the
+// same D frames, and require the canonical state to come back identical. It is
+// the local, deterministic half of rollback: no network, no prediction, no
+// remote peer. If a frame cannot be reproduced from a snapshot plus its inputs
+// on one machine, no amount of network machinery will make it reproducible on
+// two.
+//
+// The experiment is a side excursion and it is undone. A second snapshot is
+// taken at the target frame and restored at the end, so the forward timeline
+// continues exactly where it was and two peers running the same probe stay in
+// step whatever the result. Nothing is repaired, resynchronized or hidden: a
+// failure writes a report naming the first divergent subsystem and field, and
+// stops the session.
+//
+//   PARTYBOARD_FORCE_ROLLBACK=<period>[:<distance,distance,...>]
+//
+// The distance ladder exists because a one-frame rollback proves very little:
+// state the snapshot forgets often only matters once enough frames have been
+// re-simulated. Default ladder 1,2,4,8,15,30,60,120, rotated so successive
+// tests use different distances.
+// ---------------------------------------------------------------------------
+
+struct ForceRollbackProbe {
+    bool configured = false;
+    std::uint32_t period = 0;
+    std::vector<std::uint32_t> distances;
+    std::size_t ladderIndex = 0;
+    /* The frame at which the next test becomes eligible. The period paces the
+       tests; it no longer selects the instants at which the gate is asked. */
+    std::uint32_t nextEligibleFrame = 1;
+    /* The current wait: since the probe now asks every frame until the gate
+       opens, a refusal is no longer an event - it is a state. These record how
+       long the wait has lasted and which clause is holding it, so the log can
+       report the wait once instead of once per frame. */
+    std::uint32_t waitingSince = 0;
+    std::uint32_t waitRefusals = 0;
+    std::string waitClause;
+    /* Consecutive frames the gate has been open for. A test needs the gate open
+       twice - once to save, once `distance` frames later to save the forward
+       state - so arming on a one-frame opening wastes the test. */
+    std::uint32_t openStreak = 0;
+    std::uint32_t abandonedAtForwardSave = 0;
+    /* Which clause refused, and how often, across the whole run. Kept here
+       rather than reconstructed by counting log lines, so the histogram
+       survives a truncated diagnostic file. */
+    std::map<std::string, std::uint32_t> refusalsByClause;
+
+    bool recording = false;
+    std::uint32_t saveFrame = 0;
+    std::uint32_t targetFrame = 0;
+    std::vector<std::uint8_t> before;
+    std::vector<std::uint8_t> after;
+    std::vector<std::array<PartyBoardRollbackInput, rollback::kMaxPlayers>> inputs;
+    CanonicalState expected;
+
+    std::uint32_t attempted = 0;
+    std::uint32_t refused = 0;
+    std::uint32_t passed = 0;
+    std::uint32_t failed = 0;
+    bool stopped = false;
+};
+
+ForceRollbackProbe gForceRollback;
+
+void configureForceRollback()
+{
+    if (gForceRollback.configured) return;
+    gForceRollback.configured = true;
+    const char *value = std::getenv("PARTYBOARD_FORCE_ROLLBACK");
+    if (value == nullptr || value[0] == 0) return;
+
+    const std::string text(value);
+    const auto colon = text.find(':');
+    const std::string periodText = colon == std::string::npos ? text : text.substr(0, colon);
+    gForceRollback.period = static_cast<std::uint32_t>(std::strtoul(periodText.c_str(), nullptr, 10));
+    if (gForceRollback.period == 0) return;
+
+    if (colon != std::string::npos) {
+        std::size_t start = colon + 1;
+        while (start < text.size()) {
+            const auto comma = text.find(',', start);
+            const auto piece =
+                text.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+            const auto distance = static_cast<std::uint32_t>(std::strtoul(piece.c_str(), nullptr, 10));
+            if (distance > 0) gForceRollback.distances.push_back(distance);
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+        }
+    }
+    if (gForceRollback.distances.empty()) {
+        gForceRollback.distances = {1, 2, 4, 8, 15, 30, 60, 120};
+    }
+    char event[160];
+    std::snprintf(event, sizeof(event), "force-rollback armed period=%u distances=%zu",
+        gForceRollback.period, gForceRollback.distances.size());
+    writeDiagnostic(event, true);
+}
+
+// Progress is reported on every outcome, not only on failure: a probe that
+// silently refuses every test looks exactly like a probe that silently passes
+// every test, and the two must never be confusable. writeDiagnostic throttles
+// the repeats, so this stays one line every couple of seconds.
+void reportForceRollbackProgress(std::uint32_t distance, const char *outcome,
+    std::uint32_t atFrame = 0)
+{
+    const ForceRollbackProbe &probe = gForceRollback;
+    char event[224];
+    // A refusal happens at the frame it was refused on, not at the last frame a
+    // test was armed on; reporting the stale saveFrame made twenty refusals all
+    // look like they happened at frame 900.
+    std::snprintf(event, sizeof(event),
+        "force-rollback %s frame=%u distance=%u attempted=%u passed=%u failed=%u refused=%u",
+        outcome, atFrame != 0 ? atFrame : probe.saveFrame, distance, probe.attempted,
+        probe.passed, probe.failed, probe.refused);
+    // writeDiagnostic throttles unforced lines to one every two seconds across
+    // every diagnostic the runtime writes, and the netplay checkpoint line takes
+    // that slot, so an unforced line is an invisible line.
+    //
+    // Every OUTCOME is therefore written: a pass, a failure, a refusal. Only the
+    // arming, which happens once per test and says nothing on its own, is
+    // throttled to every tenth.
+    //
+    // An earlier version forced on `attempted % 10`, which never fired: a test
+    // refused before the comparison does not increment `attempted`, so a probe
+    // refusing every test sat at attempted=1 and said nothing at all. Silence
+    // from a probe has to mean the probe is silent, not that it stopped.
+    const bool arming = std::strcmp(outcome, "armed") == 0;
+    const bool always = !arming || ((probe.attempted + probe.refused) % 10) == 0;
+    writeDiagnostic(event, always);
+}
+
+std::array<PartyBoardRollbackInput, rollback::kMaxPlayers> currentAppliedInputs()
+{
+    std::array<PartyBoardRollbackInput, rollback::kMaxPlayers> inputs {};
+    for (std::size_t player = 0; player < rollback::kMaxPlayers; ++player) {
+        inputs[player] = inputFromPad(gSynchronizedPads[player]);
+    }
+    return inputs;
+}
+
+CanonicalState captureCanonicalNow(std::uint32_t frame)
+{
+    const StateDigest stamp {frame,
+        static_cast<std::uint32_t>(gRuntime.probeContext >= 0 ? gRuntime.probeContext
+                                                             : PartyBoard_NetplayContextId()),
+        frand_state_get(), static_cast<std::uint32_t>(rand8_state_get()), GlobalCounter};
+    return captureCanonical(stamp);
+}
+
+// Names the first field whose value differs. Both captures walk the same code,
+// so a length difference is itself a finding and is reported as one.
+void describeFirstDivergence(const CanonicalState &expected, const CanonicalState &actual,
+    std::string &subsystem, std::string &field, std::uint32_t &expectedValue,
+    std::uint32_t &actualValue)
+{
+    subsystem = "NONE";
+    field = "none";
+    expectedValue = 0;
+    actualValue = 0;
+    if (expected.values.size() != actual.values.size()) {
+        subsystem = "SHAPE";
+        field = "field count";
+        expectedValue = static_cast<std::uint32_t>(expected.values.size());
+        actualValue = static_cast<std::uint32_t>(actual.values.size());
+        return;
+    }
+    for (std::size_t index = 0; index < expected.values.size(); ++index) {
+        if (expected.values[index] == actual.values[index]) continue;
+        subsystem = subsystemName(expected.subsystemOf(index));
+        field = expected.names[index] != nullptr ? expected.names[index] : "?";
+        expectedValue = expected.values[index];
+        actualValue = actual.values[index];
+        return;
+    }
+}
+
+// Reports land beside the rest of a session's evidence: the crash directory the
+// launcher chose, or failing that the directory of the netplay diagnostic.
+std::string rollbackReportDirectory()
+{
+    if (const char *directory = std::getenv("PARTYBOARD_CRASH_DIR")) {
+        if (directory[0] != 0) return directory;
+    }
+    if (const char *diagnostic = std::getenv("PARTYBOARD_NET_DIAGNOSTIC")) {
+        std::string text(diagnostic);
+        const auto cut = text.find_last_of("/\\");
+        if (cut != std::string::npos) return text.substr(0, cut);
+    }
+    return ".";
+}
+
+void writeRollbackFailureReport(const CanonicalState &expected, const CanonicalState &actual,
+    std::uint32_t distance)
+{
+    std::string subsystem, field;
+    std::uint32_t expectedValue = 0, actualValue = 0;
+    describeFirstDivergence(expected, actual, subsystem, field, expectedValue, actualValue);
+
+    char name[256];
+    std::snprintf(name, sizeof(name), "rollback-failure-peer-%u-frame-%u-distance-%u.txt",
+        gRuntime.localPlayer, gForceRollback.saveFrame, distance);
+    std::string path = rollbackReportDirectory();
+    if (!path.empty()) path += "/";
+    path += name;
+
+    if (FILE *file = std::fopen(path.c_str(), "w")) {
+        std::fprintf(file, "PARTYBOARD_ROLLBACK_FAILURE version=1\n");
+        std::fprintf(file, "peer=%u role=%s\n", gRuntime.localPlayer,
+            gRuntime.localPlayer == 0 ? "host" : "client");
+        std::fprintf(file, "save_frame=%u\n", gForceRollback.saveFrame);
+        std::fprintf(file, "target_frame=%u\n", gForceRollback.targetFrame);
+        std::fprintf(file, "replay_length=%u\n", distance);
+        std::fprintf(file, "snapshot_bytes=%zu\n", gForceRollback.before.size());
+        std::fprintf(file, "first_divergent_subsystem=%s\n", subsystem.c_str());
+        std::fprintf(file, "first_divergent_field=%s\n", field.c_str());
+        std::fprintf(file, "expected_value=0x%08x actual_value=0x%08x\n", expectedValue,
+            actualValue);
+        std::fprintf(file, "expected_hash=%016llx actual_hash=%016llx\n",
+            static_cast<unsigned long long>(expected.hash),
+            static_cast<unsigned long long>(actual.hash));
+        std::fprintf(file, "\n[SUBSYSTEM HASHES]\n");
+        for (std::size_t index = 0; index < kSubsystemCount; ++index) {
+            std::fprintf(file, "%-10s expected=%08x actual=%08x %s\n", subsystemName(index),
+                expected.parts[index], actual.parts[index],
+                expected.parts[index] == actual.parts[index] ? "" : "<-- DIVERGENT");
+        }
+        std::fprintf(file, "\n[CONTEXT]\n");
+        std::fprintf(file, "game_context=%d minigame=%d\n", PartyBoard_NetplayContextId(),
+            PartyBoard_NetplayMinigameId());
+        std::fprintf(file, "rng frand=%08x rand8=%08x boardrand=%08x\n", frand_state_get(),
+            static_cast<unsigned>(rand8_state_get()), boardRandSeed);
+        std::fprintf(file, "global_counter=%u\n", GlobalCounter);
+        std::fprintf(file, "audio_bridge_active=%d healthy=%d\n",
+            PartyBoard_RollbackAudioBridgeActive() ? 1 : 0,
+            PartyBoard_RollbackAudioBridgeHealthy() ? 1 : 0);
+        std::fprintf(file, "\n[DIVERGENT FIELDS - first 64]\n");
+        std::size_t shown = 0;
+        const std::size_t count = std::min(expected.values.size(), actual.values.size());
+        for (std::size_t index = 0; index < count && shown < 64; ++index) {
+            if (expected.values[index] == actual.values[index]) continue;
+            std::fprintf(file, "%-10s %-40s expected=0x%08x actual=0x%08x\n",
+                subsystemName(expected.subsystemOf(index)),
+                expected.names[index] != nullptr ? expected.names[index] : "?",
+                expected.values[index], actual.values[index]);
+            ++shown;
+        }
+        std::fclose(file);
+    }
+
+    char event[256];
+    std::snprintf(event, sizeof(event),
+        "ROLLBACK-FAILURE save_frame=%u target_frame=%u distance=%u subsystem=%s field=%s",
+        gForceRollback.saveFrame, gForceRollback.targetFrame, distance, subsystem.c_str(),
+        field.c_str());
+    writeDiagnostic(event, true);
+    PartyBoard_CrashBreadcrumb(PARTYBOARD_CRASH_CAT_WARN, "%s", event);
+}
+
+// Runs the restore and the replay, then puts the game back where it was.
+void runForceRollbackComparison(std::uint32_t frame)
+{
+    ForceRollbackProbe &probe = gForceRollback;
+    const auto distance = static_cast<std::uint32_t>(probe.inputs.size());
+
+    const auto bytes = PartyBoard_RollbackCheckpointSize();
+    probe.after.assign(bytes, 0);
+    if (bytes == 0 || !PartyBoard_RollbackCheckpointSave(probe.after.data(), bytes)) {
+        // The forward snapshot is what makes the excursion undoable. Without it
+        // the experiment is abandoned rather than run: leaving the game on a
+        // replayed timeline would be a change nobody asked for.
+        ++probe.refused;
+        ++probe.abandonedAtForwardSave;
+        probe.recording = false;
+        char outcome[96];
+        std::snprintf(outcome, sizeof(outcome), "refused-forward-save-failed(total=%u)",
+            probe.abandonedAtForwardSave);
+        reportForceRollbackProgress(distance, outcome);
+        return;
+    }
+
+    probe.expected = captureCanonicalNow(frame);
+    ++probe.attempted;
+
+    const char *stage = "ok";
+    bool ok = PartyBoard_RollbackCheckpointLoad(probe.before.data(), probe.before.size());
+    if (!ok) stage = "restore";
+    bool startedBridge = false;
+    if (ok && !PartyBoard_RollbackAudioBridgeActive()) {
+        // The queue only accepts frames from the one the bridge was started on
+        // upwards, and the first tick replayed here is the logic for saveFrame+1
+        // because the snapshot was taken after the logic for saveFrame.
+        startedBridge = PartyBoard_RollbackAudioBridgeStartAtFrame(probe.saveFrame + 1);
+        ok = startedBridge;
+        if (!ok) stage = "audio-bridge-start";
+    }
+    if (ok) {
+        for (std::uint32_t step = 0; step < distance && ok; ++step) {
+            const auto replayFrame = probe.saveFrame + 1 + step;
+            if (!PartyBoard_RollbackAudioBridgeFrameBegin(replayFrame)) {
+                ok = false;
+                stage = "audio-frame-begin";
+            } else if (!PartyBoard_RollbackRunGameLogicTick(probe.inputs[step].data(), 3)) {
+                ok = false;
+                stage = "game-tick";
+            } else {
+                // The rendered path publishes this after the frame; a replayed
+                // tick has no presentation pass, so it is published here,
+                // exactly as the real rollback replay does.
+                ++GlobalCounter;
+            }
+            if (!PartyBoard_RollbackAudioBridgeFrameEnd() && ok) {
+                ok = false;
+                stage = "audio-frame-end";
+            }
+        }
+    }
+
+    if (ok) {
+        const auto actual = captureCanonicalNow(frame);
+        if (actual.hash == probe.expected.hash && actual.values == probe.expected.values) {
+            ++probe.passed;
+            reportForceRollbackProgress(distance, "pass");
+        } else {
+            ++probe.failed;
+            writeRollbackFailureReport(probe.expected, actual, distance);
+        }
+    } else {
+        ++probe.refused;
+        char outcome[64];
+        std::snprintf(outcome, sizeof(outcome), "refused-at-%s", stage);
+        reportForceRollbackProgress(distance, outcome);
+    }
+
+    // Back to the real timeline, whatever happened above.
+    const bool restored =
+        PartyBoard_RollbackCheckpointLoad(probe.after.data(), probe.after.size());
+    if (startedBridge) PartyBoard_RollbackAudioBridgeStop();
+    probe.recording = false;
+    probe.ladderIndex = (probe.ladderIndex + 1) % probe.distances.size();
+
+    if (!restored) {
+        probe.stopped = true;
+        failSession("Forced rollback probe could not restore the live timeline");
+        return;
+    }
+    if (probe.failed != 0) {
+        // No repair, no resynchronization, no continuing as if nothing happened.
+        probe.stopped = true;
+        failSession("Forced rollback replay did not reproduce the state");
+    }
+}
+
+void forceRollbackTick(std::uint32_t frame)
+{
+    configureForceRollback();
+    ForceRollbackProbe &probe = gForceRollback;
+    if (probe.period == 0 || probe.stopped) return;
+    // The replay below runs game logic. If anything in there ever reached this
+    // point again the probe would be measuring itself, so it is refused rather
+    // than nested.
+    static bool inside = false;
+    if (inside) return;
+    struct Guard {
+        bool &flag;
+        explicit Guard(bool &f) : flag(f) { flag = true; }
+        ~Guard() { flag = false; }
+    } guard(inside);
+
+    if (probe.recording) {
+        probe.inputs.push_back(currentAppliedInputs());
+        if (frame >= probe.targetFrame) runForceRollbackComparison(frame);
+        return;
+    }
+
+    // Arming policy: ask at the first frame the gate is open at or after the
+    // deadline, rather than only at exact multiples of the period.
+    //
+    // The old spelling was `frame % period != 0`, which asked at 159 instants
+    // over a 48000-frame replay and abandoned the opportunity until the next
+    // multiple whenever it was refused. It captured four times, and that was
+    // read as a property of the engine.
+    //
+    // It is not. Surveyed on every frame over 51000 frames of the same replay,
+    // identical to the digit on both peers:
+    //
+    //     open 1718 frames of 51000 (3.37%), first open at frame 1,
+    //     longest open run 312 frames, and 31 distinct open stretches -
+    //     15 of length 1, 5 of length 2-3, 3 of length 32-63, 8 of 64 or more.
+    //
+    // Six captures out of 159 blind samples of a gate open 3.37% of the time is
+    // exactly what chance predicts. The old numbers measured the stride. The
+    // engine's real behaviour is that the gate opens in USABLE STRETCHES - one
+    // of them five seconds long - and a probe that only ever asks on a fixed
+    // grid will keep missing them.
+    //
+    // This changes WHEN the probe asks, never WHAT it accepts: every safety
+    // clause below is untouched, and a refusal is still counted and reported.
+    if (frame == 0) return;
+    if (frame < probe.nextEligibleFrame) return;
+    const auto bytes = PartyBoard_RollbackCheckpointSize();
+    if (bytes == 0) {
+        // Not a safe boundary: a wipe, a render callback, an I/O operation or a
+        // module transition is in flight. Refused and counted, never forced.
+        //
+        // Unlike before, the opportunity is NOT abandoned until the next
+        // multiple: the probe keeps asking on the following frames until the
+        // gate opens.
+        //
+        // Which means a refusal is no longer an event, it is a state, and
+        // writing a line per refused frame is writing a line per frame. The
+        // first run under this policy did exactly that: roughly 700 bytes a
+        // frame filled the diagnostic file's 2 MB budget by frame 4449 and
+        // every later probe result was lost - the change destroyed the
+        // observability of the thing it was meant to improve.
+        //
+        // So the counters are authoritative and the log is a summary: a line
+        // when a wait begins, a line when the clause holding it changes, one
+        // every 600 frames of continued waiting, and the full histogram when a
+        // test finally arms. Nothing is lost, because refusalsByClause counts
+        // every single refusal whether or not it was printed.
+        probe.openStreak = 0;
+        ++probe.refused;
+        const char *clause = PartyBoard_RollbackCheckpointRefusal();
+        const std::string clauseText = clause ? clause : "unknown";
+        ++probe.refusalsByClause[clauseText];
+
+        const bool waitBegan = probe.waitRefusals == 0;
+        const bool clauseChanged = !waitBegan && clauseText != probe.waitClause;
+        if (waitBegan) probe.waitingSince = frame;
+        ++probe.waitRefusals;
+        probe.waitClause = clauseText;
+
+        if (waitBegan || clauseChanged || (probe.waitRefusals % 600) == 0) {
+            char outcome[96];
+            std::snprintf(outcome, sizeof(outcome), "refused-%s(waited=%u)",
+                clauseText.c_str(), probe.waitRefusals);
+            reportForceRollbackProgress(0, outcome, frame);
+        }
+        return;
+    }
+    // The gate is open. But a test needs it open TWICE: once here, and again
+    // `distance` frames later for the forward save that makes the excursion
+    // undoable. Arming on a one-frame opening therefore wastes the test, and
+    // measurement says that is what was happening: of 23 tests armed on the
+    // first open frame after the deadline, 18 died at the forward save.
+    //
+    // The per-frame survey showed the openings are strikingly bimodal - 15 of
+    // length 1, 5 of length 2-3, NOTHING between 4 and 31, then 3 of 32-63 and
+    // 8 of 64 or more. So "has the gate been open for four frames already" is a
+    // near-perfect discriminator: it rejects every short opening and accepts
+    // every long one, without needing to see the future.
+    //
+    // Four, not more: it is the smallest number that clears the short mode, and
+    // the distances tested (1, 2, 4, 8) all fit comfortably inside a 32-frame
+    // opening. Still a question about WHEN to ask, not about what to accept.
+    ++probe.openStreak;
+    constexpr std::uint32_t kMinimumOpenStreak = 4;
+    if (probe.openStreak < kMinimumOpenStreak) return;
+
+    probe.before.assign(bytes, 0);
+    if (!PartyBoard_RollbackCheckpointSave(probe.before.data(), bytes)) {
+        ++probe.refused;
+        reportForceRollbackProgress(0, "refused-save-failed", frame);
+        return;
+    }
+    probe.saveFrame = frame;
+    probe.targetFrame = frame + probe.distances[probe.ladderIndex];
+    // The period now paces the tests rather than selecting the instants: the
+    // next one becomes eligible a period after this one was armed.
+    probe.nextEligibleFrame = frame + probe.period;
+    {
+        // How long this test had to wait for an open gate is the number the new
+        // policy exists to produce: under the old one the answer was always
+        // "it did not wait, it gave up".
+        char outcome[96];
+        std::snprintf(outcome, sizeof(outcome), "armed(waited=%u)", probe.waitRefusals);
+        reportForceRollbackProgress(probe.distances[probe.ladderIndex], outcome, frame);
+        std::string histogram;
+        for (const auto &entry : probe.refusalsByClause) {
+            if (!histogram.empty()) histogram += ' ';
+            histogram += entry.first + '=' + std::to_string(entry.second);
+        }
+        if (!histogram.empty()) {
+            char line[224];
+            std::snprintf(line, sizeof(line), "force-rollback clauses %s", histogram.c_str());
+            writeDiagnostic(line, true);
+        }
+    }
+    probe.waitRefusals = 0;
+    probe.waitClause.clear();
+    probe.inputs.clear();
+    probe.recording = true;
+}
+
 void storeInput(std::array<InputSlot, kHistorySize> &history, std::uint32_t frame,
     const PartyBoardRollbackInput &input)
 {
@@ -404,10 +1015,11 @@ const InputSlot *findInput(const std::array<InputSlot, kHistorySize> &history, s
 }
 
 std::uint32_t runtimeConfigSignature(std::uint8_t inputDelay, std::uint8_t contextId,
-    bool fullGame, bool rollbackRequested)
+    bool fullGame, bool rollbackRequested, bool hookGate)
 {
     return kRuntimeConfigMagic | (fullGame ? kRuntimeFullGameFlag : 0u)
         | (rollbackRequested ? kRuntimeRollbackFlag : 0u)
+        | (hookGate ? kRuntimeHookGateFlag : 0u)
         | (static_cast<std::uint32_t>(contextId) << 8) | inputDelay;
 }
 
@@ -434,7 +1046,8 @@ bool sendInput(std::uint32_t frame, const PartyBoardRollbackInput &input, bool r
     const InputSlot *slot = findInput(gRuntime.localHistory, frame);
     outgoing.captureContext = slot ? slot->captureContext : static_cast<std::uint32_t>(gRuntime.observedContext);
     outgoing.configSignature = runtimeConfigSignature(gRuntime.inputDelay, gRuntime.contextId,
-        gRuntime.fullGame, gRuntime.rollbackRequested);
+        gRuntime.fullGame, gRuntime.rollbackRequested,
+        PartyBoard_HookTickGateEnabled() != 0);
     outgoing.frandSeed = gRuntime.randomSynchronized ? gRuntime.sessionFrandSeed : 0;
     outgoing.rand8Seed = gRuntime.randomSynchronized ? gRuntime.sessionRand8Seed : 0;
     const bool sent = !gRuntime.transport.hasPeer() || gRuntime.transport.sendInput(outgoing);
@@ -466,52 +1079,297 @@ void serviceStateRepair(bool force)
     }
 }
 
+#include "netplay_report.inc"
+
+// A recording is plain text so it can be diffed and read by a human:
+//   frame seat buttons stickX stickY substickX substickY triggerL triggerR
+// The frame is the one the sample is APPLIED on, never the one it was captured
+// on, so a recording made at one input delay replays correctly at another.
+// ---------------------------------------------------------------------------
+// Rollback gate survey. PARTYBOARD_ROLLBACK_GATE_SURVEY=1.
+//
+// Why this exists, and what it corrects. The forced rollback probe only asks
+// whether a capture is possible at multiples of its period, and abandons the
+// opportunity until the next multiple when refused. Its numbers - 155 refusals
+// out of 159 - were read as "the gate is shut 97% of the time", which they do
+// not say: they say the gate was shut at those 159 chosen instants. The 47762
+// frames never asked said nothing either way, and the two possible readings call
+// for opposite remedies. See docs/ROLLBACK_READINESS.md.
+//
+// So this asks every frame, and histograms the runs of open and shut frames
+// rather than only counting them: "open 4% of frames" means something quite
+// different when the open frames come in usable stretches than when they are
+// isolated singles.
+//
+// It is OFF by default and it is a measurement, not a policy: it changes nothing
+// about when a capture is attempted or what is accepted.
+// PartyBoard_RollbackCheckpointSize() touches no game state - it walks the
+// region set and writes a diagnostic string - but it is not free, so a survey
+// run is a survey run and not a normal one.
+struct GateSurvey {
+    bool enabled = false;
+    bool initialized = false;
+    std::uint32_t frames = 0;
+    std::uint32_t open = 0;
+    std::uint32_t openRun = 0;      // current consecutive open frames
+    std::uint32_t longestOpenRun = 0;
+    std::uint32_t firstOpenFrame = 0;
+    bool everOpen = false;
+    // Runs bucketed by length: 1, 2-3, 4-7, 8-15, 16-31, 32-63, 64+.
+    std::uint32_t openBuckets[7] {};
+    std::map<std::string, std::uint32_t> refusals;
+};
+GateSurvey gGateSurvey;
+
+unsigned gateSurveyBucket(std::uint32_t length)
+{
+    if (length <= 1) return 0;
+    if (length <= 3) return 1;
+    if (length <= 7) return 2;
+    if (length <= 15) return 3;
+    if (length <= 31) return 4;
+    if (length <= 63) return 5;
+    return 6;
+}
+
+void gateSurveyReport(std::uint32_t frame, const char *why)
+{
+    const GateSurvey &g = gGateSurvey;
+    char firstOpen[32];
+    if (g.everOpen) std::snprintf(firstOpen, sizeof(firstOpen), "%u", g.firstOpenFrame);
+    else std::snprintf(firstOpen, sizeof(firstOpen), "never");
+    std::printf("GATE SURVEY %s frame=%u asked=%u open=%u (%.2f%%) longest_open_run=%u first_open=%s\n",
+        why, frame, g.frames, g.open,
+        g.frames ? 100.0 * static_cast<double>(g.open) / static_cast<double>(g.frames) : 0.0,
+        g.longestOpenRun, firstOpen);
+    static const char *names[7] = {"1", "2-3", "4-7", "8-15", "16-31", "32-63", "64+"};
+    for (unsigned i = 0; i < 7; ++i) {
+        if (g.openBuckets[i]) std::printf("GATE SURVEY   open runs of %-6s : %u\n", names[i], g.openBuckets[i]);
+    }
+    for (const auto &entry : g.refusals) {
+        std::printf("GATE SURVEY   refused %-28s : %u\n", entry.first.c_str(), entry.second);
+    }
+    std::fflush(stdout);
+}
+
+void gateSurveyTick(std::uint32_t frame)
+{
+    GateSurvey &g = gGateSurvey;
+    if (!g.initialized) {
+        g.initialized = true;
+        const char *value = std::getenv("PARTYBOARD_ROLLBACK_GATE_SURVEY");
+        g.enabled = value && value[0] && value[0] != '0';
+        if (g.enabled) {
+            std::printf("GATE SURVEY armed: evaluating the capture gate on EVERY frame. "
+                        "This measures the engine, not the probe's sampling stride.\n");
+            std::fflush(stdout);
+        }
+    }
+    if (!g.enabled) return;
+
+    ++g.frames;
+    const bool open = PartyBoard_RollbackCheckpointSize() != 0;
+    if (open) {
+        ++g.open;
+        if (!g.everOpen) { g.everOpen = true; g.firstOpenFrame = frame; }
+        ++g.openRun;
+        if (g.openRun > g.longestOpenRun) g.longestOpenRun = g.openRun;
+    } else {
+        if (g.openRun) { ++g.openBuckets[gateSurveyBucket(g.openRun)]; g.openRun = 0; }
+        const char *refusal = PartyBoard_RollbackCheckpointRefusal();
+        ++g.refusals[refusal ? refusal : "unknown"];
+    }
+    // Periodic, so a run that is killed still leaves a measurement behind.
+    if (g.frames % 3000 == 0) gateSurveyReport(frame, "progress");
+}
+
+bool loadReplaySamples()
+{
+    std::FILE *file = std::fopen(gRuntime.replayPath.c_str(), "rb");
+    if (!file) return false;
+    unsigned frame = 0, seat = 0, buttons = 0, triggerL = 0, triggerR = 0;
+    int stickX = 0, stickY = 0, substickX = 0, substickY = 0;
+    while (std::fscanf(file, "%u %u %u %d %d %d %d %u %u", &frame, &seat, &buttons,
+        &stickX, &stickY, &substickX, &substickY, &triggerL, &triggerR) == 9) {
+        if (seat > 1 || frame > 60u * 60u * 60u) continue; // Ignore malformed rows.
+        if (frame >= gRuntime.replaySamples.size()) {
+            gRuntime.replaySamples.resize(frame + 1);
+            gRuntime.replayPresent.resize(frame + 1, false);
+        }
+        PartyBoardRollbackInput &sample = gRuntime.replaySamples[frame][seat];
+        sample.buttons = static_cast<u16>(buttons);
+        sample.stickX = static_cast<s8>(stickX);
+        sample.stickY = static_cast<s8>(stickY);
+        sample.substickX = static_cast<s8>(substickX);
+        sample.substickY = static_cast<s8>(substickY);
+        sample.triggerLeft = static_cast<u8>(triggerL);
+        sample.triggerRight = static_cast<u8>(triggerR);
+        gRuntime.replayPresent[frame] = true;
+    }
+    std::fclose(file);
+    return !gRuntime.replaySamples.empty();
+}
+
+void recordAppliedInputs(std::uint32_t frame, const PartyBoardRollbackInput &local,
+    const PartyBoardRollbackInput &remote)
+{
+    if (!gRuntime.recordFile) return;
+    const PartyBoardRollbackInput *seats[2];
+    seats[gRuntime.localPlayer] = &local;
+    seats[gRuntime.localPlayer ^ 1u] = &remote;
+    for (unsigned seat = 0; seat < 2; ++seat) {
+        std::fprintf(gRuntime.recordFile, "%u %u %u %d %d %d %d %u %u\n", frame, seat,
+            seats[seat]->buttons, seats[seat]->stickX, seats[seat]->stickY,
+            seats[seat]->substickX, seats[seat]->substickY,
+            seats[seat]->triggerLeft, seats[seat]->triggerRight);
+    }
+}
+
 bool checkStateFailure()
 {
     if (gRuntime.states.error() == StateFailure::None) return true;
     if (!gRuntime.error.empty()) return false;
     const auto frame = gRuntime.states.errorFrame();
     const auto *a = gRuntime.states.getLocal(frame), *b = gRuntime.states.getRemote(frame);
+    const char *category = a && b ? subsystemName(a->firstDifferentPart(*b)) : "UNKNOWN";
+    // One self-contained file per peer; tools/netplay_compare.py diffs the two
+    // and names the first divergent field.
+    const auto report = writeDesyncReport(frame, gRuntime.states.error());
     char message[1024];
     std::snprintf(message, sizeof(message),
-        "%s frame=%u context=%u/%u localHash=%016llx remoteHash=%016llx RNG=%08x/%08x:%08x/%08x counter=%u/%u hash_version=%u confirmed_input=%u last_equal_next=%u last_checkpoint=none state_error=%u session=%08x player=%u",
+        "%s frame=%u category=%s context=%u/%u localHash=%016llx remoteHash=%016llx RNG=%08x/%08x:%08x/%08x counter=%u/%u hash_version=%u confirmed_input=%u last_equal_next=%u state_error=%u session=%08x player=%u report=%s",
         gRuntime.states.error() == StateFailure::Desync ? "DESYNC" : "PROTOCOL_STATE",
-        frame, a ? a->context : UINT32_MAX, b ? b->context : UINT32_MAX,
+        frame, category, a ? a->context : UINT32_MAX, b ? b->context : UINT32_MAX,
         static_cast<unsigned long long>(a ? a->hash : 0), static_cast<unsigned long long>(b ? b->hash : 0),
         a ? a->frand : 0, a ? a->rand8 : 0, b ? b->frand : 0, b ? b->rand8 : 0,
         a ? a->counter : 0, b ? b->counter : 0, kStateHashVersion,
         gRuntime.frame ? gRuntime.frame - 1 : UINT32_MAX, gRuntime.states.equalThrough(),
-        static_cast<unsigned>(gRuntime.states.error()), kSessionId, gRuntime.localPlayer);
-    FILE *file = nullptr;
+        static_cast<unsigned>(gRuntime.states.error()), kSessionId, gRuntime.localPlayer,
+        report.empty() ? "none" : report.c_str());
+    // The companion collects this sidecar next to its native log; keep writing
+    // it. The per-peer report above holds the field-level evidence, which is
+    // too large to flood stderr or the capped routine log with.
+    FILE *sidecar = nullptr;
 #ifdef _WIN32
-    const auto *path = _wgetenv(L"PARTYBOARD_NET_DIAGNOSTIC");
-    if (path && *path) file = _wfopen((std::wstring(path) + L".desync").c_str(), L"ab");
+    const auto *diagnostic = _wgetenv(L"PARTYBOARD_NET_DIAGNOSTIC");
+    if (diagnostic && *diagnostic)
+        sidecar = _wfopen((std::wstring(diagnostic) + L".desync").c_str(), L"ab");
 #endif
-    if (file) std::fprintf(file, "%s\n", message);
-    if (a) {
-        const auto &state = gRuntime.canonicalHistory[frame % kStateHistorySize];
-        for (std::size_t i = 0; i < state.fields.size(); ++i) {
-            const auto &field = state.fields[i];
-            std::fprintf(stderr, "[STATE] frame=%u field=%zu name=%s value=%08x\n", frame, i, field.name, field.value);
-            if (file) std::fprintf(file, "STATE frame=%u field=%zu name=%s value=%08x\n", frame, i, field.name, field.value);
+    if (sidecar) std::fprintf(sidecar, "%s\n", message);
+    if (a && b) {
+        for (std::size_t index = 0; index < kSubsystemCount; ++index) {
+            const char *verdict = a->parts[index] == b->parts[index] ? "OK" : "DIFFERENT";
+            std::fprintf(stderr, "[STATE] frame=%u %-10s local=%08x remote=%08x %s\n", frame,
+                subsystemName(index), a->parts[index], b->parts[index], verdict);
+            if (sidecar)
+                std::fprintf(sidecar, "SUBSYSTEM frame=%u %-10s local=%08x remote=%08x %s\n",
+                    frame, subsystemName(index), a->parts[index], b->parts[index], verdict);
         }
     }
-    if (file) std::fclose(file);
+    if (sidecar) std::fclose(sidecar);
     serviceStateRepair(true);
     failSession(message, gRuntime.states.error() == StateFailure::Desync); // Retry failed digest while stopped.
     return false;
 }
 
+// Publish the facts a crash report needs, once per accepted simulation tick.
+// Everything here is a value the game thread already owns, so the cost is a
+// struct copy; the point is that a termination which cannot be intercepted
+// in-process still leaves the frame, overlay and network state on disk.
+void publishCrashState(const StateDigest &stamp)
+{
+    static std::int32_t previousOverlay = -1;
+    static std::int32_t lastOverlay = -1;
+    static std::uint32_t overlayTransitionFrame = 0;
+
+    PartyBoardCrashSimState state {};
+    state.simulationFrame = gRuntime.frame;
+    state.networkFrame = gRuntime.lastWireFrame;
+    state.gameContext = gRuntime.observedContext;
+    state.overlay = PartyBoard_NetplayContextId();
+    state.minigame = PartyBoard_NetplayMinigameId();
+    if (state.overlay != lastOverlay) {
+        previousOverlay = lastOverlay;
+        lastOverlay = state.overlay;
+        overlayTransitionFrame = gRuntime.frame;
+    }
+    state.overlayPrevious = previousOverlay;
+    state.overlayTransitionFrame = overlayTransitionFrame;
+    state.boardTurn = GWSystem.turn;
+    state.boardMaxTurn = GWSystem.max_turn;
+    state.boardId = GWSystem.board;
+
+    state.lastStateHash = stamp.hash;
+    state.lastStateHashFrame = stamp.frame;
+
+    state.frand = frand_state_get();
+    state.rand8 = static_cast<u32>(rand8_state_get());
+    state.boardRand = boardRandSeed;
+    state.frandCalls = PartyBoard_NetplayFrandCalls();
+    state.rand8Calls = PartyBoard_NetplayRand8Calls();
+    state.boardRandCalls = PartyBoard_NetplayBoardRandCalls();
+
+    state.received = gRuntime.receivedPackets;
+    state.rejected = gRuntime.rejectedPackets;
+    state.repaired = gRuntime.repairPackets;
+    state.sendErrors = gRuntime.sendFailures;
+    const auto now = monotonicMs();
+    state.packetAgeMs = static_cast<u32>(gRuntime.lastPacketMs ? now - gRuntime.lastPacketMs : 0);
+    state.stalledTicks = gRuntime.stalledTicks;
+    state.maximumStalledTicks = gRuntime.maximumStalledTicks;
+    state.txSequence = gRuntime.sequence;
+    state.randomSynchronized = gRuntime.randomSynchronized;
+    state.configMismatch = gRuntime.configMismatch;
+    state.contextMismatchFrames = gRuntime.contextMismatchFrames;
+
+    const auto &local = gRuntime.localHistory[gRuntime.frame % kHistorySize];
+    const auto &remote = gRuntime.remoteHistory[gRuntime.frame % kHistorySize];
+    state.localReady = local.valid && local.frame == gRuntime.frame;
+    state.remoteReady = remote.valid && remote.frame == gRuntime.frame;
+    state.localButtons = local.input.buttons;
+    state.remoteButtons = remote.input.buttons;
+    state.localStickX = local.input.stickX;
+    state.localStickY = local.input.stickY;
+    state.remoteStickX = remote.input.stickX;
+    state.remoteStickY = remote.input.stickY;
+
+    if (gRuntime.rollbackSession) {
+        const auto stats = gRuntime.rollbackSession->stats();
+        state.rollbackActive = 1;
+        state.rollbackCount = stats.rollbackCount;
+        state.rollbackReplayed = stats.resimulatedFrames;
+        state.rollbackPredicted = stats.predictedFrames;
+    }
+
+    // Audio thread values: diagnostic only, never hashed. See C5/C6 in
+    // docs/NETPLAY_DETERMINISM_AUDIT.md.
+    for (int channel = 0; channel < 4; ++channel)
+        state.musStatus[channel] = msmMusGetStatus(channel);
+
+    PartyBoard_CrashUpdateSimState(&state);
+    PartyBoard_CrashHeartbeat();
+}
 bool captureCommittedState()
 {
     const auto frame = gRuntime.frame - 1; // AFTER logic F, BEFORE render/counter publication.
+    // Test-only divergence, BEFORE the capture so the extra blocks are in the
+    // hash of this very frame. Fires once.
+    if (gRuntime.injectHeapFrame > 0
+        && frame == static_cast<std::uint32_t>(gRuntime.injectHeapFrame)) {
+        PartyBoard_NetplayHeapInjectLeak(gRuntime.injectHeapBlocks, 2048);
+        std::printf("[NET TEST] heap leak fired at frame %u\n", frame);
+        gRuntime.injectHeapFrame = 0;
+    }
     StateDigest stamp {frame,
         static_cast<std::uint32_t>(gRuntime.probeContext >= 0 ? gRuntime.probeContext : PartyBoard_NetplayContextId()),
         frand_state_get(), static_cast<std::uint32_t>(rand8_state_get()), GlobalCounter};
     auto state = captureCanonical(stamp);
     stamp.hash = state.hash;
-    gRuntime.canonicalHistory[frame % kStateHistorySize] = std::move(state);
+    stamp.parts = state.parts;
+    gRuntime.detailHistory[frame % kDetailHistorySize] = std::move(state);
+    gRuntime.detailFrames[frame % kDetailHistorySize] = frame;
     gRuntime.states.capture(stamp);
+    publishCrashState(stamp);
     // New frames stream immediately; input traffic repairs the oldest missing
     // state in parallel. No extra round-trip barrier for each gameplay frame.
     sendInput(frame, {}, false, &stamp);
@@ -522,6 +1380,10 @@ bool captureCommittedState()
             frame, static_cast<unsigned long long>(stamp.hash), kStateHashVersion, gRuntime.states.equalThrough());
         writeDiagnostic(event, true);
     }
+    // After the state for this frame exists and has been published, so the probe
+    // compares against exactly what the peer was told.
+    gateSurveyTick(frame);
+    forceRollbackTick(frame);
     return checkStateFailure();
 }
 
@@ -547,17 +1409,22 @@ void receivePendingPackets()
             (packet.configSignature & kRuntimeConfigMagicMask) == kRuntimeConfigMagic;
         const bool remoteFullGame = (packet.configSignature & kRuntimeFullGameFlag) != 0;
         const bool remoteRollback = (packet.configSignature & kRuntimeRollbackFlag) != 0;
+        const bool remoteHookGate = (packet.configSignature & kRuntimeHookGateFlag) != 0;
         const std::uint8_t remoteContext =
             static_cast<std::uint8_t>((packet.configSignature >> 8) & 0xffu);
         const std::uint8_t remoteDelay = static_cast<std::uint8_t>(packet.configSignature & 0xffu);
         if (!signatureValid || remoteFullGame != gRuntime.fullGame
             || remoteRollback != gRuntime.rollbackRequested
+            || remoteHookGate != (PartyBoard_HookTickGateEnabled() != 0)
             || remoteDelay != gRuntime.inputDelay) {
             if (!gRuntime.configMismatch) {
                 std::fprintf(stderr,
-                    "Netplay: session mismatch (local mode %s/delay %u, remote signature 0x%08x).\n",
+                    "Netplay: session mismatch (local mode %s/delay %u/hook-gate %d, "
+                    "remote signature 0x%08x). PARTYBOARD_HOOK_TICK_GATE must be set "
+                    "the same way on both machines.\n",
                     gRuntime.fullGame ? "full" : "minigame",
-                    static_cast<unsigned>(gRuntime.inputDelay), packet.configSignature);
+                    static_cast<unsigned>(gRuntime.inputDelay),
+                    PartyBoard_HookTickGateEnabled(), packet.configSignature);
             }
             gRuntime.configMismatch = true;
             ++gRuntime.rejectedPackets;
@@ -849,12 +1716,22 @@ bool timelineSelfTest()
         || parseLocalPad("0", parsedPad) || parseLocalPad("5", parsedPad)) {
         return false;
     }
-    return runtimeConfigSignature(0, 7, false, false) != runtimeConfigSignature(delay, 7, false, false)
-        && runtimeConfigSignature(delay, 7, false, false)
+    // Every field the signature carries must change it, or a peer that disagrees
+    // about that field would be accepted into the session.
+    return runtimeConfigSignature(0, 7, false, false, false)
+            != runtimeConfigSignature(delay, 7, false, false, false)
+        && runtimeConfigSignature(delay, 7, false, false, false)
             == (kRuntimeConfigMagic | (7u << 8) | delay)
-        && runtimeConfigSignature(delay, 7, false, false) != runtimeConfigSignature(delay, 8, false, false)
-        && runtimeConfigSignature(delay, 7, false, false) != runtimeConfigSignature(delay, 7, true, false)
-        && runtimeConfigSignature(delay, 7, false, false) != runtimeConfigSignature(delay, 7, false, true);
+        && runtimeConfigSignature(delay, 7, false, false, false)
+            != runtimeConfigSignature(delay, 8, false, false, false)
+        && runtimeConfigSignature(delay, 7, false, false, false)
+            != runtimeConfigSignature(delay, 7, true, false, false)
+        && runtimeConfigSignature(delay, 7, false, false, false)
+            != runtimeConfigSignature(delay, 7, false, true, false)
+        && runtimeConfigSignature(delay, 7, false, false, false)
+            != runtimeConfigSignature(delay, 7, false, false, true)
+        && (runtimeConfigSignature(delay, 7, false, false, true) & kRuntimeConfigMagicMask)
+            == kRuntimeConfigMagic;
 }
 
 }
@@ -903,6 +1780,53 @@ extern "C" bool PartyBoard_NetplayConfigureFromArgs(int argc, char **argv)
             gRuntime.menuProbe = true;
         } else if (argument == "--netplay-probe-realtime") {
             gRuntime.realtimeProbe = true;
+        } else if (argument == "--netplay-probe-audio") {
+            gRuntime.audioProbe = true;
+        } else if (argument == "--netplay-walk-probe") {
+            gRuntime.walkProbe = true;
+        } else if (argument.rfind("--netplay-inject-heap", 0) == 0) {
+            // Test-only: make the heaps diverge on purpose, to prove the
+            // census of D30 actually produces its lines.
+            const std::size_t equals = argument.find('=');
+            if (equals != std::string_view::npos) {
+                const std::string value(argument.substr(equals + 1));
+                const std::size_t colon = value.find(':');
+                gRuntime.injectHeapFrame = std::atoi(value.c_str());
+                gRuntime.injectHeapBlocks =
+                    colon == std::string::npos ? 7 : std::atoi(value.c_str() + colon + 1);
+                std::printf("[NET TEST] heap leak injected at frame %d, %d block(s)\n",
+                    gRuntime.injectHeapFrame, gRuntime.injectHeapBlocks);
+            }
+        } else if (argument.rfind("--netplay-max-turns", 0) == 0) {
+            const std::size_t equals = argument.find('=');
+            if (equals != std::string_view::npos) {
+                gRuntime.maxTurnsOverride =
+                    std::atoi(std::string(argument.substr(equals + 1)).c_str());
+                std::printf("[NET TEST] max_turns override=%d\n", gRuntime.maxTurnsOverride);
+            }
+        } else if (argument.rfind("--netplay-walk-plan", 0) == 0) {
+            gRuntime.walkProbe = true;
+            gRuntime.walkPlan = true;
+            const std::size_t equals = argument.find('=');
+            if (equals != std::string_view::npos) {
+                const std::string value(argument.substr(equals + 1));
+                const std::size_t colon = value.find(':');
+                if (colon == std::string::npos) {
+                    gRuntime.walkNotches = std::atoi(value.c_str());
+                } else {
+                    gRuntime.walkMode = std::atoi(value.substr(0, colon).c_str());
+                    gRuntime.walkNotches = std::atoi(value.substr(colon + 1).c_str());
+                }
+                gRuntime.walkNotchesLeft = gRuntime.walkNotches;
+                gRuntime.walkModeLeft = gRuntime.walkMode;
+            }
+            // Say it out loud: a run whose log does not carry this line was not
+            // planned, whatever the campaign manifest claims it asked for.
+            std::printf("[NET TEST] walk_plan armed mode=%d notches=%d\n", gRuntime.walkMode, gRuntime.walkNotches);
+        } else if (argument == "--netplay-record-input" && index + 1 < argc) {
+            gRuntime.recordPath = argv[++index];
+        } else if (argument == "--netplay-replay-input" && index + 1 < argc) {
+            gRuntime.replayPath = argv[++index];
         } else if (argument == "--netplay-host" || argument == "--netplay-join"
             || argument == "--netplay-delay" || argument == "--netplay-pad") {
             argumentsValid = false;
@@ -917,6 +1841,8 @@ extern "C" bool PartyBoard_NetplayConfigureFromArgs(int argc, char **argv)
     }
 
     gRuntime.localPlayer = host ? 0 : 1;
+    // The crash reporter is already armed; this only lets a report name the seat.
+    PartyBoard_CrashSetPeer(gRuntime.localPlayer, host ? "host" : "client");
     // The online companion owns the Internet-facing encrypted transport.
     // Its game subprocess must never expose the raw UDP protocol to the LAN.
     bool loopbackOnly = false;
@@ -943,6 +1869,19 @@ extern "C" bool PartyBoard_NetplayConfigureFromArgs(int argc, char **argv)
     // forwards inputs over UDP too, so it needs the same loss recovery.
     gRuntime.rollbackProbe = rollbackProbe;
     gRuntime.enabled = true;
+    if (!gRuntime.recordPath.empty()) {
+        gRuntime.recordFile = std::fopen(gRuntime.recordPath.c_str(), "wb");
+        if (!gRuntime.recordFile) {
+            std::fprintf(stderr, "Netplay: cannot write the input recording %s.\n",
+                gRuntime.recordPath.c_str());
+            return false;
+        }
+    }
+    if (!gRuntime.replayPath.empty() && !loadReplaySamples()) {
+        std::fprintf(stderr, "Netplay: cannot read the input recording %s.\n",
+            gRuntime.replayPath.c_str());
+        return false;
+    }
     std::fprintf(stdout,
         "Netplay experimental: %s, UDP port %u, local player %u, physical controller port %u, input delay %u frame(s). %s.\n",
         host ? "host" : "client", gRuntime.localPort,
@@ -956,9 +1895,46 @@ extern "C" bool PartyBoard_NetplayConfigureFromArgs(int argc, char **argv)
     return true;
 }
 
+// The simulation frame, for instrumentation that needs to date an event. Zero
+// when netplay is not running, which is the honest answer: there is no shared
+// timeline to refer to.
+extern "C" u32 PartyBoard_NetplayFrameForDiagnostics(void)
+{
+    return partyboard::netplay::gRuntime.enabled ? partyboard::netplay::gRuntime.frame : 0;
+}
+
 extern "C" bool PartyBoard_NetplayEnabled(void)
 {
     return partyboard::netplay::gRuntime.enabled;
+}
+
+// Called by a menu that has a cursor a scripted walk must move, to say
+// whether it is reading the stick this frame. Both peers run the same menu
+// code on the same simulation tick, so this stays in step by construction -
+// which a frame number chosen in advance does not.
+// D23. A draw hook advances game state, so it belongs to the tick and not to
+// the image: a peer waiting for its partner still renders, and would run every
+// hook again on a frame the network refused it. Read once - this is consulted
+// from the drawing pass, per model and per sprite.
+extern "C" int PartyBoard_HookTickGateEnabled(void)
+{
+    static int resolved = -1;
+    if (resolved < 0) {
+        const char *value = std::getenv("PARTYBOARD_HOOK_TICK_GATE");
+        resolved = (value && *value && *value != '0') ? 1 : 0;
+    }
+    return resolved;
+}
+
+// Test-only. 0 means the game decides, as it normally does.
+extern "C" int PartyBoard_NetplayMaxTurnsOverride(void)
+{
+    return partyboard::netplay::gRuntime.maxTurnsOverride;
+}
+
+extern "C" void PartyBoard_NetplayWalkMenu(int ready)
+{
+    partyboard::netplay::gRuntime.walkMenuReady = ready != 0;
 }
 
 extern "C" void PartyBoard_NetplayTrace(const char *event)
@@ -1034,10 +2010,17 @@ extern "C" bool PartyBoard_NetplayTick(void)
         : PartyBoard_NetplayMinigameId());
     if (runtime.observedContext != gameContext) {
         runtime.observedContext = gameContext;
+        runtime.contextEntryFrame = runtime.frame;
+        // A menu that is no longer on screen is no longer listening, whatever
+        // it last reported.
+        runtime.walkMenuReady = false;
         runtime.rollbackProbeDone = false;
         runtime.rollbackContextReady = false;
         if (!runtime.rollbackSession) runtime.rollbackUnavailable = false;
         std::fprintf(stdout, "Netplay: game context %d at network frame %u.\n", gameContext, runtime.frame);
+        PartyBoard_CrashBreadcrumb(PARTYBOARD_CRASH_CAT_OVERLAY,
+            "context %d at frame %u (overlay %d minigame %d)", gameContext,
+            runtime.frame, PartyBoard_NetplayContextId(), PartyBoard_NetplayMinigameId());
     }
     // A full game owns ONE input timeline and ONE initial RNG agreement.
     // Loading a module must not discard delayed inputs or authorize local ticks.
@@ -1150,13 +2133,193 @@ extern "C" bool PartyBoard_NetplayTick(void)
     }
     if (!runtime.localCaptured) {
         runtime.pendingLocal = capturePad(runtime.localPad);
-        if (runtime.menuProbe) {
-            // Explicit real-game regression only. Send the host's Start through
+        if (!runtime.replaySamples.empty()) {
+            const std::uint32_t applied = runtime.frame + runtime.inputDelay;
+            if (applied < runtime.replaySamples.size() && runtime.replayPresent[applied]) {
+                runtime.pendingLocal = runtime.replaySamples[applied][runtime.localPlayer];
+                // START inside a minigame is not a pause, it is an abort:
+                // MGSeqPauseKill() ends the sequence. Generated inputs send it
+                // blind because the instruction screen needs it, and then keep
+                // sending it. Strip it once a minigame overlay is running.
+                // Context is hashed, so both peers strip the same bit on the
+                // same frame. Only replayed input is touched.
+                const int overlay = PartyBoard_NetplayContextId();
+                if (overlay >= kFirstMinigameOverlay && overlay <= kLastMinigameOverlay) {
+                    runtime.pendingLocal.buttons &= ~PAD_BUTTON_START;
+                }
+            } else {
+                // Past the end of the recording: hold neutral rather than let
+                // a physical controller join a replay half way through.
+                runtime.pendingLocal = {};
+                if (runtime.replayExhaustedFrame == UINT32_MAX) {
+                    runtime.replayExhaustedFrame = applied;
+                    std::printf("[NET TEST] replay_exhausted_frame=%u\n", applied);
+                }
+            }
+        }
+        if (runtime.menuProbe || runtime.walkProbe) {
+            // Explicit real-game regression only. Send the host's input through
             // the normal input timeline; never advance an overlay directly.
             runtime.pendingLocal = {};
-            if (runtime.localPlayer == 0 && runtime.observedContext == static_cast<int>(MenuProbeOverlay::bootDll)
-                && runtime.frame >= 600 && runtime.frame % 120 < 2)
+            if (runtime.walkProbe) {
+                // A deterministic walk, not a hand-written menu script: the
+                // point is to cross many overlays, wipes and audio waits while
+                // the canonical state proves both peers stayed identical. A
+                // fixed menu path would break on the first layout change.
+                // Both seats act. Selection screens wait for every player to
+                // confirm, so a walk driven by the host alone would stall on the
+                // first one. The offset keeps the two seats from always pressing
+                // the same button on the same frame.
+                const unsigned beat = runtime.frame + runtime.localPlayer * 15u;
+                const int context = runtime.observedContext;
+                const unsigned held = runtime.frame - runtime.contextEntryFrame;
+                const bool modeSelect = runtime.walkPlan
+                    && context == static_cast<int>(MenuProbeOverlay::modeseldll);
+                const bool partySetup = runtime.walkPlan
+                    && context == static_cast<int>(MenuProbeOverlay::mentDll);
+                // The minigame mode is a vertical list, not a horizontal one.
+                const bool minigameList = runtime.walkPlan
+                    && context == static_cast<int>(MenuProbeOverlay::mgmodedll);
+                if (modeSelect) {
+                    // The mode list. Its cursor starts on Party, and a single
+                    // horizontal pulse moves it; the free beat delivers one
+                    // every 240 frames, so which mode is chosen depends only on
+                    // how long this screen stayed open. Measured 2026-09-12:
+                    // 1102 frames here gave Party, 817 frames gave Story. Send
+                    // no horizontal at all, and the cursor cannot drift.
+                    // This list reads the stick on its first iteration and a
+                    // single A press leaves it, so every owed move must be
+                    // spent before any A is sent. It also reads pad 0 only
+                    // (HuPadDStkRep[0]), so seat 1 stays silent throughout.
+                    if (runtime.walkMenuReady && runtime.walkModeLeft != 0) {
+                        if (runtime.localPlayer == 0) {
+                            if (runtime.walkPulseStart == UINT32_MAX) {
+                                if (runtime.frame - runtime.walkPulseEnd >= 60) {
+                                    runtime.walkPulseStart = runtime.frame;
+                                }
+                            }
+                            if (runtime.walkPulseStart != UINT32_MAX) {
+                                if (runtime.frame - runtime.walkPulseStart < 3) {
+                                    runtime.pendingLocal.stickX =
+                                        runtime.walkModeLeft < 0 ? -100 : 100;
+                                } else {
+                                    runtime.walkPulseEnd = runtime.frame;
+                                    runtime.walkPulseStart = UINT32_MAX;
+                                    runtime.walkModeLeft +=
+                                        runtime.walkModeLeft < 0 ? 1 : -1;
+                                }
+                            }
+                        }
+                    } else if (held > 60 && beat % 30 < 3 && (beat / 30) % 4 == 0) {
+                        runtime.pendingLocal.buttons = PAD_BUTTON_A;
+                    }
+                } else if (minigameList) {
+                    // Same rule as the board list, and for the same reason: a
+                    // frame window asked for row 44 and got row 0, because the
+                    // list was not on screen when the moves were spent.
+                    // Vertical here - this list scrolls, it does not slide.
+                    if (runtime.walkMenuReady && runtime.walkNotchesLeft != 0) {
+                        if (runtime.localPlayer == 0) {
+                            if (runtime.walkPulseStart == UINT32_MAX) {
+                                if (runtime.frame - runtime.walkPulseEnd >= 60) {
+                                    runtime.walkPulseStart = runtime.frame;
+                                }
+                            }
+                            if (runtime.walkPulseStart != UINT32_MAX) {
+                                if (runtime.frame - runtime.walkPulseStart < 3) {
+                                    runtime.pendingLocal.stickY =
+                                        runtime.walkNotchesLeft < 0 ? 100 : -100;
+                                } else {
+                                    runtime.walkPulseEnd = runtime.frame;
+                                    runtime.walkPulseStart = UINT32_MAX;
+                                    runtime.walkNotchesLeft +=
+                                        runtime.walkNotchesLeft < 0 ? 1 : -1;
+                                }
+                            }
+                        }
+                    } else if (beat % 30 < 3 && (beat / 30) % 4 == 0) {
+                        runtime.pendingLocal.buttons = PAD_BUTTON_A;
+                    }
+                } else if (partySetup) {
+                    // Party setup. A carries the walk through its screens; the
+                    // board list is the one place a cursor has to move, and the
+                    // first attempt aimed its moves at a frame number. That
+                    // cannot work: the list reads the stick only once its six
+                    // panels have settled, and when that happens depends on how
+                    // long the preceding screens took to load. So the menu says
+                    // when it is listening, and the walk answers.
+                    if (runtime.walkMenuReady && runtime.walkNotchesLeft != 0) {
+                        // Seat 0 only: the two seats are 15 frames apart, and a
+                        // shared cursor would move twice per intended notch.
+                        // Neither seat presses A while a move is owed, or the
+                        // list would be confirmed on the wrong board.
+                        if (runtime.localPlayer == 0) {
+                            if (runtime.walkPulseStart == UINT32_MAX) {
+                                // 60 frames between pulses: the list needs 0x15
+                                // frames to settle after each move before it
+                                // accepts the next one.
+                                if (runtime.frame - runtime.walkPulseEnd >= 60) {
+                                    runtime.walkPulseStart = runtime.frame;
+                                }
+                            }
+                            if (runtime.walkPulseStart != UINT32_MAX) {
+                                if (runtime.frame - runtime.walkPulseStart < 3) {
+                                    runtime.pendingLocal.stickX =
+                                        runtime.walkNotchesLeft < 0 ? -100 : 100;
+                                } else {
+                                    runtime.walkPulseEnd = runtime.frame;
+                                    runtime.walkPulseStart = UINT32_MAX;
+                                    runtime.walkNotchesLeft +=
+                                        runtime.walkNotchesLeft < 0 ? 1 : -1;
+                                }
+                            }
+                        }
+                    } else if (beat % 30 < 3 && (beat / 30) % 4 == 0) {
+                        runtime.pendingLocal.buttons = PAD_BUTTON_A;
+                    }
+                } else if (beat % 30 < 3) {
+                    switch ((beat / 30) % 8) {
+                    case 2:
+                        // START every 240 frames was how this walk got past the
+                        // title screen - and also how it opened the pause menu on
+                        // every board and killed the sequence of every minigame it
+                        // entered (objsysobj.c:86, MGSeqPauseKill). Valentin, who
+                        // watches these runs, saw the game pausing constantly.
+                        //
+                        // A planned walk therefore presses START only where it is
+                        // NEEDED, and presses A everywhere else.
+                        //
+                        // Where it is needed, measured: the boot screen, and the
+                        // minigame instructions screen. instDll/main.c:295 leaves
+                        // only on `btnDown == PAD_BUTTON_START` - an equality, so
+                        // START alone and nothing with it - unless all four seats
+                        // are CPU. With two human seats there is no other way out,
+                        // and a walk without START sat on that screen for 308 000
+                        // frames on 2026-09-13 before its budget ran out.
+                        if (!runtime.walkPlan
+                            || context == static_cast<int>(MenuProbeOverlay::bootDll)
+                            || context == static_cast<int>(MenuProbeOverlay::instDll)) {
+                            runtime.pendingLocal.buttons = PAD_BUTTON_START;
+                        } else {
+                            runtime.pendingLocal.buttons = PAD_BUTTON_A;
+                        }
+                        break;
+                    // The D-pad is masked out by HuPadRead; menus read the
+                    // analog stick through PadADConv.
+                    case 4: runtime.pendingLocal.stickY = -100; break;
+                    // Measured: with no cancel at all the walk settles on the
+                    // first screen that needs one; with a cancel every eighth
+                    // beat it backs out of everything and covers less. Rare.
+                    case 5: if ((beat / 240) % 2) runtime.pendingLocal.buttons = PAD_BUTTON_B; break;
+                    case 6: runtime.pendingLocal.stickX = 100; break;
+                    default: runtime.pendingLocal.buttons = PAD_BUTTON_A; break;
+                    }
+                }
+            } else if (runtime.localPlayer == 0
+                && runtime.observedContext == static_cast<int>(MenuProbeOverlay::bootDll)
+                && runtime.frame >= 600 && runtime.frame % 120 < 2) {
                 runtime.pendingLocal.buttons = PAD_BUTTON_START;
+            }
         }
         storeInput(runtime.localHistory, runtime.frame + runtime.inputDelay, runtime.pendingLocal);
         runtime.localCaptured = true;
@@ -1244,6 +2407,7 @@ extern "C" bool PartyBoard_NetplayTick(void)
         PartyBoard_NetplayPadApplyRemote(1, &local, &runtime.lastLocal);
         PartyBoard_NetplayPadApplyRemote(0, &remote, &previousRemote);
     }
+    recordAppliedInputs(runtime.frame, local, remote);
     runtime.lastLocal = local;
     runtime.localCaptured = false;
     runtime.lockstepPrepared = !runtime.rollbackRequested;
@@ -1293,6 +2457,14 @@ extern "C" bool PartyBoard_NetplayWaiting(void) {
     return gRuntime.enabled && gRuntime.progress.waiting(monotonicMs());
 }
 
+// True once a packet from the other side has ever been accepted. Lets the
+// waiting notice say whether nobody has joined yet, or whether the peer was
+// there and is gone - two different situations for whoever is watching.
+extern "C" bool PartyBoard_NetplayPeerSeen(void)
+{
+    return partyboard::netplay::gRuntime.progress.connected();
+}
+
 extern "C" const char *PartyBoard_NetplayError(void)
 {
     return partyboard::netplay::gRuntime.error.c_str();
@@ -1301,6 +2473,10 @@ extern "C" const char *PartyBoard_NetplayError(void)
 extern "C" void PartyBoard_NetplayShutdown(void)
 {
     using namespace partyboard::netplay;
+    if (gRuntime.recordFile) {
+        std::fclose(gRuntime.recordFile);
+        gRuntime.recordFile = nullptr;
+    }
     PartyBoard_RollbackAudioBridgeStop();
     gRuntime.transport.close();
     gRuntime = Runtime {};
@@ -1414,6 +2590,35 @@ static bool runNativePadRollbackSelfTest()
 
 #include "netplay_state_test.inc"
 
+extern "C" int PartyBoard_TargetFrameRateFor(bool netplayEnabled, int configured);
+
+// Defect D6 - several simulation ticks batched into one rendered frame - can
+// only occur above 60 fps, and online the pacer is clamped to 60 on both peers
+// whatever the video setting says. That clamp is therefore the only thing
+// keeping the frame rate's absence from `runtimeConfigSignature` safe: without
+// it two peers on different rates would batch differently and diverge, with no
+// signature mismatch to explain it.
+//
+// So the clamp is pinned here. If someone removes it to let netplay run at 144,
+// this goes red at once instead of producing a desync a year later that nobody
+// can trace back to a video setting.
+static bool netplayFrameRateClampHolds()
+{
+    bool ok = true;
+    for (const int configured : {30, 59, 60, 61, 120, 144, 240, 1000}) {
+        ok &= PartyBoard_TargetFrameRateFor(true, configured) == 60;
+    }
+    // Offline the setting is honoured, within its own bounds. Checked too, so a
+    // change that clamps everything to 60 - which would also make this pass -
+    // is not mistaken for the property above.
+    ok &= PartyBoard_TargetFrameRateFor(false, 144) == 144;
+    ok &= PartyBoard_TargetFrameRateFor(false, 30) == 60;
+    ok &= PartyBoard_TargetFrameRateFor(false, 1000) == 240;
+    OSReport("Netplay frame rate clamp: %s (online forced to 60 for 8 settings; offline honours 144, floors 30, caps 1000 at 240).\n",
+        ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 extern "C" bool PartyBoard_NetplayRuntimeRunSelfTest(void)
 {
     // Exercise the actual availability check used by free_play.c, with both
@@ -1463,12 +2668,47 @@ extern "C" bool PartyBoard_NetplayRuntimeRunSelfTest(void)
     const bool gamePassed = PartyBoard_RollbackGameSelfTest();
     OSReport("Rollback process generation: %s\n", topologyPassed ? "PASS" : "FAIL");
     OSReport("Rollback central game state: %s\n", gamePassed ? "PASS" : "FAIL");
-    const bool passed = runCanonicalStateSelfTest() && partyboard::netplay::timelineSelfTest()
-        && partyboard::netplay::progressSelfTest() && HuPadSnapshotSelfTest()
-        && PartyBoard_RollbackClockSelfTest() && availabilityPassed
-        && runNativePadRollbackSelfTest() && topologyPassed && gamePassed
-        && PartyBoard_AnimationRollbackSelfTest() && PartyBoard_RollbackIOSelfTest() && PartyBoard_RollbackSequenceSelfTest() && HuPrcSnapshotExecutionSelfTest() && PartyBoard_RollbackSceneSelfTest() && PartyBoard_RollbackResourcesSelfTest() && PartyBoard_RollbackCheckpointSelfTest() && PartyBoard_RollbackWipeSafetySelfTest() && PartyBoard_RollbackRenderSafetySelfTest() && PartyBoard_RollbackAudioSelfTest();
-    OSReport("Netplay runtime self-test: %s\n", passed ? "PASS" : "FAIL");
+    // Every sub-test runs and every sub-test is named. This used to be a chain
+    // of twenty-two `&&`, which stopped at the first failure: a single red
+    // component hid every one after it, and a component became silently
+    // untested the day anything ahead of it started failing. The cost of
+    // running them all is a few milliseconds; the cost of not knowing which
+    // ones ran is a release gate that cannot say what it checked.
+    int total = 0;
+    int failed = 0;
+    const auto check = [&](const char *name, bool ok) {
+        ++total;
+        if (!ok) {
+            ++failed;
+            OSReport("  netplay sub-test FAIL: %s\n", name);
+        }
+    };
+    check("canonical-state", runCanonicalStateSelfTest());
+    check("timeline", partyboard::netplay::timelineSelfTest());
+    check("progress", partyboard::netplay::progressSelfTest());
+    check("pad-snapshot", HuPadSnapshotSelfTest());
+    check("rollback-clock", PartyBoard_RollbackClockSelfTest());
+    check("minigame-availability", availabilityPassed);
+    check("native-pad-rollback", runNativePadRollbackSelfTest());
+    check("process-topology", topologyPassed);
+    check("central-game-state", gamePassed);
+    check("frame-rate-clamp", netplayFrameRateClampHolds());
+    check("animation-rollback", PartyBoard_AnimationRollbackSelfTest());
+    check("rollback-io", PartyBoard_RollbackIOSelfTest());
+    check("rollback-sequence", PartyBoard_RollbackSequenceSelfTest());
+    check("process-execution", HuPrcSnapshotExecutionSelfTest());
+    check("rollback-scene", PartyBoard_RollbackSceneSelfTest());
+    check("rollback-resources", PartyBoard_RollbackResourcesSelfTest());
+    check("rollback-checkpoint", PartyBoard_RollbackCheckpointSelfTest());
+    check("wipe-safety", PartyBoard_RollbackWipeSafetySelfTest());
+    check("render-safety", PartyBoard_RollbackRenderSafetySelfTest());
+    check("rollback-audio", PartyBoard_RollbackAudioSelfTest());
+    check("msm-stream-logical", msmStreamLogicalSelfTest());
+    check("retrace-counter", PartyBoard_RetraceCounterSelfTest());
+    check("thp-logical", PartyBoard_ThpLogicalSelfTest());
+    const bool passed = failed == 0;
+    OSReport("Netplay runtime self-test: %s (%d sub-tests, %d failed)\n",
+        passed ? "PASS" : "FAIL", total, failed);
     return passed;
 }
 
@@ -1494,6 +2734,17 @@ extern "C" bool PartyBoard_NetplayPadRunProbe(void)
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(gRuntime.disconnectProbe ? 135 : gRuntime.realtimeProbe ? 150 : 90);
     unsigned frame = 0;
     bool loadingPauseDone = false;
+    // Deterministic audio wait: both peers arm the same one-second stream at
+    // frame 100, but their simulated audio threads finish it at very different
+    // frames, exactly as two machines with different audio buffering do.
+    constexpr unsigned kAudioArmFrame = 100;
+    constexpr unsigned kAudioSampleRate = 32000;
+    const unsigned physicalFinishFrame = gRuntime.localPlayer == 0 ? 120u : 200u;
+    unsigned audioDoneFrame = 0;
+    if (gRuntime.audioProbe && !msmStreamLogicalProbeInstall()) {
+        std::fputs("[NET TEST] FAIL: a real stream table is already installed\n", stderr);
+        return false;
+    }
     while (frame < frames && std::chrono::steady_clock::now() < deadline) {
         // Revisit a context with inputs still in the delay buffer. The client
         // pauses alone to model wall-clock loading without extra simulation.
@@ -1519,6 +2770,21 @@ extern "C" bool PartyBoard_NetplayPadRunProbe(void)
                 std::fprintf(stderr, "[NET TEST] FAIL: timeline reset or uncommitted transition at frame %u\n", frame);
                 return false;
             }
+            // The online rumble mask is a constant, never the physical one.
+            // HuPadRumbleGet() feeds RumbleBit, which is part of the rollback
+            // snapshot and is NOT part of the canonical hash - so if this ever
+            // started reflecting the controllers actually plugged in, two peers
+            // would carry different pad state with nothing to report it. The
+            // constant is what makes that exclusion safe, which makes it a
+            // safety property rather than a detail, and safety properties get
+            // pinned. See docs/canonical_hash_exclusions.md.
+            if (rumble != static_cast<u32>(PAD_CHAN0_BIT | PAD_CHAN1_BIT)) {
+                std::fprintf(stderr,
+                    "[NET TEST] FAIL: online rumble mask is 0x%08x, expected the constant 0x%08x. "
+                    "A physical-dependent mask diverges between machines and is not hashed.\n",
+                    rumble, static_cast<u32>(PAD_CHAN0_BIT | PAD_CHAN1_BIT));
+                return false;
+            }
             for (unsigned player = 0; player < 2; ++player) {
                 const PartyBoardRollbackInput expected = frame < gRuntime.inputDelay
                     ? PartyBoardRollbackInput {} : sample(player, frame - gRuntime.inputDelay);
@@ -1535,6 +2801,16 @@ extern "C" bool PartyBoard_NetplayPadRunProbe(void)
                 GWPlayer[player].coins = static_cast<s16>((GWPlayer[player].coins
                     + pads[player].triggerLeft + (pads[player].button & PAD_BUTTON_A ? 3 : 0)) % 999);
                 GWPlayer[player].roll = static_cast<s8>(pads[player].stickX % 10);
+            }
+            if (gRuntime.audioProbe) {
+                if (frame == kAudioArmFrame)
+                    msmStreamLogicalProbeStart(0, kAudioSampleRate, kAudioSampleRate);
+                if (frame == physicalFinishFrame) msmStreamLogicalProbeFinishPhysical(0);
+                // The real loop advances this from PadReadSimulationTick, once
+                // per accepted tick and before the canonical state is captured.
+                msmStreamLogicalTick();
+                if (frame > kAudioArmFrame && audioDoneFrame == 0
+                    && msmStreamGetStatus(0) == 0) audioDoneFrame = frame;
             }
             if (frame == 0 || frame == 400) BoardRandInit();
             frand(); rand8(); BoardRand();
@@ -1572,6 +2848,9 @@ extern "C" bool PartyBoard_NetplayPadRunProbe(void)
         }
         // Windows coarse Sleep(1) can take 15.6 ms and invalidate the probe's
         // wall-time budget at delay zero. Precise waiting only affects this test.
+        // Asymmetric wall clock: one peer runs visibly slower in real time.
+        if (gRuntime.audioProbe && gRuntime.localPlayer == 1)
+            SDL_DelayPrecise(5000000ull);
         SDL_DelayPrecise(gRuntime.realtimeProbe ? 16000000ull : 1000000ull);
     }
     // Drain final hashes/ACKs without simulating extra input. Keep responding
@@ -1590,6 +2869,9 @@ extern "C" bool PartyBoard_NetplayPadRunProbe(void)
     }
     if (frame == frames && (gRuntime.states.equalThrough() != frames || gRuntime.states.peerEqualThrough() != frames))
         return false;
+    if (gRuntime.audioProbe)
+        std::printf("[NET TEST] audio_done_frame=%u physical_finish_frame=%u\n",
+            audioDoneFrame, physicalFinishFrame);
     std::printf("[NET TEST] equal_states=%u peer_equal_states=%u\n",
         gRuntime.states.equalThrough(), gRuntime.states.peerEqualThrough());
     std::fprintf(stdout, "[NET TEST] %s: %u/%u frames, local physical PAD=%u, game port=%u\n",

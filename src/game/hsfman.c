@@ -651,6 +651,14 @@ void Hu3DModelKill(s16 arg0) {
                 HuSprAnimKill(copy->anim);
             }
             temp_r31->hsf = NULL;
+#ifdef TARGET_PC
+            /* D24: hsf and hookFunc share storage, so the line above has just
+             * set this hook function to null. Leaving HU3D_ATTR_HOOKFUNC on
+             * tells Hu3DDrawPost there is still a hook to call, and it calls
+             * address zero - the KINOPIO HAMMER crash, three times out of
+             * three. A destroyed hook must stop advertising itself. */
+            temp_r31->attr &= ~HU3D_ATTR_HOOKFUNC;
+#endif
             if (modelKillAllF == 0) {
                 HuMemDCFlush(HEAP_DATA);
             }
@@ -2332,15 +2340,43 @@ bool PartyBoard_RollbackModelRegions(PartyBoardRollbackRegionSink sink, void *co
     return true;
 }
 
+/* Diagnostic only: which of the four conditions said no, last time.
+ * "A checkpoint was refused" is not actionable; "a sprite draw callback was
+ * live" is. Measured on a real board replay, this gate refuses 153 captures out
+ * of 159, so knowing which clause does it decides what the rollback work is. */
+static const char *rollbackRenderRefusal = "none";
+
+const char *PartyBoard_RollbackRenderRefusal(void)
+{
+    return rollbackRenderRefusal;
+}
+
 bool PartyBoard_RollbackRenderCanReplayWithoutDraw(void)
 {
     s16 i;
-    if (!PartyBoard_RollbackWipeCanReplayWithoutDraw()) return false;
-    for (i = 0; i < 8; ++i) if (layerHook[i]) return false;
-    for (i = 0; i < HU3D_MODEL_MAX; ++i)
-        if (Hu3DData[i].hsf && (Hu3DData[i].attr & HU3D_ATTR_HOOKFUNC)) return false;
-    for (i = 0; i < HUSPR_MAX; ++i)
-        if (HuSprData[i].data && (HuSprData[i].attr & HUSPR_ATTR_FUNC)) return false;
+    if (!PartyBoard_RollbackWipeCanReplayWithoutDraw()) {
+        rollbackRenderRefusal = "wipe-active";
+        return false;
+    }
+    for (i = 0; i < 8; ++i) {
+        if (layerHook[i]) {
+            rollbackRenderRefusal = "layer-hook";
+            return false;
+        }
+    }
+    for (i = 0; i < HU3D_MODEL_MAX; ++i) {
+        if (Hu3DData[i].hsf && (Hu3DData[i].attr & HU3D_ATTR_HOOKFUNC)) {
+            rollbackRenderRefusal = "model-draw-hook";
+            return false;
+        }
+    }
+    for (i = 0; i < HUSPR_MAX; ++i) {
+        if (HuSprData[i].data && (HuSprData[i].attr & HUSPR_ATTR_FUNC)) {
+            rollbackRenderRefusal = "sprite-draw-hook";
+            return false;
+        }
+    }
+    rollbackRenderRefusal = "none";
     return true;
 }
 
@@ -2366,5 +2402,88 @@ bool PartyBoard_RollbackRenderSafetySelfTest(void)
     OSReport("Rollback render safety gate: %s (wipe/layer/model/sprite callbacks rejected; live tables restored).\n",
         ok ? "PASS" : "FAIL");
     return ok;
+}
+#endif
+
+#ifdef TARGET_PC
+#include "port/netplay_state.h"
+
+/*
+ * Logical animation time. Gameplay reads this constantly: Hu3DMotionTimeGet and
+ * Hu3DMotionEndCheck are called from 549 sites across the game and its overlays,
+ * and board and minigame code sequences events on "has this motion finished".
+ * A one-tick difference here becomes a different game path on the next frame.
+ *
+ * Only the motion clocks and attributes are exported. Model pointers, HSF data,
+ * matrices, light ids and malloc handles are addresses or presentation state and
+ * differ legitimately between two machines, so they are left out; the slot being
+ * occupied is exported as a boolean rather than as its pointer.
+ */
+void PartyBoard_NetplayAnimationState(PartyBoardNetplayStateSink sink, void *context)
+{
+    s32 i;
+    s32 j;
+    s32 live = 0;
+#define WORD(value) sink(context, #value, (uint32_t)(value))
+#define FWORD(value) sink(context, #value, PartyBoard_NetplayFloatWord(value))
+#define MOTWORK(work) \
+    FWORD((work).time); FWORD((work).speed); FWORD((work).start); FWORD((work).end);
+    for (i = 0; i < HU3D_MODEL_MAX; i++) {
+        const HU3DMODEL *model = &Hu3DData[i];
+        const int used = model->hsf != NULL;
+        WORD(used);
+        if (!used) {
+            continue;
+        }
+        ++live;
+        WORD(i);
+        WORD(model->attr);
+        WORD(model->motAttr);
+        MOTWORK(model->motWork)
+        MOTWORK(model->motOvlWork)
+        MOTWORK(model->motShiftWork)
+        MOTWORK(model->motShapeWork)
+        for (j = 0; j < HU3D_CLUSTER_MAX; j++) {
+            FWORD(model->clusterTime[j]);
+            FWORD(model->clusterSpeed[j]);
+            WORD(model->clusterAttr[j]);
+            WORD(model->motIdCluster[j]);
+        }
+        /* The four work structures above are hashed; until 2026-09-12 the four
+         * identifiers that say WHICH animation each of them advances were not.
+         * Two peers could therefore run different motions with identical clocks
+         * and be declared in agreement. It is not a theoretical hole:
+         * m415Dll/main.c:1014 branches on Hu3DMotionShiftIDGet(), which returns
+         * motIdShift, and the branch it guards allocates seven HEAP_SYSTEM
+         * blocks - exactly the 7-block, 15360-byte quantum measured three times
+         * that day. See D19. */
+        WORD(model->motId);
+        WORD(model->motIdOvl);
+        WORD(model->motIdShift);
+        WORD(model->motIdShape);
+        WORD(model->motIdSrc);
+        WORD(model->linkMdlId);
+        WORD(model->cameraBit);
+        /* Diagnostic, added 2026-09-12 for the OBJECTS family.
+         *
+         * Six divergences that evening were tiny float differences in
+         * object->trans - two thousandths of a unit - with nothing else in the
+         * whole state disagreeing. object->trans is hashed; the model
+         * transforms many object functions read and write are not, so a drift
+         * that starts in a model position stays invisible until it reaches an
+         * object, which can be thousands of frames later.
+         *
+         * Hashing them names the drift at the frame it begins instead of its
+         * distant consequence. Verified beforehand that frame interpolation
+         * works on copies (renderPos/renderRot/renderScale in Hu3DExec) and
+         * never touches these, so they are game state and not presentation. */
+        FWORD(model->pos.x); FWORD(model->pos.y); FWORD(model->pos.z);
+        FWORD(model->rot.x); FWORD(model->rot.y); FWORD(model->rot.z);
+        FWORD(model->scale.x); FWORD(model->scale.y); FWORD(model->scale.z);
+    }
+    WORD(live);
+#undef MOTWORK
+#undef FWORD
+#undef WORD
 }
 #endif

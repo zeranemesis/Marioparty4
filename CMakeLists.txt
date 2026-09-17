@@ -113,7 +113,48 @@ option(SKIP_HU_ALLOC "Skip the game's built in allocator" OFF)
 option(RUNTIME_SANITIZE "Runtime (stack) sanitization" OFF)
 option(PARTYBOARD_EXPERIMENTAL_MUSYX_AUDIO "Enable the experimental MusyX audio backend" OFF)
 
-set(USE_ASAN OFF CACHE BOOL "Disable ASan" FORCE)
+# ASan stays off by default, but the switch has to be reachable: this line used
+# to FORCE it off, which silently discarded -DUSE_ASAN=ON and made the option
+# below decorative. A build that asks for it explicitly now gets it.
+if (NOT USE_ASAN)
+    set(USE_ASAN OFF CACHE BOOL "Disable ASan" FORCE)
+endif ()
+
+if (USE_ASAN AND MSVC)
+    # /fsanitize=address turns on the MSVC STL container annotations, and that
+    # choice has to match across every object in the link. Only the game, the
+    # port and the overlays are instrumented, so abseil, aurora, fmt and rmlui
+    # disagreed and the link failed with LNK2038 mismatches on annotate_string,
+    # annotate_vector and annotate_optional.
+    #
+    # _DISABLE_STL_ANNOTATION turns all of them off on both sides at once,
+    # which is the documented remedy and covers any container Microsoft
+    # annotates later. It costs exactly one class of detection: overflows
+    # INSIDE a std::string, std::vector or std::optional buffer. Nothing this
+    # investigation needs is affected, namely heap-buffer-overflow,
+    # stack-buffer-overflow, global-buffer-overflow, use-after-free,
+    # double-free and invalid-free. The corruption being hunted is in the
+    # game's own arrays and in HuMem, not in an STL container.
+    #
+    # Set before any add_subdirectory or FetchContent call, so the dependencies
+    # built from source pick it up too.
+    add_compile_definitions(_DISABLE_STL_ANNOTATION=1)
+
+    # Instrument everything that is built from source, not just our own code.
+    # abseil changes the layout of raw_hash_set under
+    # ABSL_HAVE_ADDRESS_SANITIZER, so an instrumented translation unit that
+    # inlines the header and an uninstrumented library that defines the
+    # out-of-line parts disagree about the object. That is an ODR violation,
+    # and it showed up as a null dereference inside find_non_soo the moment
+    # partyboard::config::Register touched the map at start-up. The same hazard
+    # exists for any header-heavy dependency, so the flag goes on globally
+    # before the subdirectories rather than target by target.
+    #
+    # Prebuilt packages (nod) and anything shipped as a binary cannot be
+    # instrumented; that residual inconsistency is documented rather than
+    # hidden, and it does not involve shared C++ templates.
+    add_compile_options("/fsanitize=address")
+endif ()
 set(AURORA_ENABLE_DVD ON)
 set(AURORA_ENABLE_RMLUI ON CACHE BOOL "Enable RmlUi UI support" FORCE)
 set(RUNTIME_SANITIZE OFF)
@@ -133,6 +174,21 @@ endif ()
 
 add_subdirectory(extern/aurora EXCLUDE_FROM_ALL)
 add_subdirectory(extern/musyx EXCLUDE_FROM_ALL)
+# MusyX carries the bank lifetime diagnostic's hooks, so it needs the port
+# header that declares them. Added from here rather than inside the submodule so
+# the submodule keeps building on its own.
+target_include_directories(musyx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# dol is a SHARED library, so every static library linked into it has to be
+# position independent. The submodule's own CMakeLists does not ask for that,
+# and on Linux the link fails the moment MusyX's objects are really pulled in:
+#
+#   libmusyxRD.a(hw_pc.c.o): relocation R_X86_64_PC32 against symbol
+#   `salAudioDumpFrameCount' can not be used when making a shared object
+#
+# Set from here, like the include path above, so the submodule keeps building
+# on its own. A no-op on Windows.
+set_property(TARGET musyx PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 # The pinned Tracy dependency already provides stb_image, which is used by the
 # portable THP movie player for the JPEG video component.
@@ -156,12 +212,31 @@ endif()
 target_link_libraries(dol PUBLIC aurora::core aurora::card aurora::dvd aurora::gx aurora::mtx aurora::os aurora::si aurora::vi aurora::pad musyx absl::flat_hash_map nlohmann_json::nlohmann_json fmt::fmt rmlui_debugger)
 if (WIN32)
     target_link_libraries(dol PUBLIC ws2_32)
+    # dbghelp is loaded lazily by the crash reporter for MiniDumpWriteDump, but
+    # StackWalk64 and the symbol helpers are linked directly.
+    target_link_libraries(dol PUBLIC dbghelp)
+    # Give every libco coroutine stack its own guarded reservation instead of a
+    # bare malloc block. libco falls back to malloc only when these are
+    # undefined (extern/libco/settings.h), so overriding them here needs no
+    # change inside libco itself. See include/port/coroutine_stack.h.
+    # libco.c is C and would otherwise have no prototype for the replacements,
+    # so the declarations are force-included into that one translation unit.
+    if (MSVC)
+        set(PARTY_BOARD_LIBCO_FORCE_INCLUDE "/FIport/coroutine_stack_alloc.h")
+    else ()
+        set(PARTY_BOARD_LIBCO_FORCE_INCLUDE "-include" "port/coroutine_stack_alloc.h")
+    endif ()
+    set_source_files_properties(extern/libco/libco.c PROPERTIES
+            COMPILE_DEFINITIONS "LIBCO_MALLOC=PartyBoard_CoroutineStackAlloc;LIBCO_FREE=PartyBoard_CoroutineStackFree"
+            COMPILE_OPTIONS "${PARTY_BOARD_LIBCO_FORCE_INCLUDE}")
 endif ()
 # TODO it doesn't work on Linux yet
 if (WIN32)
     if(USE_ASAN)
         target_compile_definitions(dol PRIVATE USE_ASAN)
-        set_source_files_properties(${GAME_FILES} PROPERTIES COMPILE_OPTIONS "-fsanitize=address")
+        # The instrumentation flag itself is applied globally above, so the
+        # game, the port, the overlays and every dependency built from source
+        # are consistent. Only the USE_ASAN define is target-scoped.
     endif()
     if(SKIP_HU_ALLOC)
         target_compile_definitions(dol PRIVATE SKIP_HU_ALLOC)
@@ -169,6 +244,9 @@ if (WIN32)
 endif()
 if (MSVC)
     target_link_options(dol PRIVATE "/DEF:${CMAKE_SOURCE_DIR}/dol.def")
+    # Without this, editing the export list does not relink dol and the
+    # executable fails on a symbol that looks like it was just added.
+    set_property(TARGET dol APPEND PROPERTY LINK_DEPENDS "${CMAKE_SOURCE_DIR}/dol.def")
     # target_compile_options(dol PRIVATE "/WX")
     target_compile_options(dol PRIVATE "/wd4244") # implicit narrowing conversion
     target_compile_options(dol PRIVATE "/wd4101") # unreferenced local variable
@@ -203,6 +281,31 @@ target_include_directories(partyboard PRIVATE include ${CMAKE_BINARY_DIR})
 target_link_libraries(partyboard PRIVATE dol aurora::main)
 aurora_copy_runtime_dlls(partyboard dol)
 
+if (USE_ASAN AND MSVC)
+    # The launcher itself is instrumented too, so the sanitizer runtime is
+    # initialised before any game module loads rather than by whichever DLL
+    # happens to come first.
+    # ASan cannot coexist with incremental linking, and CMake turns that on by
+    # default for RelWithDebInfo. Without this the link fails outright.
+    foreach (asan_target dol partyboard)
+        target_link_options(${asan_target} PRIVATE "/INCREMENTAL:NO")
+    endforeach ()
+    # Ship the sanitizer runtime beside the executable: the game is launched
+    # from its output directory, not from a developer command prompt, so the
+    # DLL is not otherwise on the search path.
+    get_filename_component(PARTY_BOARD_MSVC_BIN "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    set(PARTY_BOARD_ASAN_DLL "${PARTY_BOARD_MSVC_BIN}/clang_rt.asan_dynamic-x86_64.dll")
+    if (EXISTS "${PARTY_BOARD_ASAN_DLL}")
+        add_custom_command(TARGET partyboard POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${PARTY_BOARD_ASAN_DLL}" "$<TARGET_FILE_DIR:partyboard>"
+                COMMENT "Copying the AddressSanitizer runtime")
+    else ()
+        message(WARNING "AddressSanitizer runtime not found at ${PARTY_BOARD_ASAN_DLL};"
+                " the instrumented build will not start.")
+    endif ()
+endif ()
+
 list(APPEND BINARY_TARGETS partyboard dol)
 
 set(REL_TARGETS "")
@@ -223,8 +326,12 @@ foreach (dir ${REL_TARGETS})
             add_library(${dir} SHARED ${REL_SOURCE_FILES})
             list(APPEND BINARY_TARGETS ${dir})
             if (USE_ASAN)
-                set_source_files_properties(${REL_SOURCE_FILES} PROPERTIES COMPILE_OPTIONS "-fsanitize=address")
                 target_compile_definitions(${dir} PRIVATE USE_ASAN)
+                if (MSVC)
+                    # Same incompatibility as the main targets: ASan and
+                    # incremental linking cannot both be on.
+                    target_link_options(${dir} PRIVATE "/INCREMENTAL:NO")
+                endif ()
             endif()
             if (dir MATCHES "^w..Dll")
                 target_sources(${dir} PRIVATE src/REL/board_executor.c)

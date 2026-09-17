@@ -1259,8 +1259,20 @@ static void ParManFunc(void)
 
 static float jitterTbl[] = { 1.0f, 0.9f, 0.7f, 0.5f, 0.5f, 0.7f, 0.9f, 1.0f };
 
+#ifdef TARGET_PC
+/* D23. How many times the particle hook has actually run. It advances and
+ * kills particles from the DRAWING path, and the emitter then draws five
+ * random numbers per slot it freed - so a peer that renders a different
+ * number of frames consumes a different amount of shared randomness.
+ * Diagnostics only, never hashed. */
+u32 partyboardParManHookRuns;
+#endif
+
 static void ParManHook(HU3DMODEL *model, HU3DPARTICLE *particle, Mtx mtx)
 {
+#ifdef TARGET_PC
+    ++partyboardParManHookRuns;
+#endif
     HU3DPARMANPARAM *param;
     HU3DPARMAN *parManP;
     HU3DPARTICLEDATA *particleDataP;

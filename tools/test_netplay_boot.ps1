@@ -4,7 +4,19 @@ param(
     [string]$OutputDirectory='work/netplay-real-boot',
     [int]$DurationSeconds=30,
     [switch]$Menu,
-    [string]$HostProfile
+    [switch]$Walk,
+    [string]$RecordInput,
+    [string]$ReplayInput,
+    [string]$HostProfile,
+    # Diagnostic only: leave the child's stdout and stderr attached to this
+    # console instead of capturing them through a pipe, so the pipe itself can be
+    # taken out of an experiment. The stdout log and the overlay-path check are
+    # skipped, because there is nothing to read them from.
+    [switch]$NoStdoutPipe,
+    # Diagnostic only: leave PARTYBOARD_NET_DIAGNOSTIC empty so the periodic
+    # netplay log never opens a file. The in-run DESYNC poll goes with it,
+    # because it reads that same log.
+    [switch]$NoNetDiagnostic
 )
 $ErrorActionPreference='Stop'
 $projectPath=Split-Path $PSScriptRoot -Parent
@@ -15,7 +27,13 @@ function Resolve-TestPath([string]$path) {
 $binaryPath=Resolve-TestPath $BinaryDirectory
 $disc=[IO.Path]::GetFullPath($DiscPath)
 if (-not (Test-Path -LiteralPath $disc -PathType Leaf)) { throw 'Disc file missing.' }
-if ($DurationSeconds -lt 1 -or $DurationSeconds -gt 300) { throw 'Duration must be 1..300 seconds.' }
+# The cap used to be 300 seconds, which is fine for a boot check but cannot
+# replay a real recorded session: the Big Boo recording alone is 49877 frames,
+# about 831 seconds of game time. An hour is the new ceiling, still bounded so a
+# hung run cannot sit forever.
+# A sanitized build runs roughly nine times slower, so replaying the recording
+# as far as frame 48671 takes about two hours. Three is the ceiling.
+if ($DurationSeconds -lt 1 -or $DurationSeconds -gt 10800) { throw 'Duration must be 1..10800 seconds.' }
 $runPath=Join-Path (Resolve-TestPath $OutputDirectory) ([Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $runPath -Force | Out-Null
 $reservation=[Net.Sockets.UdpClient]::new([Net.IPEndPoint]::new([Net.IPAddress]::Loopback,0))
@@ -35,14 +53,22 @@ try {
         }
         if ($side -eq 0 -and $HostProfile) {
             $sourceProfile=Resolve-TestPath $HostProfile
-            $settings=Get-Content -LiteralPath (Join-Path $sourceProfile 'config.json') -Raw | ConvertFrom-Json -AsHashtable
+            # ConvertFrom-Json -AsHashtable needs PowerShell 6.2+; 5.1 returns a
+            # PSCustomObject, which ConvertTo-Json would re-emit unchanged but
+            # which cannot take the audio override below.
+            $parsed=Get-Content -LiteralPath (Join-Path $sourceProfile 'config.json') -Raw | ConvertFrom-Json
+            $settings=@{}
+            foreach ($field in $parsed.PSObject.Properties) { $settings[$field.Name]=$field.Value }
             foreach ($card in Get-ChildItem -LiteralPath $sourceProfile -File -Filter 'MemoryCard*.raw') {
                 Copy-Item -LiteralPath $card.FullName -Destination $profile
             }
             # Preserve a different offline disc path to exercise the online override.
             $settings['audio.masterVolume']=0
         }
-        $settings | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $profile 'config.json') -Encoding utf8NoBOM
+        # Windows PowerShell 5.1 has no utf8NoBOM encoding name, and the game's
+        # config parser rejects a byte-order mark.
+        [IO.File]::WriteAllText((Join-Path $profile 'config.json'),
+            ($settings | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
         $prefix='Local\PartyBoardOnlineStart-'+[Guid]::NewGuid().ToString('N')
         $ready=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$prefix+'-ready')
         $go=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$prefix+'-go')
@@ -53,20 +79,45 @@ try {
         $transport=if ($side -eq 0) { "--netplay-host $port" } else { "--netplay-join 127.0.0.1:$port" }
         $start.Arguments="$transport --netplay-full --netplay-loopback --netplay-delay 3"
         if ($Menu) { $start.Arguments+=" --netplay-menu-probe" }
+        if ($Walk) { $start.Arguments+=" --netplay-walk-probe" }
+        # Each peer records both seats to its own file so the two can be
+        # compared; a replay reads one shared file.
+        if ($RecordInput) {
+            $start.Arguments+=" --netplay-record-input " + [char]34 +
+                (Join-Path $runPath "peer-$side-input.txt") + [char]34
+        }
+        if ($ReplayInput) {
+            $start.Arguments+=" --netplay-replay-input " + [char]34 +
+                (Resolve-TestPath $ReplayInput) + [char]34
+        }
         $start.UseShellExecute=$false
         $start.CreateNoWindow=$true
         $start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
-        $start.RedirectStandardOutput=$true
-        $start.RedirectStandardError=$true
+        $start.RedirectStandardOutput=(-not $NoStdoutPipe)
+        $start.RedirectStandardError=(-not $NoStdoutPipe)
         $start.EnvironmentVariables['PARTYBOARD_ONLINE_DISC']=$disc
         $start.EnvironmentVariables['PARTYBOARD_ONLINE_READY']=$prefix+'-ready'
         $start.EnvironmentVariables['PARTYBOARD_ONLINE_GO']=$prefix+'-go'
         $start.EnvironmentVariables['PARTYBOARD_ONLINE_CANCEL']=$prefix+'-cancel'
         $start.EnvironmentVariables['PARTYBOARD_NETPLAY_TEST_PROFILE']=$profile
         $diagnostic=Join-Path $runPath "peer-$side-native.log"
+        if ($NoNetDiagnostic) {
+            $start.EnvironmentVariables['PARTYBOARD_NET_DIAGNOSTIC']=''
+        } else {
         $start.EnvironmentVariables['PARTYBOARD_NET_DIAGNOSTIC']=$diagnostic
+        }
+        # Crash reports, minidumps and the live state file go beside the run's
+        # other evidence, named per seat. Without this the reporter falls back to
+        # the diagnostic's directory, which works but cannot name the seat.
+        $start.EnvironmentVariables['PARTYBOARD_CRASH_DIR']=$runPath
+        $start.EnvironmentVariables['PARTYBOARD_CRASH_PEER']="$side"
+        $start.EnvironmentVariables['PARTYBOARD_CRASH_ROLE']=$(if ($side -eq 0) { 'host' } else { 'client' })
         $process=[Diagnostics.Process]::Start($start)
-        $testPeers+=@{Process=$process;Out=$process.StandardOutput.ReadToEndAsync();Err=$process.StandardError.ReadToEndAsync();Ready=$ready;Go=$go;Cancel=$cancel;Side=$side;Diagnostic=$diagnostic}
+        if ($NoStdoutPipe) {
+            $testPeers+=@{Process=$process;Out=$null;Err=$null;Ready=$ready;Go=$go;Cancel=$cancel;Side=$side;Diagnostic=$diagnostic}
+        } else {
+            $testPeers+=@{Process=$process;Out=$process.StandardOutput.ReadToEndAsync();Err=$process.StandardError.ReadToEndAsync();Ready=$ready;Go=$go;Cancel=$cancel;Side=$side;Diagnostic=$diagnostic}
+        }
     }
     $timer=[Diagnostics.Stopwatch]::StartNew()
     while (-not ($testPeers[0].Ready.WaitOne(0) -and $testPeers[1].Ready.WaitOne(0))) {
@@ -79,7 +130,7 @@ try {
     while ($timer.Elapsed.TotalSeconds -lt $DurationSeconds) {
         foreach ($peer in $testPeers) {
             if ($peer.Process.HasExited) { throw "Peer $($peer.Side) exited during gameplay." }
-            if (Test-Path -LiteralPath $peer.Diagnostic) {
+            if ((-not $NoNetDiagnostic) -and (Test-Path -LiteralPath $peer.Diagnostic)) {
                 $log=Get-Content -Raw -LiteralPath $peer.Diagnostic
                 if ($log -match '(DESYNC|PROTOCOL)[^\r\n]*') { throw $Matches[0] }
             }
@@ -117,13 +168,78 @@ finally {
             $peer.Process.CloseMainWindow() | Out-Null
             if (-not $peer.Process.WaitForExit(3000)) { $peer.Process.Kill();$peer.Process.WaitForExit() }
         }
-        [IO.File]::WriteAllText((Join-Path $runPath "peer-$($peer.Side)-stdout.log"),$peer.Out.Result)
-        [IO.File]::WriteAllText((Join-Path $runPath "peer-$($peer.Side)-stderr.log"),$peer.Err.Result)
+        if (-not $NoStdoutPipe) {
+            [IO.File]::WriteAllText((Join-Path $runPath "peer-$($peer.Side)-stdout.log"),$peer.Out.Result)
+            [IO.File]::WriteAllText((Join-Path $runPath "peer-$($peer.Side)-stderr.log"),$peer.Err.Result)
+        }
         $peer.Process.Dispose();$peer.Ready.Dispose();$peer.Go.Dispose();$peer.Cancel.Dispose()
     }
 }
 Write-Output "Real boot logs: $runPath"
 if ($failure) { throw $failure }
+# Both peers must cross the same overlays on the same simulation frames. A
+# transition even one frame apart is already a divergent game path, and it is
+# what the wall-clock boot waits used to produce.
+$overlays = @()
+foreach ($side in 0, 1) {
+    $log = Get-Content -LiteralPath (Join-Path $runPath "peer-$side-stdout.log") -Raw
+    $seen = [regex]::Matches($log, 'game context (-?\d+) at network frame (\d+)') |
+        ForEach-Object { "$($_.Groups[1].Value)@$($_.Groups[2].Value)" }
+    $overlays += , @($seen)
+}
+Write-Output ("Overlay path: " + ($overlays[0] -join " -> "))
+if ($overlays[0].Count -lt 2) { throw 'No overlay transition observed.' }
+if (Compare-Object $overlays[0] $overlays[1] -SyncWindow 0) {
+    $a = $overlays[0] -join ' '
+    $b = $overlays[1] -join ' '
+    throw "Peers took different overlay paths. peer0: $a | peer1: $b"
+}
+Write-Output "PASS: both peers crossed $($overlays[0].Count) overlay transitions on identical frames."
+if ($RecordInput) {
+    # Every peer records both seats, so the frames both of them reached must match
+    # exactly. A difference there would mean the peers disagreed about the input
+    # timeline itself, which the canonical hash could only catch a frame later.
+    # The two files do differ in length: the run ends by closing both processes,
+    # and one of them always commits a few more frames than the other before it
+    # goes. Only the common prefix is an invariant, and only that prefix is kept
+    # as the replay timeline.
+    $recorded = @()
+    foreach ($side in 0, 1) {
+        $path = Join-Path $runPath "peer-$side-input.txt"
+        if (-not (Test-Path -LiteralPath $path)) { throw "Peer $side wrote no input recording." }
+        $recorded += , @(Get-Content -LiteralPath $path)
+    }
+    $shared = [Math]::Min($recorded[0].Count, $recorded[1].Count)
+    if ($shared -lt 60) { throw "Input recording too short: $shared shared rows." }
+    if (Compare-Object $recorded[0][0..($shared - 1)] $recorded[1][0..($shared - 1)] -SyncWindow 0) {
+        throw "The two peers disagreed within their first $shared recorded rows."
+    }
+    $target = Resolve-TestPath $RecordInput
+    [IO.File]::WriteAllLines($target, $recorded[0][0..($shared - 1)])
+    # Store the overlay path the recording produced. A later replay must land on
+    # the same overlays at the same frames, which is what makes the recording a
+    # regression test rather than just a saved session.
+    [IO.File]::WriteAllLines("$target.overlays", $overlays[0])
+    $tail = [Math]::Abs($recorded[0].Count - $recorded[1].Count)
+    Write-Output "PASS: both peers recorded an identical $shared-row input timeline ($tail trailing rows dropped at shutdown)."
+    Write-Output "Recording saved to $target"
+}
+
+if ($ReplayInput) {
+    $expectedPath = (Resolve-TestPath $ReplayInput) + '.overlays'
+    if (Test-Path -LiteralPath $expectedPath) {
+        $expected = @(Get-Content -LiteralPath $expectedPath)
+        if (Compare-Object $expected $overlays[0] -SyncWindow 0) {
+            $want = $expected -join ' -> '
+            $got = $overlays[0] -join ' -> '
+            throw "Replay diverged from the recording. expected: $want | got: $got"
+        }
+        Write-Output "PASS: the replay reproduced all $($expected.Count) recorded overlay transitions on the same frames."
+    } else {
+        Write-Output "NOTE: no $expectedPath beside the recording, so the replay path was not compared."
+    }
+}
+
 if ($Menu) {
     foreach ($side in 0,1) {
         $log=Get-Content -LiteralPath (Join-Path $runPath "peer-$side-stdout.log") -Raw

@@ -181,14 +181,33 @@ extern "C" bool PartyBoard_RollbackResourcesLoad(const void *source, size_t size
     return loadScene(source, size, &heaps);
 }
 
+// Which gate refused the last capture. Diagnostic only: a refusal rate of
+// ninety-seven percent is a fact about the engine worth naming rather than
+// summarising, and "size was zero" does not say which of four conditions said
+// no.
+static const char *gLastCheckpointRefusal = "none";
+
+extern "C" const char *PartyBoard_RollbackCheckpointRefusal(void)
+{
+    return gLastCheckpointRefusal;
+}
+
 extern "C" size_t PartyBoard_RollbackCheckpointSize(void)
 {
-    if (HuPrcCurrentGet()) return 0;
+    if (HuPrcCurrentGet()) { gLastCheckpointRefusal = "inside-coroutine"; return 0; }
     Lease lease;
-    if (!lease.acquired) return 0;
+    if (!lease.acquired) { gLastCheckpointRefusal = "io-in-flight"; return 0; }
+    if (!PartyBoard_RollbackRenderCanReplayWithoutDraw()) {
+        // The clause, not just the gate: this one refuses the overwhelming
+        // majority of captures and "render" does not say what to fix.
+        gLastCheckpointRefusal = PartyBoard_RollbackRenderRefusal();
+        return 0;
+    }
     const auto heaps = currentHeaps();
     Builder builder;
-    return builder.build(&heaps, true) ? sizeof(Header) + builder.layout.byteSize() : 0;
+    if (!builder.build(&heaps, true)) { gLastCheckpointRefusal = "region-set-refused"; return 0; }
+    gLastCheckpointRefusal = "none";
+    return sizeof(Header) + builder.layout.byteSize();
 }
 extern "C" bool PartyBoard_RollbackCheckpointSave(void *destination, size_t capacity)
 {

@@ -1,12 +1,16 @@
 name: CubeShelf Windows Release
 
+# Releases come from a deliberate act, never from a branch push.
+#
+# This workflow used to trigger on every push to audio-local and its only gate
+# was that the build succeeded. That contradicts the project's first rule -
+# "ca compile" is never "ca fonctionne" - and it meant a work-in-progress commit
+# published a public artifact. Publishing is now a tag, or a hand-pressed
+# button.
 on:
   push:
-    branches:
-      - audio-local
-    paths-ignore:
-      - '*.md'
-      - 'docs/**'
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -74,17 +78,92 @@ jobs:
         shell: pwsh
         run: cmake --build --preset x-windows-ci-msvc
 
+      - name: Build online launcher
+        shell: pwsh
+        run: |
+          ./tools/build_online.ps1 -OutputDirectory "build/install"
+          Copy-Item -LiteralPath "tools/package/Jouer en ligne.cmd" -Destination "build/install" -Force
+          Copy-Item -LiteralPath "tools/package/Lancer PartyBoard.cmd" -Destination "build/install" -Force
+
       - name: Validate runtime
         shell: pwsh
         run: |
-          $exe = Get-ChildItem -Path "build/install" -Filter "partyboard.exe" -Recurse -ErrorAction SilentlyContinue |
-            Select-Object -First 1
+          $required = @(
+            "partyboard.exe",
+            "PartyBoardOnline.exe",
+            "PartyBoardOnline.exe.config",
+            "Jouer en ligne.cmd",
+            "Lancer PartyBoard.cmd"
+          )
 
-          if (-not $exe) {
-            throw "partyboard.exe was not produced under build/install."
+          foreach ($file in $required) {
+            $path = Join-Path "build/install" $file
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "$file was not produced under build/install."
+            }
           }
 
-          Write-Host "PartyBoard executable: $($exe.FullName)"
+          $test = Start-Process -FilePath "build/install/PartyBoardOnline.exe" `
+            -ArgumentList "--self-test" -Wait -PassThru -NoNewWindow
+          if ($test.ExitCode -ne 0) {
+            throw "PartyBoardOnline self-test failed with exit code $($test.ExitCode)."
+          }
+
+          Write-Host "Offline and online launchers are ready."
+
+      - name: Engine self-tests
+        shell: pwsh
+        # The launcher self-test was, until now, the only thing between a build
+        # and a public download. The engine carries nine self-tests of its own -
+        # rollback, transport, netplay runtime, crash reporter, heap detector,
+        # audio lifetime, crash manifest, crash uploader, CubeShelf mod overlay -
+        # and none of them ran here. They need no disc and no network.
+        run: |
+          $ErrorActionPreference = "Stop"
+          $log = & "build/install/partyboard.exe" "--netplay-self-test" 2>&1
+          $code = $LASTEXITCODE
+          $log | ForEach-Object { Write-Host $_ }
+
+          $summary = $log | Where-Object { $_ -match '^SELFTEST total=' } | Select-Object -Last 1
+          if (-not $summary) {
+            throw "The engine self-test produced no summary line; it did not run to the end."
+          }
+          if ($summary -notmatch 'total=(\d+) failed=(\d+)') {
+            throw "Unreadable self-test summary: $summary"
+          }
+          $total = [int]$Matches[1]
+          $failed = [int]$Matches[2]
+
+          # A gate that cannot say how many checks ran is not a gate: if a
+          # component is ever removed from the chain this step has to notice.
+          if ($total -ne 9) {
+            throw "Expected 9 engine self-tests, the binary ran $total."
+          }
+          if ($failed -ne 0 -or $code -ne 0) {
+            throw "$failed of $total engine self-tests failed (exit code $code)."
+          }
+          Write-Host "All $total engine self-tests passed."
+
+      - name: Test suite
+        shell: pwsh
+        # The scripts that need no disc image. This is the second half of the
+        # release gate: the engine self-tests say the binary's own components
+        # work, and these say the harness around it does - snapshot restore, PAD
+        # ticks, the crash pipeline, the rollback suites, the merge fixtures, the
+        # update channel guard.
+        #
+        # test_netplay_boot is excluded because it needs a real disc, which a CI
+        # runner does not have. test_direct_connection is excluded deliberately
+        # and permanently: it probes the router and can open a port, which must
+        # never happen unattended on a shared machine.
+        run: |
+          $ErrorActionPreference = "Stop"
+          ./tools/run_all_tests.ps1 `
+            -BinaryDirectory "build/install" `
+            -Exclude test_direct_connection
+          if ($LASTEXITCODE -ne 0) {
+            throw "The test suite failed with exit code $LASTEXITCODE."
+          }
 
       - name: Create CubeShelf package
         shell: pwsh
@@ -108,9 +187,12 @@ jobs:
             schema = 1
             game = "Mario Party 4"
             gameId = "GMPE01_00"
-            version = "nightly-$shortSha"
+            version = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "dev-$shortSha" }
             commit = "${{ github.sha }}"
-            branch = "${{ github.ref_name }}"
+            ref = "${{ github.ref_name }}"
+            refType = "${{ github.ref_type }}"
+            runId = "${{ github.run_id }}"
+            runNumber = "${{ github.run_number }}"
             platform = "win-x64"
             executable = "partyboard.exe"
             supportedDiscs = @(
@@ -143,29 +225,81 @@ jobs:
             release-notes.txt
           retention-days: 14
 
-      - name: Publish CubeShelf nightly release
+      - name: Publish release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $ErrorActionPreference = "Continue"
-
-          gh release view cubeshelf-nightly *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release delete cubeshelf-nightly --yes --cleanup-tag
-            if ($LASTEXITCODE -ne 0) {
-              throw "Unable to replace existing cubeshelf-nightly release."
-            }
+          # Every release keeps its own tag, and no published artifact is ever
+          # deleted. Replacing a single rolling release on each run left no
+          # download URL that stayed valid and nothing to bisect when a tester
+          # reported a crash against a build that no longer existed. The rolling
+          # release still exists, refreshed further down, because that is the
+          # one URL CubeShelf knows how to ask for - but it is a pointer now,
+          # not the archive.
+          $shortSha = "${{ github.sha }}".Substring(0, 12)
+          $releaseTag = if ("${{ github.ref_type }}" -eq "tag") {
+            "${{ github.ref_name }}"
+          } else {
+            "dev-$shortSha"
           }
 
+          $ErrorActionPreference = "Continue"
+          gh release view $releaseTag *> $null
+          $exists = ($LASTEXITCODE -eq 0)
           $ErrorActionPreference = "Stop"
 
-          gh release create cubeshelf-nightly `
-            "PartyBoard-win-x64.zip" `
-            "manifest.json" `
-            "checksums.txt" `
-            "release-notes.txt" `
-            --target "${{ github.sha }}" `
-            --title "CubeShelf Nightly - PartyBoard Windows" `
-            --notes-file "release-notes.txt" `
-            --prerelease
+          if ($exists) {
+            # A re-run of the same commit refreshes its own assets; it does not
+            # touch anyone else's release.
+            gh release upload $releaseTag `
+              "PartyBoard-win-x64.zip" `
+              "manifest.json" `
+              "checksums.txt" `
+              "release-notes.txt" `
+              --clobber
+          } else {
+            gh release create $releaseTag `
+              "PartyBoard-win-x64.zip" `
+              "manifest.json" `
+              "checksums.txt" `
+              "release-notes.txt" `
+              --target "${{ github.sha }}" `
+              --title "PartyBoard Windows - $releaseTag" `
+              --notes-file "release-notes.txt" `
+              --prerelease
+          }
+
+          # CubeShelf asks for one fixed URL. Its Manifest source builds
+          # releases/download/<GitHubReleaseTag>/manifest.json, and every
+          # catalog in the wild carries "cubeshelf-nightly" there, so dropping
+          # that release stopped every launcher update dead: CubeShelf kept
+          # installing the last build published under it and overwrote anything
+          # newer on its own startup check.
+          #
+          # The per-tag release above stays the archive - nothing is deleted,
+          # every build keeps a URL that never moves. This one is the moving
+          # pointer the launcher reads, refreshed from the same four files.
+          $ErrorActionPreference = "Continue"
+          gh release view cubeshelf-nightly *> $null
+          $nightlyExists = ($LASTEXITCODE -eq 0)
+          $ErrorActionPreference = "Stop"
+
+          if ($nightlyExists) {
+            gh release upload cubeshelf-nightly `
+              "PartyBoard-win-x64.zip" `
+              "manifest.json" `
+              "checksums.txt" `
+              "release-notes.txt" `
+              --clobber
+          } else {
+            gh release create cubeshelf-nightly `
+              "PartyBoard-win-x64.zip" `
+              "manifest.json" `
+              "checksums.txt" `
+              "release-notes.txt" `
+              --target "${{ github.sha }}" `
+              --title "PartyBoard Windows - latest for CubeShelf" `
+              --notes "Moving pointer for the CubeShelf launcher. It always carries the most recent build; $releaseTag keeps this one under its own tag." `
+              --prerelease
+          }

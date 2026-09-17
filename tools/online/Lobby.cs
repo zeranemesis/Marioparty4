@@ -7,6 +7,25 @@ using System.Threading;
 using System.Diagnostics;
 
 namespace PartyBoardOnline {
+static class ChildProcess {
+    static readonly object environmentLock=new object();
+    public static Process Start(ProcessStartInfo info,params string[] variables) {
+        if(variables.Length%2!=0)throw new ArgumentException("Environment variables must be name/value pairs.");
+        lock(environmentLock) {
+            var previous=new string[variables.Length/2];
+            try {
+                for(int i=0;i<variables.Length;i+=2) {
+                    previous[i/2]=Environment.GetEnvironmentVariable(variables[i]);
+                    Environment.SetEnvironmentVariable(variables[i],variables[i+1]);
+                }
+                return Process.Start(info);
+            } finally {
+                for(int i=0;i<variables.Length;i+=2)Environment.SetEnvironmentVariable(variables[i],previous[i/2]);
+            }
+        }
+    }
+}
+
 sealed class DiscFile : IDisposable {
     readonly FileStream file;
     public string Path {get;private set;}
@@ -25,8 +44,7 @@ sealed class DiscFile : IDisposable {
             if(inspect) {
                 var root=AppDomain.CurrentDomain.BaseDirectory;
                 var info=new ProcessStartInfo(System.IO.Path.Combine(root,"partyboard.exe"),"--online-disc-check"){WorkingDirectory=root,UseShellExecute=false,CreateNoWindow=true};
-                info.EnvironmentVariables["PARTYBOARD_ONLINE_DISC"]=disc.Path;
-                using(var p=Process.Start(info)) {
+                using(var p=ChildProcess.Start(info,"PARTYBOARD_ONLINE_DISC",disc.Path)) {
                     var timer=Stopwatch.StartNew();
                     while(!p.WaitForExit(100)) {
                         if(token.IsCancellationRequested || timer.Elapsed.TotalSeconds>30) {p.Kill();token.ThrowIfCancellationRequested();throw new IOException("La lecture du disque a pris trop de temps.");}
@@ -152,12 +170,12 @@ sealed class GameStart : IDisposable {
     public void Launch(string arguments,string path,bool probe=false,string diagnosticPath=null) {
         var root=AppDomain.CurrentDomain.BaseDirectory;
         var info=new ProcessStartInfo(System.IO.Path.Combine(root,"partyboard.exe"),arguments+(probe?" --netplay-start-probe --netplay-pad-probe":"")){WorkingDirectory=root,UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=probe,RedirectStandardError=probe};
-        info.EnvironmentVariables["PARTYBOARD_ONLINE_DISC"]=path;
-        info.EnvironmentVariables["PARTYBOARD_ONLINE_READY"]=prefix+"-ready";
-        info.EnvironmentVariables["PARTYBOARD_ONLINE_GO"]=prefix+"-go";
-        info.EnvironmentVariables["PARTYBOARD_ONLINE_CANCEL"]=prefix+"-cancel";
-        if(diagnosticPath!=null)info.EnvironmentVariables["PARTYBOARD_NET_DIAGNOSTIC"]=diagnosticPath;
-        Process=System.Diagnostics.Process.Start(info);
+        Process=ChildProcess.Start(info,
+            "PARTYBOARD_ONLINE_DISC",path,
+            "PARTYBOARD_ONLINE_READY",prefix+"-ready",
+            "PARTYBOARD_ONLINE_GO",prefix+"-go",
+            "PARTYBOARD_ONLINE_CANCEL",prefix+"-cancel",
+            "PARTYBOARD_NET_DIAGNOSTIC",diagnosticPath);
     }
     public void WaitReady(CancellationToken token) {
         var timer=Stopwatch.StartNew();

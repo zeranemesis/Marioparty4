@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "note": "Scenarios used to prove that a fix's regression test actually goes red when that fix is reverted. They are kept out of the normal campaign manifest because they exist to be run deliberately, one fix at a time, against a binary that has been broken on purpose. The procedure and the recorded results are in docs/regression_proofs.md.",
+  "scenarios": [
+    {
+      "id": "d3-first-unload",
+      "description": "D3. Runs past the first results-screen bank release at frame 18141, where the causal chain was proven four times out of four. With the barrier in salDetachVoicesFromSample removed this reports 8 audio lifetime violations and classifies CRASH; with it present, 0 and PASS. No need to unroll the whole recording.",
+      "board": "w04Dll",
+      "kind": "replay",
+      "replay": "work/netplay-recordings/board-replay.txt",
+      "durationSeconds": 340,
+      "minFrames": 18500,
+      "repeats": 1,
+      "netplayDelay": 3,
+      "seed": "recorded",
+      "proves": "D3",
+      "revert": "extern/musyx/src/musyx/runtime/hw_pc.c: return early from salDetachVoicesFromSample. Leave the detectors alone - what is reverted is the fix, not the instrument."
+    },
+    {
+      "id": "d5-first-rewind",
+      "description": "D5. The forced rollback probe's first comparison. With PartyBoard_AnimationAdvance removed from PartyBoard_RollbackRunGameLogicTick this fails at frame 602, the very first opportunity, with ROLLBACK:ANIMATION:(model->motWork).time; with it present the run reaches 7109 and passes. Requires -ForceRollback '600:1,2,4'.",
+      "board": "w04Dll",
+      "kind": "replay",
+      "replay": "work/netplay-recordings/board-replay.txt",
+      "durationSeconds": 120,
+      "minFrames": 6000,
+      "repeats": 1,
+      "netplayDelay": 3,
+      "seed": "recorded",
+      "proves": "D5",
+      "revert": "src/game/main.c: remove the PartyBoard_AnimationAdvance() call from PartyBoard_RollbackRunGameLogicTick."
+    },
+    {
+      "id": "d4-big-boo",
+      "description": "D4. Carries the recording through the Big Boo event at frame 48671, where the coroutine stack for fn_1_30A4 overflowed by exactly eight bytes. With the stack sizing returned to stack_size *= 2 and no floor, the session should die there; with the measured sizing it should not.",
+      "board": "w04Dll",
+      "kind": "replay",
+      "replay": "work/netplay-recordings/board-replay.txt",
+      "durationSeconds": 900,
+      "minFrames": 44000,
+      "repeats": 1,
+      "netplayDelay": 3,
+      "seed": "recorded",
+      "proves": "D4",
+      "revert": "src/game/process.c: replace `stack_size *= 4;` and the 32768 floor with `stack_size *= 2;`."
+    }
+  ]
+}

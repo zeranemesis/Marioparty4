@@ -13,6 +13,11 @@ void HuTHPStop(void);
 void HuTHPClose(void);
 void HuTHPRestart(void);
 BOOL HuTHPEndCheck(void);
+#ifdef TARGET_PC
+/* Advances the movie's deterministic playback clock by one simulation tick.
+ * Must be called exactly once per accepted game tick. */
+void PartyBoard_ThpLogicalTick(void);
+#endif
 s32 HuTHPFrameGet(void);
 s32 HuTHPTotalFrameGet(void);
 void HuTHPSetVolume(s32 left, s32 right);

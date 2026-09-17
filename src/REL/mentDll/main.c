@@ -18,6 +18,10 @@
 extern s32 rand8(void);
 #include "game/audio.h"
 #include "port/settings.h"
+#ifdef TARGET_PC
+#include "port/netplay_runtime.h"
+#include <stdio.h>
+#endif
 #endif
 
 typedef struct MentDllUnkBssE4Struct {
@@ -1268,6 +1272,31 @@ s32 fn_1_99CC(void)
                     break;
                 }
             }
+#ifdef TARGET_PC
+            /* Measurement, not behaviour. A scripted walk has to know WHEN this
+             * loop starts reading the stick, and no frame number can be assumed:
+             * the menu only accepts a move once the six panels have settled and
+             * var_r28 has reached 0x15. The cursor starts at 2, and sp8 maps it
+             * to the board: {1, 2, 0, 3, 4, 5}, so 2 is w01 and a move right is
+             * w04 next, not w02. */
+            {
+                static s32 traceCursor = -99;
+                static s32 traceReady = -99;
+                const s32 ready = (i == 6 && var_r28 >= 0x15) ? 1 : 0;
+                PartyBoard_NetplayWalkMenu(ready);
+                if (var_r30 != traceCursor || ready != traceReady) {
+                    char trace[112];
+                    snprintf(trace, sizeof(trace),
+                        "ment_board_loop cursor=%d board=%d ready=%d settle=%d stickx=%d",
+                        (int)var_r30, (int)sp8[var_r30], (int)ready, (int)var_r28,
+                        (int)HuPadStkX[lbl_1_bss_3114->unk_6C]);
+                    OSReport("%s\n", trace);
+                    PartyBoard_NetplayTrace(trace);
+                    traceCursor = var_r30;
+                    traceReady = ready;
+                }
+            }
+#endif
 
             if (i == 6 && var_r28 >= 0x15) {
                 if ((HuPadBtnDown[lbl_1_bss_3114->unk_6C] & 0x200)) {

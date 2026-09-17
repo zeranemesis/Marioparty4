@@ -1,5 +1,8 @@
 #include "dolphin.h"
 #include "game/wipe.h"
+#ifdef TARGET_PC
+#include "port/crash_report.h"
+#endif
 #include "game/memory.h"
 #include "game/flag.h"
 #include "game/board/tutorial.h"
@@ -159,6 +162,15 @@ void WipeCreate(s16 mode, s16 type, s16 duration)
 	}
 	wipe = &wipeData;
 	if(wipe->stat) {
+#ifdef TARGET_PC
+		/* D20: a refused fade is how a one-frame difference between two
+		 * peers becomes a permanent one. Not silenced, and not accepted
+		 * either - accepting would hide the difference instead of
+		 * explaining it. */
+		PartyBoard_CrashBreadcrumb("WIPE",
+			"WipeCreate refused: mode %d type %d duration %d while mode %d is running",
+			(int)mode, (int)type, (int)duration, (int)wipe->mode);
+#endif
 		return;
 	}
 	if(mode == WIPE_MODE_IN || mode == WIPE_MODE_OUT) {
@@ -392,6 +404,41 @@ bool PartyBoard_RollbackWipeRegions(PartyBoardRollbackRegionSink sink, void *con
 {
     return sink && sink(context, &wipeData, sizeof(wipeData))
         && sink(context, &wipeFadeInF, sizeof(wipeFadeInF));
+}
+
+#include "port/netplay_state.h"
+
+/* Scene gate. The wipe decides when a module transition may proceed, so a
+ * one-tick difference here becomes a different overlay on the next frame.
+ * Copy buffers and their addresses are presentation-only and excluded. */
+void PartyBoard_NetplaySceneState(PartyBoardNetplayStateSink sink, void *context)
+{
+    int i;
+    int buffers = 0;
+#define WORD(value) sink(context, #value, (uint32_t)(value))
+    WORD(wipeData.mode); WORD(wipeData.stat); WORD(wipeData.type);
+    WORD(wipeData.keep_copy); WORD(wipeFadeInF);
+    WORD(PartyBoard_NetplayFloatWord(wipeData.time));
+    WORD(PartyBoard_NetplayFloatWord(wipeData.duration));
+    WORD(wipeData.color.r); WORD(wipeData.color.g);
+    WORD(wipeData.color.b);
+    /* color.a is excluded on purpose: it is a presentation value that the
+     * BLANK branch of WipeExecAlways rewrites to 255 on every presented image,
+     * and that the fade ramps recompute from wipe->time, which is hashed just
+     * above. It is only ever read by GXSetChanMatColor/GXSetTevColor, never by
+     * game logic, so it carries the render frame rate into the state instead of
+     * gameplay. r, g and b stay hashed: WipeColorSet drives them from the
+     * board and minigame code. */
+    WORD(wipeData.w); WORD(wipeData.h); WORD(wipeData.x); WORD(wipeData.y);
+    WORD(wipeData.unk00); WORD(wipeData.unk04); WORD(wipeData.unk0C); WORD(wipeData.unk38);
+    WORD(wipeData.copy_data != NULL);
+    for (i = 0; i < 8; i++) {
+        if (wipeData.unk10[i] != NULL) {
+            buffers |= 1 << i;
+        }
+    }
+    WORD(buffers);
+#undef WORD
 }
 
 bool PartyBoard_RollbackWipeCanReplayWithoutDraw(void)

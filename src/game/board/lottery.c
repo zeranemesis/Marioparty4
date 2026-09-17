@@ -27,6 +27,7 @@
 
 #ifndef __MWERKS__
 #include "game/board/shop.h"
+#include "port/board_coverage.h"
 #endif
 
 typedef struct {
@@ -166,6 +167,7 @@ s16 BoardLotteryHostGet(void)
 
 void BoardLotteryExec(void)
 {
+    PARTYBOARD_BOARD_COVERAGE("LOTTERY");
     if (BoardPlayerSizeGet(GWSystem.player_curr) == 2) {
         return;
     }

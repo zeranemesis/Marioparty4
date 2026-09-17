@@ -1,4 +1,8 @@
 #include "REL/mstory3Dll.h"
+#ifdef TARGET_PC
+#include "port/netplay_runtime.h"
+#include <stdio.h>
+#endif
 #include "game/disp.h"
 #include "game/gamework.h"
 #include "game/gamework_data.h"
@@ -507,12 +511,39 @@ s32 fn_1_23D8(s32 arg0) {
 }
 
 void fn_1_2420(s32 arg0, s32 arg1) {
+#ifdef TARGET_PC
+    /* D27 / G6. Two runs reached their final turn and then sat 80 000 frames
+     * in this module without a single process event - the signature of a
+     * blocking wait. This function is that wait, and it waits on ONE pad: if
+     * that pad belongs to a seat nobody drives, nothing will ever press it.
+     * Say which pad and which button, once per entry. */
+    {
+        char trace[96];
+        s32 waited = 0;
+        snprintf(trace, sizeof(trace), "endwait pad=%d button=%04x", (int)arg0, (unsigned)arg1);
+        PartyBoard_NetplayTrace(trace);
+        while (TRUE) {
+            if (arg1 & HuPadBtnDown[arg0]) {
+                snprintf(trace, sizeof(trace), "endwait released pad=%d after=%d", (int)arg0, (int)waited);
+                PartyBoard_NetplayTrace(trace);
+                return;
+            }
+            if (++waited % 600 == 0) {
+                snprintf(trace, sizeof(trace), "endwait still pad=%d frames=%d btn=%04x",
+                    (int)arg0, (int)waited, (unsigned)HuPadBtnDown[arg0]);
+                PartyBoard_NetplayTrace(trace);
+            }
+            HuPrcVSleep();
+        }
+    }
+#else
     while (TRUE) {
         if (arg1 & HuPadBtnDown[arg0]) {
             break;
         }
         HuPrcVSleep();
     }
+#endif
 }
 
 void fn_1_2474(void) {

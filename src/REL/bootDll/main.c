@@ -28,6 +28,7 @@
 #include "port/byteswap.h"
 #include "port/port_version.h"
 #include "port/settings.h"
+#include "port/netplay_runtime.h"
 #endif
 
 #define HU_PAD_BTN_ALL (HuPadBtn[0] | HuPadBtn[1] | HuPadBtn[2] | HuPadBtn[3])
@@ -97,6 +98,29 @@ void ObjectSetup(void)
  s32 LanguageBootGet(void);
  BOOL LanguageMenuExec(void);
  #endif
+
+ /*
+  * Online, a boot wait must cost both peers the same number of simulation
+  * ticks. Real elapsed time differs between two machines, and every iteration
+  * here yields one lockstep tick, so a wall-clock bound makes the very first
+  * screen diverge. 180 ticks is the same three seconds the sibling branches
+  * below already count out by hand. Offline keeps the original behaviour.
+  */
+ static void BootWaitMs(OSTick start, u32 milliseconds)
+ {
+#ifdef TARGET_PC
+     if (PartyBoard_NetplayEnabled()) {
+         u32 ticks = milliseconds * 60 / 1000;
+         while (ticks-- != 0) {
+             HuPrcVSleep();
+         }
+         return;
+     }
+#endif
+     while (OSTicksToMilliseconds(OSGetTick() - start) < milliseconds) {
+         HuPrcVSleep();
+     }
+ }
 
 #ifdef TARGET_PC
  static void BootInitForSkippedSequence(void)
@@ -228,9 +252,7 @@ void ObjectSetup(void)
              HuSprGrpMemberSet(group, 1, sprite_hudson);
              HuSprPosSet(group, 1, 288, 240);
              HuSprAttrSet(group, 1, HUSPR_ATTR_DISPOFF);
-             while (OSTicksToMilliseconds(OSGetTick() - tick_prev) < 3000) {
-                HuPrcVSleep();
-             }
+             BootWaitMs(tick_prev, 3000);
          }
          else {
              for (i = 0; i < 180; i++) {
@@ -272,9 +294,7 @@ void ObjectSetup(void)
          if (!SystemInitF) {
              tick_prev = OSGetTick();
              HuAudSndGrpSet(0);
-             while (OSTicksToMilliseconds(OSGetTick() - tick_prev) < 3000) {
-                HuPrcVSleep();
-             }
+             BootWaitMs(tick_prev, 3000);
          }
          else {
              for (i = 0; i < 180; i++) {
@@ -314,9 +334,7 @@ void ObjectSetup(void)
              HuAudSndGrpSetSet(0);
              SystemInitF = 1;
          }
-         while (OSTicksToMilliseconds(OSGetTick() - tick_prev) < 1000) {
-            HuPrcVSleep();
-         }
+         BootWaitMs(tick_prev, 1000);
          HuSprAttrSet(group, 0, HUSPR_ATTR_DISPOFF);
          HuSprAttrSet(group, 1, HUSPR_ATTR_DISPOFF);
          group_thp = HuSprGrpCreate(1);
@@ -1069,7 +1087,10 @@ void ObjectSetup(void)
 
  void *NintendoDataDecode(void)
  {
-     u32 *src = (u32 *)nintendoData;
+     /* nintendoData is a macro that ALLOCATES on PC, so it is evaluated once
+        and the pointer kept: the buffer must be freed by its own address. */
+     void *source = (void *)nintendoData;
+     u32 *src = (u32 *)source;
 
      u32 size = *src++;
      void *dst;
@@ -1086,7 +1107,16 @@ void ObjectSetup(void)
          HuDecodeData(src, dst, size, decode_type);
      }
 #ifdef TARGET_PC
-     HuMemDirectFree(src);
+     /* src has been advanced twice by *src++, so it is source+8. Freeing THAT
+        made the allocator read a block header out of the payload: refused on
+        every boot ("HuMem>memory free error"), and occasionally accepted,
+        which rewrote the neighbour links from a bogus block and crashed in
+        HuMemMemoryFree. Seen 2026-09-12 twice, and 2026-09-13 at 13:05.
+        The offset is exactly eight: heap 3 based at 97ed7040, first payload
+        at 97ed7080, refused address reported as 97ed7088. */
+     if (source) {
+         HuMemDirectFree(source);
+     }
 #endif
      return dst;
  }

@@ -18,6 +18,15 @@ bool PartyBoard_NetplayConfigureFromArgs(int argc, char **argv);
 bool PartyBoard_NetplayEnabled(void);
 /* One named boot/menu diagnostic event; no-op outside a network session. */
 void PartyBoard_NetplayTrace(const char *event);
+/* Rendered frames since boot. Reported, never hashed: it is a property of
+   this machine, not of the game state. See docs/netplay_defect_register.md. */
+extern unsigned int PartyBoard_RenderedFrames;
+void PartyBoard_NetplayWalkMenu(int ready);
+/* Non-zero when a draw hook may only run on a frame carrying a simulation
+   tick. See D23 in docs/netplay_defect_register.md. */
+int PartyBoard_HookTickGateEnabled(void);
+/* Test-only override of the party turn count, 0 when unset. */
+int PartyBoard_NetplayMaxTurnsOverride(void);
 /* Companion-controlled start barrier, called only after game initialization. */
 bool PartyBoard_OnlineWaitForStart(void);
 bool PartyBoard_NetplayAllowsMultipleInstances(void);
@@ -34,6 +43,8 @@ void PartyBoard_NetplayControlMotor(u32 port, u32 command);
 bool PartyBoard_NetplayPadRunProbe(void);
 bool PartyBoard_NetplayHasError(void);
 bool PartyBoard_NetplayWaiting(void);
+/* True once a packet from the peer has ever been accepted. */
+bool PartyBoard_NetplayPeerSeen(void);
 const char *PartyBoard_NetplayError(void);
 void PartyBoard_NetplayShutdown(void);
 bool PartyBoard_NetplayRuntimeRunSelfTest(void);

@@ -1,4 +1,8 @@
 #include "REL/mstory3Dll.h"
+#ifdef TARGET_PC
+#include "port/netplay_runtime.h"
+#include <stdio.h>
+#endif
 #include "game/audio.h"
 #include "game/chrman.h"
 #include "game/data.h"
@@ -327,11 +331,36 @@ void fn_1_165C8(void) {
 s32 fn_1_16924(void) {
     s32 var_r31;
     s32 var_r30;
+#ifdef TARGET_PC
+    s32 pbWaited = 0;
+    s32 pbPad;
+    char pbTrace[128];
+#endif
 
     var_r31 = 0;
     var_r30 = 0;
+#ifdef TARGET_PC
+    /* D27 / G6. One of the two loops the end-of-game ceremony can park in.
+       It reads ONE pad, chosen by unk04, and only the unk14 == -1 branch has
+       a way out that nobody has to press. Name the pad on entry: a wait on a
+       seat nobody drives is indistinguishable from a frozen game, and that
+       confusion already cost this project nine runs and several days. */
+    pbPad = lbl_1_bss_1A0C.unk38[lbl_1_bss_1A0C.unk04].unk14;
+    snprintf(pbTrace, sizeof(pbTrace), "resultwait enter pad=%d timeout=%d",
+        (int)pbPad, (int)(lbl_1_bss_1A0C.unk14 == -1));
+    PartyBoard_NetplayTrace(pbTrace);
+#endif
     while (TRUE) {
         fn_1_938();
+#ifdef TARGET_PC
+        pbPad = lbl_1_bss_1A0C.unk38[lbl_1_bss_1A0C.unk04].unk14;
+        if (++pbWaited % 600 == 0) {
+            snprintf(pbTrace, sizeof(pbTrace),
+                "resultwait still pad=%d frames=%d down=%04x",
+                (int)pbPad, (int)pbWaited, (unsigned)HuPadBtnDown[pbPad]);
+            PartyBoard_NetplayTrace(pbTrace);
+        }
+#endif
         if (lbl_1_bss_1A0C.unk14 != -1) {
             if (HuPadBtnDown[lbl_1_bss_1A0C.unk38[lbl_1_bss_1A0C.unk04].unk14] & PAD_BUTTON_A) {
                 HuAudFXPlay(0x1C);
@@ -376,11 +405,50 @@ s32 fn_1_16924(void) {
 }
 
 void fn_1_16AD4(void) {
+#ifdef TARGET_PC
+    s32 pbWaited = 0;
+    s32 pbPad;
+    char pbTrace[160];
+#endif
     lbl_1_bss_1A0C.unk24 = 1;
     fn_1_1D44(lbl_1_bss_1A0C.unk10, MAKE_MESSID(38, lbl_1_bss_1A0C.unk2C8));
+#ifdef TARGET_PC
+    /* D27 / G6. THE loop an automatic run cannot leave, and thirty captures
+       over ten minutes show why it does not look stuck: the pages turn and
+       the screen animates the whole time.
+
+       It has exactly one exit - B, on the single pad unk04 selects - and it
+       is armed by unk24, a counter that must exceed 5. Every horizontal
+       input sets unk24 back to 0, unless the page has already hit its stop
+       (0 or 11). A driver that keeps nudging sideways therefore holds the
+       only door shut, forever, while visibly making progress.
+
+       Report the pad, the page, and the guard, so the next fix is aimed at a
+       measurement instead of at the most plausible story. */
+    pbPad = lbl_1_bss_1A0C.unk38[lbl_1_bss_1A0C.unk04].unk14;
+    snprintf(pbTrace, sizeof(pbTrace), "statpage enter pad=%d page=%d",
+        (int)pbPad, (int)lbl_1_bss_1A0C.unk2C8);
+    PartyBoard_NetplayTrace(pbTrace);
+#endif
     while (TRUE) {
         fn_1_938();
+#ifdef TARGET_PC
+        pbPad = lbl_1_bss_1A0C.unk38[lbl_1_bss_1A0C.unk04].unk14;
+        if (++pbWaited % 600 == 0) {
+            snprintf(pbTrace, sizeof(pbTrace),
+                "statpage still pad=%d frames=%d page=%d guard=%d down=%04x held=%04x stkx=%d",
+                (int)pbPad, (int)pbWaited, (int)lbl_1_bss_1A0C.unk2C8,
+                (int)lbl_1_bss_1A0C.unk24, (unsigned)HuPadBtnDown[pbPad],
+                (unsigned)HuPadBtn[pbPad], (int)HuPadStkX[pbPad]);
+            PartyBoard_NetplayTrace(pbTrace);
+        }
+#endif
         if (lbl_1_bss_1A0C.unk24++ > 5 && (HuPadBtnDown[lbl_1_bss_1A0C.unk38[lbl_1_bss_1A0C.unk04].unk14] & PAD_BUTTON_B)) {
+#ifdef TARGET_PC
+            snprintf(pbTrace, sizeof(pbTrace), "statpage left after=%d page=%d",
+                (int)pbWaited, (int)lbl_1_bss_1A0C.unk2C8);
+            PartyBoard_NetplayTrace(pbTrace);
+#endif
             HuAudFXPlay(3);
             break;
         }

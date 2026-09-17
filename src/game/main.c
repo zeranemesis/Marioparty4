@@ -24,8 +24,10 @@
 #include "port/frame_interpolation.h"
 #include "port/main.h"
 #include "port/rollback.h"
+#include "port/rollback_animation.h"
 #include "port/rollback_clock.h"
 #include "port/netplay_runtime.h"
+#include "port/crash_report.h"
 #include "port/dolassets.h"
 #include "port/ui.h"
 #include "aurora/dvd.h"
@@ -78,6 +80,8 @@ s16 HuSysVWaitGet(s16 param);
 #ifdef TARGET_PC
 void PartyBoard_RequestRestart(void)
 {
+    PartyBoard_NetplayTrace("loop_exit reason=restart_requested");
+    PartyBoard_CrashNoteUserShutdown("restart requested");
     PartyBoard_RestartRequested = SUPPORTS_PROCESS_RESTART;
     PartyBoard_IsRunning = FALSE;
 }
@@ -94,6 +98,21 @@ static void PartyBoard_RunGameLogicTick(void)
 
 bool PartyBoard_RollbackRunGameLogicTick(const PartyBoardRollbackInput inputs[4], u8 connectedMask)
 {
+    /* Defect D5. A rendered frame runs the logic for a tick, the netplay commit
+     * captures the canonical state, and only THEN does Hu3DExec advance the
+     * animation clock. So the state captured at frame F does not yet contain
+     * the advance that the drawing of F performs, and reaching F+1 from it
+     * needs that advance before the logic of F+1 - exactly the order below.
+     *
+     * A replayed tick has no presentation pass, so without this every replayed
+     * frame came back with motWork.time one frame behind, which is what the
+     * forced rollback probe measured at its very first test:
+     * ANIMATION (model->motWork).time expected 268.0, actual 267.0.
+     *
+     * The other thing Hu3DExec does under the same guard, data->tick++, is
+     * deliberately not replayed: it counts drawn models, not simulated ticks,
+     * and PartyBoard_NetplayAnimationState does not export it. */
+    PartyBoard_AnimationAdvance();
     if (!PartyBoard_RollbackApplyPads(inputs, connectedMask)) return false;
     PartyBoard_RunGameLogicTick();
     return true;
@@ -195,6 +214,12 @@ void main(void)
             ++event;
         }
         if (exiting) {
+            PartyBoard_NetplayTrace("loop_exit reason=aurora_exit");
+            // The window was closed. Record it as an expected shutdown so the
+            // supervisor can tell a requested exit from a disappearance. The
+            // supervisor knows separately when IT sent the close, and classifies
+            // that case as SUPERVISOR_TERMINATED instead.
+            PartyBoard_CrashNoteUserShutdown("window closed (AURORA_EXIT)");
             break;
         }
 #endif
@@ -267,6 +292,34 @@ void main(void)
         }
         PartyBoard_SimulationTicksThisFrame = simulatedTicks;
         PartyBoard_IsSimulationTick = simulatedTicks != 0;
+        /* Every pass through this loop presents an image, whether or not it
+           carried a simulation tick - and Hu3DDrawPost, which calls every
+           model draw hook, runs on all of them. Two peers that have rendered
+           a different number of frames at the same simulation frame have run
+           those hooks a different number of times. */
+        PartyBoard_RenderedFrames++;
+        /* Defect D6, detection only. PARTYBOARD_ADVANCE_FRAME is this bool, not
+         * a count, and Hu3DExec runs once per rendered frame - so a frame that
+         * batches two simulation ticks advances the animation clock once, for
+         * both. Below 61 frames per second frame_pacer_simulation_tick always
+         * returns 1 and this can never fire, which is why no run has ever shown
+         * it. Recording it costs one comparison and settles whether D6 is real.
+         */
+        if (simulatedTicks > 1) {
+            static s32 batchedFrames = 0;
+            static s32 worstBatch = 0;
+            if (simulatedTicks > worstBatch) {
+                worstBatch = simulatedTicks;
+            }
+            if (++batchedFrames == 1 || (batchedFrames % 100) == 0) {
+                PartyBoard_CrashBreadcrumb(PARTYBOARD_CRASH_CAT_WARN,
+                    "D6 %d simulation ticks in one rendered frame (occurrences %d, worst %d)",
+                    simulatedTicks, batchedFrames, worstBatch);
+                OSReport("D6> %d simulation ticks in one rendered frame "
+                         "(occurrences %d, worst %d)\n",
+                    simulatedTicks, batchedFrames, worstBatch);
+            }
+        }
         PartyBoard_FrameInterpolationSetStep(frame_pacer_interpolation_step());
         previousVCount = HuSysVWaitGet(0);
         HuSysVWaitSet((s16)simulatedTicks);
@@ -317,17 +370,43 @@ void main(void)
         }
 
 #ifdef TARGET_PC
+        /* The notice has to LAST. It used to be pushed once, for eight
+           seconds, behind a latch that never re-armed - so after thirteen
+           seconds the screen went silent again and stayed that way. And
+           under --netplay-full no tick passes until someone joins, so
+           nothing redraws either: a responsive window showing the last
+           image, which is a blank screen if that image was a fade. It has
+           cost Valentin two sessions.
+
+           Counted in RENDERED frames, deliberately: it is exactly when the
+           simulation stops ticking that this message must stay alive. */
         static bool netplayWaitingShown = false;
-        if (PartyBoard_NetplayWaiting() && !netplayWaitingShown) {
-            ui_push_toast("info", "En attente de l'autre joueur", "La partie est en pause. Reprise automatique si la synchronisation revient avant 2 minutes.", 8000);
-            netplayWaitingShown = true;
-        } else if (netplayWaitingShown && !PartyBoard_NetplayWaiting() && !PartyBoard_NetplayHasError()) {
+        static unsigned netplayNoticeFrame = 0;
+        if (PartyBoard_NetplayWaiting()) {
+            if (!netplayWaitingShown
+                || PartyBoard_RenderedFrames - netplayNoticeFrame >= 600u) {
+                if (PartyBoard_NetplayPeerSeen()) {
+                    ui_push_toast("info", "En attente de l'autre joueur",
+                        "La liaison est interrompue. La partie reprend seule si elle revient avant 2 minutes.", 12000);
+                } else {
+                    ui_push_toast("info", "En attente du second joueur",
+                        "Personne n'a encore rejoint. Rien ne s'affichera tant que la partie n'a pas commence : c'est normal, ce n'est pas un plantage.", 12000);
+                }
+                netplayWaitingShown = true;
+                netplayNoticeFrame = PartyBoard_RenderedFrames;
+            }
+        } else if (netplayWaitingShown && !PartyBoard_NetplayHasError()) {
             ui_push_toast("info", "Connexion retablie", "La partie reprend.", 3000);
             netplayWaitingShown = false;
         }
-        if (!netplayErrorShown && PartyBoard_NetplayHasError()) {
-            ui_push_toast("error", "Online session stopped", PartyBoard_NetplayError(), 60000);
+        /* A stopped session keeps saying so. A sixty-second toast that
+           expires leaves the same blank, silent screen as no toast at all. */
+        if (PartyBoard_NetplayHasError()
+            && (!netplayErrorShown
+                || PartyBoard_RenderedFrames - netplayNoticeFrame >= 1800u)) {
+            ui_push_toast("error", "Session en ligne arretee", PartyBoard_NetplayError(), 30000);
             netplayErrorShown = true;
+            netplayNoticeFrame = PartyBoard_RenderedFrames;
         }
         ui_update();
         aurora_end_frame();
@@ -353,10 +432,21 @@ s16 HuSysVWaitGet(s16 param)
     return (s16)minimumVcount;
 }
 
+#ifdef TARGET_PC
+unsigned int PartyBoard_RenderedFrames;
+#endif
+
 s32 rnd_seed = 0x0000D9ED;
+
+#ifdef TARGET_PC
+u32 partyboardRand8Calls;
+#endif
 
 s32 rand8(void)
 {
+#ifdef TARGET_PC
+    ++partyboardRand8Calls;
+#endif
     rnd_seed = (rnd_seed * 0x41C64E6D) + 0x3039;
     return (u8)(((rnd_seed + 1) >> 16) & 0xFF);
 }
@@ -416,12 +506,38 @@ BOOL PartyBoard_RollbackClockSelfTest(void) {
 #endif
 
 #ifdef TARGET_PC
+#include "port/netplay_state.h"
+
+extern s32 VCounter;
+
+/* Frame-domain counters. All of them must advance once per accepted
+ * simulation tick; real display time must never appear here. */
+void PartyBoard_NetplayTimerState(PartyBoardNetplayStateSink sink, void *context)
+{
+#define WORD(value) sink(context, #value, (uint32_t)(value))
+    WORD(GlobalCounter);
+    WORD(VCounter);
+    WORD(minimumVcount);
+    WORD(PartyBoard_NetplayFloatWord(minimumVcountf));
+    WORD(SystemInitF);
+    WORD(HuDvdErrWait);
+    /* PartyBoard_SimulationTicksThisFrame and PartyBoard_IsSimulationTick
+     * describe the presentation frame that produced this tick, not the tick
+     * itself: a peer that stalled once carries a different value. */
+#undef WORD
+}
+#endif
+
+#ifdef TARGET_PC
 #include "port/rollback_scene.h"
 bool PartyBoard_RollbackClockRegions(PartyBoardRollbackRegionSink sink, void *context)
 {
     if (!sink) return false;
 #define REGION(value) if (!sink(context, &(value), sizeof(value))) return false;
     REGION(rnd_seed) REGION(GlobalCounter) REGION(minimumVcount) REGION(minimumVcountf)
+    /* Consumption counters are part of the deterministic RNG state: a replayed
+     * frame must draw the same number of samples as the original one. */
+    REGION(partyboardRand8Calls)
 #undef REGION
     return PartyBoard_RollbackRandomRegions(sink, context);
 }

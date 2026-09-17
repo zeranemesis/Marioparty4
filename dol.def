@@ -4,14 +4,61 @@ EXPORTS
     PartyBoard_RollbackIsResimulating
     PartyBoard_NetTransportRunSelfTest
     PartyBoard_NetplayConfigureFromArgs
+    PartyBoard_BoardCoverageMark
     PartyBoard_NetplayEnabled
     PartyBoard_NetplayTrace
+    PartyBoard_NetplayWalkMenu
+    PartyBoard_HookTickGateEnabled
+    PartyBoard_NetplayMaxTurnsOverride
     PartyBoard_OnlineCheckDisc
     PartyBoard_OnlineBarrierProbe
     PartyBoard_NetplayAllowsMultipleInstances
+    PartyBoard_NetplayHeapCensus
+    PartyBoard_NetplayRngRingRead
+    PartyBoard_NetplayHeapInjectLeak
+    PartyBoard_NetplayPeerSeen
     PartyBoard_NetplayShutdown
     PartyBoard_NetplayRuntimeRunSelfTest
     PartyBoard_NetplayPadRunProbe
+    PartyBoard_CrashReportInit
+    PartyBoard_CrashSetPeer
+    PartyBoard_CrashReportRunSelfTest
+    PartyBoard_CrashReportProvoke
+    PartyBoard_CrashNoteUserShutdown
+    PartyBoard_CrashNoteSupervisorShutdown
+    PartyBoard_CrashNoteNormalExit
+    PartyBoard_CrashShutdownExpected
+    PartyBoard_CrashReportAbnormal
+    PartyBoard_CoroutineStackRunSelfTest
+    PartyBoard_CoroutineSymbolsReady
+    PartyBoard_CoroutineStackWatch
+    PartyBoard_CoroutineWatchdogEnabled
+    PartyBoard_CrashUploaderRunSelfTest
+    PartyBoard_CrashUploader
+    PartyBoard_CrashSetUploader
+    PartyBoard_CrashSubmitReady
+    PartyBoard_CrashExportSubmission
+    PartyBoard_CrashManifestRunSelfTest
+    PartyBoard_CrashSanitizeText
+    PartyBoard_CrashBuildFingerprint
+    PartyBoard_CrashWriteManifest
+    PartyBoard_CrashQueueAdd
+    PartyBoard_CrashQueueSetState
+    PartyBoard_CrashQueueSetConsent
+    PartyBoard_CrashQueuePendingCount
+    PartyBoard_CrashQueuePrune
+    PartyBoard_CrashQueueScan
+    PartyBoard_CrashReportDirectory
+    PartyBoard_AudioLifetimeRunSelfTest
+    PartyBoard_AudioLifetimeEnabled
+    PartyBoard_AudioLifetimeViolationDetected
+    PartyBoard_AudioLifetimeStats
+    PartyBoard_MemDiagRunSelfTest
+    PartyBoard_MemDiagEnabled
+    PartyBoard_MemDiagCorruptionDetected
+    PartyBoard_MemDiagLastGoodFrame
+    PartyBoard_MemDiagFirstBadFrame
+    PartyBoard_ModsRunSelfTest
     BoardArcCos
     BoardArcSin
     BoardAudFXPlay

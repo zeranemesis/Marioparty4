@@ -11,8 +11,10 @@
 namespace partyboard::netplay {
 
 // v6 separates input/RTX/state packets and carries versioned canonical state.
-constexpr std::uint16_t kProtocolVersion = 6;
-constexpr std::size_t kNetplayPacketSize = 88;
+// v7 appends one hash per gameplay subsystem, so the first divergent frame also
+// names the subsystem without an extra round trip.
+constexpr std::uint16_t kProtocolVersion = 7;
+constexpr std::size_t kNetplayPacketSize = 152;
 enum class PacketType : std::uint8_t { Input = 1, Retransmit = 2, State = 3 };
 
 struct InputPacket {

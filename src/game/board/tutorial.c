@@ -7,6 +7,7 @@
 #include "game/process.h"
 
 #include <string.h>
+#include "port/board_coverage.h"
 
 SHARED_SYM s32 boardTutorialData[4]; // maybe a single s32 + padding?
 static void (*tutorialHook)(s16, s32);
@@ -35,6 +36,7 @@ static void TutorialProcFunc(void) {
 }
 
 void BoardTutorialInit(void) {
+    PARTYBOARD_BOARD_COVERAGE("TUTORIAL");
     boardTutorialDirInputTime = -1;
     boardTutorialBlockF = 0;
     boardTutorialUseItem = -1;

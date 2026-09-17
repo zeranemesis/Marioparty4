@@ -44,7 +44,9 @@ $cases = @(
     @{ Delay = 3; Extra = '--netplay-probe-disconnect' },
     @{ Delay = 0; Extra = '--netplay-probe-desync' },
     @{ Delay = 3; Extra = '--netplay-probe-desync' },
-    @{ Delay = 8; Extra = '--netplay-probe-desync' }
+    @{ Delay = 8; Extra = '--netplay-probe-desync' },
+    @{ Delay = 0; Extra = '--netplay-probe-audio' },
+    @{ Delay = 3; Extra = '--netplay-probe-audio' }
 )
 foreach ($case in $cases) {
     $delay = $case.Delay
@@ -57,12 +59,36 @@ foreach ($case in $cases) {
     try {
         $peers += Start-Probe "--netplay-host $port --netplay-delay $delay --netplay-pad 1 $extra"
         $peers += Start-Probe "--netplay-join 127.0.0.1:$port --netplay-delay $delay --netplay-pad 4 $extra"
+        $audioDoneFrames = @()
         foreach ($peer in $peers) {
-            $deadlineMs = if ($extra -eq '--netplay-probe-disconnect') { 145000 } else { 30000 }
+            $deadlineMs = if ($extra -eq '--netplay-probe-disconnect') { 145000 }
+                elseif ($extra -eq '--netplay-probe-audio') { 90000 } else { 30000 }
             if (-not $peer.Process.WaitForExit($deadlineMs)) { throw 'Netplay PAD probe timed out.' }
             Write-Output $peer.Out.Result
             if ($peer.Err.Result) { Write-Output $peer.Err.Result }
             if ($peer.Process.ExitCode -ne 0) { throw "Netplay PAD probe failed (delay $delay): $($peer.Process.ExitCode)" }
+            if ($extra -eq '--netplay-probe-audio') {
+                $match = [regex]::Match($peer.Out.Result, 'audio_done_frame=(\d+)')
+                if (-not $match.Success) { throw 'Audio probe did not report a completion frame.' }
+                $audioDoneFrames += [int]$match.Groups[1].Value
+            }
+        }
+        if ($extra -eq '--netplay-probe-audio') {
+            # The two peers finish the stream at very different real times on
+            # purpose. The logical clock must still end the wait on the same
+            # simulation frame, otherwise gameplay diverges from here on.
+            if ($audioDoneFrames.Count -ne 2 -or $audioDoneFrames[0] -ne $audioDoneFrames[1]) {
+                throw "Audio wait ended on different frames: $($audioDoneFrames -join ' vs ')"
+            }
+            # One second of stream armed on frame 100 lasts 60 ticks, and the
+            # frame that starts it already consumes one of them: the real loop
+            # advances the clock in PadReadSimulationTick, before game logic
+            # polls the status. Last playing frame is therefore 158, and 159 is
+            # the first frame on which the wait is over.
+            if ($audioDoneFrames[0] -ne 159) {
+                throw "Audio wait ended at frame $($audioDoneFrames[0]), expected 159."
+            }
+            Write-Output "[NET TEST] PASS: audio wait ended at frame $($audioDoneFrames[0]) on both peers (delay $delay)"
         }
     } finally {
         foreach ($peer in $peers) {

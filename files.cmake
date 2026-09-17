@@ -81,8 +81,14 @@ set(GAME_FILES
 set(PORT_FILES
         src/port/achievements.cpp
         src/port/audio.c
+        src/port/audio_lifetime.cpp
         src/port/byteswap.cpp
         src/port/config.cpp
+        src/port/coroutine_stack.cpp
+        src/port/crash_manifest.cpp
+        src/port/crash_uploader.cpp
+        src/port/board_coverage.cpp
+        src/port/crash_report.cpp
         src/port/dolassets.cpp
         #        src/port/dvd.c
         src/port/file_select.cpp
@@ -91,6 +97,9 @@ set(PORT_FILES
         src/port/imgui.cpp
         src/port/io.cpp
         src/port/iso_validate.cpp
+        src/port/mem_diagnostics.cpp
+        src/port/mods.cpp
+        src/port/mods_test.inc
         src/port/netplay_transport.cpp
         src/port/netplay_runtime.cpp
         src/port/OS.c

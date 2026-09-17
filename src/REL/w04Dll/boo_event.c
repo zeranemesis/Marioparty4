@@ -24,6 +24,7 @@
 
 #ifndef __MWERKS__
 #include <stdlib.h>
+#include "port/board_coverage.h"
 #endif
 
 typedef struct {
@@ -340,6 +341,16 @@ static void fn_1_2C10(void)
         else {
             temp_r31->unk0A = ((BssE4Data *)lbl_1_bss_E4[i - 1]->user_data)->unk04;
         }
+        /* The board-specific gimmick markers live here and not in
+         * src/game/board/, because a board's own events are in its own
+         * module. The generic BOO marker in board/boo.c is the coin and
+         * star steal, NOT this: a 48671-frame recording of Boo's Haunted
+         * Bash reported no BOO at all while crossing this event, which is
+         * how the gap was found.
+         *
+         * This exact line is also where defect D4 lived: fn_1_30A4 asked
+         * for 0x1000 and needed 8200 bytes. */
+        PARTYBOARD_BOARD_COVERAGE("W04_BIG_BOO");
         lbl_1_bss_E4[i] = HuPrcChildCreate(fn_1_30A4, 0x2003, 0x1000, 0, boardMainProc);
         lbl_1_bss_E4[i]->user_data = temp_r31;
         temp_r31->unk2C = HuPrcChildCreate(fn_1_2FDC, 0x2002, 0x1000, 0, boardMainProc);

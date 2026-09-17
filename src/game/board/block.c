@@ -11,6 +11,7 @@
 
 #include "game/board/audio.h"
 #include "game/board/tutorial.h"
+#include "port/board_coverage.h"
 
 #define BLOCK_SPAWN 0
 #define BLOCK_HIT 2
@@ -74,6 +75,7 @@ static s32 coinF[10];
 
 s32 BoardBlockExec(s32 arg0)
 {
+    PARTYBOARD_BOARD_COVERAGE("BLOCK");
     if (BoardPlayerSizeGet(arg0) == 2) {
         return 0;
     }

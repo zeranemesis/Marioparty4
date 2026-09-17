@@ -7,6 +7,7 @@ using System.Net.Sockets;
 using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Security.Principal;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -37,6 +38,10 @@ static class Wire {
             using(var cert=req.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5),DateTimeOffset.UtcNow.AddHours(12))) {
                 // A temporary PFX import makes the private key usable by Schannel
                 // on .NET Framework. Nothing is installed in a certificate store.
+                var identity=WindowsIdentity.GetCurrent();
+                var keyDirectory=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "Microsoft","Crypto","RSA",identity.User.Value);
+                Directory.CreateDirectory(keyDirectory);
                 return new X509Certificate2(cert.Export(X509ContentType.Pfx));
             }
         }
@@ -74,25 +79,46 @@ static class Wire {
 
 sealed class Invitation {
     public IPAddress Address; public int Port; public DateTime Expires;
+    // The host's address on its own network, alongside its public one. Two PCs
+    // in the same house are zero milliseconds apart, but an invitation that
+    // carries only the public address sends them out through the box and back
+    // in - measured at 15 ms between two machines on one switch, and cut by the
+    // router after forty to fifty seconds, three sessions out of three. The
+    // guest tries this one first and keeps the public address as the fallback,
+    // so nothing is lost when the two really are far apart.
+    public IPAddress LocalAddress=IPAddress.Any; public int LocalPort;
     public byte[] Fingerprint,Token,Build;
+    public bool HasLocalPath {get{return LocalPort>0 && LocalAddress!=null && !LocalAddress.Equals(IPAddress.Any) && !LocalAddress.Equals(Address);}}
     public string Encode() {
         if(Fingerprint.Length!=16 || Token.Length!=16)throw new IOException("Invitation incompatible.");
         using(var m=new MemoryStream()) using(var w=new BinaryWriter(m)) {
             w.Write(Address.GetAddressBytes());w.Write((ushort)Port);
             w.Write((uint)(Expires-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalSeconds);
             w.Write(Fingerprint);w.Write(Token);
-            return "PB2."+Convert.ToBase64String(m.ToArray()).Replace('+','-').Replace('/','_');
+            w.Write((LocalAddress??IPAddress.Any).GetAddressBytes());w.Write((ushort)LocalPort);
+            return "PB3."+Convert.ToBase64String(m.ToArray()).Replace('+','-').Replace('/','_');
         }
     }
     public static Invitation Decode(string text,bool localTest=false) {
         try {
             if(text==null) throw new FormatException(); text=text.Trim();
-            if(text.Length!=60 || !text.StartsWith("PB2.",StringComparison.Ordinal)) throw new FormatException();
+            // A PB2 invitation carries no local address. Refusing it by name
+            // beats letting it decode short and fail later as "incomplete".
+            if(text.StartsWith("PB2.",StringComparison.Ordinal))
+                throw new IOException("Cette invitation vient d'une version plus ancienne de PartyBoard. Copiez le même dossier sur les deux PC et recréez le salon.");
+            if(text.Length!=68 || !text.StartsWith("PB3.",StringComparison.Ordinal)) throw new FormatException();
             var b64=text.Substring(4).Replace('-','+').Replace('_','/'); b64+=new string('=',(4-b64.Length%4)%4);
-            var data=Convert.FromBase64String(b64); if(data.Length!=42) throw new FormatException();
+            var data=Convert.FromBase64String(b64); if(data.Length!=48) throw new FormatException();
             using(var r=new BinaryReader(new MemoryStream(data))) {
                 var i=new Invitation{Address=new IPAddress(r.ReadBytes(4)),Port=r.ReadUInt16(),Expires=new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc).AddSeconds(r.ReadUInt32()),Fingerprint=r.ReadBytes(16),Token=r.ReadBytes(16)};
+                i.LocalAddress=new IPAddress(r.ReadBytes(4));i.LocalPort=r.ReadUInt16();
                 if(i.Port==0 || (!localTest && !Gateway.Public(i.Address))) throw new FormatException();
+                // The local address is deliberately NOT required to be public -
+                // that is the whole point - but it must be a private address, so
+                // an invitation cannot redirect the first attempt anywhere else.
+                // Reaching the wrong machine is harmless anyway: the TLS
+                // handshake pins the certificate fingerprint from the invitation.
+                if(i.LocalPort!=0 && !Gateway.Private(i.LocalAddress)) {i.LocalAddress=IPAddress.Any;i.LocalPort=0;}
                 if(i.Expires<DateTime.UtcNow) throw new IOException("Cette invitation a expiré. L'hôte doit recréer une partie.");
                 if(i.Expires>DateTime.UtcNow.AddMinutes(31)) throw new FormatException();
                 return i;
@@ -102,7 +128,11 @@ sealed class Invitation {
 }
 
 static class GameDatagram {
-    public const int Payload=88,Size=14+Payload+16;
+    // Sized from the engine header by tools/build_online.ps1. A hardcoded copy
+    // fell behind the 88 -> 152 byte change and the bridge dropped every game
+    // packet, which reads to a player as "Aucun joueur compatible apres 2
+    // minutes" with a lobby that looked perfectly connected.
+    public const int Payload=WireFormat.PacketSize,Size=14+Payload+16;
     const int Header=14,Tag=16;
     public static byte[] Key(byte[] token) {return Wire.Hash(token.Concat(Encoding.ASCII.GetBytes("PartyBoard UDP v1")).ToArray());}
     public static byte[] Seal(byte[] key,int player,ulong sequence,byte[] payload) {
@@ -154,7 +184,7 @@ sealed class Bridge : IDisposable {
         readTcp=reader;readSsl=readStream;writeTcp=writer;writeSsl=writeStream;localPlayer=player;network=internet;networkPeer=internetPeer;learnNetworkPeer=internetPeer==null;datagramKey=GameDatagram.Key(token);udp=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));
         if(hostGamePort!=0) {game=new IPEndPoint(IPAddress.Loopback,hostGamePort); udp.Connect(game);}
     }
-    internal static bool Packet(byte[] b,int player) {return b.Length==GameDatagram.Payload && b[0]==80 && b[1]==66 && b[2]==82 && b[3]==66 && b[4]==0 && b[5]==6 && b[6]>=1 && b[6]<=3 && b[7]==player;}
+    internal static bool Packet(byte[] b,int player) {return b.Length==GameDatagram.Payload && b[0]==80 && b[1]==66 && b[2]==82 && b[3]==66 && b[4]==WireFormat.VersionHigh && b[5]==WireFormat.VersionLow && b[6]>=1 && b[6]<=3 && b[7]==player;}
     void Write(byte[] payload) {
         if(payload.Length<1 || payload.Length>256)throw new IOException("Message de salon trop long.");
         var frame=new byte[payload.Length+2];frame[0]=(byte)(payload.Length>>8);frame[1]=(byte)payload.Length;

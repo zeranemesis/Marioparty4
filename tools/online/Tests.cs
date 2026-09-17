@@ -48,8 +48,21 @@ static class Tests {
     static void Reject(Action action,string name) {bool rejected=false;try{action();}catch{rejected=true;}Check(rejected,name);}
     static void Codecs() {
         var invite=new Invitation{Address=IPAddress.Parse("8.8.8.8"),Port=32000,Expires=DateTime.UtcNow.AddMinutes(30),Fingerprint=Wire.Random(16),Token=Wire.Random(16),Build=Wire.Random(32)};
-        Check(invite.Encode().Length==60,"compact invitation length");var decoded=Invitation.Decode(invite.Encode());Check(decoded.Port==32000 && Wire.Equal(invite.Token,decoded.Token) && Wire.Equal(invite.Fingerprint,decoded.Fingerprint),"invitation round trip");
+        Check(invite.Encode().Length==68,"compact invitation length");var decoded=Invitation.Decode(invite.Encode());Check(decoded.Port==32000 && Wire.Equal(invite.Token,decoded.Token) && Wire.Equal(invite.Fingerprint,decoded.Fingerprint),"invitation round trip");
         Reject(()=>Invitation.Decode("bad"),"malformed invite");Reject(()=>Invitation.Decode(new string('x',1000)),"bounded invite");
+        // The local path. Without it two PCs in one house are sent out through
+        // the box and back: 15 ms between machines that are 0 ms apart, and a
+        // control channel the router cut after forty to fifty seconds.
+        Check(!decoded.HasLocalPath,"invitation without a local address offers none");
+        invite.LocalAddress=IPAddress.Parse("192.168.1.14");invite.LocalPort=32100;
+        decoded=Invitation.Decode(invite.Encode());
+        Check(decoded.HasLocalPath && decoded.LocalAddress.Equals(IPAddress.Parse("192.168.1.14")) && decoded.LocalPort==32100,"private local address survives the round trip");
+        invite.LocalAddress=IPAddress.Parse("9.9.9.9");
+        Check(!Invitation.Decode(invite.Encode()).HasLocalPath,"public local address is discarded, not dialled");
+        invite.LocalAddress=IPAddress.Loopback;
+        Check(!Invitation.Decode(invite.Encode()).HasLocalPath,"loopback local address is discarded");
+        invite.LocalAddress=IPAddress.Any;invite.LocalPort=0;
+        Reject(()=>Invitation.Decode("PB2."+new string('A',56)),"previous invitation format refused by name");
         invite.Address=IPAddress.Loopback;Reject(()=>Invitation.Decode(invite.Encode()),"loopback invite rejected");
         invite.Address=IPAddress.Parse("8.8.8.8");invite.Expires=DateTime.UtcNow.AddSeconds(-1);Reject(()=>Invitation.Decode(invite.Encode()),"expired invite");
         foreach(string addr in new[]{"0.1.2.3","10.0.0.1","127.0.0.1","100.64.0.1","192.168.1.1","169.254.1.1","198.18.0.1","203.0.113.1","224.0.0.1","::1"}) Check(!Gateway.Public(IPAddress.Parse(addr)),"public address filter");
@@ -68,11 +81,17 @@ static class Tests {
         reply=new byte[16];reply[1]=130;Gateway.Put16(reply,8,32000);Gateway.Put16(reply,10,32100);Gateway.Put32(reply,12,120);
         Check(Gateway.PmpReply(reply,32000,out port,out life) && port==32100 && life==120,"NAT-PMP response");
         reply[3]=2;Check(!Gateway.PmpReply(reply,32000,out port,out life),"NAT-PMP refusal");
-        var payload=new byte[GameDatagram.Payload];payload[0]=80;payload[1]=66;payload[2]=82;payload[3]=66;payload[4]=0;payload[5]=6;payload[6]=1;payload[7]=0;
-        Check(Bridge.Packet(payload,0), "v6 input accepted by bridge");
+        // Shaped from the engine's own constants, never from a literal. The
+        // literal version of these four lines said 88 bytes and v6 for two days
+        // after the engine moved to 152 and v7, and the bridge silently dropped
+        // every game packet between the two PCs.
+        var payload=new byte[GameDatagram.Payload];payload[0]=80;payload[1]=66;payload[2]=82;payload[3]=66;payload[4]=WireFormat.VersionHigh;payload[5]=WireFormat.VersionLow;payload[6]=1;payload[7]=0;
+        Check(Bridge.Packet(payload,0), "current native protocol accepted by bridge");
         foreach(byte type in new byte[]{2,3}) { payload[6]=type; Check(Bridge.Packet(payload,0),"explicit repair/state packet accepted"); }
         payload[6]=4;Check(!Bridge.Packet(payload,0),"unknown packet type rejected");
-        payload[6]=1;payload[5]=5;Check(!Bridge.Packet(payload,0),"old native protocol rejected");payload[5]=6;
+        payload[6]=1;payload[5]=(byte)(WireFormat.VersionLow-1);Check(!Bridge.Packet(payload,0),"old native protocol rejected");payload[5]=WireFormat.VersionLow;
+        var truncated=new byte[GameDatagram.Payload-1];Buffer.BlockCopy(payload,0,truncated,0,truncated.Length);
+        Check(!Bridge.Packet(truncated,0),"packet of the wrong length rejected");
         var datagramKey=GameDatagram.Key(invite.Token);var datagram=GameDatagram.Seal(datagramKey,0,42,payload);ulong sequence;byte[] opened;
         Check(GameDatagram.Open(datagramKey,0,datagram,out sequence,out opened) && sequence==42 && Wire.Equal(payload,opened),"authenticated UDP game packet round trip");
         datagram[20]^=1;Check(!GameDatagram.Open(datagramKey,0,datagram,out sequence,out opened),"tampered UDP game packet rejected");

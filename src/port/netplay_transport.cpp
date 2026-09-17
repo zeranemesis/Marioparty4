@@ -97,7 +97,9 @@ std::array<std::uint8_t, kPacketSize> encode(const InputPacket &packet)
     put32(bytes.data() + 72, static_cast<std::uint32_t>(packet.state.hash >> 32));
     put32(bytes.data() + 76, static_cast<std::uint32_t>(packet.state.hash));
     // 80..83 reserved, must be zero.
-    put32(bytes.data() + 84, packetHash(bytes.data(), 84));
+    for (std::size_t index = 0; index < kSubsystemCount; ++index)
+        put32(bytes.data() + 84 + index * 4, packet.state.parts[index]);
+    put32(bytes.data() + 148, packetHash(bytes.data(), 148));
     return bytes;
 }
 
@@ -106,7 +108,7 @@ bool decode(const std::uint8_t *bytes, std::size_t size, InputPacket &packet)
     if (size != kPacketSize || !std::equal(kMagic.begin(), kMagic.end(), bytes)
         || get16(bytes + 4) != kProtocolVersion || bytes[6] < 1 || bytes[6] > 3
         || get32(bytes + 80) != 0 || get32(bytes + 48) != kStateHashVersion
-        || get32(bytes + 84) != packetHash(bytes, 84)) {
+        || get32(bytes + 148) != packetHash(bytes, 148)) {
         return false;
     }
     packet.player = bytes[7];
@@ -132,6 +134,8 @@ bool decode(const std::uint8_t *bytes, std::size_t size, InputPacket &packet)
     packet.state.rand8 = get32(bytes + 64);
     packet.state.counter = get32(bytes + 68);
     packet.state.hash = (static_cast<std::uint64_t>(get32(bytes + 72)) << 32) | get32(bytes + 76);
+    for (std::size_t index = 0; index < kSubsystemCount; ++index)
+        packet.state.parts[index] = get32(bytes + 84 + index * 4);
     packet.captureContext = get32(bytes + 44);
     return packet.player < 2
         && (packet.type != PacketType::State || packet.state.frame != kNoHashFrame);
@@ -339,21 +343,35 @@ bool runTransportSelfTest()
     if (decode(bytes.data(), bytes.size(), decoded)) return false;
     bytes = encode(codecSample);
     put16(bytes.data() + 4, 3); // Old timeline protocol, otherwise valid checksum.
-    put32(bytes.data() + 84, packetHash(bytes.data(), 84));
+    put32(bytes.data() + 148, packetHash(bytes.data(), 148));
     if (decode(bytes.data(), bytes.size(), decoded)) return false;
 
     for (const auto type : {PacketType::Input, PacketType::Retransmit, PacketType::State}) {
         codecSample.type = type;
         codecSample.hashAckNext = 8;
         codecSample.state = {7, 3, 0x11223344, 0x55667788, 6, kStateHashVersion, 0x0123456789abcdefull};
+        // Distinct per-subsystem hashes must survive the round trip intact.
+        for (std::size_t index = 0; index < kSubsystemCount; ++index)
+            codecSample.state.parts[index] = 0xA5000000u + static_cast<std::uint32_t>(index) * 0x01010101u;
         bytes = encode(codecSample);
         if (!decode(bytes.data(), bytes.size(), decoded) || decoded.type != type
-            || decoded.state != codecSample.state || decoded.hashAckNext != 8) return false;
+            || decoded.state != codecSample.state || decoded.hashAckNext != 8
+            || decoded.state.parts != codecSample.state.parts) return false;
     }
+    // A single altered subsystem hash must be both checksum-detected and, once
+    // re-signed, visible as a difference rather than silently equal.
+    bytes = encode(codecSample);
+    bytes[84 + 4 * static_cast<std::size_t>(Subsystem::Board)] ^= 0x40;
+    if (decode(bytes.data(), bytes.size(), decoded)) return false;
+    put32(bytes.data() + 148, packetHash(bytes.data(), 148));
+    if (!decode(bytes.data(), bytes.size(), decoded)
+        || decoded.state == codecSample.state
+        || decoded.state.firstDifferentPart(codecSample.state)
+            != static_cast<std::size_t>(Subsystem::Board)) return false;
     for (const unsigned offset : {5u, 6u, 7u, 48u, 80u}) {
         bytes = encode(codecSample);
         bytes[offset] = 99; // Valid checksum must not authorize an unknown schema/type/player.
-        put32(bytes.data() + 84, packetHash(bytes.data(), 84));
+        put32(bytes.data() + 148, packetHash(bytes.data(), 148));
         if (decode(bytes.data(), bytes.size(), decoded)) return false;
     }
     bytes = encode(codecSample);

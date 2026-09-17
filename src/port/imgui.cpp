@@ -278,12 +278,30 @@ bool g_interpolationActive = false;
 constexpr auto kSimulationPeriod = std::chrono::duration_cast<FramePacerClock::duration>(
     std::chrono::duration<double>(1.0 / static_cast<double>(kOriginalSimulationRate)));
 constexpr auto kAbnormalGapResetThreshold = std::chrono::milliseconds(250);
+}
+
+// The netplay clamp, split out as a pure function so it can be tested without a
+// live session.
+//
+// Above 60 the pacer catches up with real time and can hand the simulation
+// several ticks for one rendered frame. That is defect D6: two peers rendering
+// at different rates would batch differently and diverge, and nothing in
+// `runtimeConfigSignature` would notice, because the frame rate is not part of
+// it. The clamp is what makes that omission safe, so it is a load-bearing
+// safety property and not a preference - which is why removing it has to fail a
+// test rather than produce a desync nobody can explain.
+extern "C" int PartyBoard_TargetFrameRateFor(bool netplayEnabled, int configured)
+{
+    if (netplayEnabled) return kOriginalSimulationRate;
+    return std::clamp(configured, kOriginalSimulationRate, 240);
+}
+
+namespace {
 
 int target_frame_rate()
 {
-    if (PartyBoard_NetplayEnabled()) return kOriginalSimulationRate;
-    return std::clamp(partyboard::getSettings().video.targetFrameRate.getValue(),
-                      kOriginalSimulationRate, 240);
+    return PartyBoard_TargetFrameRateFor(PartyBoard_NetplayEnabled(),
+        partyboard::getSettings().video.targetFrameRate.getValue());
 }
 }
 

@@ -26,6 +26,7 @@
 
 #ifndef __MWERKS__
 #include "game/board/view.h"
+#include "port/board_coverage.h"
 #endif
 
 typedef struct {
@@ -137,6 +138,7 @@ s16 BoardStarHostMdlGet(void)
 
 void BoardStarExec(s32 arg0, s32 arg1)
 {
+    PARTYBOARD_BOARD_COVERAGE("STAR");
     if (GWBoardGet() == BOARD_ID_EXTRA1 || GWBoardGet() == BOARD_ID_EXTRA2) {
         return;
     }
