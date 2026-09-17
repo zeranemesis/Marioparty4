@@ -2810,3 +2810,65 @@ touche que la composition, pas le tracé.
   peu de 3D par-dessus les copies, peuvent encore montrer le défaut par éclairs.
 - **Les autres mini-jeux qui passent par le même chemin** ne sont pas encore
   connus : le balayage des 48 avec la trace des passes les listera.
+
+## Fusion avec la version GitHub, et ce qu'elle change à la façon de committer (17 septembre 2026)
+
+La branche GitHub `audio-local` avait avancé de 122 commits — netplay,
+diagnostics, mods CubeShelf, correctif MusyX D3, porte de publication — pendant
+que celle-ci en portait 54 de ray tracing. Fusion `afbd6c62`.
+
+### Ce qui a demandé plus qu'une fusion de texte
+
+- **Le patch MusyX** avait changé des deux côtés. C'est un fichier généré : il a
+  été reconstruit, pas fusionné comme du texte. Le patch GitHub a été appliqué
+  sur l'amont `a2b978d`, cet état fusionné avec le fork local, puis le patch
+  régénéré et vérifié par hachage d'arbre. La version GitHub contenait tout le
+  fork local, plus les points de diagnostic audio ; le seul fichier propre au
+  local, la source de régression `test/wait_ms_regression.c`, est gardé.
+- **`src/port/thp_player.cpp`** : GitHub rend la position des films
+  déterministe sous netplay ; le local avait ajouté une horloge de secours pour
+  qu'un film sans piste son ne bloque pas le jeu. La version GitHub seule
+  bloquerait encore hors netplay, donc les deux sont gardées.
+
+### La convention des sous-modules
+
+Côté GitHub, les sous-modules restent sur leur commit amont — aurora `5143394`,
+MusyX `a2b978d` —, les modifications PartyBoard vivent dans leur arbre de travail
+sans être committées, et `patches/*.patch` est ce que la CI applique et livre.
+Ce journal committait au contraire dans les sous-modules et enregistrait ces
+commits dans le dépôt principal : aurora `adc1325`, par exemple, qui n'existe
+qu'ici, et qu'une CI n'aurait pas pu récupérer.
+
+La fusion revient à la convention GitHub. Les pointeurs sont les commits amont,
+les arbres de travail ont été vérifiés identiques au hachage près aux branches
+`partyboard-local`, qui gardent l'historique. **Un lot ne se committe plus dans
+aurora** : le patch est réécrit par `tools/test_submodule_patches.ps1 -Update`,
+contrôlé par le même outil sans `-Update`, et le commit n'a lieu que si ce
+contrôle passe.
+
+### Deux défauts d'outillage trouvés en route
+
+- **Le contrôle des patches échouait à tort**, à longueur égale, sur le patch
+  aurora. PowerShell décodait la sortie de git avec la page de code de la
+  console (ibm850) et le fichier avec Windows-1252 ; les quatre tirets
+  cadratins de ce patch devenaient deux chaînes différentes. Pire : `-Update`
+  aurait réécrit la mauvaise. Les deux côtés sont lus en UTF-8 ; l'outil passe,
+  et échoue toujours sur une vraie différence.
+- **`test_raytracing.ps1` aurait fait échouer la porte de publication.** Le
+  lanceur de tests découvre les scripts par motif et le prenait pour un test
+  autonome ; il a besoin d'un disque et du binaire du jeu. Il est désormais
+  classé comme tel, ignoré sans `-DiscPath` avec sa raison, et transmet ce
+  disque au jeu par `PARTYBOARD_DISC_IMAGE`.
+
+### Vérifié sur le code fusionné
+
+| | |
+|---|---|
+| configuration et build complets | EXIT 0 |
+| auto-tests du moteur, porte de la CI | 9 sur 9 |
+| suite de scripts, comme la CI la lance | 14 réussis, 0 échec, 3 ignorés avec leur raison, 1 non applicable |
+| contrôle des patches de sous-modules | réussi pour aurora et MusyX |
+| test nul A/B du ray tracing sur le plateau | 0 pixel sur 1 228 800 |
+
+`test_audio_wait` passe au lieu d'être « non applicable » : sa source de
+régression manquait dans le patch GitHub, et la fusion l'y a mise.
