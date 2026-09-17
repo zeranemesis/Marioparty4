@@ -31,6 +31,12 @@ param(
     [ValidateSet('board', 'minigame')][string]$Target = 'board',
     [ValidateSet('on', 'off', 'ao', 'shadows', 'reflections')][string]$RayTracing = 'on',
     [string]$BinaryDirectory = 'build/windows-msvc-relwithdebinfo',
+    # The disc image to boot. Empty keeps the one the configuration remembers,
+    # which is how this script has always run on a development machine; given,
+    # it reaches the game through PARTYBOARD_DISC_IMAGE, the launcher's way of
+    # naming the disc, and run_all_tests.ps1 passes it here like to any script
+    # that needs a disc.
+    [string]$DiscPath = '',
     [string]$OutputDirectory = 'work/raytracing',
     [int]$BootSeconds = 25,
     [int]$MaxSteps = 60,
@@ -247,6 +253,7 @@ $setup = @(
 function Invoke-Run {
     Remove-Item $channel, $logPath -ErrorAction SilentlyContinue
     $env:AURORA_RT_DEBUG = '1'
+    if ($DiscPath) { $env:PARTYBOARD_DISC_IMAGE = (Resolve-Path -LiteralPath $DiscPath).Path }
     # A stale pair from an earlier run would compare as though this one had
     # written it, so it goes before the game starts.
     Remove-Item (Join-Path $binary 'rt_ab_a.pfm'), (Join-Path $binary 'rt_ab_b.pfm'),

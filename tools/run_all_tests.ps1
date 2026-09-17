@@ -34,7 +34,9 @@ function Resolve-RunnerPath([string]$path) {
 
 # Scripts that need a real disc image to do anything. Everything else runs on a
 # machine that has never seen the game, which is what lets CI run them.
-$needsDisc = @('test_netplay_boot')
+# test_raytracing drives the game to a board and traces it; without a disc it
+# has nothing to boot, and on a runner it would fail the gate for that alone.
+$needsDisc = @('test_netplay_boot', 'test_raytracing')
 
 # Two scripts need more than a disc path to mean anything, and the knowledge of
 # how to call them already lives in validate_netplay.ps1. Rather than guess,
@@ -63,15 +65,15 @@ $notApplicableExit = @{
     'test_direct_connection' = 2
     'test_generate_input'    = 2   # needs a human recording under work/netplay-recordings
     'test_crash_pipeline'    = 2   # needs a configured build tree for nlohmann/json
-    'test_audio_wait'        = 2   # needs a MusyX regression source that is in no commit
+    'test_audio_wait'        = 2   # needs extern/musyx/test/wait_ms_regression.c, which the MusyX patch creates since 2026-09-17
 }
 
 # Most scripts compile and run their own standalone test with cl.exe and never
-# touch partyboard.exe. Only these two launch it, and only they accept
+# touch partyboard.exe. Only these three launch it, and only they accept
 # -BinaryDirectory - so only they are given it. Passing it to a script that does
 # not take it is an error, and not passing it to one that does means the CI run
 # silently tests the wrong binary, or no binary at all.
-$takesBinaryDirectory = @('test_netplay_boot', 'test_netplay_pad')
+$takesBinaryDirectory = @('test_netplay_boot', 'test_netplay_pad', 'test_raytracing')
 
 $scripts = @(Get-ChildItem $PSScriptRoot -Filter 'test_*.ps1' | Sort-Object Name)
 if ($scripts.Count -eq 0) { Write-Output 'No test_*.ps1 found.'; exit 2 }
