@@ -204,6 +204,14 @@ typedef struct HsfAttribute_s {
     GXTexObj tex8000_obj;
     GXTlutObj tlut_obj;
     GXTlutObj tlut8000_obj; // used in dataFmt 11
+    // Which palette is actually baked into each GXTlutObj above. An animated
+    // material walks through bitmap frames while reusing one cached attribute,
+    // so the palette has to be checked for staleness the same way the texture
+    // data pointer is -- see LoadTexture in hsfdraw.c.
+    const u16 *tlut_palData;
+    const u16 *tlut8000_palData;
+    s16 tlut_palSize;
+    s16 tlut8000_palSize;
 #endif
 } HSFATTRIBUTE;
 

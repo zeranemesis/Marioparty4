@@ -1758,6 +1758,30 @@ static void FaceDrawShadow(HU3DDRAWOBJ *drawObj, HSFFACE *face) {
     drawCnt++;
 }
 
+#ifdef OPTIMIZED_TEXTURE_LOADING
+// The cached GXTexObj/GXTlutObj pair lives on the attribute, but an animated material
+// walks through several bitmap frames while reusing that one attribute -- which is why
+// LoadTexture refreshes the texture data pointer at the end. The palette was never
+// refreshed the same way, so every frame after the first was decoded through frame 0's
+// TLUT: an indexed animation kept its opening colours for its whole run. Reload the
+// palette whenever the bitmap moves to a different one.
+static void LoadTlutCached(GXTlutObj *tlutObj, bool *initialized, const u16 **loadedPal, s16 *loadedSize,
+                           const u16 *palData, GXTlutFmt fmt, s16 palSize, u32 texId)
+{
+    if (!*initialized || *loadedSize != palSize) {
+        GXInitTlutObj(tlutObj, palData, fmt, palSize);
+        *initialized = TRUE;
+    } else if (*loadedPal != palData) {
+        // Same entry count, so only the contents moved: keep the object identity and let
+        // the renderer invalidate the decoded texture through the TLUT's data version.
+        GXInitTlutObjData(tlutObj, palData);
+    }
+    *loadedPal = palData;
+    *loadedSize = palSize;
+    GXLoadTlut(tlutObj, texId);
+}
+#endif
+
 static void LoadTexture(HU3DMODEL *modelP, HSFBITMAP *bmpPtr, HSFATTRIBUTE *attrP, s16 texId)
 #ifdef OPTIMIZED_TEXTURE_LOADING
 {
@@ -1800,22 +1824,16 @@ static void LoadTexture(HU3DMODEL *modelP, HSFBITMAP *bmpPtr, HSFATTRIBUTE *attr
             break;
         case 9:
             fmt = bmpPtr->pixSize < 8 ? GX_TF_C4 : GX_TF_C8;
-            if (!attrP->tlut_initialized) {
-                GXInitTlutObj(tlut_obj, bmpPtr->palData, GX_TL_RGB565, bmpPtr->palSize);
-                attrP->tlut_initialized = TRUE;
-            }
-            GXLoadTlut(tlut_obj, texId);
+            LoadTlutCached(tlut_obj, &attrP->tlut_initialized, &attrP->tlut_palData, &attrP->tlut_palSize,
+                           bmpPtr->palData, GX_TL_RGB565, bmpPtr->palSize, texId);
             if (!attrP->tex_initialized) {
                 GXInitTexObjCI(tex_obj, bmpPtr->data, var_r27, var_r26, fmt, var_r22, var_r21, var_r20, texId);
             }
             break;
         case 10:
             fmt = bmpPtr->pixSize < 8 ? GX_TF_C4 : GX_TF_C8;
-            if (!attrP->tlut_initialized) {
-                GXInitTlutObj(tlut_obj, bmpPtr->palData, GX_TL_RGB5A3, bmpPtr->palSize);
-                attrP->tlut_initialized = TRUE;
-            }
-            GXLoadTlut(tlut_obj, texId);
+            LoadTlutCached(tlut_obj, &attrP->tlut_initialized, &attrP->tlut_palData, &attrP->tlut_palSize,
+                           bmpPtr->palData, GX_TL_RGB5A3, bmpPtr->palSize, texId);
             if (!attrP->tex_initialized) {
                 GXInitTexObjCI(tex_obj, bmpPtr->data, var_r27, var_r26, fmt, var_r22, var_r21, var_r20, texId);
             }
@@ -1870,22 +1888,18 @@ static void LoadTexture(HU3DMODEL *modelP, HSFBITMAP *bmpPtr, HSFATTRIBUTE *attr
             if (texId & 0x8000) {
                 tlut_obj = &attrP->tlut8000_obj;
                 tex_obj = &attrP->tex8000_obj;
-                if (!attrP->tlut8000_initialized) {
-                    GXInitTlutObj(tlut_obj, &((s16 *)bmpPtr->palData)[(bmpPtr->palSize + 0xF) & 0xFFF0], GX_TL_IA8, bmpPtr->palSize);
-                    attrP->tlut8000_initialized = TRUE;
-                }
-                GXLoadTlut(tlut_obj, texId & 0x7FFF);
+                LoadTlutCached(tlut_obj, &attrP->tlut8000_initialized, &attrP->tlut8000_palData,
+                               &attrP->tlut8000_palSize,
+                               (const u16 *)&((s16 *)bmpPtr->palData)[(bmpPtr->palSize + 0xF) & 0xFFF0], GX_TL_IA8,
+                               bmpPtr->palSize, texId & 0x7FFF);
                 if (!attrP->tex8000_initialized) {
                     GXInitTexObjCI(tex_obj, bmpPtr->data, var_r27, var_r26, fmt, var_r22, var_r21, var_r20, texId & 0x7FFF);
                     attrP->tex8000_initialized = TRUE;
                 }
             }
             else {
-                if (!attrP->tlut_initialized) {
-                    GXInitTlutObj(tlut_obj, bmpPtr->palData, GX_TL_IA8, bmpPtr->palSize);
-                    attrP->tlut_initialized = TRUE;
-                }
-                GXLoadTlut(tlut_obj, texId);
+                LoadTlutCached(tlut_obj, &attrP->tlut_initialized, &attrP->tlut_palData, &attrP->tlut_palSize,
+                               bmpPtr->palData, GX_TL_IA8, bmpPtr->palSize, texId);
                 if (!attrP->tex_initialized) {
                     GXInitTexObjCI(tex_obj, bmpPtr->data, var_r27, var_r26, fmt, var_r22, var_r21, var_r20, texId);
                     attrP->tex_initialized = TRUE;
