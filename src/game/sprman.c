@@ -294,6 +294,7 @@ ANIMDATA *HuSprAnimRead(void *data)
             AnimTexData *tex = &bmp[i].texData[j];
             tex->tex_initialized = FALSE;
             tex->tlut_initialized = FALSE;
+            tex->wrap_s = tex->wrap_t = GX_CLAMP;
             memset(&tex->tex_obj, 0, sizeof(tex->tex_obj));
             memset(&tex->tlut_obj, 0, sizeof(tex->tlut_obj));
         }
@@ -795,6 +796,7 @@ ANIMDATA *HuSprAnimMake(s16 sizeX, s16 sizeY, s16 dataFmt)
         AnimTexData *tex = &bmp->texData[i];
         tex->tex_initialized = FALSE;
         tex->tlut_initialized = FALSE;
+        tex->wrap_s = tex->wrap_t = GX_CLAMP;
         memset(&tex->tex_obj, 0, sizeof(tex->tex_obj));
         memset(&tex->tlut_obj, 0, sizeof(tex->tlut_obj));
     }
