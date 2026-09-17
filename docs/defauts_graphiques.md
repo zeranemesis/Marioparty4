@@ -1156,3 +1156,83 @@ C8 palettisé est le format en cause.
 Non acquis : **pourquoi** elle sort blanche. Les deux pistes ci-dessus sont des
 lectures, pas des mesures, et cette page a assez d'exemples d'hypothèses
 plausibles réfutées par la première mesure venue.
+
+---
+
+## La piste 2 était la bonne, et le défaut est dans Aurora — 2026-09-17
+
+La section précédente laissait deux lectures non vérifiées sur le chemin C8.
+La deuxième disait : *« toute autre texture palettisée chargée dans le même slot
+écrase la palette, et l'ordre de dessin d'un port n'est pas celui de la
+console »*. Elle visait juste, mais pas à l'endroit prévu : le problème n'est pas
+que la palette soit écrasée, c'est que **le moteur refuse de s'en apercevoir**.
+
+### Le test qui décide qu'une texture n'a pas changé
+
+`resolve_sampled_textures` (`extern/aurora/lib/gx/gx.cpp`) commençait par un
+raccourci :
+
+```cpp
+if (obj.texObjId != 0 && obj.texObjId == textureBind.texObj.texObjId &&
+    obj.texDataVersion == textureBind.texObj.texDataVersion) {
+  // Texture bind unchanged
+  continue;
+}
+```
+
+Pour une texture normale, c'est exact : mêmes octets, même image. Pour une
+texture **palettisée**, c'est faux. Ses pixels ne sont pas dans ses données :
+ce sont des *indices*, décodés à travers la TLUT présente dans le slot au moment
+du rendu. Le jeu peut charger une autre palette dans ce slot sans jamais toucher
+au `GXTexObj` — c'est même la définition d'une animation de palette. Le
+raccourci passait alors à côté, et la texture gardait les couleurs de sa
+**première** résolution pour toute sa durée de vie.
+
+Conséquence directe pour G1 : si les projecteurs de Slime Time sont résolus une
+première fois pendant qu'une *autre* palette occupe le slot 0, ils sont figés sur
+celle-là. Les `GXLoadTlut` corrects qui suivent n'y changent rien.
+
+### Ce qui a été corrigé
+
+- **Aurora** — l'identité de la TLUT (`tlutObjId`, `tlutDataVersion`) et, pour
+  une copie de framebuffer palettisée, la révision de la source entrent dans le
+  test. Elles sont portées par `TextureBind` pour que l'image suivante ait
+  quelque chose à comparer. Un slot sans palette chargée ne se résout plus du
+  tout, au lieu de décoder des indices comme s'ils étaient des couleurs.
+- **`src/game/hsfdraw.c`** — `LoadTexture` rafraîchissait déjà le pointeur de
+  données quand une matière animée passe à l'image suivante, mais pas la
+  palette : les formats 9, 10 et 11 décodaient toutes les images suivantes avec
+  la TLUT de l'image 0.
+- **`src/game/sprput.c`** — `HuSprTexLoad` ne lisait `wrap_s`/`wrap_t` que lors
+  de la toute première construction de l'objet. `hsfanim.c` les prend des
+  attributs du modèle et `m415Dll/map.c` choisit REPEAT ou CLAMP par objet, sur
+  le même triplet (anim, bmp, slot) : le premier appel décidait pour tous les
+  autres.
+
+### Ce que cela ne dit pas
+
+Les trois correctifs compilent et sont installés. **Aucun n'est vérifié à
+l'écran.** Le premier est un candidat sérieux pour G1, pas une confirmation :
+il faut relancer Slime Time et regarder la couleur des cônes. Les deux autres
+sont des défauts réels trouvés en cherchant celui-là, et leur effet visible —
+s'il y en a un — reste à constater.
+
+Aucun des trois n'ajoute de géométrie. Ils ne peuvent donc rien pour G7
+(papillons sans ombre) ni pour les arbres d'Avalanche!.
+
+### En marge : les ballons de Hop or Pop
+
+Valentin trouve les ballons « vachement clairs » par rapport au jeu d'origine.
+Mesure par lecture de pixels, port contre vidéo console (18:08) :
+
+| | console | port |
+|---|---|---|
+| vert du ballon Yoshi | `6, 129, 12` | `1, 153, 1` |
+| sol jaune | `255, 244, 86` | `255, 255, 121` |
+
+Les deux échantillons vont dans le même sens, le port est plus clair de 10 à
+20 %. Mais la référence est un encodage YouTube de huit ans, dont le gamma
+propre couvre largement un tel écart. **Soupçonné, non confirmé** : il faudrait
+une capture d'écran d'émulateur ou de console pour trancher. À la différence de
+G1, G2 ou Makin' Waves, l'écart est de *niveau* et non de *structure*, et c'est
+précisément le genre que la chaîne vidéo sait fabriquer toute seule.
