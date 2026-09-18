@@ -64,6 +64,7 @@ sealed class MainForm : Form {
         // departure this branch had nothing to report, and the Running text below was
         // shown to someone whose partner had already quit.
         if(lobby.Ending==LobbyEnding.RemoteGameClosed)SetStatus("Votre ami a quitté la partie. Le salon est fermé — recréez-en un pour rejouer.");
+        else if(lobby.Ending==LobbyEnding.LocalGameClosed)SetStatus("Votre partie est terminée. Le salon est fermé — recréez-en un pour rejouer.");
         else if(lobby.Phase==LobbyPhase.Preparing)SetStatus("Chargement sur les deux PC… Le jeu attendra que tout le monde soit prêt. Aucun bouton à presser dans l'autre fenêtre.");
         else if(lobby.Phase==LobbyPhase.Running)SetStatus(session.Bridge.ControlConnected?"Partie lancée par l'hôte. Gardez le salon ouvert pendant le jeu.":"Le canal du salon est interrompu. La partie continue tant que l'autre joueur reste joignable. Gardez cette fenêtre ouverte.");
         else if(lobby.Remote!=null) {

@@ -203,7 +203,14 @@ sealed class Session : IDisposable {
         // the sockets, so anything said after it is said to nobody -- which is precisely
         // how the other player used to be left alone in a salon that never emptied.
         if(Lobby!=null)Lobby.LocalGameExited();
-        if(!disposed){failed("La partie est terminée. Recréez un salon pour rejouer.");Dispose();}
+        // The window is reset by failed(), so it has to be called even when the session
+        // is already disposed. It was guarded by !disposed, which meant that anything
+        // tearing the session down during the game -- a lost control channel, an expired
+        // port mapping -- left the player looking at a salon still listing both of them
+        // after their own game had closed. failed() is idempotent: it does nothing once
+        // the form has moved on to another session.
+        failed("La partie est terminée. Recréez un salon pour rejouer.");
+        if(!disposed)Dispose();
         }catch(OperationCanceledException){}catch(Exception e){if(!disposed){failed(e is IOException?e.Message:"Le lancement a échoué. Fermez le salon puis réessayez.");Dispose();}}
         finally {if(gameStart!=null)gameStart.Dispose();}
     }
