@@ -95,6 +95,8 @@ jobs:
           git -C extern/musyx apply ../../patches/musyx-partyboard.patch
           git -C extern/aurora apply --check ../../patches/aurora-partyboard.patch
           git -C extern/aurora apply ../../patches/aurora-partyboard.patch
+          git -C extern/aurora apply --check ../../patches/aurora-render-fixes.patch
+          git -C extern/aurora apply ../../patches/aurora-render-fixes.patch
 
       - name: Install dependencies
         run: |
@@ -169,6 +171,8 @@ jobs:
           git -C extern/musyx apply ../../patches/musyx-partyboard.patch
           git -C extern/aurora apply --check ../../patches/aurora-partyboard.patch
           git -C extern/aurora apply ../../patches/aurora-partyboard.patch
+          git -C extern/aurora apply --check ../../patches/aurora-render-fixes.patch
+          git -C extern/aurora apply ../../patches/aurora-render-fixes.patch
 
       - name: Install dependencies
         run: brew install cmake ninja
@@ -242,6 +246,8 @@ jobs:
           git -C extern/musyx apply ../../patches/musyx-partyboard.patch
           git -C extern/aurora apply --check ../../patches/aurora-partyboard.patch
           git -C extern/aurora apply ../../patches/aurora-partyboard.patch
+          git -C extern/aurora apply --check ../../patches/aurora-render-fixes.patch
+          git -C extern/aurora apply ../../patches/aurora-render-fixes.patch
 
       - name: Install dependencies
         run: |
@@ -331,6 +337,8 @@ jobs:
           git -C extern/musyx apply ../../patches/musyx-partyboard.patch
           git -C extern/aurora apply --check ../../patches/aurora-partyboard.patch
           git -C extern/aurora apply ../../patches/aurora-partyboard.patch
+          git -C extern/aurora apply --check ../../patches/aurora-render-fixes.patch
+          git -C extern/aurora apply ../../patches/aurora-render-fixes.patch
 
       - name: Enable Visual Studio environment
         uses: ilammy/msvc-dev-cmd@v1

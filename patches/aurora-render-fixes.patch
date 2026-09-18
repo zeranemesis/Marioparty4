@@ -1,0 +1,139 @@
+diff --git a/lib/gfx/tex_copy_conv.cpp b/lib/gfx/tex_copy_conv.cpp
+index 50f4c43..4aa33cb 100644
+--- a/lib/gfx/tex_copy_conv.cpp
++++ b/lib/gfx/tex_copy_conv.cpp
+@@ -233,6 +233,21 @@ static constexpr std::string_view FragGB8 = R"(
+ }
+ )"sv;
+ 
++// GX_TF_Z24X8: full 24-bit depth -> RGBA8, high byte in R down to low byte in B.
++// Without this entry needs_conversion() is false for Z24X8 while is_depth_format()
++// is true, so a scaled copy fell through to blit(), whose pipeline is built with
++// g_bindGroupLayout while execute() binds a group laid out for g_depthBindGroupLayout.
++// The layouts do not match and the whole pass is rejected.
++static constexpr std::string_view FragZ24X8 = R"(
++@fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
++    let z24 = gx_z24(in.uv);
++    let r = f32((z24 >> 16u) & 0xFFu) / 255.0;
++    let g = f32((z24 >> 8u) & 0xFFu) / 255.0;
++    let b = f32(z24 & 0xFFu) / 255.0;
++    return vec4f(r, g, b, 1.0);
++}
++)"sv;
++
+ // GX_TF_Z16: Upper 16-bits depth -> IA8
+ static constexpr std::string_view FragZ16 = R"(
+ @fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+@@ -269,6 +284,7 @@ static constexpr std::array ConvPipelines{
+ 
+ static constexpr std::array DepthConvPipelines{
+     ConvPipeline{GX_TF_Z16, FragZ16, wgpu::TextureFormat::RGBA8Unorm, "TexCopyConv Z16"},
++    ConvPipeline{GX_TF_Z24X8, FragZ24X8, wgpu::TextureFormat::RGBA8Unorm, "TexCopyConv Z24X8"},
+ };
+ 
+ static wgpu::BindGroupLayout g_bindGroupLayout;
+diff --git a/lib/gfx/texture.hpp b/lib/gfx/texture.hpp
+index ac7c91c..c214538 100644
+--- a/lib/gfx/texture.hpp
++++ b/lib/gfx/texture.hpp
+@@ -128,9 +128,24 @@ namespace aurora::gfx {
+ struct TextureBind {
+   TextureHandle ref;
+   GXTexObj_ texObj;
++  // What the resolved handle actually depends on besides the texture object itself.
++  // A palettised texture decodes to different pixels depending on the TLUT loaded in
++  // its slot, and a palettised EFB copy also depends on the revision of the copy it
++  // reads from; neither of those touches the texture object, so both have to be part
++  // of the "bind unchanged" test in resolve_sampled_textures.
++  u32 tlutObjId = 0;
++  u32 tlutDataVersion = 0;
++  u32 copyRevision = 0;
+ 
+   TextureBind() noexcept = default;
+   TextureBind(const GXTexObj_& obj, TextureHandle handle) noexcept : ref(std::move(handle)), texObj(obj) {}
++  TextureBind(const GXTexObj_& obj, TextureHandle handle, u32 tlutObjId_, u32 tlutDataVersion_,
++              u32 copyRevision_) noexcept
++  : ref(std::move(handle))
++  , texObj(obj)
++  , tlutObjId(tlutObjId_)
++  , tlutDataVersion(tlutDataVersion_)
++  , copyRevision(copyRevision_) {}
+   void reset() noexcept { ref.reset(); }
+   [[nodiscard]] wgpu::SamplerDescriptor get_descriptor() const noexcept;
+   operator bool() const noexcept { return ref.operator bool(); }
+diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
+index 9ca9036..76fb927 100644
+--- a/lib/gx/gx.cpp
++++ b/lib/gx/gx.cpp
+@@ -445,27 +445,48 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
+ 
+     GXTexObj_ obj = g_gxState.loadedTextures[i];
+     auto& textureBind = g_gxState.textures[i];
++
++    const auto copyIt = g_gxState.copyTextures.find(obj.data);
++    const GXState::CopyTextureRef* copyRef = copyIt != g_gxState.copyTextures.end() ? &copyIt->second : nullptr;
++
++    // The texture object alone does not determine the pixels we resolve to. A
++    // palettised texture is decoded through whichever TLUT currently sits in its
++    // slot, and the game is free to load a different palette there without ever
++    // touching the texture object -- that is how palette animation works. Fold the
++    // palette's identity, and the source revision of a palettised EFB copy, into the
++    // early-out below, or such a texture keeps the first frame's colours forever.
++    u32 tlutObjId = 0;
++    u32 tlutDataVersion = 0;
++    const GXTlutObj_* tlut = nullptr;
++    if (is_palette_format(obj.format())) {
++      const auto tlutIdx = static_cast<size_t>(obj.tlut);
++      if (tlutIdx < g_gxState.loadedTluts.size() && g_gxState.loadedTluts[tlutIdx].data != nullptr) {
++        tlut = &g_gxState.loadedTluts[tlutIdx];
++        tlutObjId = tlut->tlutObjId;
++        tlutDataVersion = tlut->tlutDataVersion;
++      }
++    }
++    // Only a palettised copy re-reads its source here; a plain copy hands back the
++    // same handle whose contents update in place, so its revision is not a dependency.
++    const u32 copyRevision = (tlut != nullptr && copyRef != nullptr) ? copyRef->revision : 0;
++
+     if (obj.texObjId != 0 && obj.texObjId == textureBind.texObj.texObjId &&
+-        obj.texDataVersion == textureBind.texObj.texDataVersion) {
++        obj.texDataVersion == textureBind.texObj.texDataVersion && tlutObjId == textureBind.tlutObjId &&
++        tlutDataVersion == textureBind.tlutDataVersion && copyRevision == textureBind.copyRevision) {
+       // Texture bind unchanged
+       continue;
+     }
+ 
+     gfx::TextureHandle handle;
+-    const auto copyIt = g_gxState.copyTextures.find(obj.data);
+-    const GXState::CopyTextureRef* copyRef = copyIt != g_gxState.copyTextures.end() ? &copyIt->second : nullptr;
+-    if (is_palette_format(obj.format())) {
+-      const auto tlutIdx = static_cast<size_t>(obj.tlut);
+-      if (tlutIdx < g_gxState.loadedTluts.size()) {
+-        const auto& tlut = g_gxState.loadedTluts[tlutIdx];
+-        if (tlut.data != nullptr) {
+-          if (copyRef != nullptr) {
+-            handle = resolve_dynamic_palette_texture(obj, *copyRef, tlut);
+-          } else {
+-            handle = resolve_static_palette_texture(obj, tlut);
+-          }
+-        }
++    if (tlut != nullptr) {
++      if (copyRef != nullptr) {
++        handle = resolve_dynamic_palette_texture(obj, *copyRef, *tlut);
++      } else {
++        handle = resolve_static_palette_texture(obj, *tlut);
+       }
++    } else if (is_palette_format(obj.format())) {
++      // No palette loaded in the slot yet: leave the bind empty rather than decoding
++      // the indices as if they were colours.
+     } else if (copyRef != nullptr) {
+       handle = copyRef->handle;
+     } else if (obj.data != nullptr) {
+@@ -473,7 +494,7 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
+     }
+ 
+     obj.mFormat = resolved_format_for_handle(handle);
+-    textureBind = gfx::TextureBind{obj, std::move(handle)};
++    textureBind = gfx::TextureBind{obj, std::move(handle), tlutObjId, tlutDataVersion, copyRevision};
+   }
+ }
+ 
