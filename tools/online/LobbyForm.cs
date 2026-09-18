@@ -66,7 +66,13 @@ sealed class MainForm : Form {
         if(lobby.Ending==LobbyEnding.RemoteGameClosed)SetStatus("Votre ami a quitté la partie. Le salon est fermé — recréez-en un pour rejouer.");
         else if(lobby.Phase==LobbyPhase.Preparing)SetStatus("Chargement sur les deux PC… Le jeu attendra que tout le monde soit prêt. Aucun bouton à presser dans l'autre fenêtre.");
         else if(lobby.Phase==LobbyPhase.Running)SetStatus(session.Bridge.ControlConnected?"Partie lancée par l'hôte. Gardez le salon ouvert pendant le jeu.":"Le canal du salon est interrompu. La partie continue tant que l'autre joueur reste joignable. Gardez cette fenêtre ouverte.");
-        else if(lobby.Remote!=null)SetStatus(match?(session.Host?"Les disques sont identiques. Vous pouvez lancer la partie pour tout le monde.":"Disques identiques. Attendez que l'hôte lance la partie."):"Les fichiers disques sont différents : lancement bloqué. Quittez le salon, choisissez exactement le même fichier sur les deux PC, puis recréez le salon.");
+        else if(lobby.Remote!=null) {
+            if(!match)SetStatus("Les fichiers disques sont différents : lancement bloqué. Quittez le salon, choisissez exactement le même fichier sur les deux PC, puis recréez le salon.");
+            // Mods are checked after the disc because a different disc makes the mod
+            // comparison meaningless, and reporting both at once helps nobody.
+            else if(!lobby.ModsMatch)SetStatus((session.Host?"L'invité n'a pas les mêmes mods que vous — ":"Vos mods ne correspondent pas à ceux de l'hôte — ")+lobby.ModAdvice+". Installez-les dans CubeShelf, puis recréez le salon.");
+            else SetStatus(session.Host?"Disques et mods identiques. Vous pouvez lancer la partie pour tout le monde.":"Disques et mods identiques. Attendez que l'hôte lance la partie.");
+        }
     });}
     void ChooseDisc(){
         if(session!=null || hashing)return;
@@ -82,7 +88,13 @@ sealed class MainForm : Form {
     }
     void Begin(bool create,string invitationText){
         if(session!=null || disc==null || hashing)return;
-        var profile=new PlayerInfo(nickname.Text,disc.Hash,disc.Length);
+        // The mod list is read once, here, and frozen for the session. Re-reading it
+        // later would let a mod be enabled between the announcement and the launch,
+        // which is exactly the divergence the announcement exists to rule out.
+        string modsFrom;ModSet mods;
+        try {mods=ModSet.FromCubeShelf("GMPE01_00",out modsFrom);}
+        catch(Exception e){SetStatus(Friendly(e));return;}
+        var profile=new PlayerInfo(nickname.Text,disc.Hash,disc.Length,mods);
         Session current=null;current=new Session(t=>UI(()=>{if(session==current)SetStatus(t);}),()=>UI(()=>{if(session==current)RefreshLobby();}),t=>UI(()=>{if(session==current){Reset();SetStatus(t);}}),profile,disc);
         session=current;lastReport=current.Report;current.Host=create;RefreshLobby();
         current.Report.Write("role="+(create?"host":"guest")+" connection_requested");

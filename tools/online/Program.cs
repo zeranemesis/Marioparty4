@@ -62,7 +62,7 @@ sealed class Firewall : IDisposable {
 sealed class Session : IDisposable {
     public Invitation Invite; public Bridge Bridge; public bool Host;
     public Lobby Lobby;public readonly PlayerInfo Profile;readonly DiscFile disc;
-    public int? PingMs;GameStart gameStart;
+    public int? PingMs;GameStart gameStart;string modListDirectory;
     public readonly Report Report=new Report();System.Threading.Timer diagnosticTimer;
     TcpListener listener;TcpClient peer,peerWrite;X509Certificate2 cert;Gateway mapping,mappingUdp;Firewall firewall;UdpClient internetGame;
     readonly CancellationTokenSource cancel=new CancellationTokenSource();
@@ -173,6 +173,15 @@ sealed class Session : IDisposable {
         if(!Bridge.UdpReady)throw new IOException("Le canal rapide du jeu se prépare encore. Attendez deux secondes puis réessayez.");
         Lobby.Start();
     }
+    // Not the diagnostics directory: Report is documented as never holding a file
+    // path, and a mod list is nothing but file paths. This one is ours, and it goes
+    // when the session does.
+    string ModListDirectory() {
+        lock(this) {
+            if(modListDirectory==null)modListDirectory=Path.Combine(Path.GetTempPath(),"PartyBoardOnline-mods-"+Guid.NewGuid().ToString("N"));
+            return modListDirectory;
+        }
+    }
     void LoadGame(Guid attempt) {
         try {
         Report.Write("loading="+attempt);
@@ -183,7 +192,11 @@ sealed class Session : IDisposable {
         string args=Host ? "--netplay-host "+HostGamePort : "--netplay-join 127.0.0.1:"+Bridge.LocalPort;
         args=GameStart.OnlineArguments(args);
         Report.Write("netplay_mode=lockstep input_delay_frames=3");
-        gameStart.Launch(args,disc.Path,false,Report.NativePath);Game=gameStart.Process;
+        // Write the list that was announced, not the one CubeShelf happens to have on
+        // disk: the salon launches the game itself, so its copy can be stale, and a
+        // load order that differs from the announced one desyncs the session.
+        string modList=Profile.Mods.None?null:Profile.Mods.WriteListFile(ModListDirectory());
+        gameStart.Launch(args,disc.Path,false,Report.NativePath,modList);Game=gameStart.Process;
         gameStart.WaitReady(cancel.Token);Report.Write("native_ready="+attempt);Lobby.Loaded(attempt);
         Game.WaitForExit();Report.Write("native_exit="+Game.ExitCode);
         // Announce the departure while the control channel is still up. Dispose() closes
@@ -196,7 +209,8 @@ sealed class Session : IDisposable {
     }
     public void Dispose() {
         lock(this) {
-            if(!disposed)Report.Write("session_closed");if(diagnosticTimer!=null)diagnosticTimer.Dispose();
+            if(!disposed)Report.Write("session_closed");
+            if(modListDirectory!=null)try{Directory.Delete(modListDirectory,true);}catch{}if(diagnosticTimer!=null)diagnosticTimer.Dispose();
             disposed=true;cancel.Cancel();if(listener!=null) listener.Stop();if(peer!=null) peer.Close();if(peerWrite!=null)peerWrite.Close();
             if(gameStart!=null)gameStart.Abort();if(Lobby!=null)Lobby.Close();
             if(Bridge!=null) Bridge.Dispose();if(internetGame!=null)internetGame.Close();if(mappingUdp!=null)mappingUdp.Dispose();if(mapping!=null) mapping.Dispose();if(firewall!=null) firewall.Dispose();

@@ -275,7 +275,11 @@ sealed class Bridge : IDisposable {
         var receive=Worker("tls_read",()=> {
             while(!closed && ControlConnected) {
                 var size=ReadControl(2); int n=(size[0]<<8)|size[1];
-                if(n<1 || n>256) throw new IOException("Message réseau incompatible.");
+                // The player announcement now carries the mod list, which a disc hash and a
+                // nickname alone never needed. 2048 leaves room for the 24 mods ModSet
+                // allows, names included, and still refuses anything a peer could use to
+                // make us allocate.
+                if(n<1 || n>2048) throw new IOException("Message réseau incompatible.");
                 var data=ReadControl(n);
                 if(n==1 && data[0]==0) continue;
                 if(n==9 && data[0]==6) {data[0]=7;Write(data);continue;}

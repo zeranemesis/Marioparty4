@@ -68,9 +68,10 @@ sealed class DiscFile : IDisposable {
 
 sealed class PlayerInfo {
     public readonly string Name;public readonly byte[] DiscHash;public readonly long DiscLength;
-    public PlayerInfo(string name,byte[] hash=null,long length=0) {
+    public readonly ModSet Mods;
+    public PlayerInfo(string name,byte[] hash=null,long length=0,ModSet mods=null) {
         Name=CleanName(name);if(hash!=null && (hash.Length!=32 || length<=0)) throw new IOException("Information disque incorrecte.");
-        DiscHash=hash==null?null:(byte[])hash.Clone();DiscLength=hash==null?0:length;
+        DiscHash=hash==null?null:(byte[])hash.Clone();DiscLength=hash==null?0:length;Mods=mods??ModSet.Empty;
     }
     public static string CleanName(string name) {
         name=(name??"").Trim();if(name.Length<1 || name.Length>24 || name.Any(c=>char.IsControl(c) || char.IsSurrogate(c)))
@@ -78,10 +79,14 @@ sealed class PlayerInfo {
         return name;
     }
     public bool SameDisc(PlayerInfo other) {return other!=null && DiscHash!=null && other.DiscHash!=null && DiscLength==other.DiscLength && Wire.Equal(DiscHash,other.DiscHash);}
+    // The disc decides whether the two players own the same game; the mods decide
+    // whether they will read the same bytes out of it. Both have to hold.
+    public bool SameMods(PlayerInfo other) {return other!=null && Mods.Same(other.Mods);}
     public byte[] Encode() {
         using(var m=new MemoryStream()) using(var w=new BinaryWriter(m)) {
             byte[] name=Encoding.UTF8.GetBytes(Name);w.Write((byte)2);w.Write((byte)name.Length);w.Write(name);w.Write(DiscHash!=null);
-            if(DiscHash!=null){w.Write(DiscLength);w.Write(DiscHash);}return m.ToArray();
+            if(DiscHash!=null){w.Write(DiscLength);w.Write(DiscHash);}
+            Mods.Write(w);return m.ToArray();
         }
     }
     public static PlayerInfo Decode(byte[] data) {
@@ -90,7 +95,13 @@ sealed class PlayerInfo {
                 if(r.ReadByte()!=2) throw new IOException();int n=r.ReadByte();if(n<1 || n>96) throw new IOException();
                 string name=new UTF8Encoding(false,true).GetString(r.ReadBytes(n));byte present=r.ReadByte();if(present>1)throw new IOException();
                 long length=present==1?r.ReadInt64():0;byte[] hash=present==1?r.ReadBytes(32):null;
-                if(r.BaseStream.Position!=data.Length)throw new IOException();return new PlayerInfo(name,hash,length);
+                // The mod list is appended after the disc, and Decode has always insisted
+                // on consuming the message exactly. A peer built before mods existed
+                // therefore rejects this outright instead of reading a short message and
+                // believing the other player has none -- loud is the only safe failure
+                // here, because a silent one launches a session that will desync.
+                var mods=ModSet.Read(r);
+                if(r.BaseStream.Position!=data.Length)throw new IOException();return new PlayerInfo(name,hash,length,mods);
             }
         }catch{throw new IOException("Informations du joueur incompatibles.");}
     }
@@ -115,14 +126,25 @@ sealed class Lobby {
     public Lobby(bool host,PlayerInfo local,Action<byte[]> sender,Action<Guid> loader,Action<Guid> starter,Action refresh) {
         Host=host;Local=local;send=sender;prepare=loader;commit=starter;changed=refresh;
     }
-    public bool CanStart {get{lock(this)return Host && Phase==LobbyPhase.Waiting && Local.SameDisc(Remote);}}
+    public bool CanStart {get{lock(this)return Host && Phase==LobbyPhase.Waiting && Local.SameDisc(Remote) && Local.SameMods(Remote);}}
     public bool DiscMatches {get{lock(this)return Local.SameDisc(Remote);}}
+    public bool ModsMatch {get{lock(this)return Local.SameMods(Remote);}}
+    // The host's active list is the requirement: choosing which mods a session runs
+    // is done where mods are managed, in CubeShelf, and the salon reports it rather
+    // than offering a second place to disagree about it.
+    public ModSet RequiredMods {get{lock(this)return Host?Local.Mods:(Remote!=null?Remote.Mods:null);}}
+    public string ModAdvice {get{lock(this){
+        if(Remote==null)return "";
+        var required=Host?Local.Mods:Remote.Mods;
+        var mine=Host?Remote.Mods:Local.Mods;      // what the player who must adapt has
+        return mine.Same(required)?"":mine.DifferenceFrom(required);
+    }}}
     public void Announce(){lock(this){if(Phase==LobbyPhase.Waiting)send(Local.Encode());}}
     public void Update(PlayerInfo local) {lock(this){if(Phase!=LobbyPhase.Waiting)throw new IOException("Le lancement est déjà en cours.");Local=local;send(Local.Encode());changed();}}
     internal static byte[] Command(byte type,Guid id){return new[]{type}.Concat(id.ToByteArray()).ToArray();}
     public void Start() {
         lock(this) {
-            if(!CanStart)throw new IOException(Host?"Les deux joueurs doivent avoir exactement le même fichier disque.":"Seul l'hôte peut lancer la partie.");
+            if(!CanStart)throw new IOException(!Host?"Seul l'hôte peut lancer la partie.":!Local.SameDisc(Remote)?"Les deux joueurs doivent avoir exactement le même fichier disque.":"Les deux joueurs doivent avoir exactement les mêmes mods actifs : "+ModAdvice);
             attempt=Guid.NewGuid();Phase=LobbyPhase.Preparing;localReady=remoteReady=false;
             send(Command(3,attempt));prepare(attempt);changed();
         }
@@ -149,7 +171,7 @@ sealed class Lobby {
             var id=new Guid(packet.Skip(1).ToArray());
             switch(packet[0]) {
                 case 3:
-                    if(Host || Phase!=LobbyPhase.Waiting || !Local.SameDisc(Remote) || id==Guid.Empty)throw new IOException("Demande de lancement non autorisée.");
+                    if(Host || Phase!=LobbyPhase.Waiting || !Local.SameDisc(Remote) || !Local.SameMods(Remote) || id==Guid.Empty)throw new IOException("Demande de lancement non autorisée.");
                     attempt=id;Phase=LobbyPhase.Preparing;localReady=remoteReady=false;prepare(attempt);break;
                 case 4:
                     if(!Host || Phase!=LobbyPhase.Preparing || id!=attempt || remoteReady)throw new IOException("Confirmation de chargement inattendue.");
@@ -197,7 +219,12 @@ sealed class GameStart : IDisposable {
     readonly EventWaitHandle ready,go,cancel;readonly string prefix;
     public Process Process {get;private set;} public readonly Guid Attempt;
     public GameStart(Guid id){Attempt=id;prefix="Local\\PartyBoardOnlineStart-"+Guid.NewGuid().ToString("N");ready=new EventWaitHandle(false,EventResetMode.ManualReset,prefix+"-ready");go=new EventWaitHandle(false,EventResetMode.ManualReset,prefix+"-go");cancel=new EventWaitHandle(false,EventResetMode.ManualReset,prefix+"-cancel");}
-    public void Launch(string arguments,string path,bool probe=false,string diagnosticPath=null) {
+    // modListPath is the list the salon announced and both players agreed on. It is
+    // passed explicitly because the game loads mods from PARTYBOARD_MOD_LIST and this
+    // launcher never set it: an online game used to run with no mods at all, whatever
+    // either player had enabled. A null or empty path keeps that behaviour, which is
+    // the right answer when neither side has any.
+    public void Launch(string arguments,string path,bool probe=false,string diagnosticPath=null,string modListPath=null) {
         var root=AppDomain.CurrentDomain.BaseDirectory;
         var info=new ProcessStartInfo(System.IO.Path.Combine(root,"partyboard.exe"),arguments+(probe?" --netplay-start-probe --netplay-pad-probe":"")){WorkingDirectory=root,UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=probe,RedirectStandardError=probe};
         Process=ChildProcess.Start(info,
@@ -205,6 +232,7 @@ sealed class GameStart : IDisposable {
             "PARTYBOARD_ONLINE_READY",prefix+"-ready",
             "PARTYBOARD_ONLINE_GO",prefix+"-go",
             "PARTYBOARD_ONLINE_CANCEL",prefix+"-cancel",
+            "PARTYBOARD_MOD_LIST",string.IsNullOrEmpty(modListPath)?null:modListPath,
             "PARTYBOARD_NET_DIAGNOSTIC",diagnosticPath);
     }
     public void WaitReady(CancellationToken token) {

@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Text;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
@@ -199,6 +200,87 @@ static class Tests {
         Check(cleanup==1,"excessive lease cleaned up");
     }
     static Process Probe(string root,string args) {return Process.Start(new ProcessStartInfo(Path.Combine(root,"partyboard.exe"),GameStart.OnlineArguments(args)+" --netplay-pad-probe"){WorkingDirectory=root,UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true});}
+    static ModEntry Mod(int id,string name,byte seed) {
+        var fingerprint=new byte[8];for(int i=0;i<8;i++)fingerprint[i]=(byte)(seed+i);
+        return new ModEntry(id,name,@"C:\mods\"+id,fingerprint);
+    }
+
+    // A mod changes the bytes the game reads, so in lockstep it has to be agreed the
+    // same way the disc is. These checks pin the three ways two players can differ -
+    // a missing mod, a different build of the same mod, and the same mods loaded in
+    // the other order - because only the first of the three is obvious to a player.
+    static void Mods(byte[] disc) {
+        var a=Mod(546878,"MP4DX",0x10);var b=Mod(620561,"Candlelight Fright Name Fix",0x40);
+        var full=new ModSet(new[]{a,b});
+        Check(full.Same(new ModSet(new[]{a,b})) && !full.Same(ModSet.Empty),"identical mod lists match, an empty one does not");
+        Check(!full.Same(new ModSet(new[]{b,a})),"load order is part of the agreement");
+        Check(!full.Same(new ModSet(new[]{a,Mod(620561,"Candlelight Fright Name Fix",0x99)})),"same mod, different build, blocked");
+
+        var moved=new ModSet(new[]{b,a});
+        Check(moved.DifferenceFrom(full).Contains("autre ordre"),"a pure reordering is named as one");
+        Check(new ModSet(new[]{a}).DifferenceFrom(full).Contains("620561"),"a missing mod is named by its GameBanana id");
+        Check(full.DifferenceFrom(new ModSet(new[]{a})).Contains("désactiver"),"an extra mod is reported as one to switch off");
+
+        var host=new PlayerInfo("Camille",disc,3,full);var guest=new PlayerInfo("Alex",disc,3,new ModSet(new[]{a}));
+        Check(host.SameDisc(guest) && !host.SameMods(guest),"same disc is no longer enough");
+        var hq=new Queue<byte[]>();var cq=new Queue<byte[]>();
+        var h=new Lobby(true,host,x=>hq.Enqueue(x),id=>{},id=>{},()=>{});
+        var c=new Lobby(false,guest,x=>cq.Enqueue(x),id=>{},id=>{},()=>{});
+        h.Announce();c.Announce();c.Receive(hq.Dequeue());h.Receive(cq.Dequeue());
+        Check(h.DiscMatches && !h.ModsMatch && !h.CanStart,"host cannot start while the mods differ");
+        Check(h.ModAdvice.Contains("620561"),"the host is told exactly what the guest is missing");
+        Reject(()=>c.Receive(Lobby.Command(3,Guid.NewGuid())),"guest refuses a launch its mods do not match");
+        c.Update(new PlayerInfo("Alex",disc,3,full));h.Receive(cq.Dequeue());
+        Check(h.ModsMatch && h.CanStart,"agreeing on the mods unblocks the launch");
+
+        Check(PlayerInfo.Decode(host.Encode()).Mods.Same(full),"mod list survives the wire");
+        Check(PlayerInfo.Decode(new PlayerInfo("Zoé",disc,3).Encode()).Mods.None,"a player with no mods announces none");
+        Reject(()=>new ModSet(Enumerable.Range(1,ModSet.MaxMods+1).Select(i=>Mod(i,"m"+i,(byte)i))),"more mods than one message can carry is refused");
+        ModsFromDisk();
+    }
+
+    // Reading CubeShelf's installed.json is the one part of this that talks to a file
+    // written by another program, so it is exercised against a real one rather than a
+    // stub. The rules mirrored here are PortableModManager.WriteActiveList's: enabled,
+    // not switched off in-game, content root present, descending priority then id.
+    static void ModsFromDisk() {
+        var root=Path.Combine(Path.GetTempPath(),"pb-modtest-"+Guid.NewGuid().ToString("N"));
+        var previous=Environment.GetEnvironmentVariable("PARTYBOARD_MOD_LIST");
+        try {
+            Directory.CreateDirectory(root);
+            string low=Path.Combine(root,"100"),high=Path.Combine(root,"200"),off=Path.Combine(root,"300"),gone=Path.Combine(root,"400");
+            foreach(var d in new[]{low,high,off})Directory.CreateDirectory(d);
+            // "GO!, PAUSED," is a real mod name and it contains escaped quotes: a
+            // hand-rolled parser would have swallowed the rest of the file on it.
+            File.WriteAllText(Path.Combine(root,"installed.json"),
+                "[{\"Id\":100,\"Name\":\"\\\"GO!, PAUSED,\\\" and \\\"TIE!\\\"\",\"Enabled\":true,\"Priority\":100,\"ContentRoot\":"+Quote(low)+",\"Sha256\":\"0102030405060708aabbccdd\"},"+
+                "{\"Id\":200,\"Name\":\"MP4DX\",\"Enabled\":true,\"Priority\":120,\"ContentRoot\":"+Quote(high)+",\"Sha256\":\"1112131415161718\"},"+
+                "{\"Id\":300,\"Name\":\"Switched off\",\"Enabled\":false,\"Priority\":130,\"ContentRoot\":"+Quote(off)+",\"Sha256\":\"21\"},"+
+                "{\"Id\":400,\"Name\":\"Folder deleted\",\"Enabled\":true,\"Priority\":140,\"ContentRoot\":"+Quote(gone)+",\"Sha256\":\"31\"}]",
+                new UTF8Encoding(false));
+            Environment.SetEnvironmentVariable("PARTYBOARD_MOD_LIST",Path.Combine(root,"online-mods.txt"));
+
+            string from;var set=ModSet.FromCubeShelf("GMPE01_00",out from);
+            Check(set.Entries.Length==2,"only enabled mods whose folder still exists are announced");
+            Check(set.Entries[0].Id==200 && set.Entries[1].Id==100,"highest priority first, exactly as the game loads them");
+            Check(set.Entries[0].Fingerprint[0]==0x11 && set.Entries[1].Fingerprint[0]==0x01,"the recorded SHA-256 is what identifies a build");
+            Check(set.Entries[1].Name.Contains("GO!"),"a name with escaped quotes survives");
+
+            File.WriteAllText(Path.Combine(root,"player-disabled.json"),"[200]",new UTF8Encoding(false));
+            set=ModSet.FromCubeShelf("GMPE01_00",out from);
+            Check(set.Entries.Length==1 && set.Entries[0].Id==100,"a mod switched off inside the game is not announced");
+
+            var listPath=set.WriteListFile(root);
+            Check(File.ReadAllLines(listPath).Length==1 && File.ReadAllLines(listPath)[0]==Path.GetFullPath(low),
+                "the list handed to the game is the list that was announced");
+        } finally {
+            Environment.SetEnvironmentVariable("PARTYBOARD_MOD_LIST",previous);
+            try{Directory.Delete(root,true);}catch{}
+        }
+    }
+
+    static string Quote(string path){return "\""+path.Replace("\\","\\\\")+"\"";}
+
     static void LobbyRules() {
         var launch=GameStart.OnlineArguments("--netplay-host 32100");
         Check(launch.Contains("--netplay-full") && launch.Contains("--netplay-delay 3")
@@ -231,6 +313,7 @@ static class Tests {
         Reject(()=>w.Receive(Lobby.Command(8,Guid.NewGuid())),"end notice cannot knock over a waiting salon");
         h.Close();h.Loaded(hId);Check(starts==2 && !h.CanStart,"closed session cannot start");
         Reject(()=>new PlayerInfo("\n"),"empty/control nickname rejected");Reject(()=>PlayerInfo.Decode(new byte[]{2,96,1}),"truncated metadata rejected");
+        Mods(same);
         Check(PlayerInfo.Decode(new PlayerInfo("Élodie",same,3).Encode()).Name=="Élodie","UTF8 nickname preserved");
     }
     static void Discs() {

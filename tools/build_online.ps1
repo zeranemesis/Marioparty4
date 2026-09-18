@@ -46,7 +46,7 @@ static class WireFormat {
 "@ | Set-Content -LiteralPath $generated -Encoding ascii
 Write-Output "wire format: $packetSize octets, protocole v$protocolVersion"
 
-& $csc /nologo /target:winexe /platform:x64 /optimize+ /warnaserror+ /langversion:latest "/out:$output\PartyBoardOnline.exe" /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Xml.dll /reference:Microsoft.CSharp.dll "$source\Connection.cs" "$source\Gateway.cs" "$source\Program.cs" "$source\Lobby.cs" "$source\LobbyForm.cs" "$source\Tests.cs" "$source\Report.cs" "$source\UpdateService.cs" "$generated"
+& $csc /nologo /target:winexe /platform:x64 /optimize+ /warnaserror+ /langversion:latest "/out:$output\PartyBoardOnline.exe" /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Xml.dll /reference:Microsoft.CSharp.dll /reference:System.Web.Extensions.dll "$source\Connection.cs" "$source\Gateway.cs" "$source\Program.cs" "$source\Lobby.cs" "$source\Mods.cs" "$source\LobbyForm.cs" "$source\Tests.cs" "$source\Report.cs" "$source\UpdateService.cs" "$generated"
 if ($LASTEXITCODE -ne 0) { throw 'Online companion compilation failed.' }
 Copy-Item -LiteralPath "$source\PartyBoardOnline.exe.config" -Destination $output -Force
 
