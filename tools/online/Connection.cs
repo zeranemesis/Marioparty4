@@ -286,7 +286,11 @@ sealed class Bridge : IDisposable {
                     if(sent!=Interlocked.Read(ref pingStamp))continue;
                     continue;
                 }
-                if(data[0]>=2 && data[0]<=5) {if(Control==null)throw new IOException("Salon indisponible.");Control(data);continue;}
+                // 8 is the end-of-session notice. It sits outside the 2..5 block because
+                // 6 and 7 are this layer's own ping and pong; a peer built before this
+                // existed will reject it and drop the control channel, which at the end
+                // of a session leaves it exactly where it was before -- no worse.
+                if((data[0]>=2 && data[0]<=5) || data[0]==8) {if(Control==null)throw new IOException("Salon indisponible.");Control(data);continue;}
                 throw new IOException("Message réseau incompatible.");
             }
         });

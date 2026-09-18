@@ -219,6 +219,16 @@ static class Tests {
         h.Loaded(hId);Check(starts==0,"one ready is insufficient");c.Loaded(cId);h.Receive(cq.Dequeue());c.Receive(hq.Dequeue());
         Check(starts==2 && h.Phase==LobbyPhase.Running && c.Phase==LobbyPhase.Running,"both ready then authenticated host commits");
         Reject(()=>h.Start(),"double start rejected");Reject(()=>h.Update(profile),"metadata frozen during game");
+        // The reported bug, reproduced: one player quits the game, and the other used to
+        // stay in Running with no way out. The departure is announced and the peer leaves.
+        Reject(()=>c.Receive(Lobby.Command(8,Guid.NewGuid())),"end notice for another attempt rejected");
+        h.LocalGameExited();
+        Check(h.Phase==LobbyPhase.Closed && h.Ending==LobbyEnding.LocalGameClosed,"quitting closes the salon that quit");
+        c.Receive(hq.Dequeue());
+        Check(c.Phase==LobbyPhase.Closed && c.Ending==LobbyEnding.RemoteGameClosed,"the other player leaves the room too");
+        Reject(()=>c.Receive(Lobby.Command(8,cId)),"end notice on a closed salon rejected");
+        var wq=new Queue<byte[]>();var w=new Lobby(true,profile,b=>wq.Enqueue(b),id=>{},id=>{},()=>{});
+        Reject(()=>w.Receive(Lobby.Command(8,Guid.NewGuid())),"end notice cannot knock over a waiting salon");
         h.Close();h.Loaded(hId);Check(starts==2 && !h.CanStart,"closed session cannot start");
         Reject(()=>new PlayerInfo("\n"),"empty/control nickname rejected");Reject(()=>PlayerInfo.Decode(new byte[]{2,96,1}),"truncated metadata rejected");
         Check(PlayerInfo.Decode(new PlayerInfo("Élodie",same,3).Encode()).Name=="Élodie","UTF8 nickname preserved");

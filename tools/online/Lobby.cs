@@ -97,11 +97,20 @@ sealed class PlayerInfo {
 }
 
 enum LobbyPhase { Waiting, Preparing, Running, Closed }
+// Why a session needs an explicit ending. Running had no exit transition at all: once
+// both games were launched the phase stayed Running forever, and the player who quit
+// closed their own window without telling anyone. The other player was left in a salon
+// that would never empty -- and RefreshLobby actively reassured them about it, because a
+// control channel dropping during a game is normal and tolerated on purpose (the game
+// itself keeps running over UDP). The one signal that would have meant "they left" was
+// the one the lobby was designed to ignore. So the departure is now said out loud.
+enum LobbyEnding { None, LocalGameClosed, RemoteGameClosed }
 // Role checks live in the protocol state machine, not just the disabled button.
 sealed class Lobby {
     readonly Action<byte[]> send;readonly Action<Guid> prepare,commit;readonly Action changed;
     public readonly bool Host;public PlayerInfo Local {get;private set;} public PlayerInfo Remote {get;private set;}
     public LobbyPhase Phase {get;private set;}
+    public LobbyEnding Ending {get;private set;}
     Guid attempt;bool localReady,remoteReady;
     public Lobby(bool host,PlayerInfo local,Action<byte[]> sender,Action<Guid> loader,Action<Guid> starter,Action refresh) {
         Host=host;Local=local;send=sender;prepare=loader;commit=starter;changed=refresh;
@@ -148,12 +157,33 @@ sealed class Lobby {
                 case 5:
                     if(Host || Phase!=LobbyPhase.Preparing || id!=attempt || !localReady)throw new IOException("Départ de partie non autorisé.");
                     Phase=LobbyPhase.Running;commit(attempt);break;
+                case 8:
+                    // The peer's game has closed. Accepted only for the attempt actually
+                    // under way, and only once a launch exists, so it cannot be used to
+                    // knock a waiting salon over. Id checked like every other command.
+                    if(Phase!=LobbyPhase.Running && Phase!=LobbyPhase.Preparing)throw new IOException("Fin de partie inattendue.");
+                    if(id!=attempt)throw new IOException("Fin de partie périmée.");
+                    Ending=LobbyEnding.RemoteGameClosed;Phase=LobbyPhase.Closed;break;
                 default:throw new IOException("Commande de salon inconnue.");
             }
             changed();
         }
     }
-    public void Close(){lock(this){Phase=LobbyPhase.Closed;changed();}}
+    // Our own game has exited. Tell the peer before anything tears the sockets down,
+    // then close. Sending is best-effort by design: if the channel is already gone the
+    // session still has to end here, and a throw would only replace one stuck salon
+    // with two.
+    public void LocalGameExited() {
+        lock(this) {
+            if(Phase==LobbyPhase.Closed)return;
+            var announce=Phase==LobbyPhase.Running || Phase==LobbyPhase.Preparing;
+            Ending=LobbyEnding.LocalGameClosed;Phase=LobbyPhase.Closed;
+            if(announce){try{send(Command(8,attempt));}catch{}}
+            changed();
+        }
+    }
+
+    public void Close(){lock(this){if(Phase!=LobbyPhase.Closed)Phase=LobbyPhase.Closed;changed();}}
 }
 
 // Local process readiness is independent of network readiness. The game signals

@@ -60,7 +60,11 @@ sealed class MainForm : Form {
         players.EndUpdate();
         play.Text=session!=null && !session.Host?"L'hôte lance la partie":"Lancer pour tout le monde";
         if(lobby==null)return;
-        if(lobby.Phase==LobbyPhase.Preparing)SetStatus("Chargement sur les deux PC… Le jeu attendra que tout le monde soit prêt. Aucun bouton à presser dans l'autre fenêtre.");
+        // A salon that has ended says so first. Until the peer could announce its
+        // departure this branch had nothing to report, and the Running text below was
+        // shown to someone whose partner had already quit.
+        if(lobby.Ending==LobbyEnding.RemoteGameClosed)SetStatus("Votre ami a quitté la partie. Le salon est fermé — recréez-en un pour rejouer.");
+        else if(lobby.Phase==LobbyPhase.Preparing)SetStatus("Chargement sur les deux PC… Le jeu attendra que tout le monde soit prêt. Aucun bouton à presser dans l'autre fenêtre.");
         else if(lobby.Phase==LobbyPhase.Running)SetStatus(session.Bridge.ControlConnected?"Partie lancée par l'hôte. Gardez le salon ouvert pendant le jeu.":"Le canal du salon est interrompu. La partie continue tant que l'autre joueur reste joignable. Gardez cette fenêtre ouverte.");
         else if(lobby.Remote!=null)SetStatus(match?(session.Host?"Les disques sont identiques. Vous pouvez lancer la partie pour tout le monde.":"Disques identiques. Attendez que l'hôte lance la partie."):"Les fichiers disques sont différents : lancement bloqué. Quittez le salon, choisissez exactement le même fichier sur les deux PC, puis recréez le salon.");
     });}

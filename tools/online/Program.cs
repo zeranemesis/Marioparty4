@@ -185,7 +185,12 @@ sealed class Session : IDisposable {
         Report.Write("netplay_mode=lockstep input_delay_frames=3");
         gameStart.Launch(args,disc.Path,false,Report.NativePath);Game=gameStart.Process;
         gameStart.WaitReady(cancel.Token);Report.Write("native_ready="+attempt);Lobby.Loaded(attempt);
-        Game.WaitForExit();Report.Write("native_exit="+Game.ExitCode);if(!disposed){failed("La partie est terminée. Recréez un salon pour rejouer.");Dispose();}
+        Game.WaitForExit();Report.Write("native_exit="+Game.ExitCode);
+        // Announce the departure while the control channel is still up. Dispose() closes
+        // the sockets, so anything said after it is said to nobody -- which is precisely
+        // how the other player used to be left alone in a salon that never emptied.
+        if(Lobby!=null)Lobby.LocalGameExited();
+        if(!disposed){failed("La partie est terminée. Recréez un salon pour rejouer.");Dispose();}
         }catch(OperationCanceledException){}catch(Exception e){if(!disposed){failed(e is IOException?e.Message:"Le lancement a échoué. Fermez le salon puis réessayez.");Dispose();}}
         finally {if(gameStart!=null)gameStart.Dispose();}
     }
