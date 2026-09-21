@@ -1236,3 +1236,81 @@ propre couvre largement un tel écart. **Soupçonné, non confirmé** : il faudr
 une capture d'écran d'émulateur ou de console pour trancher. À la différence de
 G1, G2 ou Makin' Waves, l'écart est de *niveau* et non de *structure*, et c'est
 précisément le genre que la chaîne vidéo sait fabriquer toute seule.
+
+## Makin' Waves — enquête du 2026-09-21 : ce qui est éliminé
+
+Le diagnostic de la section « Makin' Waves — 14:40 » ci-dessus (« distorsion
+beaucoup trop ample », cause supposée = application du facteur d'échelle dans le
+shader) est **faux**. Il a été réfuté par la mesure. Voici l'état réel, pour
+qu'on ne recommence pas le même chemin.
+
+### Prouvé équivalent à Dolphin
+
+Tout le chemin du texturage indirect d'Aurora a été comparé ligne à ligne à
+`PixelShaderGen.cpp` de Dolphin, et vérifié en exécution avec le disque réel :
+
+- **Encodage et décodage de `GXSetIndTexMtx`** — matrice ×1024 sur 11 bits
+  signés, exposant biaisé de +17 réparti 2 bits par colonne. Correct pour les
+  trois valeurs employées par `water.c` (`-2`, `0`, `-3`).
+- **Amplitude finale**, calculée des deux côtés pour la matrice 0 :
+  Dolphin `(-512 × coord) >> 3 >> 2` en unités de 1/128 texel, Aurora
+  `-0.5 × coord × 2⁻²` en texels. **±16 texels dans les deux cas.**
+- **Correspondance lignes/colonnes** de la matrice (`ma,mc,me` / `mb,md,mf`),
+  **biais −128** pour `GX_ITF_8`, **décalage de format**, **échelle SU** de
+  texcoord, **division perspective par fragment** (`shader.cpp:1243`).
+- **Modes de répétition**, capturés en exécution : texmap 0/1/2 en `GX_CLAMP`,
+  texmap 3 en `GX_MIRROR` — exactement ce que demande `water.c:775-780`.
+- **Le WGSL généré**, vidé pour ce dessin précis et comparé à `water.c` :
+  3 étages indirects tous sur `TEXCOORD1`/`TEXMAP1` (le jeu fait réellement
+  ainsi), 4 étages TEV avec les bons texcoords et texmaps, 5 texgens avec les
+  bons indices de matrice (30/33/36/39/42 → 10..14). Traduction fidèle.
+- **`indLod` / `lb_utclod`** : ni Aurora ni Dolphin n'exploitent ce bit. Ce
+  n'est donc pas une divergence, et le « corriger » éloignerait du rendu de
+  référence au lieu de s'en rapprocher.
+
+### Éliminé par l'expérience
+
+- **La perturbation indirecte n'est pas la cause.** Avec son amplitude forcée à
+  zéro, l'artefact du bord est atténué mais **subsiste**.
+- **La copie EFB se résout correctement.** La sonde rapporte `tex0 bound=true`
+  en 640×480 au format 4 — la « Resolved Texture » RGB565 que crée `GXCopyTex`
+  pour un EFB sans alpha, et non le format 5 déclaré par `water.c`. C'est la
+  preuve *positive* que TEXMAP0 échantillonne bien le reflet, et non le tampon
+  `malloc` non initialisé de `water.c:323`. (`copyRevision=0` est normal ici :
+  ce compteur ne sert qu'aux copies palettisées.)
+- **La résolution interne n'est pas en cause.** Résoudre les copies EFB à leur
+  taille déclarée au lieu de la résolution interne ne change rien à l'aspect.
+
+### Fausses pistes à ne pas refaire
+
+- **« Le dump RVZ est mauvais »** : le SHA-1 du `.rvz` de l'utilisateur ne
+  correspond pas à Redump, mais le même fichier rend correctement sous Dolphin.
+  Les données du disque ne sont pas en cause.
+- **« Ce n'est pas un bug »** : une comparaison vidéo avec Dolphin avait conclu
+  à un aspect identique. C'est faux — le défaut est bien réel et localisé au
+  **bord** du bassin, pas sur toute la surface.
+
+### Ce qui reste à explorer
+
+**Rien de précis.** La dernière piste envisagée — le double tampon de sommets —
+a été vérifiée et écartée le même jour : `water.c` recalcule bien à chaque image
+les positions et normales du maillage 30×36 dans deux tampons alternés
+(`unk_6BC`/`unk_6C4`, basculés par `unk_6B4`), et Aurora met bien en cache les
+tableaux de sommets par pointeur (`command_processor.cpp:1636`), mais
+`end_frame` vide `cachedRange` pour tous les tableaux à chaque fin d'image
+(`gfx/common.cpp:1125`). Le cache ne vit donc qu'à l'intérieur d'une image et
+les sommets sont réenvoyés à chaque frame : aucune donnée périmée possible.
+
+À noter au passage, sans rapport avec ce défaut : l'invalidation de
+`command_processor.cpp:1739` ne lâche le cache que si le **pointeur** change,
+alors qu'un jeu réécrivant le même tampon entre deux dessins d'une même image
+obtiendrait des données périmées. Le vidage de fin d'image masque le problème
+aujourd'hui ; c'est une fragilité latente, pas un bug actif.
+
+Reste donc la géométrie elle-même (valeurs des positions et normales calculées
+par le code décompilé, liste d'affichage, ordre des triangles), qu'aucune mesure
+n'a encore touchée — mais sans hypothèse précise pour l'aborder.
+
+Les sondes employées (`PARTYBOARD_IND_SCALE`, `PARTYBOARD_DEBUG_WATERTEX`,
+`PARTYBOARD_DUMP_WATER_SHADER`, `PARTYBOARD_EFB_COPY_NATIVE`) sont dans
+l'historique git entre `f0ac5f6` et `18b2af3` si besoin de les réemployer.

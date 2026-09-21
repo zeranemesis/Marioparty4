@@ -1,3 +1,39 @@
+diff --git a/lib/dolphin/gx/GXFrameBuffer.cpp b/lib/dolphin/gx/GXFrameBuffer.cpp
+index c196cf6..581808b 100644
+--- a/lib/dolphin/gx/GXFrameBuffer.cpp
++++ b/lib/dolphin/gx/GXFrameBuffer.cpp
+@@ -9,6 +9,7 @@
+ #include "../vi/vi_internal.hpp"
+ 
+ #include <algorithm>
++#include <cstdlib>
+ #include <cmath>
+ 
+ namespace {
+@@ -17,6 +18,23 @@ aurora::Vec2<uint32_t> scale_copy_dst(u32 logicalWidth, u32 logicalHeight) {
+     return {logicalWidth, logicalHeight};
+   }
+ 
++  // Makin' Waves: everything that feeds the water shader has been proven
++  // equivalent to Dolphin (matrices, biases, scales, wrap modes, texgens, the
++  // generated WGSL against water.c stage for stage), and zeroing the indirect
++  // offset does not remove the rim artifact -- so the effect's logic is right
++  // and only its *detail* differs. water.c declares its reflection as a 640x480
++  // GXInitTexObj and the effect was calibrated for that blur; resolving the copy
++  // at internal resolution instead gives the perturbation ~9x more high frequency
++  // content to smear, worst where the coordinate gradient is steepest, i.e. the
++  // grazing far rim. This keeps EFB copies at their declared size so they carry
++  // console-accurate detail while the rest of the frame stays sharp.
++  // Opt-in for now: a blanket change would also shrink every other EFB-copy
++  // effect (shadows among them), which must not regress.
++  static const bool nativeCopies = std::getenv("PARTYBOARD_EFB_COPY_NATIVE") != nullptr;
++  if (nativeCopies) {
++    return {logicalWidth, logicalHeight};
++  }
++
+   const auto [logicalFbWidth, logicalFbHeight] = aurora::gx::logical_fb_size();
+   const auto [targetWidth, targetHeight] = aurora::gfx::get_render_target_size();
+   if (logicalFbWidth == 0 || logicalFbHeight == 0 || targetWidth == 0 || targetHeight == 0) {
 diff --git a/lib/gfx/tex_copy_conv.cpp b/lib/gfx/tex_copy_conv.cpp
 index 50f4c43..4aa33cb 100644
 --- a/lib/gfx/tex_copy_conv.cpp
@@ -137,3 +173,123 @@ index 9ca9036..76fb927 100644
    }
  }
  
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index 3671ed5..7c6b9fb 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -9,6 +9,8 @@
+ #include <dolphin/gx/GXEnum.h>
+ 
+ #include <absl/container/flat_hash_set.h>
++#include <cstdlib>
++#include <fstream>
+ #include <mutex>
+ #include <string_view>
+ #include <utility>
+@@ -1931,6 +1933,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {{{6}{5}
+     Log.info("Generated shader: {}", shaderSource);
+   }
+ 
++  // Makin' Waves: the indirect path is exonerated (PARTYBOARD_IND_SCALE=0 leaves
++  // the rim artifact) and the EFB copy resolves correctly (PARTYBOARD_DEBUG_WATERTEX
++  // reports tex0 bound as the resolved RGB565 copy), so the remaining unknown is
++  // how the TEV stages actually combine the reflection and the two bump textures.
++  // Reading the generator's branches is not the same as reading its output, so this
++  // writes out the water draw's own WGSL once. Gated on water.c's three indirect
++  // stages plus its exact matrix signature to avoid the all-shaders dump that
++  // EnableDebugPrints would produce. Diagnostic only.
++  if (config.numIndStages == 3 && g_gxState.indTexMtxs[0].scaleExp == -2 &&
++      g_gxState.indTexMtxs[2].scaleExp == -3 && std::getenv("PARTYBOARD_DUMP_WATER_SHADER") != nullptr) {
++    static bool dumped = false;
++    if (!dumped) {
++      dumped = true;
++      std::ofstream out("water_shader.wgsl", std::ios::binary);
++      out << shaderSource;
++      Log.warn("wrote water_shader.wgsl ({} bytes)", shaderSource.size());
++    }
++  }
++
+   return shaderSource;
+ }
+ 
+diff --git a/lib/gx/shader_info.cpp b/lib/gx/shader_info.cpp
+index bb9ddec..488a9f4 100644
+--- a/lib/gx/shader_info.cpp
++++ b/lib/gx/shader_info.cpp
+@@ -1,6 +1,7 @@
+ #include "shader_info.hpp"
+ 
+ #include <cmath>
++#include <cstdlib>
+ 
+ #include <tracy/Tracy.hpp>
+ 
+@@ -466,19 +467,65 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
+     buf.append(
+         Vec4{static_cast<f32>(scale.scaleS) + 1.0f, static_cast<f32>(scale.scaleT) + 1.0f, 0.0f, 0.0f});
+   }
++  // Makin' Waves edge distortion, third pass. The whole indirect-texturing path
++  // has now been checked against Dolphin's PixelShaderGen line by line -- matrix
++  // row/column mapping, the -128 bias, the format shift, the per-fragment
++  // perspective divide, the SU scale, and the offset magnitude (both come out at
++  // +/-16 texels for water.c's matrix 0) are all equivalent. Static analysis is
++  // out of hypotheses, so this makes the perturbation amplitude adjustable at
++  // runtime to bisect empirically: PARTYBOARD_IND_SCALE=0 removes the indirect
++  // offset entirely, which tells us whether the rim artifact comes from indirect
++  // texturing at all. Folded into the existing exp2(scaleExp) uniform on purpose,
++  // so the generated shader source is unchanged and a warm pipeline cache cannot
++  // silently ignore the setting. Diagnostic only; remove once understood.
++  static const float indScaleDebug = [] {
++    const char* v = std::getenv("PARTYBOARD_IND_SCALE");
++    if (v == nullptr) {
++      return 1.0f;
++    }
++    const float parsed = std::strtof(v, nullptr);
++    Log.warn("PARTYBOARD_IND_SCALE={} -- indirect texture offsets scaled by {}", v, parsed);
++    return parsed;
++  }();
+   if (info.usedIndTexMtxs.any()) {
+     for (int i = 0; i < MaxIndTexMtxs; ++i) {
+       const auto& mtx = g_gxState.indTexMtxs[i];
+       buf.append(Vec4{mtx.mtx.m0.x, mtx.mtx.m0.y, mtx.mtx.m1.x, mtx.mtx.m1.y});
+-      buf.append(Vec4{mtx.mtx.m2.x, mtx.mtx.m2.y, std::exp2f(mtx.scaleExp), 0.0f});
+-    }
+-  }
++      buf.append(Vec4{mtx.mtx.m2.x, mtx.mtx.m2.y, std::exp2f(mtx.scaleExp) * indScaleDebug, 0.0f});
++    }
++  }
++  // With the indirect offset forced to zero the rim artifact survives, so the
++  // perturbation is not the cause and the reflection texture itself is the
++  // remaining suspect. water.c hands GXCopyTex an uninitialised malloc buffer
++  // (water.c:323) and binds that same pointer as TEXMAP0 (water.c:775); on
++  // hardware the copy fills it, on aurora GXCopyTex only uses the pointer as a
++  // cache key and resolves into a texture at internal render resolution
++  // (scale_copy_dst), while the texture object still declares 640x480. This
++  // reports whether that resolution actually succeeds for the water draw:
++  // a bind with copyRevision == 0 or a null handle means TEXMAP0 is being fed
++  // something other than the resolved copy. Gated on water.c's exact indirect
++  // matrix signature so it neither spams nor touches any other draw, and on
++  // PARTYBOARD_DEBUG_WATERTEX. Diagnostic only.
++  const bool debugWaterTex = info.usedIndTexMtxs.any() && g_gxState.indTexMtxs[0].scaleExp == -2 &&
++                             g_gxState.indTexMtxs[2].scaleExp == -3 &&
++                             std::getenv("PARTYBOARD_DEBUG_WATERTEX") != nullptr;
+   for (int i = 0; i < info.sampledTextures.size(); ++i) {
+     if (!info.sampledTextures.test(i)) {
+       continue;
+     }
+     const auto& tex = get_texture(static_cast<GXTexMapID>(i));
+     // CHECK(tex, "unbound texture {}", i);
++    if (debugWaterTex) {
++      static u32 lastRev[GX_MAX_TEXMAP] = {};
++      static bool seen[GX_MAX_TEXMAP] = {};
++      if (i < GX_MAX_TEXMAP && (!seen[i] || lastRev[i] != tex.copyRevision)) {
++        seen[i] = true;
++        lastRev[i] = tex.copyRevision;
++        Log.warn("water tex{}: bound={} texObj={}x{} fmt={} copyRevision={} mips={}", i,
++                 static_cast<bool>(tex), tex.texObj.width(), tex.texObj.height(), tex.texObj.format(),
++                 tex.copyRevision, tex.texObj.mip_count());
++      }
++    }
+     buf.append(texture_size_bias(tex));
+   }
+   g_gxState.stateDirty = false;
