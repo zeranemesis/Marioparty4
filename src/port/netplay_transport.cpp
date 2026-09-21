@@ -24,6 +24,11 @@
 #endif
 
 namespace partyboard::netplay {
+
+// The transport seats exactly as many players as the simulation does. If these
+// ever drift, a packet is accepted for a seat the rollback session has no slot
+// for, and the failure appears somewhere far from here.
+static_assert(kMaxNetplayPeers == rollback::kMaxPlayers, "netplay peers and rollback seats must agree");
 namespace {
 
 constexpr std::size_t kPacketSize = kNetplayPacketSize;
@@ -137,7 +142,10 @@ bool decode(const std::uint8_t *bytes, std::size_t size, InputPacket &packet)
     for (std::size_t index = 0; index < kSubsystemCount; ++index)
         packet.state.parts[index] = get32(bytes + 84 + index * 4);
     packet.captureContext = get32(bytes + 44);
-    return packet.player < 2
+    // The author byte indexes seat arrays, so it is bounded here and nowhere else.
+    // It said "< 2" -- the single line that made a third player impossible at the
+    // wire level, whatever the rest of the stack could do.
+    return packet.player < kMaxNetplayPeers
         && (packet.type != PacketType::State || packet.state.frame != kNoHashFrame);
 }
 
@@ -158,9 +166,14 @@ bool wouldBlock(int error) { return error == EAGAIN || error == EWOULDBLOCK; }
 }
 
 struct UdpTransport::Impl {
+    struct Peer {
+        sockaddr_in address {};
+        bool valid = false;
+    };
     Socket socket = kInvalidSocket;
-    sockaddr_in peer {};
-    bool hasPeer = false;
+    std::array<Peer, kMaxNetplayPeers> peers {};
+    std::uint8_t lastSender = kMaxNetplayPeers;
+    std::size_t expectedPeers = 1;
     bool discoverPeer = false;
 #if defined(_WIN32)
     bool winsockStarted = false;
@@ -241,17 +254,33 @@ bool UdpTransport::open(std::uint16_t localPort, bool loopbackOnly)
     return true;
 }
 
-bool UdpTransport::setPeer(const std::string &ipv4Address, std::uint16_t port)
+bool UdpTransport::addPeer(std::uint8_t player, const std::string &ipv4Address, std::uint16_t port)
 {
-    mImpl->peer = {};
-    mImpl->peer.sin_family = AF_INET;
-    mImpl->peer.sin_port = htons(port);
-    if (inet_pton(AF_INET, ipv4Address.c_str(), &mImpl->peer.sin_addr) != 1) {
+    if (player >= kMaxNetplayPeers) {
+        mImpl->error = "peer seat out of range";
+        return false;
+    }
+    sockaddr_in address {};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    if (inet_pton(AF_INET, ipv4Address.c_str(), &address.sin_addr) != 1) {
         mImpl->error = "invalid IPv4 peer address";
         return false;
     }
-    mImpl->hasPeer = true;
+    mImpl->peers[player].address = address;
+    mImpl->peers[player].valid = true;
     return true;
+}
+
+bool UdpTransport::setPeer(const std::string &ipv4Address, std::uint16_t port)
+{
+    for (std::size_t seat = 0; seat < mImpl->peers.size(); ++seat) {
+        if (!mImpl->peers[seat].valid) {
+            return addPeer(static_cast<std::uint8_t>(seat), ipv4Address, port);
+        }
+    }
+    mImpl->error = "no free peer seat";
+    return false;
 }
 
 void UdpTransport::enablePeerDiscovery(bool enabled)
@@ -259,20 +288,48 @@ void UdpTransport::enablePeerDiscovery(bool enabled)
     mImpl->discoverPeer = enabled;
 }
 
-bool UdpTransport::sendInput(const InputPacket &packet)
+void UdpTransport::expectPeers(std::size_t count)
 {
-    if (mImpl->socket == kInvalidSocket || !mImpl->hasPeer) {
+    mImpl->expectedPeers = std::clamp<std::size_t>(count, 1, kMaxNetplayPeers);
+}
+
+bool UdpTransport::sendInputTo(std::uint8_t player, const InputPacket &packet)
+{
+    if (mImpl->socket == kInvalidSocket || player >= kMaxNetplayPeers || !mImpl->peers[player].valid) {
         mImpl->error = "UDP transport is not connected";
         return false;
     }
     const auto bytes = encode(packet);
     const int sent = sendto(mImpl->socket, reinterpret_cast<const char *>(bytes.data()), static_cast<int>(bytes.size()), 0,
-        reinterpret_cast<const sockaddr *>(&mImpl->peer), sizeof(mImpl->peer));
+        reinterpret_cast<const sockaddr *>(&mImpl->peers[player].address), sizeof(sockaddr_in));
     if (sent != static_cast<int>(bytes.size())) {
         mImpl->error = "UDP send failed: " + std::to_string(lastSocketError());
         return false;
     }
     return true;
+}
+
+bool UdpTransport::sendInput(const InputPacket &packet)
+{
+    if (mImpl->socket == kInvalidSocket) {
+        mImpl->error = "UDP transport is not connected";
+        return false;
+    }
+    // One unreachable guest must not stop the frame reaching the other two, so a
+    // send counts as done when it reached anybody. The caller learns nothing about
+    // which link failed; that is the session layer's job, from missing inputs.
+    bool any = false;
+    bool anyPeer = false;
+    for (std::size_t seat = 0; seat < mImpl->peers.size(); ++seat) {
+        if (!mImpl->peers[seat].valid) continue;
+        anyPeer = true;
+        if (sendInputTo(static_cast<std::uint8_t>(seat), packet)) any = true;
+    }
+    if (!anyPeer) {
+        mImpl->error = "UDP transport is not connected";
+        return false;
+    }
+    return any;
 }
 
 bool UdpTransport::receiveInput(InputPacket &packet)
@@ -295,17 +352,45 @@ bool UdpTransport::receiveInput(InputPacket &packet)
         mImpl->error = "UDP receive failed: " + std::to_string(error);
         return false;
     }
-    if (mImpl->hasPeer && (sender.sin_addr.s_addr != mImpl->peer.sin_addr.s_addr
-        || sender.sin_port != mImpl->peer.sin_port)) {
+    // Which registered seat this came from. A packet from nobody we know is
+    // dropped unless discovery is on, exactly as before -- the difference is that
+    // "nobody we know" is now a search rather than a single comparison.
+    std::uint8_t from = kMaxNetplayPeers;
+    for (std::size_t seat = 0; seat < mImpl->peers.size(); ++seat) {
+        const auto &peer = mImpl->peers[seat];
+        if (peer.valid && peer.address.sin_addr.s_addr == sender.sin_addr.s_addr
+            && peer.address.sin_port == sender.sin_port) {
+            from = static_cast<std::uint8_t>(seat);
+            break;
+        }
+    }
+    const bool known = from < kMaxNetplayPeers;
+    if (!known && !mImpl->discoverPeer) {
         return false;
     }
     if (!decode(bytes.data(), static_cast<std::size_t>(received), packet)) {
         return false;
     }
-    if (mImpl->discoverPeer && !mImpl->hasPeer) {
-        mImpl->peer = sender;
-        mImpl->hasPeer = true;
+    if (!known) {
+        // Discovery closes as soon as the expected peers are seated. Without this a
+        // host would keep accepting strangers for the rest of the session; with two
+        // players that was prevented by there being exactly one peer to compare to.
+        if (peerCount() >= mImpl->expectedPeers) {
+            return false;
+        }
+        // Discovery seats a new peer by the author byte it announced, which decode
+        // has already bounded. A host binds one port and learns each guest from its
+        // first packet; this is the same trust as the two-player version had, and
+        // the same caveat -- the authenticated channel that carries these is the
+        // thing that makes it safe, not this function.
+        if (mImpl->peers[packet.player].valid) {
+            return false;
+        }
+        mImpl->peers[packet.player].address = sender;
+        mImpl->peers[packet.player].valid = true;
+        from = packet.player;
     }
+    mImpl->lastSender = from;
     return true;
 }
 
@@ -316,7 +401,9 @@ void UdpTransport::close()
         closeSocket(mImpl->socket);
         mImpl->socket = kInvalidSocket;
     }
-    mImpl->hasPeer = false;
+    mImpl->peers = {};
+    mImpl->lastSender = kMaxNetplayPeers;
+    mImpl->expectedPeers = 1;
     mImpl->discoverPeer = false;
     mImpl->port = 0;
 #if defined(_WIN32)
@@ -328,8 +415,141 @@ void UdpTransport::close()
 }
 
 std::uint16_t UdpTransport::localPort() const { return mImpl->port; }
-bool UdpTransport::hasPeer() const { return mImpl->hasPeer; }
+bool UdpTransport::hasPeer() const { return peerCount() != 0; }
+bool UdpTransport::hasPeer(std::uint8_t player) const
+{
+    return player < kMaxNetplayPeers && mImpl->peers[player].valid;
+}
+std::size_t UdpTransport::peerCount() const
+{
+    std::size_t count = 0;
+    for (const auto &peer : mImpl->peers) if (peer.valid) ++count;
+    return count;
+}
+std::uint8_t UdpTransport::lastSenderPlayer() const { return mImpl->lastSender; }
 const std::string &UdpTransport::lastError() const { return mImpl->error; }
+
+// A real four-player star over loopback: three guests, one host, every guest
+// discovered from its own first packet and seated by the author byte it
+// announced. This is the shape the lobby will drive, and it is checked here
+// because everything above it is easier to debug once this is known good.
+//
+// It also pins the two properties the two-player code got for free and that a
+// peer table has to earn back: a stranger is refused once the expected guests
+// are seated, and the host can tell which link a packet arrived on rather than
+// trusting the author byte, which is the only way a relay avoids echoing a
+// packet back to its sender.
+bool runStarSelfTest()
+{
+    UdpTransport host;
+    if (!host.open()) return false;
+    host.enablePeerDiscovery(true);
+    host.expectPeers(3);
+
+    std::array<UdpTransport, 3> guests;
+    for (std::size_t index = 0; index < guests.size(); ++index) {
+        if (!guests[index].open() || !guests[index].setPeer("127.0.0.1", host.localPort())) return false;
+    }
+
+    // Each guest announces itself once; the host must end up with three distinct
+    // seats, in the seats the guests claimed rather than in arrival order.
+    for (std::size_t index = 0; index < guests.size(); ++index) {
+        InputPacket hello {};
+        hello.sessionId = 0x4D503452u;
+        hello.frame = 1;
+        hello.player = static_cast<std::uint8_t>(index + 1);
+        hello.type = PacketType::Input;
+        hello.state.frame = kNoHashFrame;
+        hello.state.version = kStateHashVersion;
+        if (!guests[index].sendInput(hello)) return false;
+    }
+
+    std::array<bool, kMaxNetplayPeers> seen {};
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    std::size_t received = 0;
+    while (received < guests.size() && std::chrono::steady_clock::now() < deadline) {
+        InputPacket packet {};
+        if (host.receiveInput(packet)) {
+            if (packet.player == 0 || packet.player > guests.size()) return false;
+            // Sender seat and announced author agree here because the guests are
+            // honest; what matters is that the host can name the link at all.
+            if (host.lastSenderPlayer() != packet.player) return false;
+            if (seen[packet.player]) return false;
+            seen[packet.player] = true;
+            ++received;
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    if (received != guests.size() || host.peerCount() != guests.size()) return false;
+    for (std::uint8_t seat = 1; seat <= guests.size(); ++seat) {
+        if (!host.hasPeer(seat)) return false;
+    }
+    if (host.hasPeer(0)) return false;
+
+    // A fourth socket arriving after the expected guests are seated is refused,
+    // exactly as the third socket was refused when there were only two players.
+    UdpTransport intruder;
+    InputPacket forged {};
+    forged.sessionId = 0x4D503452u;
+    forged.frame = 2;
+    forged.player = 0;
+    forged.type = PacketType::Input;
+    forged.state.frame = kNoHashFrame;
+    forged.state.version = kStateHashVersion;
+    if (!intruder.open() || !intruder.setPeer("127.0.0.1", host.localPort())
+        || !intruder.sendInput(forged)) return false;
+    const auto rejectDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(30);
+    while (std::chrono::steady_clock::now() < rejectDeadline) {
+        InputPacket packet {};
+        if (host.receiveInput(packet)) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (host.peerCount() != guests.size()) return false;
+
+    // One broadcast from the host reaches all three guests.
+    InputPacket broadcast {};
+    broadcast.sessionId = 0x4D503452u;
+    broadcast.frame = 3;
+    broadcast.player = 0;
+    broadcast.sequence = 42;
+    broadcast.type = PacketType::Input;
+    broadcast.state.frame = kNoHashFrame;
+    broadcast.state.version = kStateHashVersion;
+    if (!host.sendInput(broadcast)) return false;
+    for (std::size_t index = 0; index < guests.size(); ++index) {
+        bool got = false;
+        const auto guestDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        while (!got && std::chrono::steady_clock::now() < guestDeadline) {
+            InputPacket packet {};
+            if (guests[index].receiveInput(packet)) {
+                if (packet.sequence != broadcast.sequence || packet.player != 0) return false;
+                got = true;
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+        if (!got) return false;
+    }
+
+    // And a targeted send reaches only the guest it names.
+    InputPacket direct = broadcast;
+    direct.sequence = 43;
+    if (!host.sendInputTo(2, direct)) return false;
+    bool reachedTwo = false;
+    const auto directDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+    while (std::chrono::steady_clock::now() < directDeadline) {
+        InputPacket packet {};
+        if (guests[1].receiveInput(packet) && packet.sequence == direct.sequence) { reachedTwo = true; break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!reachedTwo) return false;
+    for (const std::size_t other : {std::size_t{0}, std::size_t{2}}) {
+        InputPacket packet {};
+        if (guests[other].receiveInput(packet)) return false;
+    }
+    return true;
+}
 
 bool runTransportSelfTest()
 {
@@ -379,6 +599,8 @@ bool runTransportSelfTest()
     codecSample.state.frame = kNoHashFrame;
     bytes = encode(codecSample);
     if (decode(bytes.data(), bytes.size(), decoded)) return false;
+
+    if (!runStarSelfTest()) return false;
 
     UdpTransport host;
     UdpTransport client;

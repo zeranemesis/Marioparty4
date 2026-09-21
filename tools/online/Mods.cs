@@ -79,6 +79,17 @@ sealed class ModSet {
 
     public ModEntry Find(int id){return Entries.FirstOrDefault(e=>e.Id==id);}
 
+    // The same "missing" set DifferenceFrom already computes (required's
+    // entries this ModSet has no matching id for), structured for a caller
+    // that wants to act on each one -- a download button per mod -- rather
+    // than fold it into one human-readable string. Ignores a version
+    // mismatch on purpose: a mod already present, even at the wrong build,
+    // is not something a download link would fix.
+    public IEnumerable<ModEntry> Missing(ModSet required) {
+        if(required==null)return Enumerable.Empty<ModEntry>();
+        return required.Entries.Where(r=>Find(r.Id)==null);
+    }
+
     // What the other player must change, in words they can act on. Order matters to
     // the comparison, so a pure reordering is reported as such instead of leaving
     // someone hunting for a mod they already have.

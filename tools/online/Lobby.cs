@@ -1,6 +1,8 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Collections.Generic;
+using System.Net;
 using System.Text;
 using System.Security.Cryptography;
 using System.Threading;
@@ -117,90 +119,283 @@ enum LobbyPhase { Waiting, Preparing, Running, Closed }
 // the one the lobby was designed to ignore. So the departure is now said out loud.
 enum LobbyEnding { None, LocalGameClosed, RemoteGameClosed }
 // Role checks live in the protocol state machine, not just the disabled button.
+//
+// Seats, not "us and them". The host is always seat 0 and assigns 1..3 to guests
+// as they arrive; every rule below is written over the occupied seats rather than
+// over a single Remote, because a four-player salon has three of them and "the
+// other player" stops naming anybody.
+//
+// The topology is a star: guests only ever talk to the host, and the host is the
+// only one holding the whole roster. That is why sending takes a destination -- a
+// guest ignores it and answers the host, while the host either names a guest or
+// broadcasts. It is also why the host carries the requirement: every guest
+// compares itself to seat 0 and to nobody else, so three guests cannot deadlock
+// each other over whose mods are right.
 sealed class Lobby {
-    readonly Action<byte[]> send;readonly Action<Guid> prepare,commit;readonly Action changed;
-    public readonly bool Host;public PlayerInfo Local {get;private set;} public PlayerInfo Remote {get;private set;}
+    public const int MaxSeats = 4;
+    public const int Broadcast = -1;
+
+    readonly Action<int,byte[]> send;readonly Action<Guid> prepare,commit;readonly Action changed;
+    readonly PlayerInfo[] seats = new PlayerInfo[MaxSeats];
+    readonly bool[] ready = new bool[MaxSeats];
+    // Where each seat can be reached directly, for the mesh -- distinct from
+    // the disc/mods PlayerInfo above, and learned independently of it. A
+    // player announces this only once its own port mapping has actually
+    // succeeded, so "known" here means "dialable now", not "will be soon".
+    readonly IPEndPoint[] endpoints = new IPEndPoint[MaxSeats];
+    public readonly bool Host;
+    public int LocalSeat {get;private set;}
     public LobbyPhase Phase {get;private set;}
     public LobbyEnding Ending {get;private set;}
-    Guid attempt;bool localReady,remoteReady;
-    public Lobby(bool host,PlayerInfo local,Action<byte[]> sender,Action<Guid> loader,Action<Guid> starter,Action refresh) {
-        Host=host;Local=local;send=sender;prepare=loader;commit=starter;changed=refresh;
+    Guid attempt;
+    // Fired once per seat, in order, whenever this player learns where a
+    // remote seat can be reached -- including catch-up replays for seats it
+    // already knew about before the local one joined or was told. The mesh
+    // side (not written yet) registers a peer on hearing this rather than
+    // polling PeerEndpoint, so a late endpoint update after the initial one
+    // (a NAT remapping, say) is not missed.
+    public Action<int,IPEndPoint> EndpointLearned;
+
+    public Lobby(bool host,PlayerInfo local,Action<int,byte[]> sender,Action<Guid> loader,Action<Guid> starter,Action refresh) {
+        Host=host;send=sender;prepare=loader;commit=starter;changed=refresh;
+        LocalSeat=host?0:1;   // a guest keeps 1 until the host tells it otherwise
+        seats[LocalSeat]=local;
     }
-    public bool CanStart {get{lock(this)return Host && Phase==LobbyPhase.Waiting && Local.SameDisc(Remote) && Local.SameMods(Remote);}}
-    public bool DiscMatches {get{lock(this)return Local.SameDisc(Remote);}}
-    public bool ModsMatch {get{lock(this)return Local.SameMods(Remote);}}
-    // The host's active list is the requirement: choosing which mods a session runs
-    // is done where mods are managed, in CubeShelf, and the salon reports it rather
-    // than offering a second place to disagree about it.
-    public ModSet RequiredMods {get{lock(this)return Host?Local.Mods:(Remote!=null?Remote.Mods:null);}}
-    public string ModAdvice {get{lock(this){
-        if(Remote==null)return "";
-        var required=Host?Local.Mods:Remote.Mods;
-        var mine=Host?Remote.Mods:Local.Mods;      // what the player who must adapt has
-        return mine.Same(required)?"":mine.DifferenceFrom(required);
+
+    public PlayerInfo Local {get{lock(this)return seats[LocalSeat];}}
+    // The seat every guest measures itself against, and the only one measuring back.
+    public PlayerInfo HostInfo {get{lock(this)return seats[0];}}
+    public int Occupied {get{lock(this){int n=0;foreach(var s in seats)if(s!=null)n++;return n;}}}
+    public PlayerInfo SeatInfo(int index){lock(this)return index>=0 && index<MaxSeats?seats[index]:null;}
+    // Kept for the two-player callers and the window: the other side of a pair.
+    public PlayerInfo Remote {get{lock(this){for(int i=0;i<MaxSeats;i++)if(i!=LocalSeat && seats[i]!=null)return seats[i];return null;}}}
+
+    bool AgreesWithHost(int seat) {
+        var host=seats[0];var other=seats[seat];
+        return host!=null && other!=null && host.SameDisc(other) && host.SameMods(other);
+    }
+    // Public so a player list can show each occupied seat's own agreement with
+    // the host, rather than the lobby-wide ModsMatch/DiscMatches, which says
+    // only whether everyone agrees and not which one does not.
+    public bool SeatAgrees(int seat){lock(this)return seat>=0 && seat<MaxSeats && AgreesWithHost(seat);}
+    // Every occupied seat against seat 0. A guest can only see itself and the host,
+    // which is enough: if each guest agrees with the host, all of them agree.
+    bool EveryoneAgrees() {
+        if(seats[0]==null)return false;
+        for(int i=1;i<MaxSeats;i++)if(seats[i]!=null && !AgreesWithHost(i))return false;
+        return true;
+    }
+
+    public bool CanStart {get{lock(this)return Host && Phase==LobbyPhase.Waiting && Occupied>=2 && EveryoneAgrees();}}
+    public bool DiscMatches {get{lock(this){
+        if(seats[0]==null || Occupied<2)return false;
+        for(int i=1;i<MaxSeats;i++)if(seats[i]!=null && !seats[0].SameDisc(seats[i]))return false;
+        return true;
     }}}
-    public void Announce(){lock(this){if(Phase==LobbyPhase.Waiting)send(Local.Encode());}}
-    public void Update(PlayerInfo local) {lock(this){if(Phase!=LobbyPhase.Waiting)throw new IOException("Le lancement est déjà en cours.");Local=local;send(Local.Encode());changed();}}
+    public bool ModsMatch {get{lock(this){
+        if(seats[0]==null || Occupied<2)return false;
+        for(int i=1;i<MaxSeats;i++)if(seats[i]!=null && !seats[0].SameMods(seats[i]))return false;
+        return true;
+    }}}
+    public ModSet RequiredMods {get{lock(this)return seats[0]!=null?seats[0].Mods:null;}}
+
+    // Said to whoever has to act. A guest is told what it must change; the host is
+    // told which guest is out of step, because with three of them "the other player"
+    // names nobody.
+    public string ModAdvice {get{lock(this){
+        if(seats[0]==null)return "";
+        if(!Host)return seats[LocalSeat].Mods.Same(seats[0].Mods)?"":seats[LocalSeat].Mods.DifferenceFrom(seats[0].Mods);
+        var parts=new List<string>();
+        for(int i=1;i<MaxSeats;i++) {
+            if(seats[i]==null || seats[i].Mods.Same(seats[0].Mods))continue;
+            parts.Add(seats[i].Name+" : "+seats[i].Mods.DifferenceFrom(seats[0].Mods));
+        }
+        return string.Join(" - ",parts.ToArray());
+    }}}
+
+    public void Announce(){lock(this){if(Phase==LobbyPhase.Waiting)send(Broadcast,seats[LocalSeat].Encode());}}
+    public void Update(PlayerInfo local) {lock(this){if(Phase!=LobbyPhase.Waiting)throw new IOException("Le lancement est deja en cours.");seats[LocalSeat]=local;send(Broadcast,seats[LocalSeat].Encode());changed();}}
     internal static byte[] Command(byte type,Guid id){return new[]{type}.Concat(id.ToByteArray()).ToArray();}
+    // Seat assignment. Only the host sends it, and a guest accepts it only while
+    // waiting: a seat moving under a launch would repoint every rule at once.
+    internal static byte[] SeatCommand(int seat){return new byte[]{9,(byte)seat};}
+
+    // type(1) + subject seat(1) + IPv4(4) + port(2) = 8 bytes. Fixed shape, like
+    // the seat command, because this is protocol plumbing rather than the
+    // free-form profile PlayerInfo already owns.
+    internal static byte[] EndpointCommand(int subjectSeat,IPEndPoint endpoint) {
+        var address=endpoint.Address.GetAddressBytes();
+        if(address.Length!=4)throw new IOException("Seules les adresses IPv4 sont prises en charge pour le maillage.");
+        var packet=new byte[8];packet[0]=11;packet[1]=(byte)subjectSeat;
+        Buffer.BlockCopy(address,0,packet,2,4);
+        packet[6]=(byte)(endpoint.Port>>8);packet[7]=(byte)endpoint.Port;
+        return packet;
+    }
+    static bool DecodeEndpoint(byte[] packet,out int subjectSeat,out IPEndPoint endpoint) {
+        subjectSeat=-1;endpoint=null;
+        if(packet.Length!=8 || packet[0]!=11)return false;
+        subjectSeat=packet[1];if(subjectSeat<0 || subjectSeat>=MaxSeats)return false;
+        var address=new byte[4];Buffer.BlockCopy(packet,2,address,0,4);
+        int port=(packet[6]<<8)|packet[7];if(port<=0 || port>65535)return false;
+        endpoint=new IPEndPoint(new IPAddress(address),port);return true;
+    }
+
+    public IPEndPoint PeerEndpoint(int seat){lock(this)return seat>=0 && seat<MaxSeats?endpoints[seat]:null;}
+
+    // Announces where OUR OWN seat can be reached. Callable at any phase --
+    // unlike the profile, an address can become known (a slow port mapping
+    // finishing) or change (a NAT remapping) after the game has already
+    // started, and a mesh peer needs to hear that whenever it happens.
+    public void AnnounceEndpoint(IPEndPoint endpoint) {
+        lock(this) {
+            endpoints[LocalSeat]=endpoint;
+            send(Host?Broadcast:0,EndpointCommand(LocalSeat,endpoint));
+        }
+    }
+
+    // info is optional because a new connection has to be told its seat before
+    // the host can possibly know its profile -- that profile only exists once
+    // the guest announces it, over the very link this seat number identifies.
+    // Called with null, this reserves the seat and sends the seat/host-profile/
+    // catch-up messages without touching seats[guest]; the guest's own
+    // Announce() then fills it in through the ordinary packet[0]==2 path,
+    // exactly as ever. Called with a real profile (existing callers), nothing
+    // changes.
+    public void Admit(int guest,PlayerInfo info=null) {
+        lock(this) {
+            if(!Host)throw new IOException("Seul l'hote attribue les places.");
+            if(guest<1 || guest>=MaxSeats)throw new IOException("Place invalide.");
+            if(Phase!=LobbyPhase.Waiting)throw new IOException("Le lancement est deja en cours.");
+            if(info!=null)seats[guest]=info;
+            send(guest,SeatCommand(guest));send(guest,seats[0].Encode());
+            // Catch-up: seats admitted earlier already broadcast their endpoint
+            // (or had it relayed to them) before this guest existed to receive
+            // it. Without this replay a guest that joined third would never
+            // learn the second guest's address at all.
+            for(int seat=0;seat<MaxSeats;seat++)
+                if(seat!=guest && endpoints[seat]!=null)send(guest,EndpointCommand(seat,endpoints[seat]));
+            changed();
+        }
+    }
+
+    public void Leave(int guest) {
+        lock(this) {
+            if(guest<1 || guest>=MaxSeats || guest==LocalSeat)return;
+            seats[guest]=null;ready[guest]=false;endpoints[guest]=null;changed();
+        }
+    }
+
     public void Start() {
         lock(this) {
-            if(!CanStart)throw new IOException(!Host?"Seul l'hôte peut lancer la partie.":!Local.SameDisc(Remote)?"Les deux joueurs doivent avoir exactement le même fichier disque.":"Les deux joueurs doivent avoir exactement les mêmes mods actifs : "+ModAdvice);
-            attempt=Guid.NewGuid();Phase=LobbyPhase.Preparing;localReady=remoteReady=false;
-            send(Command(3,attempt));prepare(attempt);changed();
+            if(!CanStart) {
+                if(!Host)throw new IOException("Seul l'hote peut lancer la partie.");
+                if(Occupied<2)throw new IOException("Il faut au moins deux joueurs.");
+                if(!DiscMatches)throw new IOException("Tous les joueurs doivent avoir exactement le meme fichier disque.");
+                throw new IOException("Tous les joueurs doivent avoir exactement les memes mods actifs : "+ModAdvice);
+            }
+            attempt=Guid.NewGuid();Phase=LobbyPhase.Preparing;Array.Clear(ready,0,ready.Length);
+            send(Broadcast,Command(3,attempt));prepare(attempt);changed();
         }
     }
+
     public void Loaded(Guid id) {
         lock(this) {
-            if(Phase!=LobbyPhase.Preparing || id!=attempt || localReady)return;
-            localReady=true;
-            if(Host) TryCommit();else send(Command(4,attempt));changed();
+            if(Phase!=LobbyPhase.Preparing || id!=attempt || ready[LocalSeat])return;
+            ready[LocalSeat]=true;
+            if(Host) TryCommit();else send(0,Command(4,attempt));changed();
         }
     }
+
+    // Everyone, not both. One silent guest holds the start, which is the same rule
+    // as before written over a set rather than over a pair.
     void TryCommit() {
-        if(!Host || !localReady || !remoteReady)return;
-        send(Command(5,attempt));Phase=LobbyPhase.Running;commit(attempt);
+        if(!Host)return;
+        for(int i=0;i<MaxSeats;i++)if(seats[i]!=null && !ready[i])return;
+        send(Broadcast,Command(5,attempt));Phase=LobbyPhase.Running;commit(attempt);
     }
-    public void Receive(byte[] packet) {
+
+    // Two-player wiring has exactly one link, so the seat is implied: a host hears
+    // from seat 1, a guest from seat 0. Every existing caller keeps working, and a
+    // star host names the seat explicitly.
+    public void Receive(byte[] packet){Receive(Host?1:0,packet);}
+    // from is the seat the message arrived on, which the transport knows and the
+    // message does not: a guest cannot claim to be someone else by writing it down.
+    public void Receive(int from,byte[] packet) {
         lock(this) {
-            if(Phase==LobbyPhase.Closed)throw new IOException("Le salon est fermé.");
+            if(Phase==LobbyPhase.Closed)throw new IOException("Le salon est ferme.");
+            if(from<0 || from>=MaxSeats || from==LocalSeat)throw new IOException("Place inconnue.");
             if(packet.Length>0 && packet[0]==2) {
-                if(Phase!=LobbyPhase.Waiting)throw new IOException("Le disque ou le pseudo a changé pendant le lancement.");
-                Remote=PlayerInfo.Decode(packet);changed();return;
+                if(Phase!=LobbyPhase.Waiting)throw new IOException("Le disque ou le pseudo a change pendant le lancement.");
+                seats[from]=PlayerInfo.Decode(packet);changed();return;
+            }
+            if(packet.Length==2 && packet[0]==9) {
+                if(Host)throw new IOException("Un invite n attribue pas les places.");
+                if(from!=0)throw new IOException("Seul l hote attribue les places.");
+                if(Phase!=LobbyPhase.Waiting)throw new IOException("La place ne peut pas changer pendant le lancement.");
+                int seat=packet[1];
+                if(seat<1 || seat>=MaxSeats)throw new IOException("Place invalide.");
+                if(seat!=LocalSeat){var mine=seats[LocalSeat];seats[LocalSeat]=null;LocalSeat=seat;seats[seat]=mine;}
+                changed();return;
+            }
+            if(packet.Length==8 && packet[0]==11) {
+                int subjectSeat;IPEndPoint endpoint;
+                if(!DecodeEndpoint(packet,out subjectSeat,out endpoint))throw new IOException("Adresse de pair incorrecte.");
+                if(Host) {
+                    // Self-announcement only: a guest cannot speak for a seat that
+                    // is not its own, since that is exactly the roster the other
+                    // guests will trust.
+                    if(subjectSeat!=from)throw new IOException("Un joueur ne peut annoncer que sa propre adresse.");
+                    endpoints[subjectSeat]=endpoint;
+                    for(int seat=1;seat<MaxSeats;seat++)
+                        if(seats[seat]!=null && seat!=from)send(seat,packet);
+                } else {
+                    // A guest only ever hears this from the host (from==0 by
+                    // construction, one link), whether it is the host's own
+                    // address or a relay of another guest's.
+                    endpoints[subjectSeat]=endpoint;
+                }
+                EndpointLearned?.Invoke(subjectSeat,endpoint);
+                changed();return;
             }
             if(packet.Length!=17)throw new IOException("Commande de salon incorrecte.");
             var id=new Guid(packet.Skip(1).ToArray());
             switch(packet[0]) {
                 case 3:
-                    if(Host || Phase!=LobbyPhase.Waiting || !Local.SameDisc(Remote) || !Local.SameMods(Remote) || id==Guid.Empty)throw new IOException("Demande de lancement non autorisée.");
-                    attempt=id;Phase=LobbyPhase.Preparing;localReady=remoteReady=false;prepare(attempt);break;
+                    if(Host || from!=0 || Phase!=LobbyPhase.Waiting || !AgreesWithHost(LocalSeat) || id==Guid.Empty)throw new IOException("Demande de lancement non autorisee.");
+                    attempt=id;Phase=LobbyPhase.Preparing;Array.Clear(ready,0,ready.Length);prepare(attempt);break;
                 case 4:
-                    if(!Host || Phase!=LobbyPhase.Preparing || id!=attempt || remoteReady)throw new IOException("Confirmation de chargement inattendue.");
-                    remoteReady=true;TryCommit();break;
+                    if(!Host || Phase!=LobbyPhase.Preparing || id!=attempt || ready[from])throw new IOException("Confirmation de chargement inattendue.");
+                    ready[from]=true;TryCommit();break;
                 case 5:
-                    if(Host || Phase!=LobbyPhase.Preparing || id!=attempt || !localReady)throw new IOException("Départ de partie non autorisé.");
+                    if(Host || from!=0 || Phase!=LobbyPhase.Preparing || id!=attempt || !ready[LocalSeat])throw new IOException("Depart de partie non autorise.");
                     Phase=LobbyPhase.Running;commit(attempt);break;
                 case 8:
-                    // The peer's game has closed. Accepted only for the attempt actually
-                    // under way, and only once a launch exists, so it cannot be used to
-                    // knock a waiting salon over. Id checked like every other command.
+                    // A player has closed their game. Accepted only for the attempt
+                    // actually under way, and only once a launch exists, so it cannot be
+                    // used to knock a waiting salon over.
                     if(Phase!=LobbyPhase.Running && Phase!=LobbyPhase.Preparing)throw new IOException("Fin de partie inattendue.");
-                    if(id!=attempt)throw new IOException("Fin de partie périmée.");
+                    if(id!=attempt)throw new IOException("Fin de partie perimee.");
+                    // In a star the host has to relay it: a guest hears only from the
+                    // host, so without this the other guests sit in a salon that never
+                    // empties -- the very bug this protocol just learned to avoid.
+                    if(Host)for(int i=1;i<MaxSeats;i++)if(seats[i]!=null && i!=from){try{send(i,Command(8,attempt));}catch{}}
                     Ending=LobbyEnding.RemoteGameClosed;Phase=LobbyPhase.Closed;break;
                 default:throw new IOException("Commande de salon inconnue.");
             }
             changed();
         }
     }
-    // Our own game has exited. Tell the peer before anything tears the sockets down,
+
+    // Our own game has exited. Tell everyone before anything tears the sockets down,
     // then close. Sending is best-effort by design: if the channel is already gone the
     // session still has to end here, and a throw would only replace one stuck salon
-    // with two.
+    // with several.
     public void LocalGameExited() {
         lock(this) {
             if(Phase==LobbyPhase.Closed)return;
             var announce=Phase==LobbyPhase.Running || Phase==LobbyPhase.Preparing;
             Ending=LobbyEnding.LocalGameClosed;Phase=LobbyPhase.Closed;
-            if(announce){try{send(Command(8,attempt));}catch{}}
+            if(announce){try{send(Broadcast,Command(8,attempt));}catch{}}
             changed();
         }
     }
@@ -215,6 +410,28 @@ sealed class GameStart : IDisposable {
     // rollback remains an explicit native developer option, not a lobby default.
     public static string OnlineArguments(string transportArguments) {
         return transportArguments+" --netplay-loopback --netplay-full --netplay-pad 1 --netplay-delay 3";
+    }
+    // Above two players there is no single host/join pair left to name: every
+    // seat, the salon's host included, reaches every other seat through its
+    // own MeshRelay leg. --netplay-host here only binds this seat's own port
+    // (peer discovery is harmless and unused -- every real peer arrives
+    // through an explicit --netplay-peer instead); ownPort therefore does not
+    // need to be anything in particular, only a real one. Kept free of Session,
+    // Lobby and every socket type so the string itself is what Tests.cs checks,
+    // the same way OnlineArguments already is.
+    public static string MeshArguments(int ownPort,int seat,int players,IEnumerable<Tuple<int,int>> peers) {
+        if(ownPort<=0 || ownPort>65535)throw new IOException("Port de jeu invalide.");
+        if(players<3 || players>Lobby.MaxSeats || seat<0 || seat>=players)throw new IOException("Configuration de maillage invalide.");
+        var args="--netplay-host "+ownPort+" --netplay-players "+players+" --netplay-seat "+seat;
+        var seen=new bool[players];
+        foreach(var peer in peers) {
+            int peerSeat=peer.Item1,peerPort=peer.Item2;
+            if(peerSeat==seat || peerSeat<0 || peerSeat>=players)throw new IOException("Pair de maillage invalide.");
+            if(seen[peerSeat])throw new IOException("Pair de maillage répété.");
+            seen[peerSeat]=true;
+            args+=" --netplay-peer "+peerSeat+":127.0.0.1:"+peerPort;
+        }
+        return args;
     }
     readonly EventWaitHandle ready,go,cancel;readonly string prefix;
     public Process Process {get;private set;} public readonly Guid Attempt;

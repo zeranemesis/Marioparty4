@@ -49,7 +49,13 @@ static class Tests {
     static void Reject(Action action,string name) {bool rejected=false;try{action();}catch{rejected=true;}Check(rejected,name);}
     static void Codecs() {
         var invite=new Invitation{Address=IPAddress.Parse("8.8.8.8"),Port=32000,Expires=DateTime.UtcNow.AddMinutes(30),Fingerprint=Wire.Random(16),Token=Wire.Random(16),Build=Wire.Random(32)};
-        Check(invite.Encode().Length==68,"compact invitation length");var decoded=Invitation.Decode(invite.Encode());Check(decoded.Port==32000 && Wire.Equal(invite.Token,decoded.Token) && Wire.Equal(invite.Fingerprint,decoded.Fingerprint),"invitation round trip");
+        Check(invite.Encode().Length==72,"compact invitation length");var decoded=Invitation.Decode(invite.Encode());Check(decoded.Port==32000 && Wire.Equal(invite.Token,decoded.Token) && Wire.Equal(invite.Fingerprint,decoded.Fingerprint),"invitation round trip");
+        Check(decoded.MaxPlayers==2,"default player count round trips as two");
+        invite.MaxPlayers=4;Check(Invitation.Decode(invite.Encode()).MaxPlayers==4,"a chosen player count survives the round trip");
+        invite.MaxPlayers=1;Reject(()=>invite.Encode(),"a salon of one cannot be encoded");
+        invite.MaxPlayers=5;Reject(()=>invite.Encode(),"a fifth seat cannot be encoded either");
+        invite.MaxPlayers=2;
+        Reject(()=>Invitation.Decode("PB3."+new string('A',64)),"the previous format (no player count) is refused by name, not decoded short");
         Reject(()=>Invitation.Decode("bad"),"malformed invite");Reject(()=>Invitation.Decode(new string('x',1000)),"bounded invite");
         // The local path. Without it two PCs in one house are sent out through
         // the box and back: 15 ms between machines that are 0 ms apart, and a
@@ -97,9 +103,91 @@ static class Tests {
         Check(GameDatagram.Open(datagramKey,0,datagram,out sequence,out opened) && sequence==42 && Wire.Equal(payload,opened),"authenticated UDP game packet round trip");
         datagram[20]^=1;Check(!GameDatagram.Open(datagramKey,0,datagram,out sequence,out opened),"tampered UDP game packet rejected");
         Check(!GameDatagram.Open(Wire.Random(32),0,GameDatagram.Seal(datagramKey,0,43,payload),out sequence,out opened),"foreign UDP game packet rejected");
+        // Every seat can seal and open, and a datagram authored by one seat must not
+        // verify as another's: the seat is inside the signed bytes, not beside them.
+        for(int seat=0;seat<Lobby.MaxSeats;seat++) {
+            var sealed4=GameDatagram.Seal(datagramKey,seat,77,new byte[GameDatagram.Payload]);
+            ulong seq4;byte[] out4;
+            Check(GameDatagram.Open(datagramKey,seat,sealed4,out seq4,out out4) && seq4==77,"seat "+seat+" seals and opens");
+            for(int other=0;other<Lobby.MaxSeats;other++)
+                if(other!=seat) Check(!GameDatagram.Open(datagramKey,other,sealed4,out seq4,out out4),"a datagram from seat "+seat+" is not seat "+other+"'s");
+        }
+        Reject(()=>GameDatagram.Seal(datagramKey,Lobby.MaxSeats,1,new byte[GameDatagram.Payload]),"a fifth seat cannot seal");
+        // One window per sender. A shared one would let a high sequence from one
+        // peer make a fresh packet from another look like a replay -- silent packet
+        // loss on three of four links, which is the kind of fault that reads as lag.
+        var replay=new ReplayWindow();
+        Check(replay.Accept(1,1000),"first packet from a seat is fresh");
+        Check(!replay.Accept(1,1000),"the same packet twice is a replay");
+        Check(replay.Accept(2,5),"a low sequence from another seat is still fresh");
+        Check(replay.Accept(3,1),"and so is seat 3 starting at one");
+        Check(replay.Accept(1,999),"a packet just behind is accepted once");
+        Check(!replay.Accept(1,999),"but not twice");
+        Check(!replay.Accept(1,900),"and not far behind the window");
+        Check(replay.Accept(2,6) && replay.Accept(3,2),"the other seats are untouched by any of it");
+        Check(!replay.Accept(Lobby.MaxSeats,1),"a seat outside the table is refused");
         var udpPcp=Gateway.PcpRequest(IPAddress.Parse("192.168.1.2"),key,32000,32000,120,17);Check(udpPcp[36]==17,"PCP UDP mapping request");
         var udpPmp=Gateway.PmpRequest(32000,32000,120,1);Check(udpPmp[1]==1,"NAT-PMP UDP mapping request");
     }
+    // A control-only Bridge on real TLS sockets, paired against an ordinary
+    // Bridge -- the same two-channel construction Tls()'s bridgeTest uses, but
+    // without the game-launch machinery, since nothing here is about a game.
+    // What is under test: lobby messages flow through the control-only side,
+    // and it never once touches UDP, even though the other side keeps sending
+    // heartbeats onto sockets nobody is reading.
+    static void ControlOnlyLink() {
+        using(var cert=Wire.Certificate()) {
+            var listener=new TcpListener(IPAddress.Loopback,0);listener.Start();
+            var invite=new Invitation{Address=IPAddress.Loopback,Port=((IPEndPoint)listener.LocalEndpoint).Port,Expires=DateTime.UtcNow.AddMinutes(1),Fingerprint=Wire.Hash(cert.RawData).Take(16).ToArray(),Token=Wire.Random(16),Build=Wire.Random(32)};
+            var other=Invitation.Decode(invite.Encode(),true);
+            TcpClient host=null;SslStream server=null;
+            var accept=Task.Run(()=>{host=listener.AcceptTcpClient();byte channel;server=Wire.Server(host,cert,invite,invite.Build,out channel);return channel==0;});
+            using(var client=new TcpClient()) {
+                client.Connect(IPAddress.Loopback,invite.Port);var ssl=Wire.Client(client,other,invite.Build);
+                Check(accept.Wait(5000) && accept.Result,"first channel of the control-only pair");
+                TcpClient host2=null;SslStream server2=null;
+                var accept2=Task.Run(()=>{host2=listener.AcceptTcpClient();byte channel;server2=Wire.Server(host2,cert,invite,invite.Build,out channel);return channel==1;});
+                using(var client2=new TcpClient()) {
+                    client2.Connect(IPAddress.Loopback,invite.Port);var ssl2=Wire.Client(client2,other,invite.Build,1);
+                    Check(accept2.Wait(5000) && accept2.Result,"second channel of the control-only pair");
+                    var hostNet=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));
+                    var guestNet=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));
+                    using(var a=new Bridge(host,server,host2,server2,0,hostNet,(IPEndPoint)guestNet.Client.LocalEndPoint,invite.Token))
+                    using(var b=new Bridge(client2,ssl2,client,ssl,1,guestNet,(IPEndPoint)hostNet.Client.LocalEndPoint,invite.Token)) {
+                        var seen=new List<byte[]>();
+                        var profileHost=new PlayerInfo("Camille",Wire.Hash(new byte[]{1,2,3}),3);
+                        var profileGuest=new PlayerInfo("Alex",Wire.Hash(new byte[]{1,2,3}),3);
+                        var hl=new Lobby(true,profileHost,(seat,payload)=>a.SendControl(payload),id=>{},id=>{},()=>{});
+                        var cl=new Lobby(false,profileGuest,(seat,payload)=>b.SendControl(payload),id=>{},id=>{},()=>{});
+                        a.Control=hl.Receive;b.Control=cl.Receive;
+                        var at=a.Run();
+                        // The one line this test exists to exercise: the guest side never
+                        // starts a UDP pump.
+                        var bt=b.RunControlOnly();
+                        hl.Announce();cl.Announce();
+                        Check(SpinWait.SpinUntil(()=>hl.Remote!=null && cl.Remote!=null,5000),
+                            "lobby profiles cross a control-only link exactly as a full one");
+                        Check(hl.Remote.Name=="Alex" && cl.Remote.Name=="Camille","and carry the right names in each direction");
+
+                        // Give the host's own (ordinary) heartbeat pump several real
+                        // ticks to run -- it sends UDP whether the other side is
+                        // listening or not. If RunControlOnly ever started reading its
+                        // own network/udp sockets, GamePackets/PeerPackets would move.
+                        Thread.Sleep(500);
+                        Check(!b.UdpReady,"the control-only side never becomes UDP-ready");
+                        Check(b.GamePackets==0 && b.PeerPackets==0,"and never counts a single UDP packet, sent or received");
+                        Check(b.TransportStatus.Contains("udp_age_ms=-1"),"its own UDP age stays unset, not merely small");
+
+                        client.Close();client2.Close();
+                        Check(SpinWait.SpinUntil(()=>bt.IsCompleted,5000),"closing the TLS pair ends a control-only link on its own");
+                        host.Close();host2.Close();
+                        try{at.Wait(2000);}catch{}
+                    }
+                }
+            }
+        }
+    }
+
     static void Tls(int mode,bool bridgeTest=false,bool resetBeforeCommit=false) {
         using(var cert=Wire.Certificate()) {
             var listener=new TcpListener(IPAddress.Loopback,0);listener.Start();
@@ -131,8 +219,8 @@ static class Tests {
                         impairment.ResetControl=resetTls;
                         using(var hr=new ManualResetEventSlim())using(var cr=new ManualResetEventSlim()) {
                         var profile=new PlayerInfo("Test",Wire.Hash(new byte[]{1,2,3}),3);
-                        var hl=new Lobby(true,profile,a.SendControl,id=>{hi=id;hg=new GameStart(id);hg.Launch(GameStart.OnlineArguments("--netplay-host "+gamePort)+" --netplay-probe-realtime","barrier-test-only",true,diagHost.NativePath);hr.Set();},id=>{a.CommitGame();hg.Commit(id);},()=>{});
-                        var cl=new Lobby(false,profile,b.SendControl,id=>{ci=id;cg=new GameStart(id);cg.Launch(GameStart.OnlineArguments("--netplay-join 127.0.0.1:"+b.LocalPort)+" --netplay-probe-realtime","barrier-test-only",true,diagGuest.NativePath);cr.Set();},id=>{b.CommitGame();cg.Commit(id);},()=>{});
+                        var hl=new Lobby(true,profile,(seat,payload)=>a.SendControl(payload),id=>{hi=id;hg=new GameStart(id);hg.Launch(GameStart.OnlineArguments("--netplay-host "+gamePort)+" --netplay-probe-realtime","barrier-test-only",true,diagHost.NativePath);hr.Set();},id=>{a.CommitGame();hg.Commit(id);},()=>{});
+                        var cl=new Lobby(false,profile,(seat,payload)=>b.SendControl(payload),id=>{ci=id;cg=new GameStart(id);cg.Launch(GameStart.OnlineArguments("--netplay-join 127.0.0.1:"+b.LocalPort)+" --netplay-probe-realtime","barrier-test-only",true,diagGuest.NativePath);cr.Set();},id=>{b.CommitGame();cg.Commit(id);},()=>{});
                         a.Control=hl.Receive;b.Control=cl.Receive;a.Ping=value=>{Interlocked.Exchange(ref ping,value);Interlocked.Increment(ref pingCount);};
                         var at=a.Run();var bt=b.Run();hl.Announce();cl.Announce();
                         Check(SpinWait.SpinUntil(()=>hl.CanStart,5000),"encrypted lobby metadata exchange");
@@ -209,6 +297,178 @@ static class Tests {
     // same way the disc is. These checks pin the three ways two players can differ -
     // a missing mod, a different build of the same mod, and the same mods loaded in
     // the other order - because only the first of the three is obvious to a player.
+    static byte[] FakeGamePacket(int player,byte type=1) {
+        var b=new byte[GameDatagram.Payload];
+        b[0]=80;b[1]=66;b[2]=82;b[3]=66;b[4]=WireFormat.VersionHigh;b[5]=WireFormat.VersionLow;b[6]=type;b[7]=(byte)player;
+        return b;
+    }
+    static bool TryReceive(UdpClient socket,int timeoutMs,out byte[] data,out IPEndPoint from) {
+        socket.Client.ReceiveTimeout=timeoutMs;from=null;
+        try{data=socket.Receive(ref from);return true;}catch(SocketException){data=null;return false;}
+    }
+    // The pump sends a heartbeat to every leg on its very first iteration
+    // (nextHeartbeat starts at 0), so a socket standing in for a remote peer
+    // sees that keepalive before it sees whatever the test actually sent.
+    // Skipping heartbeats here is not a workaround for a race: real peers do
+    // exactly this too, which is the whole reason IsHeartbeat exists.
+    static bool TryReceiveGamePacket(byte[] key,int expectedSeat,UdpClient socket,int timeoutMs,out byte[] payload,out IPEndPoint from) {
+        var deadline=Stopwatch.StartNew();payload=null;from=null;
+        while(deadline.ElapsedMilliseconds<timeoutMs) {
+            byte[] data;IPEndPoint sender;
+            int remaining=(int)Math.Max(1,timeoutMs-deadline.ElapsedMilliseconds);
+            if(!TryReceive(socket,remaining,out data,out sender))return false;
+            ulong sequence;byte[] opened;
+            if(!GameDatagram.Open(key,expectedSeat,data,out sequence,out opened))continue;
+            if(Bridge.IsHeartbeat(opened,expectedSeat))continue;
+            payload=opened;from=sender;return true;
+        }
+        return false;
+    }
+
+    // MeshRelay end to end, on real sockets standing in for what a real mesh
+    // has: three remote peers, each its own relay on its own machine, and one
+    // local game that only ever speaks to loopback ports. Nothing here is the
+    // native engine -- these are the exact bytes it would send and expect, built
+    // by hand, so what is under test is MeshRelay's routing and authentication
+    // and nothing about the game.
+    //
+    // The local game side is deliberately ONE socket sending to three different
+    // leg ports with the targeted Send overload, not three throwaway sockets:
+    // the real engine's UdpTransport is one socket registering N peer addresses,
+    // and a leg only learns where to send a reply once it has seen that ONE
+    // socket's port at least once -- exactly the property that a naive test
+    // with a fresh socket per send would never exercise.
+    // MeshWiring in isolation, no router or remote peer needed: it only has to
+    // decide when to call AddPeer, and that decision does not touch a socket.
+    static void MeshWiringTest() {
+        var internet=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));
+        var relay=new MeshRelay(0,Wire.Random(16),internet);
+        try {
+            var wiring=new MeshWiring(relay,0);
+            Check(!relay.HasPeer(1),"a fresh relay has no peers");
+            wiring.OnEndpointLearned(1,new IPEndPoint(IPAddress.Loopback,40100));
+            Check(relay.HasPeer(1),"the first announcement for a seat registers it");
+
+            // A second announcement for the same seat must not throw -- Lobby
+            // fires this from inside its own lock, and an unhandled exception
+            // there would be a lot harder to diagnose than a silently ignored
+            // duplicate.
+            wiring.OnEndpointLearned(1,new IPEndPoint(IPAddress.Loopback,40100));
+            wiring.OnEndpointLearned(1,new IPEndPoint(IPAddress.Loopback,40999));
+
+            wiring.OnEndpointLearned(0,new IPEndPoint(IPAddress.Loopback,40200));
+            Check(!relay.HasPeer(0),"our own seat is never registered as a peer of itself");
+
+            wiring.OnEndpointLearned(2,new IPEndPoint(IPAddress.Loopback,40300));
+            Check(relay.HasPeer(1) && relay.HasPeer(2) && !relay.HasPeer(3),
+                "seats are registered independently of each other");
+        } finally {
+            relay.Dispose();
+        }
+    }
+
+    static void MeshRouting() {
+        var token=Wire.Random(16);var key=GameDatagram.Key(token);
+        var remotes=new UdpClient[Lobby.MaxSeats];
+        for(int seat=1;seat<Lobby.MaxSeats;seat++)remotes[seat]=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));
+        var internet=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));
+        var relay=new MeshRelay(0,token,internet);
+        var events=new List<string>();relay.Diagnostic=events.Add;
+
+        int port1=relay.AddPeer(1,(IPEndPoint)remotes[1].Client.LocalEndPoint);
+        int port2=relay.AddPeer(2,(IPEndPoint)remotes[2].Client.LocalEndPoint);
+        // Seat 3 is registered without an address, the way a guest is before the
+        // host has told it who else is in the salon: learned from the first
+        // authenticated packet that arrives claiming to be seat 3.
+        int port3=relay.AddPeer(3,null);
+        Reject(()=>relay.AddPeer(1,null),"a seat cannot be registered twice");
+        Reject(()=>relay.AddPeer(0,null),"our own seat is not a peer");
+        Reject(()=>relay.AddPeer(Lobby.MaxSeats,null),"a seat outside the table is refused");
+
+        var run=relay.Run();
+        var game=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));
+        try {
+            var hostEndpoint=(IPEndPoint)internet.Client.LocalEndPoint;
+            var leg1=new IPEndPoint(IPAddress.Loopback,port1);
+            var leg2=new IPEndPoint(IPAddress.Loopback,port2);
+            var leg3=new IPEndPoint(IPAddress.Loopback,port3);
+
+            // The one local-game socket -> leg 1 -> remote 1, and nowhere else.
+            game.Send(FakeGamePacket(0),GameDatagram.Payload,leg1);
+            byte[] payload1;IPEndPoint from1;
+            Check(TryReceiveGamePacket(key,0,remotes[1],2000,out payload1,out from1) && Bridge.Packet(payload1,0),
+                "a local-game packet on leg 1 reaches remote 1, authentic and addressed as seat 0");
+            byte[] stray;IPEndPoint strayFrom;
+            Check(!TryReceiveGamePacket(key,0,remotes[2],150,out stray,out strayFrom),"and remote 2 receives nothing from that");
+
+            // The same socket, sent to leg 2, must land on remote 2 and nowhere else.
+            game.Send(FakeGamePacket(0),GameDatagram.Payload,leg2);
+            byte[] payload2;IPEndPoint from2;
+            Check(TryReceiveGamePacket(key,0,remotes[2],2000,out payload2,out from2),"the same socket reaches remote 2 through leg 2");
+            Check(!TryReceiveGamePacket(key,0,remotes[1],150,out stray,out strayFrom),"remote 1 saw nothing from that second send");
+
+            // Remote 1 -> us -> leg 1's loopback port -> the local game, tagged
+            // with seat 1's own identity. This only works because leg 1 already
+            // learned the game's address from the very first send above; that
+            // dependency is the point, not an accident of ordering.
+            var fromRemote1=GameDatagram.Seal(key,1,1000,FakeGamePacket(1));
+            remotes[1].Send(fromRemote1,fromRemote1.Length,hostEndpoint);
+            byte[] arrived;IPEndPoint arrivedFrom;
+            Check(TryReceive(game,2000,out arrived,out arrivedFrom) && Bridge.Packet(arrived,1),
+                "a packet authenticated as seat 1 is delivered back to the local game");
+
+            // A forged seat byte cannot be produced without the key that signs
+            // it; corrupting one after the fact must fail the HMAC, not just get
+            // routed to the wrong leg.
+            var tampered=(byte[])fromRemote1.Clone();tampered[5]=2;
+            remotes[1].Send(tampered,tampered.Length,hostEndpoint);
+            byte[] leaked;IPEndPoint leakedFrom;
+            Check(!TryReceive(game,150,out leaked,out leakedFrom),
+                "a seat byte flipped after sealing fails the HMAC, and reaches the game as nothing");
+
+            // Seat 3 was registered with no known network address. There is
+            // nowhere for the relay to send a game packet on that leg until
+            // something arrives to learn an address from -- SendToLeg has
+            // nothing to target, exactly like a two-player Bridge in
+            // learnNetworkPeer mode before its one peer has said anything. The
+            // attempt still teaches the relay where the LOCAL game listens on
+            // this leg, though: that half of discovery does not wait on the
+            // other half succeeding.
+            byte[] nothingYet;IPEndPoint nothingYetFrom;
+            game.Send(FakeGamePacket(0),GameDatagram.Payload,leg3);
+            Check(!TryReceiveGamePacket(key,0,remotes[3],150,out nothingYet,out nothingYetFrom),
+                "leg 3 has no address to relay to before seat 3 has ever spoken");
+
+            // Seat 3 speaks first, teaching the relay its address. The game's own
+            // address on this leg was already learned above, so this is
+            // delivered immediately -- discovery in one direction does not have
+            // to wait for discovery in the other.
+            var fromRemote3=GameDatagram.Seal(key,3,500,FakeGamePacket(3));
+            remotes[3].Send(fromRemote3,fromRemote3.Length,hostEndpoint);
+            byte[] arrived3;IPEndPoint arrivedFrom3;
+            Check(TryReceive(game,2000,out arrived3,out arrivedFrom3) && Bridge.Packet(arrived3,3),
+                "seat 3's first packet reaches the game once the game's own address on that leg is known");
+
+            // And now that seat 3's address is known too, a further game packet
+            // on leg 3 relays all the way out.
+            game.Send(FakeGamePacket(0),GameDatagram.Payload,leg3);
+            byte[] sealed3;IPEndPoint from3;
+            Check(TryReceiveGamePacket(key,0,remotes[3],2000,out sealed3,out from3),
+                "leg 3 relays outbound now that seat 3's address is known too");
+
+            // Replay: the exact same sequence number from seat 1 again must not
+            // reach the local game a second time.
+            remotes[1].Send(fromRemote1,fromRemote1.Length,hostEndpoint);
+            byte[] replayed;IPEndPoint replayedFrom;
+            Check(!TryReceive(game,150,out replayed,out replayedFrom),"a repeated sequence number from seat 1 is dropped as a replay");
+        } finally {
+            relay.Dispose();
+            game.Close();
+            foreach(var socket in remotes)if(socket!=null)socket.Close();
+            try{run.Wait(2000);}catch{}
+        }
+    }
+
     static void Mods(byte[] disc) {
         var a=Mod(546878,"MP4DX",0x10);var b=Mod(620561,"Candlelight Fright Name Fix",0x40);
         var full=new ModSet(new[]{a,b});
@@ -221,11 +481,21 @@ static class Tests {
         Check(new ModSet(new[]{a}).DifferenceFrom(full).Contains("620561"),"a missing mod is named by its GameBanana id");
         Check(full.DifferenceFrom(new ModSet(new[]{a})).Contains("désactiver"),"an extra mod is reported as one to switch off");
 
+        // The same "missing" set, structured for a download button per mod
+        // instead of folded into ModAdvice's one string.
+        var oneMissing=new ModSet(new[]{a}).Missing(full).ToArray();
+        Check(oneMissing.Length==1 && oneMissing[0].Id==620561,"Missing names exactly the one mod this side lacks");
+        Check(!full.Missing(full).Any(),"a set with everything required has nothing missing");
+        Check(!full.Missing(ModSet.Empty).Any(),"nothing is missing from an empty requirement");
+        Check(!ModSet.Empty.Missing(null).Any(),"a null requirement is treated as nothing required, not a crash");
+        var localWrongBuild=new ModSet(new[]{a,Mod(620561,"Candlelight Fright Name Fix",0x99)});
+        Check(!localWrongBuild.Missing(full).Any(),"a mod present at the wrong build is not reported as missing -- that's a CubeShelf update, not a download");
+
         var host=new PlayerInfo("Camille",disc,3,full);var guest=new PlayerInfo("Alex",disc,3,new ModSet(new[]{a}));
         Check(host.SameDisc(guest) && !host.SameMods(guest),"same disc is no longer enough");
         var hq=new Queue<byte[]>();var cq=new Queue<byte[]>();
-        var h=new Lobby(true,host,x=>hq.Enqueue(x),id=>{},id=>{},()=>{});
-        var c=new Lobby(false,guest,x=>cq.Enqueue(x),id=>{},id=>{},()=>{});
+        var h=new Lobby(true,host,(seat,x)=>hq.Enqueue(x),id=>{},id=>{},()=>{});
+        var c=new Lobby(false,guest,(seat,x)=>cq.Enqueue(x),id=>{},id=>{},()=>{});
         h.Announce();c.Announce();c.Receive(hq.Dequeue());h.Receive(cq.Dequeue());
         Check(h.DiscMatches && !h.ModsMatch && !h.CanStart,"host cannot start while the mods differ");
         Check(h.ModAdvice.Contains("620561"),"the host is told exactly what the guest is missing");
@@ -281,14 +551,211 @@ static class Tests {
 
     static string Quote(string path){return "\""+path.Replace("\\","\\\\")+"\"";}
 
+    // Four seats, driven entirely in memory: the state machine is the part that can
+    // be checked without sockets, and it is the part that decides whether a salon
+    // starts a session everyone agreed to.
+    //
+    // The cases that a two-player salon cannot express are the point. One silent
+    // guest must hold the start. One disagreeing guest must block it while the
+    // others are fine. And a guest leaving must reach the guests it never talks to,
+    // because in a star they only ever hear the host.
+    // The endpoint-announcement protocol, in memory, the same way Seats() drives
+    // the seat/readiness state machine: one host Lobby with a queue-capturing
+    // send, fed hand-built wire bytes standing in for what a real guest's Lobby
+    // would produce. What matters here is the star's relaying and bookkeeping,
+    // not the sockets underneath it -- those are MeshRelay's job, already
+    // covered on its own.
+    static void Endpoints(byte[] disc) {
+        var mod=Mod(546878,"MP4DX",0x10);var full=new ModSet(new[]{mod});
+        Func<string,ModSet,PlayerInfo> who=(name,mods)=>new PlayerInfo(name,disc,3,mods);
+
+        var hq=new Dictionary<int,Queue<byte[]>>();
+        for(int i=-1;i<Lobby.MaxSeats;i++)hq[i]=new Queue<byte[]>();
+        var learned=new List<Tuple<int,IPEndPoint>>();
+        var host=new Lobby(true,who("Camille",full),(seat,b)=>hq[seat].Enqueue(b),id=>{},id=>{},()=>{});
+        host.EndpointLearned=(seat,endpoint)=>learned.Add(Tuple.Create(seat,endpoint));
+        host.Admit(1,who("Alex",full));
+        host.Admit(2,who("Zoe",full));
+        hq[1].Clear();hq[2].Clear();   // discard the seat-command/profile pair Admit already sent each
+
+        var hostEp=new IPEndPoint(IPAddress.Parse("203.0.113.10"),40001);
+        host.AnnounceEndpoint(hostEp);
+        Check(host.PeerEndpoint(0).Equals(hostEp),"the host knows its own announced address");
+        Check(hq[Lobby.Broadcast].Count==1,"the host's own announcement goes out once, addressed Broadcast");
+        int subjectSeat0;IPEndPoint decoded0;
+        Check(TryDecodeEndpoint(hq[Lobby.Broadcast].Dequeue(),out subjectSeat0,out decoded0) && subjectSeat0==0 && decoded0.Equals(hostEp),
+            "the host's announcement names seat 0 and its own address");
+
+        // Guest 1 announces itself. The host must learn it, and relay it to
+        // every OTHER seat -- seat 2, not back to seat 1.
+        var guest1Ep=new IPEndPoint(IPAddress.Parse("203.0.113.20"),40002);
+        host.Receive(1,Lobby.EndpointCommand(1,guest1Ep));
+        Check(host.PeerEndpoint(1).Equals(guest1Ep),"the host learns guest 1's announced address");
+        Check(learned.Count==1 && learned[0].Item1==1 && learned[0].Item2.Equals(guest1Ep),
+            "EndpointLearned fires with the seat and the address");
+        Check(hq[2].Count==1,"the relay reaches seat 2");
+        Check(hq[1].Count==0,"and is not echoed back to seat 1");
+        int relayedSeat;IPEndPoint relayedEp;
+        Check(TryDecodeEndpoint(hq[2].Dequeue(),out relayedSeat,out relayedEp) && relayedSeat==1 && relayedEp.Equals(guest1Ep),
+            "the relayed packet still names seat 1, not the host relaying it");
+
+        Reject(()=>host.Receive(1,Lobby.EndpointCommand(2,new IPEndPoint(IPAddress.Parse("203.0.113.30"),1))),
+            "a guest cannot announce another seat's address");
+        Reject(()=>host.Receive(1,new byte[]{11,1,1,2,3,4,0}),"a truncated endpoint command is refused");
+        Reject(()=>host.Receive(1,new byte[]{11,1,1,2,3,4,0,0,0}),"an oversized endpoint command is refused");
+
+        // A guest admitted after seat 1 already announced still needs seat 1's
+        // address -- without a catch-up replay it would never learn it, since
+        // that broadcast happened before this guest existed.
+        host.Admit(3,who("Remi",full));
+        var toGuest3=new List<byte[]>();while(hq[3].Count>0)toGuest3.Add(hq[3].Dequeue());
+        Check(toGuest3.Any(p=>{int s;IPEndPoint e;return TryDecodeEndpoint(p,out s,out e) && s==1 && e.Equals(guest1Ep);}),
+            "the late guest's admission replays seat 1's already-known address");
+        Check(toGuest3.Any(p=>{int s;IPEndPoint e;return TryDecodeEndpoint(p,out s,out e) && s==0 && e.Equals(hostEp);}),
+            "and the host's own address too");
+
+        // Leaving clears the bookkeeping, not just the roster entry.
+        host.Leave(1);
+        Check(host.PeerEndpoint(1)==null,"a departed seat's address is forgotten");
+
+        // The guest side of the same protocol: a guest only ever hears from the
+        // host (from==0), whether the subject is the host itself or a fellow
+        // guest being relayed. Either way the guest just records it.
+        var gq=new Dictionary<int,Queue<byte[]>>();
+        for(int i=-1;i<Lobby.MaxSeats;i++)gq[i]=new Queue<byte[]>();
+        var guestLearned=new List<Tuple<int,IPEndPoint>>();
+        var guest=new Lobby(false,who("Alex",full),(seat,b)=>gq[seat].Enqueue(b),id=>{},id=>{},()=>{});
+        guest.EndpointLearned=(seat,endpoint)=>guestLearned.Add(Tuple.Create(seat,endpoint));
+        guest.Receive(0,Lobby.EndpointCommand(0,hostEp));
+        Check(guest.PeerEndpoint(0).Equals(hostEp),"a guest records the host's announced address");
+        var guest2Ep=new IPEndPoint(IPAddress.Parse("203.0.113.40"),40003);
+        guest.Receive(0,Lobby.EndpointCommand(2,guest2Ep));
+        Check(guest.PeerEndpoint(2).Equals(guest2Ep),"and a fellow guest's address, relayed by the host");
+        Check(guestLearned.Count==2,"both arrivals fired the callback");
+        gq[0].Clear();
+        guest.AnnounceEndpoint(new IPEndPoint(IPAddress.Parse("203.0.113.50"),40004));
+        Check(gq[0].Count==1,"a guest announces to the host, not by broadcast");
+    }
+    static bool TryDecodeEndpoint(byte[] packet,out int seat,out IPEndPoint endpoint) {
+        seat=-1;endpoint=null;
+        if(packet.Length!=8 || packet[0]!=11)return false;
+        seat=packet[1];
+        var address=new byte[4];Buffer.BlockCopy(packet,2,address,0,4);
+        int port=(packet[6]<<8)|packet[7];
+        endpoint=new IPEndPoint(new IPAddress(address),port);return true;
+    }
+
+    static void Seats(byte[] disc) {
+        var mod=Mod(546878,"MP4DX",0x10);
+        var full=new ModSet(new[]{mod});
+        Func<string,ModSet,PlayerInfo> who=(name,mods)=>new PlayerInfo(name,disc,3,mods);
+
+        var hq=new Dictionary<int,Queue<byte[]>>();
+        for(int i=-1;i<Lobby.MaxSeats;i++)hq[i]=new Queue<byte[]>();
+        int starts=0,loads=0;
+        var host=new Lobby(true,who("Camille",full),(seat,b)=>hq[seat].Enqueue(b),id=>loads++,id=>starts++,()=>{});
+
+        Reject(()=>host.Start(),"a host alone cannot start");
+        host.Admit(1,who("Alex",full));
+        Check(host.Occupied==2 && host.CanStart,"two seats agreeing is enough to start");
+        host.Admit(2,who("Zoe",full));
+        host.Admit(3,who("Remi",full));
+        Check(host.Occupied==4 && host.CanStart,"four seats agreeing still start");
+        Reject(()=>host.Admit(4,who("Trop",full)),"a fifth player is refused");
+        Reject(()=>host.Admit(0,who("Usurpateur",full)),"nobody is admitted to the host seat");
+
+        // One guest out of step blocks everyone, and is named rather than implied.
+        host.Leave(2);host.Admit(2,who("Zoe",ModSet.Empty));
+        Check(!host.CanStart && !host.ModsMatch,"one guest with different mods blocks the launch");
+        Check(host.ModAdvice.Contains("Zoe") && host.ModAdvice.Contains("546878"),"the host is told which guest, and which mod");
+        Check(host.DiscMatches,"the disc is still agreed while only the mods differ");
+        host.Leave(2);host.Admit(2,who("Zoe",full));
+        Check(host.CanStart,"putting it right unblocks the launch");
+
+        // The readiness barrier: every occupied seat, not two of them.
+        host.Start();
+        Check(loads==1 && starts==0,"starting prepares the host and commits nobody");
+        var attempt=new Guid(hq[Lobby.Broadcast].Dequeue().Skip(1).ToArray());
+        host.Loaded(attempt);
+        Check(starts==0,"the host being ready is not enough");
+        host.Receive(1,Lobby.Command(4,attempt));
+        Check(starts==0,"one guest ready is not enough");
+        host.Receive(2,Lobby.Command(4,attempt));
+        Check(starts==0,"two guests ready is still not enough");
+        Reject(()=>host.Receive(2,Lobby.Command(4,attempt)),"a guest cannot confirm twice");
+        host.Receive(3,Lobby.Command(4,attempt));
+        Check(starts==1 && host.Phase==LobbyPhase.Running,"the last guest releases the start");
+
+        // A departure has to be relayed, or the guests that never hear from each
+        // other stay in a salon that cannot empty.
+        hq[1].Clear();hq[2].Clear();hq[3].Clear();
+        host.Receive(1,Lobby.Command(8,attempt));
+        Check(host.Phase==LobbyPhase.Closed,"the host closes when a guest quits");
+        Check(hq[2].Count==1 && hq[3].Count==1 && hq[1].Count==0,"the host relays the departure to the others, not back to the sender");
+        Check(hq[2].Peek()[0]==8,"and it relays it as a departure");
+
+        // A guest learns its seat from the host, and only from the host.
+        var gq=new Dictionary<int,Queue<byte[]>>();
+        for(int i=-1;i<Lobby.MaxSeats;i++)gq[i]=new Queue<byte[]>();
+        var guest=new Lobby(false,who("Alex",full),(seat,b)=>gq[seat].Enqueue(b),id=>{},id=>{},()=>{});
+        Check(guest.LocalSeat==1,"a guest starts at seat 1 until told otherwise");
+        guest.Receive(0,Lobby.SeatCommand(3));
+        Check(guest.LocalSeat==3 && guest.Local.Name=="Alex","the host moves a guest, and it takes its profile with it");
+        Reject(()=>guest.Receive(0,Lobby.SeatCommand(0)),"a guest is never moved into the host seat");
+        Reject(()=>guest.Receive(0,new byte[]{9,7}),"a seat beyond the table is refused");
+        Reject(()=>host.Receive(1,Lobby.SeatCommand(2)),"a guest cannot hand out seats");
+        Reject(()=>guest.Receive(guest.LocalSeat,Lobby.SeatCommand(2)),"nothing arrives from our own seat");
+
+        // A seat can be reserved the moment a connection arrives, before the
+        // host has any idea who is on the other end -- the profile shows up
+        // later, over the very link this seat number identifies.
+        var hq2=new Dictionary<int,Queue<byte[]>>();
+        for(int i=-1;i<Lobby.MaxSeats;i++)hq2[i]=new Queue<byte[]>();
+        var host2=new Lobby(true,who("Camille",full),(seat,b)=>hq2[seat].Enqueue(b),id=>{},id=>{},()=>{});
+        host2.Admit(1);
+        Check(host2.SeatInfo(1)==null,"reserving a seat without a profile leaves its occupant unknown");
+        Check(host2.Occupied==1,"and does not count as an occupied seat yet");
+        Check(hq2[1].Count==2,"the reservation still sends exactly the seat number and the host's own profile");
+        Check(hq2[1].Dequeue()[0]==9,"the first message is the seat assignment");
+        Check(hq2[1].Dequeue()[0]==2,"the second is the host's profile, same as an ordinary admit");
+        Reject(()=>host2.Start(),"a reserved-but-unknown seat still cannot start a game");
+        host2.Receive(1,who("Alex",full).Encode());
+        Check(host2.SeatInfo(1)!=null && host2.SeatInfo(1).Name=="Alex","the guest's own Announce() fills the reservation in, exactly as for an ordinary admit");
+        Check(host2.Occupied==2 && host2.CanStart,"and from then on it counts like any other occupied seat");
+
+        // Admitting without a profile must never clobber one that is already
+        // known -- the omitted argument means "leave it alone," not "erase it."
+        host2.Admit(1);
+        Check(host2.SeatInfo(1)!=null && host2.SeatInfo(1).Name=="Alex","re-admitting a seat with no profile leaves its known occupant untouched");
+    }
+
+    // Pure string-building, no socket in sight: what seat 2 of a four-player
+    // mesh is actually told to run with, given the loopback ports its two
+    // peers' legs were assigned.
+    static void MeshArgumentsTest() {
+        var peers=new[]{Tuple.Create(0,50010),Tuple.Create(3,50013)};
+        var args=GameStart.MeshArguments(50002,2,4,peers);
+        Check(args=="--netplay-host 50002 --netplay-players 4 --netplay-seat 2 --netplay-peer 0:127.0.0.1:50010 --netplay-peer 3:127.0.0.1:50013",
+            "mesh arguments name this seat, the table size, and one peer per remote seat, in the order given");
+        Check(GameStart.MeshArguments(50000,0,3,new Tuple<int,int>[0])=="--netplay-host 50000 --netplay-players 3 --netplay-seat 0",
+            "a seat with no peers yet still gets a valid, peerless command line");
+        Reject(()=>GameStart.MeshArguments(50000,0,2,peers),"two players has no mesh arguments -- that path stays the classic host/join pair");
+        Reject(()=>GameStart.MeshArguments(50000,0,5,peers),"a fifth seat is refused, same bound as Lobby.MaxSeats");
+        Reject(()=>GameStart.MeshArguments(50000,4,4,peers),"a seat outside its own table is refused");
+        Reject(()=>GameStart.MeshArguments(0,0,4,peers),"port zero is not a real port");
+        Reject(()=>GameStart.MeshArguments(50000,0,4,new[]{Tuple.Create(0,50010)}),"a peer cannot be our own seat");
+        Reject(()=>GameStart.MeshArguments(50000,0,4,new[]{Tuple.Create(5,50010)}),"a peer seat outside the table is refused");
+        Reject(()=>GameStart.MeshArguments(50000,0,4,new[]{Tuple.Create(1,50010),Tuple.Create(1,50011)}),"the same peer seat cannot be named twice");
+    }
     static void LobbyRules() {
         var launch=GameStart.OnlineArguments("--netplay-host 32100");
         Check(launch.Contains("--netplay-full") && launch.Contains("--netplay-delay 3")
             && !launch.Contains("--netplay-rollback"),"normal lobby uses lockstep without automatic rollback");
+        MeshArgumentsTest();
         var same=Wire.Hash(new byte[]{1,2,3});var profile=new PlayerInfo("Camille",same,3);
         var hq=new Queue<byte[]>();var cq=new Queue<byte[]>();Guid hId=Guid.Empty,cId=Guid.Empty;int starts=0,loads=0;
-        var h=new Lobby(true,profile,b=>hq.Enqueue(b),id=>{hId=id;loads++;},id=>starts++,()=>{});
-        var c=new Lobby(false,new PlayerInfo("Alex",same,3),b=>cq.Enqueue(b),id=>{cId=id;loads++;},id=>starts++,()=>{});
+        var h=new Lobby(true,profile,(seat,b)=>hq.Enqueue(b),id=>{hId=id;loads++;},id=>starts++,()=>{});
+        var c=new Lobby(false,new PlayerInfo("Alex",same,3),(seat,b)=>cq.Enqueue(b),id=>{cId=id;loads++;},id=>starts++,()=>{});
         Reject(()=>h.Start(),"host cannot start alone");h.Announce();c.Announce();c.Receive(hq.Dequeue());h.Receive(cq.Dequeue());
         Check(h.CanStart && !c.CanStart && h.Remote.Name=="Alex","host authority and roster");
         Reject(()=>c.Start(),"guest launch rejected");Reject(()=>h.Receive(Lobby.Command(3,Guid.NewGuid())),"forged guest PREPARE rejected");
@@ -309,11 +776,13 @@ static class Tests {
         c.Receive(hq.Dequeue());
         Check(c.Phase==LobbyPhase.Closed && c.Ending==LobbyEnding.RemoteGameClosed,"the other player leaves the room too");
         Reject(()=>c.Receive(Lobby.Command(8,cId)),"end notice on a closed salon rejected");
-        var wq=new Queue<byte[]>();var w=new Lobby(true,profile,b=>wq.Enqueue(b),id=>{},id=>{},()=>{});
+        var wq=new Queue<byte[]>();var w=new Lobby(true,profile,(seat,b)=>wq.Enqueue(b),id=>{},id=>{},()=>{});
         Reject(()=>w.Receive(Lobby.Command(8,Guid.NewGuid())),"end notice cannot knock over a waiting salon");
         h.Close();h.Loaded(hId);Check(starts==2 && !h.CanStart,"closed session cannot start");
         Reject(()=>new PlayerInfo("\n"),"empty/control nickname rejected");Reject(()=>PlayerInfo.Decode(new byte[]{2,96,1}),"truncated metadata rejected");
         Mods(same);
+        Seats(same);
+        Endpoints(same);
         Check(PlayerInfo.Decode(new PlayerInfo("Élodie",same,3).Encode()).Name=="Élodie","UTF8 nickname preserved");
     }
     static void Discs() {
@@ -353,6 +822,24 @@ static class Tests {
         for(int i=0;i<3010;i++)report.Write("bounded");
         Check(File.ReadAllLines(Path.Combine(report.DirectoryPath,"session.txt")).Length==3000,"bounded diagnostic log");
     }
-    public static int Run() {try{Reports();Codecs();Leases();LobbyRules();Discs();CancelLoading();Tls(0,true,true);for(int mode=0;mode<4;mode++)Tls(mode,mode==0);Console.WriteLine("PASS: "+checks+" checks; host-only lobby start, full disk hash and locks, UDP ping, native loading barrier/cancel, TLS loss before/after commit and authenticated UDP for 4800 native ticks. No real router/firewall changes.");return 0;}catch(Exception e){Console.Error.WriteLine("FAIL: "+e.ToString());return 1;}}
+    // The accept loop's own bookkeeping, exercised without a socket in sight:
+    // three guests whose two channels arrive out of order and interleaved,
+    // exactly as three real connections racing over the Internet would land.
+    static void ChannelPairingTest() {
+        var pairing=new ChannelPairing<string>();
+        var alex=Wire.Random(16);var zoe=Wire.Random(16);var remi=Wire.Random(16);
+        Check(pairing.Add(alex,0,"alex-0")==null,"a first channel alone never completes a guest");
+        Check(pairing.Pending==1,"and leaves exactly one guest waiting on its second channel");
+        Check(pairing.Add(zoe,1,"zoe-1")==null,"a different guest's channel does not complete anyone either");
+        var done=pairing.Add(alex,1,"alex-1");
+        Check(done!=null && done[0]=="alex-0" && done[1]=="alex-1","the second channel completes the right guest, in channel order");
+        Check(pairing.Pending==1,"completing one guest leaves the other still waiting");
+        Reject(()=>pairing.Add(zoe,1,"zoe-1-again"),"the same channel cannot arrive twice for one guest");
+        Check(pairing.Add(zoe,0,"zoe-0")!=null,"zoe's outstanding channel completes her, unaffected by the earlier rejection");
+        Check(pairing.Pending==0,"nobody is left waiting once both guests are complete");
+        Check(pairing.Add(remi,0,"remi-0")==null && pairing.Add(remi,1,"remi-1")!=null,"a third guest pairs exactly like the first two");
+        Reject(()=>pairing.Add(Wire.Random(16),2,"x"),"a channel index outside 0/1 is refused");
+    }
+    public static int Run() {try{Reports();Codecs();Leases();LobbyRules();Discs();CancelLoading();MeshWiringTest();MeshRouting();ControlOnlyLink();ChannelPairingTest();Tls(0,true,true);for(int mode=0;mode<4;mode++)Tls(mode,mode==0);Console.WriteLine("PASS: "+checks+" checks; host-only lobby start, full disk hash and locks, UDP ping, native loading barrier/cancel, TLS loss before/after commit, authenticated UDP for 4800 native ticks and a real three-peer UDP mesh. No real router/firewall changes.");return 0;}catch(Exception e){Console.Error.WriteLine("FAIL: "+e.ToString());return 1;}}
 }
 }
