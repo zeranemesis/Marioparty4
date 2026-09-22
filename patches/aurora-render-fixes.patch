@@ -61,6 +61,55 @@ index c196cf6..46ca1c1 100644
  
  void GXSetDispCopyGamma(GXGamma gamma) {}
  
+diff --git a/lib/dolphin/gx/GXTev.cpp b/lib/dolphin/gx/GXTev.cpp
+index 5b88284..1e26ef5 100644
+--- a/lib/dolphin/gx/GXTev.cpp
++++ b/lib/dolphin/gx/GXTev.cpp
+@@ -169,7 +169,43 @@ void GXSetTevOrder(GXTevStageID id, GXTexCoordID tcid, GXTexMapID tmid, GXChanne
+ }
+ 
+ void GXSetZTexture(GXZTexOp op, GXTexFmt fmt, u32 bias) {
+-  // TODO
++  // Was an empty stub, which is why Tree Stomp's trail is not confined by the
++  // depth test: it draws full-screen orthographic quads and relies on this to
++  // take their depth from a Z texture instead of the quad's own
++  // (m419Dll/main.c:279).
++  //
++  // Written through the BP registers rather than straight into the state,
++  // because a scene enables z-texturing, draws, then disables it again within
++  // one frame -- a direct write would apply whichever value happened to be last
++  // to every draw in between.
++  u32 type;
++  switch (fmt) {
++  case GX_TF_Z8:
++    type = 0;
++    break;
++  case GX_TF_Z16:
++    type = 1;
++    break;
++  case GX_TF_Z24X8:
++    type = 2;
++    break;
++  default:
++    CHECK(false, "invalid z texture format {}", static_cast<int>(fmt));
++    type = 0;
++    break;
++  }
++
++  u32 reg1 = 0;
++  SET_REG_FIELD(0, reg1, 24, 0, bias & 0xFFFFFF);
++  SET_REG_FIELD(0, reg1, 8, 24, 0xF4);
++  GX_WRITE_RAS_REG(reg1);
++
++  u32 reg2 = 0;
++  SET_REG_FIELD(0, reg2, 2, 0, type);
++  SET_REG_FIELD(0, reg2, 2, 2, static_cast<u32>(op));
++  SET_REG_FIELD(0, reg2, 8, 24, 0xF5);
++  GX_WRITE_RAS_REG(reg2);
++  __gx->bpSent = 1;
+ }
+ 
+ void GXSetNumTevStages(u8 num) {
 diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
 index eff0c65..f3d785c 100644
 --- a/lib/gfx/common.cpp
@@ -342,8 +391,33 @@ index ad37737..5895439 100644
      return std::nullopt;
    }
  
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+index 9748556..db28fb9 100644
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -809,6 +809,20 @@ static void handle_bp(u32 value, bool bigEndian) {
+     break;
+   }
+ 
++  // Z texture (GXSetZTexture): 0xF4 carries the 24-bit bias, 0xF5 the format in
++  // bits 0-1 and the operation in bits 2-3.
++  case 0xF4: {
++    g_gxState.ztexBias = bp_get(value, 24, 0);
++    g_gxState.stateDirty = true;
++    break;
++  }
++  case 0xF5: {
++    g_gxState.ztexFmt = static_cast<u8>(bp_get(value, 2, 0));
++    g_gxState.ztexOp = static_cast<u8>(bp_get(value, 2, 2));
++    g_gxState.stateDirty = true;
++    break;
++  }
++
+   // TEV K color/alpha select (0xF6-0xFD)
+   case 0xF6:
+   case 0xF7:
 diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
-index 9ca9036..76fb927 100644
+index 9ca9036..9af2835 100644
 --- a/lib/gx/gx.cpp
 +++ b/lib/gx/gx.cpp
 @@ -445,27 +445,48 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
@@ -418,11 +492,23 @@ index 9ca9036..76fb927 100644
    }
  }
  
+@@ -782,6 +803,11 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
+ 
+   const auto& vtxFmt = g_gxState.vtxFmts[fmt];
+   config.shaderConfig.fogType = g_gxState.fog.type;
++  // Part of the config, not a uniform: replacing the interpolated depth changes
++  // whether the fragment shader declares a frag_depth output at all, so it has
++  // to select a different pipeline.
++  config.shaderConfig.ztexOp = g_gxState.ztexOp;
++  config.shaderConfig.ztexFmt = g_gxState.ztexFmt;
+   u8 vtxOffset = 0;
+   for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
+     const auto attr = static_cast<GXAttr>(i);
 diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
-index 287bbd7..4d8f122 100644
+index 287bbd7..cdceb49 100644
 --- a/lib/gx/gx.hpp
 +++ b/lib/gx/gx.hpp
-@@ -345,6 +345,13 @@ struct GXState {
+@@ -345,6 +345,19 @@ struct GXState {
    std::array<AttrArray, MaxVtxAttr> arrays;
    gfx::ClipRect texCopySrc;
    GXTexFmt texCopyFmt;
@@ -431,13 +517,41 @@ index 287bbd7..4d8f122 100644
 +  // what an unset filter must behave as. Games enable a real one to deflicker
 +  // the copy, and for an effect that copies its own output every frame that
 +  // blur is also what keeps the feedback from compounding.
++  // GXSetZTexture: the fragment's depth comes from the last stage's texture
++  // instead of the interpolated value. 0 disabled, 1 add, 2 replace; format
++  // 0 = U8, 1 = U16, 2 = U24, matching the BP encoding.
++  u8 ztexOp = 0;
++  u8 ztexFmt = 0;
++  u32 ztexBias = 0;
 +  bool copyFilterEnabled = false;
 +  std::array<u8, 7> copyFilter{0, 0, 0, 64, 0, 0, 0};
    u16 texCopyDstWidth = 0;
    u16 texCopyDstHeight = 0;
    struct CopyTextureKey {
+@@ -447,7 +460,12 @@ struct ShaderConfig {
+   u8 fogType = GX_FOG_NONE;
+   u8 vtxStride = 0;
+   u8 lineMode : 2 = 0; // 1 = GX_LINES, 2 = GX_LINESTRIP, 3 = GX_POINTS
+-  u8 pad1 : 6 = 0;
++  // Taken from pad1's spare bits so the struct keeps its size and its hash: a
++  // disabled z-texture is 0, exactly what the padding already held, so pipelines
++  // recorded before this stay valid and the shipped cache seed is unaffected.
++  u8 ztexOp : 2 = 0;
++  u8 ztexFmt : 2 = 0;
++  u8 pad1 : 2 = 0;
+   u8 pad2 = 0;
+   std::array<AttrConfig, MaxVtxAttr> attrs;
+   std::array<TevSwap, MaxTevSwap> tevSwapTable;
+@@ -483,6 +501,7 @@ struct ShaderInfo {
+   std::bitset<MaxIndTexMtxs> usedIndTexMtxs;
+   u32 uniformSize = 0;
+   bool usesFog : 1 = false;
++  bool usesZTex : 1 = false;
+   bool lightingEnabled : 1 = false;
+   u8 lineMode : 2 = 0;
+ };
 diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
-index 3671ed5..7c6b9fb 100644
+index 3671ed5..aec7e48 100644
 --- a/lib/gx/shader.cpp
 +++ b/lib/gx/shader.cpp
 @@ -9,6 +9,8 @@
@@ -449,7 +563,121 @@ index 3671ed5..7c6b9fb 100644
  #include <mutex>
  #include <string_view>
  #include <utility>
-@@ -1931,6 +1933,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {{{6}{5}
+@@ -80,6 +82,23 @@ static std::string alpha_bump_sel(size_t stageIdx, const ShaderConfig& config, c
+   }
+ }
+ 
++// GX reads the z texture from the last stage that has one BOUND, whether or not
++// that stage's combiner consumes it: Tree Stomp adds a GX_PASSCLR stage solely
++// to aim z-texturing at TEXMAP1 (m419Dll/main.c:278), and picking the last stage
++// that actually samples would take the colour texture instead.
++static int ztex_source_stage(const ShaderConfig& config) noexcept {
++  if (config.ztexOp == 0) {
++    return -1;
++  }
++  for (int i = static_cast<int>(config.tevStageCount) - 1; i >= 0; --i) {
++    const auto& stage = config.tevStages[i];
++    if (stage.texMapId != GX_TEXMAP_NULL && stage.texCoordId != GX_TEXCOORD_NULL) {
++      return i;
++    }
++  }
++  return -1;
++}
++
+ static bool uses_texture_sample(const TevStage& stage) noexcept {
+   const auto& c = stage.colorPass;
+   const auto& a = stage.alphaPass;
+@@ -1294,13 +1313,16 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+   if (info.usedIndStages.any()) {
+     fragmentFnPre += "\n    var t_TexCoord = vec2f(0.0);";
+   }
++  const int zTexStage = ztex_source_stage(config);
++  int lastSampledStage = -1;
+   for (int i = 0; i < config.tevStageCount; ++i) {
+     const auto& stage = config.tevStages[i];
+     const bool needsIndirectCoord = stage.indTexMtxId != GX_ITM_OFF;
+     const bool hasIndirectStage = stage.indTexStage < config.numIndStages;
+     const bool needsTevTexCoord =
+         needsIndirectCoord || stage.indTexWrapS != GX_ITW_OFF || stage.indTexWrapT != GX_ITW_OFF || stage.indTexAddPrev;
+-    const bool needsTextureSample = uses_texture_sample(stage);
++    // Sampled even when the combiner ignores it, when it is the z texture source.
++    const bool needsTextureSample = uses_texture_sample(stage) || i == zTexStage;
+     if (!needsTevTexCoord && !needsTextureSample) {
+       continue;
+     }
+@@ -1469,7 +1491,55 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+     fragmentFnPre +=
+         fmt::format("\n    var sampled{0} = textureSampleBias(tex{1}, tex{1}_samp, {2}, ubuf.tex{1}_size_bias.z);", i,
+                     underlying(stage.texMapId), uvIn);
++    // GX takes the z texture from the last stage that sampled one.
++    lastSampledStage = i;
++  }
++  // GXSetZTexture: the depth comes from the last stage's texture instead of
++  // the interpolated value, which is what confines Tree Stomp's full-screen
++  // trail quads to the scene depth. Weights are baked per format exactly as the
++  // hardware assembles its 24-bit value; the bias stays a uniform because it is
++  // not part of the pipeline config and may differ between draws sharing one.
++  std::string fragOutStruct;
++  std::string fragRetType = "@location(0) vec4f";
++  std::string fragRetStmt = "    return prev;";
++  if (config.ztexOp != 0) {
++    std::string_view zWeights;
++    switch (config.ztexFmt) {
++    case 0:
++      zWeights = "vec4f(0.0, 0.0, 0.0, 1.0)";
++      break;
++    case 1:
++      zWeights = "vec4f(1.0, 0.0, 0.0, 256.0)";
++      break;
++    default:
++      zWeights = "vec4f(65536.0, 256.0, 1.0, 0.0)";
++      break;
++    }
++    fragOutStruct = "\nstruct FragmentOutput {\n"
++                    "    @location(0) color: vec4f,\n"
++                    "    @builtin(frag_depth) depth: f32,\n"
++                    "}\n";
++    fragRetType = "FragmentOutput";
++    const std::string zsrc =
++        zTexStage >= 0 ? fmt::format("sampled{}", zTexStage) : std::string{"vec4f(0.0)"};
++    // 16777215 and the reversed-Z sense match gx_z24 in tex_copy_conv and the
++    // clear value in common.cpp: far is 0 reversed, 1 otherwise.
++    const std::string zInterp = UseReversedZ ? "(1.0 - in.pos.z)" : "in.pos.z";
++    const std::string zAdd =
++        config.ztexOp == 1 ? fmt::format("\n    ztex_z += {} * 16777215.0;", zInterp) : std::string{};
++    fragRetStmt = fmt::format(
++        "    var frag_out: FragmentOutput;"
++        "\n    frag_out.color = prev;"
++        "\n    let ztex_texel = vec4f(round({0}.r * 255.0), round({0}.g * 255.0), "
++        "round({0}.b * 255.0), round({0}.a * 255.0));"
++        "\n    var ztex_z = dot(ztex_texel, {1}) + ubuf.ztex_bias.x;{2}"
++        "\n    let ztex_i = u32(clamp(ztex_z, 0.0, 16777215.0)) & 0xFFFFFFu;"
++        "\n    frag_out.depth = {3}f32(ztex_i) / 16777215.0;"
++        "\n    return frag_out;",
++        zsrc, zWeights, zAdd, UseReversedZ ? "1.0 - " : "");
++    uniBufAttrs += "\n    ztex_bias: vec4f,";
+   }
++
+   if (info.usesPTTexMtx.any())
+     uniBufAttrs += fmt::format("\n    postmtx: array<mat3x4f, {}>,", MaxPTTexMtx);
+   if (info.usesFog) {
+@@ -1920,17 +1990,38 @@ fn vs_main(
+     return out;
+ }}
+ 
++{9}
+ @fragment
+-fn fs_main(in: VertexOutput) -> @location(0) vec4f {{{6}{5}
+-    return prev;
++fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
++{11}
+ }}
+ )""",
+                                         uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn,
+-                                        fragmentFnPre, vtxXfrAttrsPre, uniformPre);
++                                        fragmentFnPre, vtxXfrAttrsPre, uniformPre, fragOutStruct, fragRetType,
++                                        fragRetStmt);
+   if (EnableDebugPrints) {
      Log.info("Generated shader: {}", shaderSource);
    }
  
@@ -476,7 +704,7 @@ index 3671ed5..7c6b9fb 100644
  }
  
 diff --git a/lib/gx/shader_info.cpp b/lib/gx/shader_info.cpp
-index bb9ddec..488a9f4 100644
+index bb9ddec..c7e6295 100644
 --- a/lib/gx/shader_info.cpp
 +++ b/lib/gx/shader_info.cpp
 @@ -1,6 +1,7 @@
@@ -487,7 +715,28 @@ index bb9ddec..488a9f4 100644
  
  #include <tracy/Tracy.hpp>
  
-@@ -466,19 +467,65 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
+@@ -322,6 +323,20 @@ ShaderInfo build_shader_info(const ShaderConfig& config) noexcept {
+   if (info.usedIndTexMtxs.any()) {
+     info.uniformSize += MaxIndTexMtxs * sizeof(Mat2x4<float>);
+   }
++  if (config.ztexOp != 0) {
++    info.usesZTex = true;
++    info.uniformSize += sizeof(Vec4<float>);
++    // The z texture's stage may have a combiner that never reads it, so nothing
++    // else would bind it. Register the last stage with a texture bound.
++    for (int i = static_cast<int>(config.tevStageCount) - 1; i >= 0; --i) {
++      const auto& stage = config.tevStages[i];
++      if (stage.texMapId != GX_TEXMAP_NULL && stage.texCoordId != GX_TEXCOORD_NULL) {
++        info.sampledTextures.set(stage.texMapId);
++        info.sampledTexCoords.set(stage.texCoordId);
++        break;
++      }
++    }
++  }
+   info.uniformSize += info.sampledTextures.count() * sizeof(Vec4<float>);
+   info.uniformSize = gfx::align_uniform(info.uniformSize);
+   if (info.uniformSize > MaxUniformSize) {
+@@ -466,21 +481,72 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
      buf.append(
          Vec4{static_cast<f32>(scale.scaleS) + 1.0f, static_cast<f32>(scale.scaleT) + 1.0f, 0.0f, 0.0f});
    }
@@ -555,4 +804,11 @@ index bb9ddec..488a9f4 100644
 +    }
      buf.append(texture_size_bias(tex));
    }
++  if (info.usesZTex) {
++    // Declared after the texture sizes in shader.cpp, so it has to be appended
++    // after them here: the uniform is written positionally.
++    buf.append(Vec4{static_cast<f32>(g_gxState.ztexBias), 0.f, 0.f, 0.f});
++  }
    g_gxState.stateDirty = false;
+   return gfx::push_uniform(buf.data(), buf.size());
+ }

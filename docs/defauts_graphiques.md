@@ -1237,6 +1237,42 @@ une capture d'écran d'émulateur ou de console pour trancher. À la différence
 G1, G2 ou Makin' Waves, l'écart est de *niveau* et non de *structure*, et c'est
 précisément le genre que la chaîne vidéo sait fabriquer toute seule.
 
+## Tree Stomp — CORRIGÉ, 2026-09-22
+
+Le gros carré noir autour du joueur en prenant la banane dorée est corrigé, et
+confirmé en jeu.
+
+**Cause** : `GXSetZTexture` était une **fonction vide** dans Aurora. Tree Stomp
+dessine sa traînée comme huit quads plein écran en projection orthographique et
+d'alpha décroissant (`m419Dll/main.c:279-290`) ; le Z-texturing leur donne la
+profondeur stockée dans une texture au lieu de celle du quad. Sans lui, rien ne
+confinait ces quads à la scène.
+
+**Sémantique** : profondeur assemblée depuis la texture du dernier étage avec
+les coefficients par format (U8 `(0,0,0,1)`, U16 `(1,0,0,256)`, U24
+`(65536,256,1,0)`), plus le biais, masquée sur 24 bits. Le sens de la
+profondeur inversée et le diviseur 16777215 viennent d'Aurora lui-même
+(`gx_z24` dans `tex_copy_conv`, valeur d'effacement dans `common.cpp`) et non de
+Dolphin, dont le drapeau équivalent a la polarité opposée — le recopier aurait
+inversé la profondeur.
+
+**Le piège, et ce qui a failli faire conclure à un échec** : une première
+implémentation correcte n'a rien changé à l'écran. Une trace posée pour
+distinguer « ça ne marche pas » de « ça ne s'exécute pas » a montré que le
+pipeline était bien construit (`op=2 fmt=2`) mais que la profondeur était lue
+dans la texture de **couleur**. GX prend la texture du dernier étage qui en a
+une **liée**, que le combinateur s'en serve ou non : Tree Stomp déclare son
+étage 1 en `GX_PASSCLR` avec TEXMAP1 uniquement pour viser la texture de
+profondeur, donc `uses_texture_sample()` renvoyait faux et le dernier étage
+réellement échantillonné était l'étage 0. Dolphin signale ce piège dans un
+commentaire (« hopefully this has been read »).
+
+Écrit via les registres BP 0xF4/0xF5 et non directement dans l'état, parce que
+le jeu active puis désactive le Z-texturing au sein d'une même image. L'opération
+et le format occupent les bits libres de `ShaderConfig`, donc sa taille ne change
+pas et un Z-texturing désactivé garde la même empreinte : la graine de pipelines
+livrée reste valide.
+
 ## Makin' Waves — enquête du 2026-09-21 : ce qui est éliminé
 
 Le diagnostic de la section « Makin' Waves — 14:40 » ci-dessus (« distorsion
