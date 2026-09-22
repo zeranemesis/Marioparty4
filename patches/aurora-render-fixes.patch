@@ -1,3 +1,38 @@
+diff --git a/lib/dolphin/mtx/mtx.c b/lib/dolphin/mtx/mtx.c
+index ba2796d..ba28c95 100644
+--- a/lib/dolphin/mtx/mtx.c
++++ b/lib/dolphin/mtx/mtx.c
+@@ -531,6 +531,30 @@ void C_MTXLookAt(Mtx m, const Point3d* camPos, const Vec* camUp, const Point3d*
+   vLook.z = camPos->z - target->z;
+   VECNormalize(&vLook, &vLook);
+   VECCrossProduct(camUp, &vLook, &vRight);
++  /* A camUp parallel to the view direction makes that cross product exactly
++   * zero, and normalising it yields NaN for every element -- which then poisons
++   * the whole matrix. Mario Party 4 reaches this: Slime Time's shadow light
++   * passes normalize(camPos) as its up vector while looking at the origin, so up
++   * and look are bit-identical (m402Dll/main.c:1830). The resulting shadow
++   * matrix was entirely NaN and no surface could ever sample the shadow map.
++   *
++   * Pick any axis not parallel to vLook and rebuild from it. The roll about the
++   * view axis is arbitrary in a degenerate case by definition, but it is a real
++   * basis rather than NaN, and the light's projection is symmetric about that
++   * axis anyway. */
++  if (vRight.x == 0.0f && vRight.y == 0.0f && vRight.z == 0.0f) {
++    Vec fallback;
++    if (fabsf(vLook.x) < 0.5f) {
++      fallback.x = 1.0f;
++      fallback.y = 0.0f;
++      fallback.z = 0.0f;
++    } else {
++      fallback.x = 0.0f;
++      fallback.y = 1.0f;
++      fallback.z = 0.0f;
++    }
++    VECCrossProduct(&fallback, &vLook, &vRight);
++  }
+   VECNormalize(&vRight, &vRight);
+   VECCrossProduct(&vLook, &vRight, &vUp);
+   m[0][0] = vRight.x;
 diff --git a/lib/dolphin/gx/GXFrameBuffer.cpp b/lib/dolphin/gx/GXFrameBuffer.cpp
 index c196cf6..46ca1c1 100644
 --- a/lib/dolphin/gx/GXFrameBuffer.cpp

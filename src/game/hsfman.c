@@ -11,6 +11,9 @@
 #include "game/disp.h"
 #include "port/rollback_animation.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+
 #include "dolphin/gx/GXVert.h"
 
 #include "ext_math.h"

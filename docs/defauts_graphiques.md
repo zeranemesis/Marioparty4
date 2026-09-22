@@ -1237,6 +1237,103 @@ une capture d'écran d'émulateur ou de console pour trancher. À la différence
 G1, G2 ou Makin' Waves, l'écart est de *niveau* et non de *structure*, et c'est
 précisément le genre que la chaîne vidéo sait fabriquer toute seule.
 
+## Ombres manquantes (G7 et Slime Time) — CORRIGÉ, 2026-09-22
+
+**Cause : la matrice de projection d'ombre valait `NaN` dans ses douze
+éléments.** Pas « mal calculée » — littéralement pas un nombre. Une coordonnée
+NaN n'échantillonne rien, c'était donc une garantie mathématique d'absence
+d'ombre.
+
+L'origine est dans les données du jeu, et elle est parfaitement légale :
+
+```c
+VECNormalize(&lbl_1_data_60, &sp20);                       /* « haut » = normalize(position) */
+Hu3DShadowPosSet(&lbl_1_data_60, &sp20, &lbl_1_data_6C);   /* cible = origine */
+```
+
+Le vecteur « haut » de la lumière vaut `normalize(position)`, et sa direction de
+visée vaut `normalize(cible − position)` = `−normalize(position)`. Les deux sont
+calculés depuis la même entrée par la même opération : ils sortent **identiques
+au bit près**. Dans `C_MTXLookAt`, leur produit vectoriel est donc exactement
+`(0,0,0)`, qui est ensuite normalisé — `1/√0 = ∞`, puis `0 × ∞ = NaN`, qui
+contamine toute la matrice.
+
+Correctif dans `C_MTXLookAt` (`extern/aurora/lib/dolphin/mtx/mtx.c`) : quand le
+produit vectoriel dégénère, reconstruire la base depuis un axe non colinéaire à
+la visée. Le roulis autour de l'axe de visée est arbitraire par définition dans
+ce cas, et la projection de la lumière est symétrique autour de cet axe.
+
+### L'analyse précédente était fausse, et voici ce que la mesure a donné
+
+Cette page concluait que la passe d'ombre était éteinte, l'un des deux drapeaux
+valant zéro. C'est faux. Chaque étape a été mesurée :
+
+| mesure | résultat |
+|---|---|
+| drapeaux de garde | `Hu3DShadowF=1 Hu3DShadowCamBit=1` — **la passe s'exécute** |
+| frustum d'Avalanche forcé sur Slime Time | aucun changement — **le frustum n'est pas en cause** |
+| modèles entrant dans la boucle de rendu | 1 |
+| constante substituée à l'échantillon | toutes les surfaces s'assombrissent — **la chaîne d'application fonctionne** |
+| faces dessinées dans la carte | `drawn=442780 skipped=6720` — **la carte a du contenu** |
+| `TEXMTX9` | **`-nan(ind)` sur les douze éléments** |
+
+Tout était vrai simultanément, et tout était inutile tant que la coordonnée
+valait NaN. C'est aussi pourquoi forcer le frustum d'Avalanche n'avait rien
+changé.
+
+**Deux erreurs commises en chemin, consignées pour qu'on ne les refasse pas.**
+Un correctif a été annoncé puis annulé : il ajoutait un amorçage de variables
+déjà présent, et le signe était une modification de code qui échouait parce que
+la cible existait déjà. Et la conclusion « la carte est vide » était une
+sur-interprétation du test d'assombrissement, qui ne prouvait que le bon
+fonctionnement de l'étage TEV.
+
+Butterfly Blitz (`m441Dll`) partage la même signature
+(`Hu3DShadowCreate(30, 20, 20000)`) et devrait être corrigé du même coup —
+**à vérifier**.
+
+## Ombres manquantes (G7) — la passe N'EST PAS bloquée, 2026-09-22
+
+Slime Time n'a **aucune ombre** non plus, constaté en jeu. Ses paramètres
+`Hu3DShadowCreate(30, 20, 20000)` sont **identiques** à ceux de Butterfly Blitz
+(`m441Dll`, le défaut G7), alors qu'Avalanche, qui a des ombres, utilise
+`(45, 1000, 250000)`. Deux mini-jeux défaillants partageant la même signature,
+ce n'est plus une observation isolée.
+
+**L'analyse précédente est réfutée par la mesure.** Cette page concluait que la
+passe d'ombre était éteinte parce que l'un des deux drapeaux valait zéro, tout
+en précisant que « lequel ne se déduit pas du code ». Une sonde sur le site de
+garde (`hsfman.c`) donne, pour Slime Time :
+
+```
+[shadow] Hu3DShadowF=1 Hu3DShadowCamBit=1 -> pass RUNS
+```
+
+**La passe s'exécute.** Le problème n'est donc pas qu'elle soit bloquée, mais
+que son résultat n'apparaisse pas — ce qui déplace entièrement la cible.
+
+### Ce qui a été vérifié et écarté depuis
+
+- **La résolution de la copie EFB.** La carte d'ombre est copiée en
+  `GX_CTF_R8` (`hsfman.c:2240`) puis liée en `GX_TF_I8` (`hsfdraw.c:1629`). Ces
+  formats diffèrent, mais la recherche se fait **par pointeur seul**
+  (`gx.cpp:449`, `copyTextures.find(obj.data)`), donc le format ne l'empêche
+  pas ; et `GX_CTF_R8` possède bien son pipeline de conversion dans Aurora
+  (`tex_copy_conv.cpp:303`).
+- **La taille de la carte** n'est pas le discriminant : `Hu3DShadowData.size`
+  vaut toujours `0xC0`, y compris pour Avalanche qui fonctionne. Le chemin de
+  copie est donc identique dans les trois mini-jeux, réduction 2:1 comprise
+  (`GXSetTexCopySrc` à `size * 2`).
+
+### Ce qui reste
+
+Le seul écart avéré entre les cas qui marchent et ceux qui ne marchent pas
+reste **fov / near / far**. `C_MTXLightPerspective` n'utilise que le `fov` ;
+`nnear` et `ffar` servent ailleurs. La mesure qui trancherait : savoir si la
+carte d'ombre **contient une silhouette** ou si elle est vide. Vide, le rendu
+du point de vue de la lumière est en cause (donc probablement le frustum).
+Pleine, c'est son application sur la scène.
+
 ## Tree Stomp — CORRIGÉ, 2026-09-22
 
 Le gros carré noir autour du joueur en prenant la banane dorée est corrigé, et
