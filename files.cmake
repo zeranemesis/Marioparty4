@@ -143,6 +143,8 @@ set(PORT_FILES
         src/port/ui/pane.hpp
         src/port/ui/menu_bar.cpp
         src/port/ui/menu_bar.hpp
+        src/port/ui/precompile.cpp
+        src/port/ui/precompile.hpp
         src/port/ui/prelaunch.cpp
         src/port/ui/prelaunch.hpp
         src/port/ui/preset.cpp

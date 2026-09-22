@@ -90,6 +90,7 @@ struct UserSettings {
         // Graphics
         ConfigVar<int> internalResolutionScale;
         ConfigVar<int> shadowResolutionMultiplier;
+        ConfigVar<bool> precompileShaders;
 
         // Audio
 

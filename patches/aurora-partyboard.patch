@@ -1,3 +1,73 @@
+diff --git a/include/dolphin/gx/GXAurora.h b/include/dolphin/gx/GXAurora.h
+index 8f88a93..bd4f8e3 100644
+--- a/include/dolphin/gx/GXAurora.h
++++ b/include/dolphin/gx/GXAurora.h
+@@ -109,6 +109,28 @@ void AuroraSetViewportPolicy(AuroraViewportPolicy policy);
+  */
+ void AuroraGetRenderSize(u32* width, u32* height);
+ 
++/**
++ * Compiles every pipeline already loaded from the on-disk cache, blocking until
++ * they are all ready.
++ *
++ * The cache is loaded at GPU init but compiled asynchronously, and a draw whose
++ * pipeline is not ready yet is dropped rather than delayed -- which is what makes
++ * a scene's first visit show missing geometry for a few seconds. Calling this
++ * before the first frame trades a one-off wait at startup for no pop-in at all.
++ * Returns how many pipelines were built; gives up after a timeout rather than
++ * hanging, leaving the rest to compile in the background as before.
++ */
++u32 AuroraPrecompilePipelines(void);
++
++/**
++ * How many pipelines loaded from the cache are still waiting to be created.
++ *
++ * Non-blocking, unlike AuroraPrecompilePipelines: the caller keeps driving its
++ * own frame loop and polls this, so the window stays responsive and can show
++ * progress rather than appearing to hang while the driver compiles.
++ */
++u32 AuroraPipelinesQueued(void);
++
+ /**
+  * Sets the actual render viewport in native framebuffer coordinates.
+  * Overrides the automatically scaled values set by the logical GXSetViewport.
+diff --git a/lib/dolphin/gx/GXAurora.cpp b/lib/dolphin/gx/GXAurora.cpp
+index 833ed96..e011ae3 100644
+--- a/lib/dolphin/gx/GXAurora.cpp
++++ b/lib/dolphin/gx/GXAurora.cpp
+@@ -7,6 +7,7 @@
+ #include "../../window.hpp"
+ 
+ #include "../../gfx/common.hpp"
++#include "../../gfx/pipeline_cache.hpp"
+ #include "../../gx/fifo.hpp"
+ 
+ static void GXWriteString(const char* label) {
+@@ -38,6 +39,24 @@ void AuroraSetViewportPolicy(AuroraViewportPolicy policy) {
+   aurora::window::set_frame_buffer_aspect_fit(policy == AURORA_VIEWPORT_FIT);
+ }
+ 
++u32 AuroraPipelinesQueued(void) { return static_cast<u32>(aurora::gfx::pipelines_remaining()); }
++
++u32 AuroraPrecompilePipelines(void) {
++  u32 lastLogged = 0;
++  return static_cast<u32>(aurora::gfx::wait_for_pipeline_cache([&](size_t created, size_t total) {
++    // One line per 25% rather than per pipeline: this runs hundreds of times and
++    // the log is the only feedback there is while the window is not yet drawing.
++    if (total == 0) {
++      return;
++    }
++    const auto percent = static_cast<u32>(created * 100 / total);
++    if (percent >= lastLogged + 25) {
++      lastLogged = percent - percent % 25;
++      Log.info("Precompiling shaders: {}% ({}/{})", lastLogged, created, total);
++    }
++  }));
++}
++
+ void AuroraGetRenderSize(u32* width, u32* height) {
+   const auto windowSize = aurora::window::get_window_size();
+   if (width != nullptr) {
 diff --git a/lib/dolphin/pad/pad.cpp b/lib/dolphin/pad/pad.cpp
 index 2d7f795..145a9cf 100644
 --- a/lib/dolphin/pad/pad.cpp
@@ -152,6 +222,119 @@ index 2d7f795..145a9cf 100644
    return rumbleSupport;
  }
  
+diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
+index 04a4310..80f7b3a 100644
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -16,6 +16,7 @@
+ #include <filesystem>
+ #include <limits>
+ #include <mutex>
++#include <chrono>
+ #include <thread>
+ 
+ #include <SDL3/SDL_iostream.h>
+@@ -326,6 +327,7 @@ struct AtomicStatRef {
+     __atomic_store_n(&ref, val, __ATOMIC_RELAXED);
+     return val;
+   }
++  uint32_t load() const { return __atomic_load_n(&ref, __ATOMIC_RELAXED); }
+ };
+ static AtomicStatRef queuedPipelines{g_stats.queuedPipelines};
+ static AtomicStatRef createdPipelines{g_stats.createdPipelines};
+@@ -1050,6 +1052,70 @@ void initialize_pipeline_cache() {
+   }
+ }
+ 
++size_t pipelines_remaining() {
++  if (g_pipelineCacheBroken) {
++    return 0;
++  }
++  return static_cast<size_t>(queuedPipelines.load());
++}
++
++size_t wait_for_pipeline_cache(const PipelineCacheProgress& progress) {
++  // initialize_pipeline_cache() already queues every cached pipeline through
++  // load_pipeline_cache(), but creation is asynchronous: the game starts while
++  // the worker thread is still compiling, and a draw whose pipeline is not ready
++  // is dropped rather than delayed (gx/pipeline.cpp:18). Draining the queue up
++  // front is what turns a seeded cache into no pop-in at all, at the cost of a
++  // wait before the first frame.
++  if (g_pipelineCacheBroken) {
++    Log.warn("Not precompiling pipelines: the pipeline cache is unusable");
++    return 0;
++  }
++  const auto total = static_cast<size_t>(queuedPipelines.load());
++  if (total == 0) {
++    // Not the same as never running, and the difference matters: the background
++    // worker drains the queue while the prelaunch UI is up, so by the time the
++    // player presses play there may genuinely be nothing left to do. Silence here
++    // would be indistinguishable from the call never happening.
++    Log.info("Nothing to precompile: all {} cached pipelines were already built", createdPipelines.load());
++    return 0;
++  }
++
++  const auto start = std::chrono::steady_clock::now();
++  // A pipeline that never completes must not hang the game on startup, so the
++  // wait gives up rather than blocking forever; the queue keeps draining in the
++  // background afterwards exactly as it did before.
++  constexpr std::chrono::seconds Timeout{120};
++  size_t remaining = total;
++  while (true) {
++    if (!g_hasPipelineThread) {
++      // With no dedicated thread the worker only runs from end_pipeline_frame and
++      // stops after BuildPipelinesPerFrame, so it has to be driven directly here.
++      g_pipelinesPerFrame = 0;
++      pipeline_worker();
++    }
++    remaining = static_cast<size_t>(queuedPipelines.load());
++    if (progress) {
++      progress(total - remaining, total);
++    }
++    if (remaining == 0) {
++      break;
++    }
++    if (std::chrono::steady_clock::now() - start > Timeout) {
++      Log.warn("Gave up precompiling pipelines after {}s, {} of {} still queued", Timeout.count(), remaining, total);
++      break;
++    }
++    if (g_hasPipelineThread) {
++      std::this_thread::sleep_for(std::chrono::milliseconds(4));
++    }
++  }
++
++  const auto elapsed =
++      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
++  const auto built = total - remaining;
++  Log.info("Precompiled {} of {} pipelines in {}ms", built, total, elapsed);
++  return built;
++}
++
+ void shutdown_pipeline_cache() {
+   if (g_hasPipelineThread) {
+     g_pipelineThreadEnd = true;
+diff --git a/lib/gfx/pipeline_cache.hpp b/lib/gfx/pipeline_cache.hpp
+index 2e87f4c..e2a6bed 100644
+--- a/lib/gfx/pipeline_cache.hpp
++++ b/lib/gfx/pipeline_cache.hpp
+@@ -20,6 +20,17 @@ namespace aurora::gfx {
+ 
+ using NewPipelineCallback = std::function<wgpu::RenderPipeline()>;
+ 
++/* How many queued pipelines have not been created yet. Non-blocking, so a
++ * caller can drive its own frame loop and show progress instead of freezing. */
++size_t pipelines_remaining();
++
++using PipelineCacheProgress = std::function<void(size_t created, size_t total)>;
++
++/* Blocks until every pipeline queued from the cache has been created, reporting
++ * progress. Returns how many were built. Safe to call once after
++ * initialize_pipeline_cache(); gives up after a timeout rather than hanging. */
++size_t wait_for_pipeline_cache(const PipelineCacheProgress& progress = {});
++
+ void initialize_pipeline_cache();
+ void shutdown_pipeline_cache();
+ void begin_pipeline_frame();
 diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
 index a969465..6f5e446 100644
 --- a/lib/webgpu/gpu.cpp

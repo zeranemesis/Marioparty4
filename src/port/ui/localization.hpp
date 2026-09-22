@@ -14,6 +14,8 @@ inline std::string ui_translate(std::string_view text)
     }
     struct Entry { std::string_view source; std::string_view translated; };
     static constexpr Entry entries[] = {
+        {"Compiling shaders", "Compilation des shaders"}, {"Preparing...", "Préparation…"},
+        {"This only happens once. The result is kept for future launches.", "Cela n’arrive qu’une seule fois. Le résultat est conservé pour les prochains lancements."},
         {"Settings", "Paramètres"}, {"Achievements", "Succès"}, {"Quit", "Quitter"},
         {"Play", "Jouer"}, {"Play Online", "Jouer en ligne"}, {"Select Disc Image", "Sélectionner l’image disque"}, {"Prelaunch", "Avant le lancement"},
         {"Online mode", "Mode en ligne"}, {"PartyBoardOnline.exe is missing or could not be started.", "PartyBoardOnline.exe est absent ou ne peut pas être démarré."},

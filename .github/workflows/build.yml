@@ -98,6 +98,15 @@ jobs:
           git -C extern/aurora apply --check ../../patches/aurora-render-fixes.patch
           git -C extern/aurora apply ../../patches/aurora-render-fixes.patch
 
+      # Aurora drops a draw whose pipeline is still compiling instead of delaying
+      # it, so a player with an empty cache sees missing geometry on every scene's
+      # first visit. seed_pipeline_cache() fixes that, but it rejects a seed whose
+      # schema does not match with nothing louder than a Log.warn -- a failure that
+      # ships silently. Runs after the patches, since it reads the schema constant
+      # out of the engine source rather than duplicating it.
+      - name: Check pipeline cache seed
+        run: python3 tools/check_pipeline_cache_seed.py
+
       - name: Install dependencies
         run: |
           sudo apt-get update

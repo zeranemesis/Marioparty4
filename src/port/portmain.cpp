@@ -13,6 +13,7 @@
 #include "partyboard_version.h"
 #include "ui/menu_bar.hpp"
 #include "ui/overlay.hpp"
+#include "ui/precompile.hpp"
 #include "ui/prelaunch.hpp"
 #include "ui/preset.hpp"
 
@@ -20,6 +21,8 @@
 #include <aurora/aurora.h>
 #include <aurora/event.h>
 #include <dolphin/gx/GXAurora.h>
+
+#include <chrono>
 #include <dolphin/os.h>
 #include <dolphin/pad.h>
 #include <dolphin/vi.h>
@@ -597,6 +600,69 @@ extern "C" int port_main(int argc, char* argv[]) {
             partyboard::ui::shutdown();
             aurora_shutdown();
             return 0;
+        }
+    }
+
+    // Shaders are compiled before the game boots rather than during it. The cache
+    // is loaded at GPU init but compiled asynchronously, and a draw whose pipeline
+    // is not ready is dropped rather than delayed, which is what makes a scene's
+    // first visit show missing geometry for a few seconds. Doing it here -- after
+    // the prelaunch UI has closed, before the disc boots -- trades a one-off wait
+    // for no pop-in at all. Opt-out, since it is a wait the player can see.
+    if (partyboard::getSettings().game.precompileShaders.getValue()) {
+        const u32 total = AuroraPipelinesQueued();
+        if (total > 0) {
+            auto &screen = static_cast<partyboard::ui::ShaderPrecompile &>(
+                partyboard::ui::push_document(std::make_unique<partyboard::ui::ShaderPrecompile>(), true, true));
+            const auto started = std::chrono::steady_clock::now();
+            u32 remaining = total;
+            bool exitRequested = false;
+            while (!exitRequested) {
+                remaining = AuroraPipelinesQueued();
+                screen.set_progress(total - remaining, total);
+                if (remaining == 0) {
+                    break;
+                }
+                // A driver that never finishes must not strand the player on this
+                // screen; give up and let the rest build in the background, which
+                // is exactly the behaviour there was before this existed.
+                if (std::chrono::steady_clock::now() - started > std::chrono::minutes(5)) {
+                    PartyBoardMainLog.warn(
+                        "Gave up waiting on {} shader pipelines, they will finish in the background", remaining);
+                    break;
+                }
+                // Driving a real frame does two jobs: it draws the progress, and on
+                // backends with no dedicated pipeline thread it is what advances the
+                // compilation at all, since there the worker only runs from
+                // end_pipeline_frame().
+                const AuroraEvent *event = aurora_update();
+                while (event != nullptr && event->type != AURORA_NONE) {
+                    if (event->type == AURORA_SDL_EVENT) {
+                        partyboard::ui::handle_event(event->sdl);
+                    } else if (event->type == AURORA_EXIT) {
+                        exitRequested = true;
+                        break;
+                    }
+                    event++;
+                }
+                if (exitRequested) {
+                    break;
+                }
+                if (!aurora_begin_frame()) {
+                    continue;
+                }
+                partyboard::ui::update();
+                aurora_end_frame();
+            }
+            screen.pop();
+            PartyBoardMainLog.info("Precompiled {} of {} shader pipelines before boot", total - remaining, total);
+            if (exitRequested) {
+                fflush(stdout);
+                fflush(stderr);
+                partyboard::ui::shutdown();
+                aurora_shutdown();
+                return 0;
+            }
         }
     }
 

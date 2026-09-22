@@ -46,6 +46,7 @@ UserSettings g_userSettings = {
         // Graphics
         .internalResolutionScale {"game.internalResolutionScale", 0},
         .shadowResolutionMultiplier {"game.shadowResolutionMultiplier", 1},
+        .precompileShaders {"game.precompileShaders", true},
 
         // Audio
 
@@ -111,6 +112,7 @@ void registerSettings() {
     Register(g_userSettings.game.enableQuickTransform);
     Register(g_userSettings.game.pauseOnFocusLost);
     Register(g_userSettings.game.internalResolutionScale);
+    Register(g_userSettings.game.precompileShaders);
     Register(g_userSettings.game.shadowResolutionMultiplier);
     Register(g_userSettings.game.enableAchievementToasts);
     Register(g_userSettings.game.enableControllerToasts);
