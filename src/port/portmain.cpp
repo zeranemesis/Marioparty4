@@ -509,7 +509,11 @@ extern "C" int port_main(int argc, char* argv[]) {
         config.allowJoystickBackgroundEvents = PartyBoard_NetplayEnabled() || partyboard::getSettings().game.allowBackgroundInput;
         config.pauseOnFocusLost = !PartyBoard_NetplayEnabled() && partyboard::getSettings().game.pauseOnFocusLost;
         // config.imGuiInitCallback = &aurora_imgui_init_callback;
-        config.allowTextureDumps = false;
+        // Aurora can write out every decoded texture it loads, which is the one
+        // way to look at what a draw actually samples instead of inferring it
+        // from code. Opt-in: it writes a DDS per texture into
+        // %APPDATA%/Party Board/texture_dumps.
+        config.allowTextureDumps = std::getenv("PARTYBOARD_DUMP_TEXTURES") != nullptr;
         auroraInfo = aurora_initialize(argc, argv, &config);
     }
 

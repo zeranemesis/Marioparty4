@@ -1,5 +1,5 @@
 diff --git a/lib/dolphin/gx/GXFrameBuffer.cpp b/lib/dolphin/gx/GXFrameBuffer.cpp
-index c196cf6..581808b 100644
+index c196cf6..46ca1c1 100644
 --- a/lib/dolphin/gx/GXFrameBuffer.cpp
 +++ b/lib/dolphin/gx/GXFrameBuffer.cpp
 @@ -9,6 +9,7 @@
@@ -34,11 +34,167 @@ index c196cf6..581808b 100644
    const auto [logicalFbWidth, logicalFbHeight] = aurora::gx::logical_fb_size();
    const auto [targetWidth, targetHeight] = aurora::gfx::get_render_target_size();
    if (logicalFbWidth == 0 || logicalFbHeight == 0 || targetWidth == 0 || targetHeight == 0) {
+@@ -141,7 +159,25 @@ void GXSetCopyClear(GXColor color, u32 depth) {
+   __gx->bpSent = 1;
+ }
+ 
+-void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[7]) {}
++void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[7]) {
++  // Was an empty stub. The anti-alias sample pattern still is one -- aurora
++  // resolves MSAA itself -- but the vertical filter is not cosmetic for every
++  // caller: an effect whose EFB copy feeds its own next frame relies on that
++  // blur to stay stable, and without it the feedback sharpens every frame.
++  if (!vf || vfilter == nullptr) {
++    g_gxState.copyFilterEnabled = false;
++    return;
++  }
++  u32 sum = 0;
++  for (size_t i = 0; i < g_gxState.copyFilter.size(); ++i) {
++    g_gxState.copyFilter[i] = vfilter[i];
++    sum += vfilter[i];
++  }
++  // A filter that is only its centre tap is the identity; treating it as
++  // enabled would cost a shader pass per copy to change nothing.
++  const bool centreOnly = g_gxState.copyFilter[3] == sum;
++  g_gxState.copyFilterEnabled = sum > 0 && !centreOnly;
++}
+ 
+ void GXSetDispCopyGamma(GXGamma gamma) {}
+ 
+diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
+index eff0c65..f3d785c 100644
+--- a/lib/gfx/common.cpp
++++ b/lib/gfx/common.cpp
+@@ -1,3 +1,5 @@
++#include <cstdlib>
++#include <set>
+ #include "common.hpp"
+ 
+ #include "clear.hpp"
+@@ -161,6 +163,7 @@ struct RenderPass {
+   GXTexFmt resolveFormat = GX_TF_RGBA8;
+   ClipRect resolveRect;
+   Range resolveUniformRange;
++  bool resolveFiltered = false;
+   Vec4<float> clearColorValue{0.f, 0.f, 0.f, 0.f};
+   float clearDepthValue = gx::UseReversedZ ? 0.f : 1.f;
+   wgpu::LoadOp colorLoadOp = wgpu::LoadOp::Undefined;
+@@ -570,13 +573,39 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
+   // Push UV transform uniform for tex_copy_conv (crop region in UV space)
+   const auto srcW = static_cast<float>(prevPass.targetSize.width);
+   const auto srcH = static_cast<float>(prevPass.targetSize.height);
++  // The copy filter's taps ride along in the same uniform. Weights are
++  // normalised here rather than in the shader so an unusual filter that does
++  // not sum to 64 still preserves brightness.
++  const auto [logicalFbW, logicalFbH] = gx::logical_fb_size();
++  const auto logicalH = static_cast<float>(logicalFbH);
++  float taps[7] = {0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f};
++  if (gx::g_gxState.copyFilterEnabled) {
++    float sum = 0.f;
++    for (size_t i = 0; i < 7; ++i) {
++      sum += static_cast<float>(gx::g_gxState.copyFilter[i]);
++    }
++    if (sum > 0.f) {
++      for (size_t i = 0; i < 7; ++i) {
++        taps[i] = static_cast<float>(gx::g_gxState.copyFilter[i]) / sum;
++      }
++    }
++  }
+   const std::array uvTransform{
+       static_cast<float>(rect.x) / srcW,
+       static_cast<float>(rect.y) / srcH,
+       static_cast<float>(rect.width) / srcW,
+       static_cast<float>(rect.height) / srcH,
++      taps[0], taps[1], taps[2], taps[3],
++      taps[4], taps[5], taps[6],
++      // One EFB LINE in UV, not one source texel. The copy source is at
++      // internal render resolution, so a texel there is a fraction of a console
++      // line; stepping by texels made the filter several times narrower than
++      // hardware's and therefore invisible. Hardware filters EFB lines, and an
++      // EFB line is 1/logical-height of the copy whatever the render scale.
++      logicalH > 0.f ? 1.f / logicalH : 0.f,
+   };
+   prevPass.resolveUniformRange = push_uniform(uvTransform);
++  prevPass.resolveFiltered = gx::g_gxState.copyFilterEnabled;
+   enqueue_pass(current_frame_packet(), g_recordingFrameSlot, g_currentRenderPass);
+ 
+   // Populate new render pass from previous
+@@ -1327,8 +1356,31 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+         .dst = passInfo.resolveTarget,
+         .sampleFilter = needsScaling ? tex_copy_conv::SampleFilter::Linear : tex_copy_conv::SampleFilter::Nearest,
+     };
++    // A filtered copy has to go through a shader even when it would otherwise
++    // be a straight texture-to-texture copy, since the filter is the whole
++    // point of the pass. Depth copies keep the old path: GXSetCopyFilter
++    // describes a colour filter and averaging depth would be meaningless.
++    const bool filtered = passInfo.resolveFiltered && !isDepth
++        && std::getenv("PARTYBOARD_EFB_COPY_FILTER") != nullptr;
++    if (std::getenv("PARTYBOARD_EFB_COPY_FILTER") != nullptr) {
++      // Reporting only the first copy said nothing about the one that matters:
++      // a run makes many, and the water's is not the first. Keyed on the shape
++      // of the copy so each distinct kind is reported once instead.
++      static std::set<uint64_t> reported;
++      const uint64_t key = (static_cast<uint64_t>(passInfo.resolveFormat) << 32) ^
++                           (static_cast<uint64_t>(dstSize.width) << 16) ^ dstSize.height ^
++                           (needsConversion ? 1ull << 48 : 0) ^ (needsScaling ? 1ull << 49 : 0) ^
++                           (passInfo.resolveFiltered ? 1ull << 50 : 0);
++      if (reported.insert(key).second) {
++        Log.warn("copy filter: {}x{} fmt={} enabled={} conversion={} scaling={} depth={} -> {}", dstSize.width,
++                 dstSize.height, static_cast<int>(passInfo.resolveFormat), passInfo.resolveFiltered, needsConversion,
++                 needsScaling, isDepth, (filtered && !needsConversion) ? "FILTERED" : "not filtered");
++      }
++    }
+     if (needsConversion) {
+       tex_copy_conv::run(cmd, convReq);
++    } else if (filtered) {
++      tex_copy_conv::vfilter_blit(cmd, convReq);
+     } else if (needsScaling) {
+       tex_copy_conv::blit(cmd, convReq);
+     } else {
 diff --git a/lib/gfx/tex_copy_conv.cpp b/lib/gfx/tex_copy_conv.cpp
-index 50f4c43..4aa33cb 100644
+index 50f4c43..add107d 100644
 --- a/lib/gfx/tex_copy_conv.cpp
 +++ b/lib/gfx/tex_copy_conv.cpp
-@@ -233,6 +233,21 @@ static constexpr std::string_view FragGB8 = R"(
+@@ -24,6 +24,11 @@ static constexpr std::string_view ShaderPreamble = R"(
+ struct UVTransform {
+     offset: vec2f,
+     scale: vec2f,
++    // GXSetCopyFilter's seven vertical taps, weights already divided by their
++    // sum, plus one source texel height in UV. Carried in the transform rather
++    // than a second binding so every copy pipeline keeps one bind group layout.
++    vf0: vec4f,
++    vf1: vec4f,
+ };
+ @group(0) @binding(2) var<uniform> uv_xf: UVTransform;
+ 
+@@ -153,6 +158,26 @@ static constexpr std::string_view FragIA8 = R"(
+ )"sv;
+ 
+ // GX_TF_RGB565: Blit alpha to 1.0
++// GXSetCopyFilter's vertical filter, which aurora ignored entirely until now.
++// Seven taps down the source column, weights out of 64. Hardware applies this
++// while copying the EFB; skipping it leaves every copy sharper than the console
++// produced, and for an effect that samples its own previous copy each frame it
++// removes the low-pass that keeps the feedback from compounding.
++static constexpr std::string_view FragVFilter = R"(
++@fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
++    let h = uv_xf.vf1.w;
++    var acc = vec4f(0.0);
++    acc += textureSample(src, src_samp, vec2f(in.uv.x, in.uv.y - 3.0 * h)) * uv_xf.vf0.x;
++    acc += textureSample(src, src_samp, vec2f(in.uv.x, in.uv.y - 2.0 * h)) * uv_xf.vf0.y;
++    acc += textureSample(src, src_samp, vec2f(in.uv.x, in.uv.y - 1.0 * h)) * uv_xf.vf0.z;
++    acc += textureSample(src, src_samp, in.uv) * uv_xf.vf0.w;
++    acc += textureSample(src, src_samp, vec2f(in.uv.x, in.uv.y + 1.0 * h)) * uv_xf.vf1.x;
++    acc += textureSample(src, src_samp, vec2f(in.uv.x, in.uv.y + 2.0 * h)) * uv_xf.vf1.y;
++    acc += textureSample(src, src_samp, vec2f(in.uv.x, in.uv.y + 3.0 * h)) * uv_xf.vf1.z;
++    return acc;
++}
++)"sv;
++
+ static constexpr std::string_view FragRGB565 = R"(
+ @fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+     let c = textureSample(src, src_samp, in.uv);
+@@ -233,6 +258,21 @@ static constexpr std::string_view FragGB8 = R"(
  }
  )"sv;
  
@@ -60,7 +216,7 @@ index 50f4c43..4aa33cb 100644
  // GX_TF_Z16: Upper 16-bits depth -> IA8
  static constexpr std::string_view FragZ16 = R"(
  @fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-@@ -269,6 +284,7 @@ static constexpr std::array ConvPipelines{
+@@ -269,6 +309,7 @@ static constexpr std::array ConvPipelines{
  
  static constexpr std::array DepthConvPipelines{
      ConvPipeline{GX_TF_Z16, FragZ16, wgpu::TextureFormat::RGBA8Unorm, "TexCopyConv Z16"},
@@ -68,6 +224,64 @@ index 50f4c43..4aa33cb 100644
  };
  
  static wgpu::BindGroupLayout g_bindGroupLayout;
+@@ -277,6 +318,7 @@ static wgpu::Sampler g_nearestSampler;
+ static wgpu::Sampler g_linearSampler;
+ static absl::flat_hash_map<GXTexFmt, wgpu::RenderPipeline> g_pipelines;
+ static wgpu::RenderPipeline g_blitPipeline;
++static wgpu::RenderPipeline g_vfilterPipeline;
+ 
+ static wgpu::RenderPipeline create_pipeline(const ConvPipeline& conv, const std::string_view shaderPreamble,
+                                             const wgpu::BindGroupLayout& bindGroupLayout) {
+@@ -350,7 +392,9 @@ void initialize() {
+       },
+       wgpu::BindGroupLayoutEntry{
+           .binding = 2,
+-          .visibility = wgpu::ShaderStage::Vertex,
++          // Fragment too: the vertical copy filter reads its taps from the same
++          // uniform, which keeps one bind group layout for every copy pipeline.
++          .visibility = wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Fragment,
+           .buffer =
+               wgpu::BufferBindingLayout{
+                   .type = wgpu::BufferBindingType::Uniform,
+@@ -393,6 +437,9 @@ void initialize() {
+   g_blitPipeline = create_pipeline(
+       {GX_TF_RGBA8, FragPassthrough, webgpu::g_graphicsConfig.surfaceConfiguration.format, "TexCopyConv Blit"},
+       ShaderPreamble, g_bindGroupLayout);
++  g_vfilterPipeline = create_pipeline(
++      {GX_TF_RGBA8, FragVFilter, webgpu::g_graphicsConfig.surfaceConfiguration.format, "TexCopyConv VFilter"},
++      ShaderPreamble, g_bindGroupLayout);
+   for (const auto& conv : ConvPipelines) {
+     g_pipelines[conv.fmt] = create_pipeline(conv, ShaderPreamble, g_bindGroupLayout);
+     if (conv.outputFormat != to_wgpu(conv.fmt)) {
+@@ -424,6 +471,7 @@ void initialize() {
+ void shutdown() {
+   g_pipelines.clear();
+   g_blitPipeline = {};
++  g_vfilterPipeline = {};
+   g_bindGroupLayout = {};
+   g_depthBindGroupLayout = {};
+   g_nearestSampler = {};
+@@ -507,4 +555,8 @@ void run(const wgpu::CommandEncoder& cmd, const ConvRequest& req) {
+ 
+ void blit(const wgpu::CommandEncoder& cmd, const ConvRequest& req) { execute(cmd, req, g_blitPipeline); }
+ 
++void vfilter_blit(const wgpu::CommandEncoder& cmd, const ConvRequest& req) {
++  execute(cmd, req, g_vfilterPipeline);
++}
++
+ } // namespace aurora::gfx::tex_copy_conv
+diff --git a/lib/gfx/tex_copy_conv.hpp b/lib/gfx/tex_copy_conv.hpp
+index 31aa804..f5c1b9c 100644
+--- a/lib/gfx/tex_copy_conv.hpp
++++ b/lib/gfx/tex_copy_conv.hpp
+@@ -25,5 +25,7 @@ void initialize();
+ void shutdown();
+ void run(const wgpu::CommandEncoder& cmd, const ConvRequest& req);
+ void blit(const wgpu::CommandEncoder& cmd, const ConvRequest& req);
++/* Same as blit, with GXSetCopyFilter's vertical filter applied. */
++void vfilter_blit(const wgpu::CommandEncoder& cmd, const ConvRequest& req);
+ 
+ } // namespace aurora::gfx::tex_copy_conv
 diff --git a/lib/gfx/texture.hpp b/lib/gfx/texture.hpp
 index ac7c91c..c214538 100644
 --- a/lib/gfx/texture.hpp
@@ -97,6 +311,37 @@ index ac7c91c..c214538 100644
    void reset() noexcept { ref.reset(); }
    [[nodiscard]] wgpu::SamplerDescriptor get_descriptor() const noexcept;
    operator bool() const noexcept { return ref.operator bool(); }
+diff --git a/lib/gfx/texture_replacement.cpp b/lib/gfx/texture_replacement.cpp
+index ad37737..5895439 100644
+--- a/lib/gfx/texture_replacement.cpp
++++ b/lib/gfx/texture_replacement.cpp
+@@ -783,6 +783,13 @@ bool dump_editable_texture_dds(const aurora::texture::TextureSourceKey& key, con
+ 
+   const auto dumpRoot =
+       std::filesystem::path{reinterpret_cast<const char8_t*>(aurora::g_config.cachePath)} / "texture_dumps";
++  // The directory was only ever created by load_replacement_directory, which
++  // returns early when no replacement root is configured -- so with dumps
++  // enabled and no replacement pack installed, every write failed silently and
++  // the feature looked like it simply did nothing.
++  if (!ensure_directory(dumpRoot)) {
++    return false;
++  }
+   const auto path = dumpRoot / format_replacement_filename(key);
+   return aurora::gfx::dds::write_rgba8_dds(path, texWidth, texHeight, pixels.data);
+ }
+@@ -1046,7 +1053,11 @@ std::optional<TextureHandle> find_replacement(const GXTexObj_& obj) noexcept {
+   ZoneScoped;
+ 
+   std::lock_guard lk(s_registryMutex);
+-  if (s_entriesByKey.empty()) {
++  // Not when dumping: the dump lives further down this function, so bailing on
++  // an empty registry made it unreachable in the one situation it exists for --
++  // no replacement pack installed yet, which is exactly when someone wants the
++  // textures written out in order to build one.
++  if (s_entriesByKey.empty() && !g_config.allowTextureDumps) {
+     return std::nullopt;
+   }
+ 
 diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
 index 9ca9036..76fb927 100644
 --- a/lib/gx/gx.cpp
@@ -173,6 +418,24 @@ index 9ca9036..76fb927 100644
    }
  }
  
+diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
+index 287bbd7..4d8f122 100644
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -345,6 +345,13 @@ struct GXState {
+   std::array<AttrArray, MaxVtxAttr> arrays;
+   gfx::ClipRect texCopySrc;
+   GXTexFmt texCopyFmt;
++  // GXSetCopyFilter's vertical filter: seven taps over EFB lines, weights out
++  // of 64. The default is the centre tap alone, i.e. no filtering, which is
++  // what an unset filter must behave as. Games enable a real one to deflicker
++  // the copy, and for an effect that copies its own output every frame that
++  // blur is also what keeps the feedback from compounding.
++  bool copyFilterEnabled = false;
++  std::array<u8, 7> copyFilter{0, 0, 0, 64, 0, 0, 0};
+   u16 texCopyDstWidth = 0;
+   u16 texCopyDstHeight = 0;
+   struct CopyTextureKey {
 diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
 index 3671ed5..7c6b9fb 100644
 --- a/lib/gx/shader.cpp

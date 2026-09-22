@@ -1281,6 +1281,71 @@ Tout le chemin du texturage indirect d'Aurora a été comparé ligne à ligne à
 - **La résolution interne n'est pas en cause.** Résoudre les copies EFB à leur
   taille déclarée au lieu de la résolution interne ne change rien à l'aspect.
 
+### Suite de l'enquête, 2026-09-22 : le filtre de copie EFB
+
+`GXSetCopyFilter` était une **fonction vide** dans Aurora alors que le jeu
+l'active à chaque démarrage (`src/game/init.c:134`, `vf=GX_TRUE` avec le filtre
+sept taps du mode d'affichage). Comme l'eau dessine sans mélange, prend sa
+`GXCopyTex` **après** son propre dessin (`water.c:885`) et réutilise cette copie
+comme TEXMAP0 à l'image suivante, elle se nourrit de sa propre sortie : ce
+filtre est le passe-bas qui empêche une telle boucle de s'emballer. L'hypothèse
+était donc solide.
+
+Elle est **réfutée par la mesure**. Le filtre a été implémenté (passage de
+shader à sept taps, pas d'une ligne EFB et non d'un texel de la source, ce qui
+importe dès que la résolution interne dépasse 480 lignes), et la trace confirme
+que la copie de l'eau l'emprunte réellement :
+
+```
+copy filter: 640x480 fmt=5 enabled=true conversion=false scaling=false -> FILTERED
+```
+
+L'aspect de l'eau est inchangé. Le filtre reste derrière
+`PARTYBOARD_EFB_COPY_FILTER` : c'est un manque réel comblé, qui rapproche toutes
+les copies EFB du rendu console, mais il ne corrige pas ce défaut et il touche
+aussi les ombres, donc il n'est pas activé par défaut sans vérification plus
+large.
+
+Également écarté ce jour : la **magnification**. L'utilisateur décrit « de gros
+pixels dès que la vague touche le bord », ce qui évoque un échantillonnage au
+plus proche — mais `init_texobj_common` met bien `mode0` bit 4 à 1, donc
+`mag_filter()` renvoie `GX_LINEAR`, et `water.c:883-884` copie le plein écran
+sans réduction. Les deux sont corrects.
+
+**Correction d'une conclusion antérieure** : le test
+`PARTYBOARD_EFB_COPY_NATIVE` du 2026-09-21 était vide de sens. Il forçait la
+copie à sa taille déclarée alors que la machine tournait déjà à
+`internalResolutionScale = 1`, donc en 640×480. Il ne pouvait rien montrer. La
+conclusion « la résolution n'est pas en cause » reste vraie, mais elle repose
+sur un autre fait : l'artefact persiste **à 640×480 natif**, c'est-à-dire à la
+résolution exacte de la console.
+
+### Les textures de l'eau sont correctes, 2026-09-22
+
+Exportées depuis le jeu en cours d'exécution (`PARTYBOARD_DUMP_TEXTURES`, voir
+plus bas), et regardées en image plutôt que déduites du code :
+
+| texture | contenu |
+|---|---|
+| 256×256 RGBA8 (TEXMAP1, relief indirect) | motif de vaguelettes — correct |
+| 64×64 I8 (TEXMAP3) | bruit fin — correct |
+| 256×256 RGB5A3 (TEXMAP2) | ondes circulaires — correct |
+
+**Correction d'une observation antérieure** : l'affirmation « TEXMAP2 se décode
+en une photo sans rapport » était une **mauvaise attribution**. La photographie
+(la vallée de Yosemite) existe réellement dans les données et se décode
+proprement — ce n'est donc pas de la mémoire non initialisée — mais elle n'est
+pas la texture de l'eau ; celle-ci est le motif d'ondes circulaires. C'est cette
+erreur d'attribution qui avait mené à l'hypothèse du « mauvais dump RVZ », elle
+aussi fausse : le disque de l'utilisateur rend correctement sous Dolphin.
+
+Deux défauts réels ont été corrigés dans l'export de textures d'Aurora pour
+obtenir ces images, tous deux silencieux : le dossier de destination n'était
+créé que par le chargement d'un pack de remplacement, et `find_replacement`
+sortait immédiatement sur un registre vide alors que l'export vit plus bas dans
+cette même fonction. L'export était donc inopérant pour quiconque n'avait pas
+déjà un pack installé — c'est-à-dire dans la seule situation où il sert.
+
 ### Fausses pistes à ne pas refaire
 
 - **« Le dump RVZ est mauvais »** : le SHA-1 du `.rvz` de l'utilisateur ne

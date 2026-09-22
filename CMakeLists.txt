@@ -521,6 +521,28 @@ endif ()
 install(FILES ${CMAKE_SOURCE_DIR}/initial_pipeline_cache.db
         DESTINATION ${CMAKE_INSTALL_PREFIX} OPTIONAL)
 
+# The install rule alone only helps a packaged build. A developer running from
+# the build directory gets whatever copy happens to sit there, which is how a
+# stale 207-pipeline seed was still being loaded after the recording had been
+# widened to 437 -- silently, since the engine reports how many rows merged but
+# not which generation of the file they came from. Keep the build directory in
+# step instead of relying on remembering to copy it by hand.
+if (EXISTS ${CMAKE_SOURCE_DIR}/initial_pipeline_cache.db)
+    # Depends on the seed itself rather than hanging off partyboard's POST_BUILD:
+    # a POST_BUILD only fires when the executable relinks, so recapturing the seed
+    # without touching any source would leave the stale copy in place -- which is
+    # precisely the failure this is here to prevent.
+    set(PIPELINE_SEED_STAGED ${CMAKE_BINARY_DIR}/initial_pipeline_cache.db)
+    add_custom_command(OUTPUT ${PIPELINE_SEED_STAGED}
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_SOURCE_DIR}/initial_pipeline_cache.db
+                ${PIPELINE_SEED_STAGED}
+        DEPENDS ${CMAKE_SOURCE_DIR}/initial_pipeline_cache.db
+        COMMENT "Staging the pipeline cache seed next to partyboard")
+    add_custom_target(stage_pipeline_seed ALL DEPENDS ${PIPELINE_SEED_STAGED})
+    add_dependencies(partyboard stage_pipeline_seed)
+endif()
+
 # TODO uncomment
 if (CMAKE_BUILD_TYPE STREQUAL Debug) #OR CMAKE_BUILD_TYPE STREQUAL RelWithDebInfo)
     set(DEBUG_FILES_LIST "")
