@@ -1784,6 +1784,39 @@ static void LoadTlutCached(GXTlutObj *tlutObj, bool *initialized, const u16 **lo
 }
 #endif
 
+#ifdef OPTIMIZED_TEXTURE_LOADING
+/* The GX format LoadTexture below builds for an HSF bitmap format. */
+static GXTexFmt HsfBitmapTexFmt(const HSFBITMAP *bmpPtr)
+{
+    switch (bmpPtr->dataFmt) {
+        case 6: return GX_TF_RGBA8;
+        case 4: return GX_TF_RGB565;
+        case 5: return GX_TF_RGB5A3;
+        case 0: return GX_TF_I4;
+        case 1: return GX_TF_I8;
+        case 2: return GX_TF_IA4;
+        case 3: return GX_TF_IA8;
+        case 7: return GX_TF_CMPR;
+        default: return (GXTexFmt)(bmpPtr->pixSize < 8 ? GX_TF_C4 : GX_TF_C8);
+    }
+}
+
+/* Whether a cached texture object still describes this bitmap.
+ *
+ * An animated attribute steps through a list of bitmaps with one cached
+ * GXTexObj, and only the data pointer is refreshed per frame. That is enough
+ * while every frame shares one size and format, and wrong as soon as they do
+ * not: the new pixels are then decoded with the first frame's layout. Slime
+ * Time's landing effect starts on a C4 bitmap and continues on RGB5A3 ones,
+ * which came out as solid white squares. The console builds a fresh object on
+ * every call, so it never had the problem. */
+static BOOL HsfTexObjMatches(GXTexObj *texObj, const HSFBITMAP *bmpPtr)
+{
+    return GXGetTexObjWidth(texObj) == (u16)bmpPtr->sizeX && GXGetTexObjHeight(texObj) == (u16)bmpPtr->sizeY
+        && GXGetTexObjFmt(texObj) == HsfBitmapTexFmt(bmpPtr);
+}
+#endif
+
 static void LoadTexture(HU3DMODEL *modelP, HSFBITMAP *bmpPtr, HSFATTRIBUTE *attrP, s16 texId)
 #ifdef OPTIMIZED_TEXTURE_LOADING
 {
@@ -1808,6 +1841,12 @@ static void LoadTexture(HU3DMODEL *modelP, HSFBITMAP *bmpPtr, HSFATTRIBUTE *attr
     var_r22 = (attrP->wrapS == 1) ? GX_REPEAT : GX_CLAMP;
     var_r21 = (attrP->wrapT == 1) ? GX_REPEAT : GX_CLAMP;
     var_r20 = (attrP->flag & 0x80) ? GX_TRUE : GX_FALSE;
+    if (attrP->tex_initialized && !HsfTexObjMatches(&attrP->tex_obj, bmpPtr)) {
+        attrP->tex_initialized = FALSE;
+    }
+    if (attrP->tex8000_initialized && (texId & 0x8000) && !HsfTexObjMatches(&attrP->tex8000_obj, bmpPtr)) {
+        attrP->tex8000_initialized = FALSE;
+    }
     switch (bmpPtr->dataFmt) {
         case 6:
             if (!attrP->tex_initialized) {

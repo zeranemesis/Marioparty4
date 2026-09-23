@@ -1237,7 +1237,76 @@ une capture d'écran d'émulateur ou de console pour trancher. À la différence
 G1, G2 ou Makin' Waves, l'écart est de *niveau* et non de *structure*, et c'est
 précisément le genre que la chaîne vidéo sait fabriquer toute seule.
 
-## Projecteurs blancs de Slime Time — mesuré, non résolu, 2026-09-23
+## Ballons de Hop or Pop — conforme à Dolphin, 2026-09-23
+
+Comparaison entre un enregistrement du port et une vidéo console
+(MarioPartyGaming, « All Minigames (Master Difficulty) », 32:04), sur la même
+vue de caméra.
+
+**Ce qui est établi :**
+
+- **La chaîne vidéo est neutre.** Le cadre du chronomètre, qui ne reçoit aucun
+  éclairage, vaut 57,39,23 sur la console et 59,37,25 sur le port.
+- **Le sol est fidèle.** Mesuré sur toute sa surface (environ 100 000 pixels) :
+  médiane 255,234,97 sur la console, 255,242,111 sur le port. Un premier
+  chiffre de « ×1,3 » venait de points mal placés sur le motif, il est faux.
+- **Les ballons des joueurs diffèrent vraiment.** Sur la console, le ballon de
+  Peach est rose saumon pastel avec un large reflet brillant. Sur le port, il
+  est rose plus foncé, saturé et mat. Leur matériau utilise un reflet
+  spéculaire (mode de sommet 2, puissance 50, canal `GX_COLOR1` en
+  `GX_AF_SPEC`), sans reflet d'environnement (`refAlpha = 0`).
+
+**Vérifié et conforme au SDK, donc écarté :** plafonnement de l'éclairage
+(`shader.cpp`), position de la lumière spéculaire (`GX_LARGE_NUMBER` vaut
+−1048576, le signe est donc correct), éclairage par sommet, couleurs par défaut
+de `GX_COLOR1A1`, translation nulle de `MTXInvXpose`, branchement de
+`GX_COLOR1A1` dans le TEV, direction de la lumière dans l'espace caméra (droit
+vers le bas, reflet attendu sur le haut-avant du ballon).
+
+**Expérience réfutée :** les normales S8 stockées mesurent 1,97 (en unités à
+6 bits de fraction) au lieu de 1. Ne plus les normaliser rend le dessus des
+ballons blanc brûlé, bien plus que sur la console. Aurora et Dolphin
+normalisent tous deux, et ce choix est le bon.
+
+**Tranché par Dolphin.** Une capture Dolphin de l'utilisateur, avec son
+disque, montre le ballon de Peach **rose et mat, identique au port**. Le port
+est donc fidèle à l'émulateur de référence. L'écart ne concerne que la vidéo
+YouTube, sans doute enregistrée sur une vraie console ou avec d'autres
+réglages. Si un comportement matériel en est la cause, Dolphin ne le reproduit
+pas non plus, et l'expérience des normales brutes montre qu'il ne s'agit pas
+simplement de la normalisation. Aucun correctif n'est justifié en l'état.
+
+## Carrés blancs de Slime Time — CORRIGÉ, 2026-09-23
+
+Confirmé en jeu par l'utilisateur : les carrés blancs ont disparu.
+
+**Ce n'étaient pas les projecteurs.** Une comparaison image par image avec une
+vidéo console (MarioPartyGaming, « All Minigames (Master Difficulty) »,
+Slime Time à 0:19-0:23) contre l'enregistrement du port l'a tranché :
+
+| instant | console | port avant correctif |
+|---|---|---|
+| « FINISH! », le gros slime retombe | lueur rose diffuse, confettis sombres | grands carrés blancs opaques à bords francs |
+| « MARIO WON! », projecteurs | cônes blancs en haut, magenta en bas | **identiques** |
+
+Les projecteurs ont toujours été corrects, et la section suivante, qui les
+visait, se trompait d'objet.
+
+**Cause.** L'objet fautif est l'effet n° 6 de `m402Dll` (`main.c:1071`), un
+modèle HSF animé joué à l'atterrissage du slime. Sous
+`OPTIMIZED_TEXTURE_LOADING`, `LoadTexture` (`hsfdraw.c`) construit un seul
+`GXTexObj` par attribut et, quand l'animation passe à l'image suivante, ne
+rafraîchit que le pointeur de données. Une sonde a montré que cet effet commence
+sur un bitmap **C4** et continue sur 28 bitmaps **RGB5A3** de même taille : les
+pixels RGB5A3 étaient décodés comme des indices de palette 4 bits. La console
+reconstruit l'objet à chaque appel et n'a jamais eu ce problème.
+
+**Correctif.** Avant d'utiliser l'objet en cache, `LoadTexture` vérifie qu'il a
+toujours la taille et le format du bitmap demandé, et le reconstruit sinon.
+`GXInitTexObj` d'Aurora remet l'objet à zéro avec un nouvel identifiant : pas de
+fuite, et le cas courant (toutes les images au même format) ne change pas.
+
+## Projecteurs blancs de Slime Time — mesuré, non résolu, 2026-09-23 (mauvaise cible, voir ci-dessus)
 
 Le défaut est **enfin vu** au lieu d'être décrit. Une image tirée d'un
 enregistrement de l'utilisateur, à l'écran de victoire de Slime Time
