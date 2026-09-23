@@ -1237,6 +1237,49 @@ une capture d'écran d'émulateur ou de console pour trancher. À la différence
 G1, G2 ou Makin' Waves, l'écart est de *niveau* et non de *structure*, et c'est
 précisément le genre que la chaîne vidéo sait fabriquer toute seule.
 
+## Projecteurs blancs de Slime Time — mesuré, non résolu, 2026-09-23
+
+Le défaut est **enfin vu** au lieu d'être décrit. Une image tirée d'un
+enregistrement de l'utilisateur, à l'écran de victoire de Slime Time
+(« MARIO WON! »), montre **quatre barres blanches verticales à bords francs**
+sur le damier, deux de chaque côté du personnage. Ce sont les projecteurs, et
+c'est ce que l'utilisateur appelait « les carrés blancs ».
+
+### Ce qui est établi par la mesure
+
+Une sonde sur le dessin des particules donne deux familles pendant cette scène :
+
+| | format | mélange | couleur | couleur mesurée |
+|---|---|---|---|---|
+| projecteurs | `dataFmt=8` (I4) | additif | du **sommet** | **`rgba=(255,255,255,255)`** |
+| confettis | `dataFmt=3` (C8) | normal | de la texture | `rgba=(38,38,0,30)` |
+
+- **Les bords francs s'expliquent sans bug.** La forme vient de l'alpha de la
+  texture, vérifiée directement depuis son export : alpha de 0 à 238, un vrai
+  dégradé. Avec un mélange **additif**, un dégradé qui sature produit des bords
+  francs. C'est le comportement attendu.
+- **Le blanc n'est pas un accident.** La couleur des particules provient de
+  `param->colorStart[]` interpolée vers `colorEnd[]` (`hsfanim.c:1277` et
+  `1367-1372`), c'est-à-dire des **données de l'effet**. Elle vaut blanc dès
+  l'apparition : ces particules sont blanches **par conception**.
+
+### Hypothèses écartées en chemin
+
+Texture non liée (aucune : sonde dédiée, zéro cas), décodage I4 (correct,
+`alpha = intensité`), alpha de la texture (dégradé conforme), palette des
+textures indexées (chargée à chaque appel), et le blanchiment plein écran de
+fin de mini-jeu, qui est une **transition** sans rapport (luminosité moyenne
+mesurée : 113 → 191 → 110 sur deux secondes).
+
+### Ce qu'il reste
+
+Si les particules sont blanches par conception, alors soit la teinte rose vient
+d'un chemin non identifié, soit **la référence console invoquée est fausse**.
+Cette même section du registre contenait déjà une affirmation erronée du même
+ordre — les confettis y étaient accusés à tort avant qu'une comparaison montre
+qu'ils sont blancs et gris sur console aussi. Trancher demande une capture
+console ou émulateur **de cet écran précis**, que personne n'a encore fournie.
+
 ## Ombres manquantes (G7 et Slime Time) — CORRIGÉ, 2026-09-22
 
 **Cause : la matrice de projection d'ombre valait `NaN` dans ses douze
@@ -1369,6 +1412,85 @@ le jeu active puis désactive le Z-texturing au sein d'une même image. L'opéra
 et le format occupent les bits libres de `ShaderConfig`, donc sa taille ne change
 pas et un Z-texturing désactivé garde la même empreinte : la graine de pipelines
 livrée reste valide.
+
+## Makin' Waves — CORRIGÉ, 2026-09-23
+
+Le défaut du bord du bassin (creux, eau qui « se tord », gros pixels dès que la
+vague touche le bord) est corrigé et confirmé en jeu.
+
+### La cause : une racine carrée d'un nombre négatif
+
+Pour chaque sommet situé dans le bassin, `water.c` calcule un poids de vague :
+
+```c
+var_f31 = 750.0f - distance;     /* de +100 à −100 pour une distance de 650 à 850 */
+if (var_f31 < 100.0f) {
+    var_f31 *= 0.01f;
+    poids = sqrtf(var_f31);      /* argument NÉGATIF dès que distance > 750 */
+}
+```
+
+Pour tout sommet de l'**anneau du bord** (rayon 750 à 850), l'argument est
+négatif. Le jeu a été compilé avec la `sqrtf` en ligne de MSL
+(`include/PowerPC_EABI_Support/Msl/MSL_C/MSL_Common/math.h`), qui fait
+`if (x > 0) { ... } return x;` : pour un argument négatif elle **renvoie
+l'argument lui-même**. Sur console, ces sommets reçoivent donc un petit poids
+négatif et bougent doucement à contre-sens de la vague.
+
+Le port, lui, lie la `sqrtf` du système, qui renvoie **NaN** pour un argument
+négatif. Chaque sommet du bord portait donc un poids NaN, et prenait une
+**position NaN** dès que le déplacement d'une vague l'atteignait : des triangles
+qui disparaissent ou partent n'importe où — exactement au bord, exactement quand
+la vague le touche. Correctif : reproduire la sémantique MSL à cet appel.
+
+### Pourquoi l'enquête a été si longue, et ce qui l'a débloquée
+
+Aucune hypothèse de rendu ne pouvait aboutir : **le rendu était correct**, et
+c'étaient ses données d'entrée qui étaient empoisonnées. Toute la série
+d'éliminations ci-dessous reste exacte — texturage indirect, matrices, copie
+EFB, filtre de copie, textures — mais elle cherchait au mauvais étage.
+
+C'est la cause des **ombres de Slime Time** (une base de visée dégénérée
+produisant un NaN) qui a fait regarder les NaN dans l'eau. Une première sonde a
+trouvé **116 à 146 normales NaN sur 1 080 à chaque image** ; les neutraliser n'a
+rien changé à l'écran, parce qu'elles n'étaient qu'un **symptôme** des positions
+NaN. Remonter à ce qui rendait les positions NaN a mené à la `sqrtf`.
+
+**Un test antérieur était faussé par ces NaN** : `PARTYBOARD_IND_SCALE=0`
+multipliait le décalage de relief par zéro pour le supprimer, mais
+**NaN × 0 = NaN** — il ne supprimait donc rien aux sommets contaminés. Sa
+conclusion ne valait rien, et elle a été refaite une fois les NaN éliminés.
+
+### Étendu à tout le jeu
+
+Le correctif n'est plus local à l'eau. `include/port/msl_sqrtf.h` donne à
+**tout le code du jeu** la sémantique de la `sqrtf` console, et il est injecté
+(`/FI` ou `-include`) dans les sources C du jeu et de chaque DLL de mini-jeu ou
+de plateau — **et nulle part ailleurs** : ni le C++ du port qui partage la même
+cible, ni Aurora, ni libco, vérifié sur `build.ninja`.
+
+La source faisant foi est `libc/math.h`, l'en-tête C réellement utilisé par le
+build console (`-i libc`, `-nosyspath`) : sa branche MWCC renvoie l'argument
+inchangé pour `x <= 0`, sa branche `#else` — celle que prend tout autre
+compilateur — se contente de déclarer la `sqrtf` système, qui renvoie NaN.
+
+- **Seul le cas `x <= 0` change.** Un argument positif atteint toujours la
+  `sqrtf` système : tout résultat fini aujourd'hui reste identique au bit près,
+  ce qui laisse le comportement existant et le verrouillage du jeu en ligne
+  intacts, sauf là où le port produisait un NaN.
+- **La `sqrt` en double précision n'est pas touchée** : `libc/math.h` y renvoie
+  NaN pour un négatif, exactement comme le système.
+- **Vérifié par désassemblage**, l'exécution d'un binaire de test étant bloquée
+  par Windows : `comiss`/`jbe` qui renvoie `x` pour zéro, négatif et NaN, puis
+  `sqrtss` — l'instruction même de la `sqrtf` système — pour un positif.
+- **Validé en jeu** : le correctif local de `water.c` a été retiré au profit de
+  la ligne d'origine du jeu, et le bord du bassin est resté propre.
+
+Le jeu compte **320 appels à `sqrtf`**. Les développeurs en ont protégé
+certains par `ABS()`, preuve que l'argument pouvait réellement devenir négatif,
+et ont laissé les autres sans garde parce que sur leur plateforme cela n'avait
+aucune conséquence. Chacun était un NaN latent sur PC ; ils sont tous couverts,
+y compris ceux dont personne n'avait encore remarqué l'effet.
 
 ## Makin' Waves — enquête du 2026-09-21 : ce qui est éliminé
 

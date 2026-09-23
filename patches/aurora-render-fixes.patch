@@ -1,40 +1,5 @@
-diff --git a/lib/dolphin/mtx/mtx.c b/lib/dolphin/mtx/mtx.c
-index ba2796d..ba28c95 100644
---- a/lib/dolphin/mtx/mtx.c
-+++ b/lib/dolphin/mtx/mtx.c
-@@ -531,6 +531,30 @@ void C_MTXLookAt(Mtx m, const Point3d* camPos, const Vec* camUp, const Point3d*
-   vLook.z = camPos->z - target->z;
-   VECNormalize(&vLook, &vLook);
-   VECCrossProduct(camUp, &vLook, &vRight);
-+  /* A camUp parallel to the view direction makes that cross product exactly
-+   * zero, and normalising it yields NaN for every element -- which then poisons
-+   * the whole matrix. Mario Party 4 reaches this: Slime Time's shadow light
-+   * passes normalize(camPos) as its up vector while looking at the origin, so up
-+   * and look are bit-identical (m402Dll/main.c:1830). The resulting shadow
-+   * matrix was entirely NaN and no surface could ever sample the shadow map.
-+   *
-+   * Pick any axis not parallel to vLook and rebuild from it. The roll about the
-+   * view axis is arbitrary in a degenerate case by definition, but it is a real
-+   * basis rather than NaN, and the light's projection is symmetric about that
-+   * axis anyway. */
-+  if (vRight.x == 0.0f && vRight.y == 0.0f && vRight.z == 0.0f) {
-+    Vec fallback;
-+    if (fabsf(vLook.x) < 0.5f) {
-+      fallback.x = 1.0f;
-+      fallback.y = 0.0f;
-+      fallback.z = 0.0f;
-+    } else {
-+      fallback.x = 0.0f;
-+      fallback.y = 1.0f;
-+      fallback.z = 0.0f;
-+    }
-+    VECCrossProduct(&fallback, &vLook, &vRight);
-+  }
-   VECNormalize(&vRight, &vRight);
-   VECCrossProduct(&vLook, &vRight, &vUp);
-   m[0][0] = vRight.x;
 diff --git a/lib/dolphin/gx/GXFrameBuffer.cpp b/lib/dolphin/gx/GXFrameBuffer.cpp
-index c196cf6..46ca1c1 100644
+index c196cf6..996ec20 100644
 --- a/lib/dolphin/gx/GXFrameBuffer.cpp
 +++ b/lib/dolphin/gx/GXFrameBuffer.cpp
 @@ -9,6 +9,7 @@
@@ -45,31 +10,15 @@ index c196cf6..46ca1c1 100644
  #include <cmath>
  
  namespace {
-@@ -17,6 +18,23 @@ aurora::Vec2<uint32_t> scale_copy_dst(u32 logicalWidth, u32 logicalHeight) {
+@@ -17,6 +18,7 @@ aurora::Vec2<uint32_t> scale_copy_dst(u32 logicalWidth, u32 logicalHeight) {
      return {logicalWidth, logicalHeight};
    }
  
-+  // Makin' Waves: everything that feeds the water shader has been proven
-+  // equivalent to Dolphin (matrices, biases, scales, wrap modes, texgens, the
-+  // generated WGSL against water.c stage for stage), and zeroing the indirect
-+  // offset does not remove the rim artifact -- so the effect's logic is right
-+  // and only its *detail* differs. water.c declares its reflection as a 640x480
-+  // GXInitTexObj and the effect was calibrated for that blur; resolving the copy
-+  // at internal resolution instead gives the perturbation ~9x more high frequency
-+  // content to smear, worst where the coordinate gradient is steepest, i.e. the
-+  // grazing far rim. This keeps EFB copies at their declared size so they carry
-+  // console-accurate detail while the rest of the frame stays sharp.
-+  // Opt-in for now: a blanket change would also shrink every other EFB-copy
-+  // effect (shadows among them), which must not regress.
-+  static const bool nativeCopies = std::getenv("PARTYBOARD_EFB_COPY_NATIVE") != nullptr;
-+  if (nativeCopies) {
-+    return {logicalWidth, logicalHeight};
-+  }
 +
    const auto [logicalFbWidth, logicalFbHeight] = aurora::gx::logical_fb_size();
    const auto [targetWidth, targetHeight] = aurora::gfx::get_render_target_size();
    if (logicalFbWidth == 0 || logicalFbHeight == 0 || targetWidth == 0 || targetHeight == 0) {
-@@ -141,7 +159,25 @@ void GXSetCopyClear(GXColor color, u32 depth) {
+@@ -141,7 +143,25 @@ void GXSetCopyClear(GXColor color, u32 depth) {
    __gx->bpSent = 1;
  }
  
@@ -145,17 +94,51 @@ index 5b88284..1e26ef5 100644
  }
  
  void GXSetNumTevStages(u8 num) {
+diff --git a/lib/dolphin/mtx/mtx.c b/lib/dolphin/mtx/mtx.c
+index ba2796d..ba28c95 100644
+--- a/lib/dolphin/mtx/mtx.c
++++ b/lib/dolphin/mtx/mtx.c
+@@ -531,6 +531,30 @@ void C_MTXLookAt(Mtx m, const Point3d* camPos, const Vec* camUp, const Point3d*
+   vLook.z = camPos->z - target->z;
+   VECNormalize(&vLook, &vLook);
+   VECCrossProduct(camUp, &vLook, &vRight);
++  /* A camUp parallel to the view direction makes that cross product exactly
++   * zero, and normalising it yields NaN for every element -- which then poisons
++   * the whole matrix. Mario Party 4 reaches this: Slime Time's shadow light
++   * passes normalize(camPos) as its up vector while looking at the origin, so up
++   * and look are bit-identical (m402Dll/main.c:1830). The resulting shadow
++   * matrix was entirely NaN and no surface could ever sample the shadow map.
++   *
++   * Pick any axis not parallel to vLook and rebuild from it. The roll about the
++   * view axis is arbitrary in a degenerate case by definition, but it is a real
++   * basis rather than NaN, and the light's projection is symmetric about that
++   * axis anyway. */
++  if (vRight.x == 0.0f && vRight.y == 0.0f && vRight.z == 0.0f) {
++    Vec fallback;
++    if (fabsf(vLook.x) < 0.5f) {
++      fallback.x = 1.0f;
++      fallback.y = 0.0f;
++      fallback.z = 0.0f;
++    } else {
++      fallback.x = 0.0f;
++      fallback.y = 1.0f;
++      fallback.z = 0.0f;
++    }
++    VECCrossProduct(&fallback, &vLook, &vRight);
++  }
+   VECNormalize(&vRight, &vRight);
+   VECCrossProduct(&vLook, &vRight, &vUp);
+   m[0][0] = vRight.x;
 diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
-index eff0c65..f3d785c 100644
+index eff0c65..5b61db1 100644
 --- a/lib/gfx/common.cpp
 +++ b/lib/gfx/common.cpp
-@@ -1,3 +1,5 @@
+@@ -1,3 +1,4 @@
 +#include <cstdlib>
-+#include <set>
  #include "common.hpp"
  
  #include "clear.hpp"
-@@ -161,6 +163,7 @@ struct RenderPass {
+@@ -161,6 +162,7 @@ struct RenderPass {
    GXTexFmt resolveFormat = GX_TF_RGBA8;
    ClipRect resolveRect;
    Range resolveUniformRange;
@@ -163,7 +146,7 @@ index eff0c65..f3d785c 100644
    Vec4<float> clearColorValue{0.f, 0.f, 0.f, 0.f};
    float clearDepthValue = gx::UseReversedZ ? 0.f : 1.f;
    wgpu::LoadOp colorLoadOp = wgpu::LoadOp::Undefined;
-@@ -570,13 +573,39 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
+@@ -570,13 +572,39 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
    // Push UV transform uniform for tex_copy_conv (crop region in UV space)
    const auto srcW = static_cast<float>(prevPass.targetSize.width);
    const auto srcH = static_cast<float>(prevPass.targetSize.height);
@@ -203,7 +186,7 @@ index eff0c65..f3d785c 100644
    enqueue_pass(current_frame_packet(), g_recordingFrameSlot, g_currentRenderPass);
  
    // Populate new render pass from previous
-@@ -1327,8 +1356,31 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+@@ -1327,8 +1355,16 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
          .dst = passInfo.resolveTarget,
          .sampleFilter = needsScaling ? tex_copy_conv::SampleFilter::Linear : tex_copy_conv::SampleFilter::Nearest,
      };
@@ -213,21 +196,6 @@ index eff0c65..f3d785c 100644
 +    // describes a colour filter and averaging depth would be meaningless.
 +    const bool filtered = passInfo.resolveFiltered && !isDepth
 +        && std::getenv("PARTYBOARD_EFB_COPY_FILTER") != nullptr;
-+    if (std::getenv("PARTYBOARD_EFB_COPY_FILTER") != nullptr) {
-+      // Reporting only the first copy said nothing about the one that matters:
-+      // a run makes many, and the water's is not the first. Keyed on the shape
-+      // of the copy so each distinct kind is reported once instead.
-+      static std::set<uint64_t> reported;
-+      const uint64_t key = (static_cast<uint64_t>(passInfo.resolveFormat) << 32) ^
-+                           (static_cast<uint64_t>(dstSize.width) << 16) ^ dstSize.height ^
-+                           (needsConversion ? 1ull << 48 : 0) ^ (needsScaling ? 1ull << 49 : 0) ^
-+                           (passInfo.resolveFiltered ? 1ull << 50 : 0);
-+      if (reported.insert(key).second) {
-+        Log.warn("copy filter: {}x{} fmt={} enabled={} conversion={} scaling={} depth={} -> {}", dstSize.width,
-+                 dstSize.height, static_cast<int>(passInfo.resolveFormat), passInfo.resolveFiltered, needsConversion,
-+                 needsScaling, isDepth, (filtered && !needsConversion) ? "FILTERED" : "not filtered");
-+      }
-+    }
      if (needsConversion) {
        tex_copy_conv::run(cmd, convReq);
 +    } else if (filtered) {
@@ -452,10 +420,15 @@ index 9748556..db28fb9 100644
    case 0xF6:
    case 0xF7:
 diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
-index 9ca9036..9af2835 100644
+index 9ca9036..a17cb60 100644
 --- a/lib/gx/gx.cpp
 +++ b/lib/gx/gx.cpp
-@@ -445,27 +445,48 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ #include "gx.hpp"
+ 
+ #include "pipeline.hpp"
+@@ -445,27 +446,48 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
  
      GXTexObj_ obj = g_gxState.loadedTextures[i];
      auto& textureBind = g_gxState.textures[i];
@@ -518,7 +491,7 @@ index 9ca9036..9af2835 100644
      } else if (copyRef != nullptr) {
        handle = copyRef->handle;
      } else if (obj.data != nullptr) {
-@@ -473,7 +494,7 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
+@@ -473,7 +495,7 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
      }
  
      obj.mFormat = resolved_format_for_handle(handle);
@@ -527,7 +500,7 @@ index 9ca9036..9af2835 100644
    }
  }
  
-@@ -782,6 +803,11 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
+@@ -782,6 +804,11 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
  
    const auto& vtxFmt = g_gxState.vtxFmts[fmt];
    config.shaderConfig.fogType = g_gxState.fog.type;
@@ -586,19 +559,10 @@ index 287bbd7..cdceb49 100644
    u8 lineMode : 2 = 0;
  };
 diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
-index 3671ed5..aec7e48 100644
+index 3671ed5..e46fd80 100644
 --- a/lib/gx/shader.cpp
 +++ b/lib/gx/shader.cpp
-@@ -9,6 +9,8 @@
- #include <dolphin/gx/GXEnum.h>
- 
- #include <absl/container/flat_hash_set.h>
-+#include <cstdlib>
-+#include <fstream>
- #include <mutex>
- #include <string_view>
- #include <utility>
-@@ -80,6 +82,23 @@ static std::string alpha_bump_sel(size_t stageIdx, const ShaderConfig& config, c
+@@ -80,6 +80,23 @@ static std::string alpha_bump_sel(size_t stageIdx, const ShaderConfig& config, c
    }
  }
  
@@ -622,7 +586,7 @@ index 3671ed5..aec7e48 100644
  static bool uses_texture_sample(const TevStage& stage) noexcept {
    const auto& c = stage.colorPass;
    const auto& a = stage.alphaPass;
-@@ -1294,13 +1313,16 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+@@ -1294,13 +1311,16 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
    if (info.usedIndStages.any()) {
      fragmentFnPre += "\n    var t_TexCoord = vec2f(0.0);";
    }
@@ -640,7 +604,7 @@ index 3671ed5..aec7e48 100644
      if (!needsTevTexCoord && !needsTextureSample) {
        continue;
      }
-@@ -1469,7 +1491,55 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+@@ -1469,7 +1489,55 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
      fragmentFnPre +=
          fmt::format("\n    var sampled{0} = textureSampleBias(tex{1}, tex{1}_samp, {2}, ubuf.tex{1}_size_bias.z);", i,
                      underlying(stage.texMapId), uvIn);
@@ -696,7 +660,7 @@ index 3671ed5..aec7e48 100644
    if (info.usesPTTexMtx.any())
      uniBufAttrs += fmt::format("\n    postmtx: array<mat3x4f, {}>,", MaxPTTexMtx);
    if (info.usesFog) {
-@@ -1920,17 +1990,38 @@ fn vs_main(
+@@ -1920,13 +1988,15 @@ fn vs_main(
      return out;
  }}
  
@@ -715,31 +679,8 @@ index 3671ed5..aec7e48 100644
    if (EnableDebugPrints) {
      Log.info("Generated shader: {}", shaderSource);
    }
- 
-+  // Makin' Waves: the indirect path is exonerated (PARTYBOARD_IND_SCALE=0 leaves
-+  // the rim artifact) and the EFB copy resolves correctly (PARTYBOARD_DEBUG_WATERTEX
-+  // reports tex0 bound as the resolved RGB565 copy), so the remaining unknown is
-+  // how the TEV stages actually combine the reflection and the two bump textures.
-+  // Reading the generator's branches is not the same as reading its output, so this
-+  // writes out the water draw's own WGSL once. Gated on water.c's three indirect
-+  // stages plus its exact matrix signature to avoid the all-shaders dump that
-+  // EnableDebugPrints would produce. Diagnostic only.
-+  if (config.numIndStages == 3 && g_gxState.indTexMtxs[0].scaleExp == -2 &&
-+      g_gxState.indTexMtxs[2].scaleExp == -3 && std::getenv("PARTYBOARD_DUMP_WATER_SHADER") != nullptr) {
-+    static bool dumped = false;
-+    if (!dumped) {
-+      dumped = true;
-+      std::ofstream out("water_shader.wgsl", std::ios::binary);
-+      out << shaderSource;
-+      Log.warn("wrote water_shader.wgsl ({} bytes)", shaderSource.size());
-+    }
-+  }
-+
-   return shaderSource;
- }
- 
 diff --git a/lib/gx/shader_info.cpp b/lib/gx/shader_info.cpp
-index bb9ddec..c7e6295 100644
+index bb9ddec..e906aef 100644
 --- a/lib/gx/shader_info.cpp
 +++ b/lib/gx/shader_info.cpp
 @@ -1,6 +1,7 @@
@@ -771,72 +712,8 @@ index bb9ddec..c7e6295 100644
    info.uniformSize += info.sampledTextures.count() * sizeof(Vec4<float>);
    info.uniformSize = gfx::align_uniform(info.uniformSize);
    if (info.uniformSize > MaxUniformSize) {
-@@ -466,21 +481,72 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
-     buf.append(
-         Vec4{static_cast<f32>(scale.scaleS) + 1.0f, static_cast<f32>(scale.scaleT) + 1.0f, 0.0f, 0.0f});
-   }
-+  // Makin' Waves edge distortion, third pass. The whole indirect-texturing path
-+  // has now been checked against Dolphin's PixelShaderGen line by line -- matrix
-+  // row/column mapping, the -128 bias, the format shift, the per-fragment
-+  // perspective divide, the SU scale, and the offset magnitude (both come out at
-+  // +/-16 texels for water.c's matrix 0) are all equivalent. Static analysis is
-+  // out of hypotheses, so this makes the perturbation amplitude adjustable at
-+  // runtime to bisect empirically: PARTYBOARD_IND_SCALE=0 removes the indirect
-+  // offset entirely, which tells us whether the rim artifact comes from indirect
-+  // texturing at all. Folded into the existing exp2(scaleExp) uniform on purpose,
-+  // so the generated shader source is unchanged and a warm pipeline cache cannot
-+  // silently ignore the setting. Diagnostic only; remove once understood.
-+  static const float indScaleDebug = [] {
-+    const char* v = std::getenv("PARTYBOARD_IND_SCALE");
-+    if (v == nullptr) {
-+      return 1.0f;
-+    }
-+    const float parsed = std::strtof(v, nullptr);
-+    Log.warn("PARTYBOARD_IND_SCALE={} -- indirect texture offsets scaled by {}", v, parsed);
-+    return parsed;
-+  }();
-   if (info.usedIndTexMtxs.any()) {
-     for (int i = 0; i < MaxIndTexMtxs; ++i) {
-       const auto& mtx = g_gxState.indTexMtxs[i];
-       buf.append(Vec4{mtx.mtx.m0.x, mtx.mtx.m0.y, mtx.mtx.m1.x, mtx.mtx.m1.y});
--      buf.append(Vec4{mtx.mtx.m2.x, mtx.mtx.m2.y, std::exp2f(mtx.scaleExp), 0.0f});
--    }
--  }
-+      buf.append(Vec4{mtx.mtx.m2.x, mtx.mtx.m2.y, std::exp2f(mtx.scaleExp) * indScaleDebug, 0.0f});
-+    }
-+  }
-+  // With the indirect offset forced to zero the rim artifact survives, so the
-+  // perturbation is not the cause and the reflection texture itself is the
-+  // remaining suspect. water.c hands GXCopyTex an uninitialised malloc buffer
-+  // (water.c:323) and binds that same pointer as TEXMAP0 (water.c:775); on
-+  // hardware the copy fills it, on aurora GXCopyTex only uses the pointer as a
-+  // cache key and resolves into a texture at internal render resolution
-+  // (scale_copy_dst), while the texture object still declares 640x480. This
-+  // reports whether that resolution actually succeeds for the water draw:
-+  // a bind with copyRevision == 0 or a null handle means TEXMAP0 is being fed
-+  // something other than the resolved copy. Gated on water.c's exact indirect
-+  // matrix signature so it neither spams nor touches any other draw, and on
-+  // PARTYBOARD_DEBUG_WATERTEX. Diagnostic only.
-+  const bool debugWaterTex = info.usedIndTexMtxs.any() && g_gxState.indTexMtxs[0].scaleExp == -2 &&
-+                             g_gxState.indTexMtxs[2].scaleExp == -3 &&
-+                             std::getenv("PARTYBOARD_DEBUG_WATERTEX") != nullptr;
-   for (int i = 0; i < info.sampledTextures.size(); ++i) {
-     if (!info.sampledTextures.test(i)) {
-       continue;
-     }
-     const auto& tex = get_texture(static_cast<GXTexMapID>(i));
+@@ -481,6 +496,11 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
      // CHECK(tex, "unbound texture {}", i);
-+    if (debugWaterTex) {
-+      static u32 lastRev[GX_MAX_TEXMAP] = {};
-+      static bool seen[GX_MAX_TEXMAP] = {};
-+      if (i < GX_MAX_TEXMAP && (!seen[i] || lastRev[i] != tex.copyRevision)) {
-+        seen[i] = true;
-+        lastRev[i] = tex.copyRevision;
-+        Log.warn("water tex{}: bound={} texObj={}x{} fmt={} copyRevision={} mips={}", i,
-+                 static_cast<bool>(tex), tex.texObj.width(), tex.texObj.height(), tex.texObj.format(),
-+                 tex.copyRevision, tex.texObj.mip_count());
-+      }
-+    }
      buf.append(texture_size_bias(tex));
    }
 +  if (info.usesZTex) {

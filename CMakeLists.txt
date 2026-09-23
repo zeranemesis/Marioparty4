@@ -203,6 +203,19 @@ source_group("Game" FILES ${GAME_FILES})
 source_group("Port" FILES ${PORT_FILES})
 
 add_library(dol SHARED ${GAME_FILES} ${PORT_FILES} extern/libco/libco.c)
+
+# The game was built against the console libc's inline sqrtf, which returns a
+# zero or negative argument unchanged; the system sqrtf returns NaN instead. That
+# difference is what broke Makin' Waves' pool rim. Force-include a shim into the
+# game's own C sources only -- not PORT_FILES, which share this target but are the
+# port's C++, and not Aurora. See include/port/msl_sqrtf.h.
+set(MSL_SQRTF_SHIM ${CMAKE_SOURCE_DIR}/include/port/msl_sqrtf.h)
+if (MSVC)
+    set(MSL_SQRTF_FLAG "/FI${MSL_SQRTF_SHIM}")
+else ()
+    set(MSL_SQRTF_FLAG -include ${MSL_SQRTF_SHIM})
+endif ()
+set_property(SOURCE ${GAME_FILES} APPEND PROPERTY COMPILE_OPTIONS ${MSL_SQRTF_FLAG})
 set_target_properties(dol PROPERTIES C_VISIBILITY_PRESET default CXX_VISIBILITY_PRESET default)
 target_compile_definitions(dol PRIVATE TARGET_PC NON_MATCHING OPTIMIZED_TEXTURE_LOADING BYTESWAPPING TARGET_DOL VERSION=${VERSION} MUSY_VERSION_MAJOR=1 MUSY_VERSION_MINOR=5 MUSY_VERSION_PATCH=4)
 target_include_directories(dol PRIVATE include extern extern/aurora/include extern/aurora/include/dolphin ${CMAKE_BINARY_DIR})
@@ -337,6 +350,7 @@ foreach (dir ${REL_TARGETS})
                 target_sources(${dir} PRIVATE src/REL/board_executor.c)
             endif()
             target_compile_definitions(${dir} PRIVATE TARGET_PC OPTIMIZED_TEXTURE_LOADING BYTESWAPPING NON_MATCHING VERSION=${VERSION})
+            target_compile_options(${dir} PRIVATE ${MSL_SQRTF_FLAG})
             target_include_directories(${dir} PRIVATE include extern extern/aurora/include extern/aurora/include/dolphin)
             if (MSVC)
                 set_target_properties(${dir} PROPERTIES LINK_FLAGS "/EXPORT:ObjectSetup")
