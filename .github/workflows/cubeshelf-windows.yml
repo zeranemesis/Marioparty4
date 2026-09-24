@@ -12,6 +12,16 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      # A build has to be testable without reaching every CubeShelf. On 2026-09-24 a branch cut
+      # from a stale base was run through here and republished cubeshelf-nightly 26 commits
+      # behind audio-local; there was no way to build and self-test it without publishing it.
+      # Off: build, run every self-test and keep the Actions artifact, publish nothing.
+      publish:
+        description: "Publish the release and refresh cubeshelf-nightly"
+        required: true
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -177,13 +187,19 @@ jobs:
             Remove-Item $zip -Force
           }
 
-          Compress-Archive -Path "build/install/*" -DestinationPath $zip -Force
-
-          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $zip" | Set-Content "checksums.txt" -Encoding ascii
-
           $shortSha = "${{ github.sha }}".Substring(0, 12)
           $changes = (git log -5 --pretty=format:"%h %s") -join "`n"
+
+          # What a launcher may ask of the companion in this package. CubeShelf reads it from the
+          # manifest.json beside PartyBoardOnline.exe -- inside the zip, where it lands on disk --
+          # rather than probing, because an older companion treats an unknown flag as no flag and
+          # opens its ordinary window. Until 2026-09-24 this package carried no manifest at all:
+          # only package_release.ps1 wrote one, and CubeShelf judged every CI-built companion too
+          # old to drive. Declared only when the code behind it is in this tree, so the flag cannot
+          # outlive the feature.
+          $capabilities = @()
+          if (Test-Path "tools/online/Startup.cs") { $capabilities += "launcher-invites" }
+
 
           $manifest = [ordered]@{
             schema = 1
@@ -201,8 +217,17 @@ jobs:
               "GMPE01_00",
               "GMPE01_01"
             )
+            capabilities = $capabilities
             changes = $changes
           } | ConvertTo-Json -Depth 6
+
+          # Inside the package first, then beside it for the release. Not part of the folder hash:
+          # Wire.BuildHash covers the DLLs and the two executables only.
+          Set-Content "build/install/manifest.json" -Value $manifest -Encoding utf8
+          Compress-Archive -Path "build/install/*" -DestinationPath $zip -Force
+
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $zip" | Set-Content "checksums.txt" -Encoding ascii
 
           Set-Content "manifest.json" -Value $manifest -Encoding utf8
 
@@ -228,6 +253,8 @@ jobs:
           retention-days: 14
 
       - name: Publish release
+        # A tag always publishes; a hand-pressed run publishes unless asked not to.
+        if: github.event_name == 'push' || inputs.publish
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
