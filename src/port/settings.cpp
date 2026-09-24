@@ -80,7 +80,12 @@ UserSettings g_userSettings = {
         .checkForUpdates {"backend.checkForUpdates", true},
         .cardFileType {"backend.cardFileType", static_cast<int>(CARD_RAWIMAGE)},
         .enableAdvancedSettings {"backend.enableAdvancedSettings", false},
-    }
+    },
+    .retroAchievements = {
+        .enabled {"retroAchievements.enabled", true},
+        .username {"retroAchievements.username", ""},
+        .token {"retroAchievements.token", ""},
+    },
 };
 
 UserSettings& getSettings() {
@@ -135,6 +140,10 @@ void registerSettings() {
     Register(g_userSettings.backend.checkForUpdates);
     Register(g_userSettings.backend.cardFileType);
     Register(g_userSettings.backend.enableAdvancedSettings);
+
+    Register(g_userSettings.retroAchievements.enabled);
+    Register(g_userSettings.retroAchievements.username);
+    Register(g_userSettings.retroAchievements.token);
 }
 
 }

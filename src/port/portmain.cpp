@@ -34,6 +34,7 @@
 #include <port/settings.h>
 #include <port/netplay_runtime.h>
 #include <port/port_version.h>
+#include <port/retroachievements.h>
 
 #include <aurora/dvd.h>
 #include <aurora/lib/logging.hpp>
@@ -717,6 +718,8 @@ extern "C" int port_main(int argc, char* argv[]) {
         PartyBoard_NetplayTrace(diagnostic);
     }
     LanguageInit();
+    // After the disc is known: the achievement set is chosen by its hash.
+    PartyBoard_RAInit();
 
     // OSInit();
 
@@ -738,6 +741,7 @@ extern "C" int port_main(int argc, char* argv[]) {
 
     // Notifies all CVs and causes threads to exit
     OSResetSystem(OS_RESET_SHUTDOWN, 0, 0);
+    PartyBoard_RAShutdown();
 
 #ifdef PARTY_BOARD_DISCORD
     partyboard::discord::shutdown();

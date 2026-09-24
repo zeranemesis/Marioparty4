@@ -100,6 +100,8 @@ FetchContent_Declare(json
 )
 FetchContent_MakeAvailable(json)
 
+include(cmake/rcheevos.cmake)
+
 set(VERSION 1)
 set(PARTY_BOARD_BUNDLE_NAME PartyBoard)
 set(PARTY_BOARD_BUNDLE_IDENTIFIER com.mariopartyrd.partyboard)
@@ -223,6 +225,25 @@ if (tracy_SOURCE_DIR)
     target_include_directories(dol PRIVATE ${tracy_SOURCE_DIR}/profiler/src)
 endif()
 target_link_libraries(dol PUBLIC aurora::core aurora::card aurora::dvd aurora::gx aurora::mtx aurora::os aurora::si aurora::vi aurora::pad musyx absl::flat_hash_map nlohmann_json::nlohmann_json fmt::fmt rmlui_debugger)
+target_link_libraries(dol PRIVATE rcheevos)
+# HTTPS for RetroAchievements, through each platform's own networking stack
+# (include/port/http.hpp). Only the curl backend needs anything from the system;
+# without it the feature is simply unavailable rather than breaking the build.
+if (WIN32)
+    target_link_libraries(dol PRIVATE winhttp)
+elseif (APPLE)
+    target_sources(dol PRIVATE src/port/http_apple.m)
+    set_source_files_properties(src/port/http_apple.m PROPERTIES COMPILE_FLAGS -fobjc-arc)
+    target_link_libraries(dol PRIVATE "-framework Foundation")
+elseif (NOT ANDROID)
+    find_package(CURL QUIET)
+    if (CURL_FOUND)
+        target_compile_definitions(dol PRIVATE PARTYBOARD_HAVE_CURL)
+        target_link_libraries(dol PRIVATE CURL::libcurl)
+    else ()
+        message(WARNING "libcurl not found: RetroAchievements will be unavailable in this build")
+    endif ()
+endif ()
 if (WIN32)
     target_link_libraries(dol PUBLIC ws2_32)
     # dbghelp is loaded lazily by the crash reporter for MiniDumpWriteDump, but
@@ -395,12 +416,22 @@ if (ANDROID)
 endif ()
 
 if (NOT APPLE)
-    add_custom_command(TARGET partyboard POST_BUILD
+    # Depends on the files themselves, not on the executable being relinked:
+    # as a POST_BUILD step, a change to a stylesheet alone never reached the
+    # build directory, and the game kept showing the old one.
+    file(GLOB_RECURSE PARTY_BOARD_RES_FILES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/res/*")
+    set(PARTY_BOARD_RES_STAMP ${CMAKE_BINARY_DIR}/res.stamp)
+    add_custom_command(OUTPUT ${PARTY_BOARD_RES_STAMP}
             COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_SOURCE_DIR}/res"
             "$<TARGET_FILE_DIR:partyboard>/res"
+            COMMAND ${CMAKE_COMMAND} -E touch ${PARTY_BOARD_RES_STAMP}
+            DEPENDS ${PARTY_BOARD_RES_FILES}
             COMMENT "Copying resources"
+            VERBATIM
     )
+    add_custom_target(partyboard_resources ALL DEPENDS ${PARTY_BOARD_RES_STAMP})
+    add_dependencies(partyboard partyboard_resources)
 endif ()
 #
 if (WIN32)

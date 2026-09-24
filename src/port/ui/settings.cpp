@@ -12,6 +12,8 @@
 #include "menu_bar.hpp"
 #include "number_button.hpp"
 #include "pane.hpp"
+#include "port/retroachievements.h"
+#include "string_button.hpp"
 #include "prelaunch.hpp"
 #include "ui.hpp"
 
@@ -20,6 +22,14 @@
 #include <game/disp.h>
 #include <gx/GXAurora.h>
 #include <vi.h>
+
+namespace {
+// The RetroAchievements login fields. Typed in the settings and handed to
+// rcheevos on "Log In"; the password is never saved and is cleared as soon
+// as it has been sent.
+Rml::String s_raPendingUser;
+Rml::String s_raPendingPassword;
+} // namespace
 
 namespace partyboard::ui {
 namespace {
@@ -701,6 +711,58 @@ SettingsWindow::SettingsWindow(bool prelaunch)
         // addCheat("Infinite Hearts", getSettings().game.infiniteHearts, "Keeps your health full.");
 
         // leftPane.add_section("Abilities");
+    });
+
+    add_tab("RetroAchievements", [this](Rml::Element *content) {
+        auto &leftPane = add_child<Pane>(content, Pane::Type::Controlled);
+        auto &rightPane = add_child<Pane>(content, Pane::Type::Uncontrolled);
+
+        if (s_raPendingUser.empty()) {
+            s_raPendingUser = getSettings().retroAchievements.username.getValue();
+        }
+
+        leftPane.add_section("Account");
+        leftPane.register_control(leftPane.add_select_button({
+                                      .key = "Status",
+                                      .getValue = [] { return Rml::String { ra::statusText() }; },
+                                  }),
+            rightPane, [](Pane &pane) {
+                pane.add_text("Achievements are unlocked in softcore mode. Hardcore needs the "
+                              "RetroAchievements team to validate this client first.");
+                pane.add_text("Online sessions do not count toward achievements.");
+            });
+        config_bool_select(leftPane, rightPane, getSettings().retroAchievements.enabled,
+            {
+                .key = "Enable RetroAchievements",
+                .helpText = "Connect to retroachievements.org and unlock achievements while you play. "
+                            "Takes effect the next time the game starts.",
+            });
+        leftPane.register_control(leftPane.add_child<StringButton>(StringButton::Props {
+                                      .key = "Username",
+                                      .getValue = [] { return s_raPendingUser; },
+                                      .setValue = [](Rml::String value) { s_raPendingUser = std::move(value); },
+                                      .maxLength = 64,
+                                  }),
+            rightPane, [](Pane &pane) { pane.add_text("Your retroachievements.org username."); });
+        leftPane.register_control(leftPane.add_child<StringButton>(StringButton::Props {
+                                      .key = "Password",
+                                      .getValue = [] { return s_raPendingPassword; },
+                                      .setValue = [](Rml::String value) { s_raPendingPassword = std::move(value); },
+                                      .maxLength = 256,
+                                      .type = "password",
+                                      .secret = true,
+                                  }),
+            rightPane, [](Pane &pane) {
+                pane.add_text("Only used to log in. It is not saved: the game keeps the session "
+                              "token the server returns instead.");
+            });
+        leftPane.register_control(leftPane.add_button("Log In").on_pressed([] {
+            ra::loginWithPassword(s_raPendingUser, s_raPendingPassword);
+            s_raPendingPassword.clear();
+        }),
+            rightPane, [](Pane &pane) { pane.add_text("Log in with the username and password above."); });
+        leftPane.register_control(leftPane.add_button("Log Out").on_pressed([] { ra::logout(); }),
+            rightPane, [](Pane &pane) { pane.add_text("Forget the saved session on this computer."); });
     });
 
     add_tab("Interface", [this](Rml::Element *content) {

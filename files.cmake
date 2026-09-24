@@ -87,6 +87,9 @@ set(PORT_FILES
         src/port/coroutine_stack.cpp
         src/port/crash_manifest.cpp
         src/port/crash_uploader.cpp
+        src/port/http.cpp
+        src/port/retroachievements.cpp
+        src/port/retroachievements_memory.cpp
         src/port/board_coverage.cpp
         src/port/crash_report.cpp
         src/port/dolassets.cpp

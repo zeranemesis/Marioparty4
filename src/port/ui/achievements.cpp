@@ -3,6 +3,7 @@
 #include "achievements.hpp"
 
 #include "port/achievements.h"
+#include "port/retroachievements.h"
 #include "fmt/format.h"
 #include "nav_types.hpp"
 #include "pane.hpp"
@@ -103,11 +104,117 @@ namespace {
         bool mConfirming = false;
     };
 
+    Rml::String build_ra_info_rml(const ra::AchievementInfo &a)
+    {
+        Rml::String s = fmt::format(R"(<div class="achievement-header">)"
+                                    R"(<span class="achievement-name{}">{}</span>)"
+                                    R"(<span class="achievement-badge{}">{} - {} pts</span>)"
+                                    R"(</div>)"
+                                    R"(<p class="achievement-desc">{}</p>)",
+            a.unlocked ? " unlocked" : "", a.title, a.unlocked ? " unlocked" : " locked",
+            ui_translate(a.unlocked ? "Unlocked" : "Locked"), a.points, a.description);
+        // Every row gets a bar. Only achievements the set measures have steps in
+        // between ("3/9"); the others are all-or-nothing in RetroAchievements,
+        // so their bar is empty until the unlock and full after it.
+        float fraction = 0.0f;
+        Rml::String label;
+        if (a.unlocked) {
+            fraction = 1.0f;
+            label = ui_translate("Unlocked");
+        } else if (!a.progress.empty()) {
+            fraction = a.progressPercent / 100.0f;
+            label = fmt::format("{} ({:.0f}%)", a.progress, a.progressPercent);
+        } else {
+            label = "0%";
+        }
+        s += fmt::format(R"(<progress value="{:.3f}" class="{}"/>)"
+                         R"(<span class="achievement-progress">{}</span>)",
+            fraction, a.unlocked ? "progress-done" : "progress-ongoing", label);
+        return s;
+    }
+
+    // A RetroAchievements row: read-only, the server owns the unlock.
+    class RaAchievementRow : public FluentComponent<RaAchievementRow> {
+    public:
+        RaAchievementRow(Rml::Element *parent, const ra::AchievementInfo &a)
+            : FluentComponent(createRowRoot(parent))
+        {
+            auto *infoDiv = append(mRoot, "div");
+            infoDiv->SetClass("achievement-info", true);
+            infoDiv->SetInnerRML(build_ra_info_rml(a));
+        }
+
+    private:
+        static Rml::Element *createRowRoot(Rml::Element *parent)
+        {
+            auto *doc = parent->GetOwnerDocument();
+            auto elem = doc->CreateElement("div");
+            elem->SetClass("achievement-row", true);
+            return parent->AppendChild(std::move(elem));
+        }
+    };
+
 } // namespace
+
+void AchievementsWindow::buildRetroAchievements()
+{
+    mRetroAchievements = true;
+    mRaRevision = ra::revision();
+    // An opaque, higher-contrast variant of the window (res/rml/window.rcss):
+    // the list is read over a busy game scene.
+    mRoot->SetClass("achievements", true);
+    {
+        auto elem = mDocument->CreateElement("div");
+        elem->SetClass("achievement-total", true);
+        mTotalEl = mRoot->AppendChild(std::move(elem));
+        updateTotal();
+    }
+    for (const bool unlockedTab : { false, true }) {
+        add_tab(unlockedTab ? "Unlocked" : "Locked", [this, unlockedTab](Rml::Element *content) {
+            const auto list = ra::achievements();
+            auto &pane = add_child<Pane>(content, Pane::Type::Controlled);
+            int unlocked = 0;
+            uint32_t points = 0, totalPoints = 0;
+            for (const auto &a : list) {
+                unlocked += a.unlocked;
+                totalPoints += a.points;
+                points += a.unlocked ? a.points : 0;
+            }
+            const float fraction = list.empty() ? 0.0f : float(unlocked) / float(list.size());
+            pane.add_rml(fmt::format(R"(<div class="ra-summary">)"
+                                     R"(<span class="ra-summary-user">RetroAchievements - {}</span>)"
+                                     R"(<span class="ra-summary-count">{} / {} {} - {} / {} pts</span>)"
+                                     R"(</div>)"
+                                     R"(<progress class="ra-total" value="{:.3f}"/>)",
+                ra::username(), unlocked, list.size(), ui_translate("unlocked"), points, totalPoints, fraction));
+            for (const auto &a : list) {
+                if (a.unlocked == unlockedTab) {
+                    pane.add_child<RaAchievementRow>(a);
+                }
+            }
+            pane.finalize();
+        });
+    }
+}
 
 AchievementsWindow::AchievementsWindow()
 {
+    if (ra::state() == ra::State::Playing) {
+        buildRetroAchievements();
+        return;
+    }
     const auto all = AchievementSystem::get().getAchievements();
+    if (all.empty()) {
+        // Nothing local to show: say where the achievements come from.
+        add_tab("RetroAchievements", [this](Rml::Element *content) {
+            auto &pane = add_child<Pane>(content, Pane::Type::Controlled);
+            pane.add_section("RetroAchievements");
+            pane.add_text(ra::statusText());
+            pane.add_text("Log in from Settings > RetroAchievements.");
+            pane.finalize();
+        });
+        return;
+    }
 
     {
         auto elem = mDocument->CreateElement("div");
@@ -190,6 +297,15 @@ AchievementsWindow::AchievementsWindow()
 
 void AchievementsWindow::update()
 {
+    if (mRetroAchievements) {
+        if (ra::revision() != mRaRevision) {
+            mRaRevision = ra::revision();
+            refresh_active_tab();
+            updateTotal();
+        }
+        Window::update();
+        return;
+    }
     const auto current = AchievementSystem::get().getAchievements();
     bool dirty = current.size() != mSnapshot.size();
     if (!dirty) {
@@ -211,6 +327,16 @@ void AchievementsWindow::update()
 void AchievementsWindow::updateTotal()
 {
     if (mTotalEl == nullptr) {
+        return;
+    }
+    if (mRetroAchievements) {
+        const auto list = ra::achievements();
+        int unlocked = 0;
+        for (const auto &a : list) {
+            unlocked += a.unlocked;
+        }
+        const int pct = list.empty() ? 0 : static_cast<int>(unlocked * 100 / list.size());
+        mTotalEl->SetInnerRML(fmt::format("{}%", pct));
         return;
     }
     const auto all = AchievementSystem::get().getAchievements();

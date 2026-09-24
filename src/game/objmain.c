@@ -53,6 +53,16 @@ s16 pcOvlKillArg = 0;
 
 static omOvlHisData omovlhis[OM_OVL_HIS_MAX];
 
+#ifdef TARGET_PC
+/* For RetroAchievements, which reads the console copy of this table
+ * (src/port/retroachievements_memory.cpp). */
+const omOvlHisData *PartyBoard_RAOverlayHistory(int *count)
+{
+    *count = OM_OVL_HIS_MAX;
+    return omovlhis;
+}
+#endif
+
 u8 omSysPauseEnableFlag = TRUE;
 OMOVL omprevovl = DLL_NONE;
 

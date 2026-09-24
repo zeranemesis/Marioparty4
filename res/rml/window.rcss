@@ -292,6 +292,71 @@ icon.question-mark {
     decorator: text("&#xeb8b;" center center);
 }
 
+/* RetroAchievements list: opaque and higher contrast, since it is read over
+   the game scene (src/port/ui/achievements.cpp). */
+window.achievements {
+    background-color: rgba(16, 26, 74, 98%);
+}
+
+window.achievements .achievement-desc {
+    color: rgba(240, 236, 222, 88%);
+    font-size: 17dp;
+}
+
+window.achievements .achievement-total {
+    color: rgba(240, 236, 222, 90%);
+    font-size: 16dp;
+}
+
+window.achievements .achievement-progress {
+    color: rgba(240, 236, 222, 80%);
+    font-size: 14dp;
+}
+
+window.achievements progress {
+    height: 10dp;
+    border-radius: 5dp;
+    background-color: rgba(255, 255, 255, 18%);
+}
+
+window.achievements progress.progress-done fill {
+    background-color: #44cc55;
+    border-radius: 5dp;
+}
+
+window.achievements progress.progress-ongoing fill {
+    background-color: #3fa9f5;
+    border-radius: 5dp;
+}
+
+.ra-summary {
+    display: flex;
+    align-items: center;
+    margin: 4dp 0 6dp 0;
+}
+
+.ra-summary-user {
+    flex: 1;
+    font-weight: bold;
+    color: rgba(240, 236, 222, 90%);
+}
+
+.ra-summary-count {
+    font-weight: bold;
+    color: #ffa826;
+}
+
+progress.ra-total {
+    height: 14dp;
+    border-radius: 7dp;
+    margin: 0 0 12dp 0;
+}
+
+progress.ra-total fill {
+    background-color: #ffa826;
+    border-radius: 7dp;
+}
+
 .achievement-total {
     position: absolute;
     top: 0;

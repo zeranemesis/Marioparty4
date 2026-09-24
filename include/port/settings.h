@@ -125,6 +125,14 @@ struct UserSettings {
         ConfigVar<int> cardFileType;
         ConfigVar<bool> enableAdvancedSettings;
     } backend;
+
+    struct {
+        // RetroAchievements (src/port/retroachievements.cpp). Only the session
+        // token is kept, never the password.
+        ConfigVar<bool> enabled;
+        ConfigVar<std::string> username;
+        ConfigVar<std::string> token;
+    } retroAchievements;
 };
 
 UserSettings& getSettings();

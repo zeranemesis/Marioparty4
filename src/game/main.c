@@ -30,6 +30,7 @@
 #include "port/crash_report.h"
 #include "port/dolassets.h"
 #include "port/ui.h"
+#include "port/retroachievements.h"
 #include "aurora/dvd.h"
 #include <aurora/aurora.h>
 #include <aurora/event.h>
@@ -275,6 +276,7 @@ void main(void)
 #ifdef TARGET_PC
                 PartyBoard_RunGameLogicTick();
                 PartyBoard_NetplayCommitTick();
+                PartyBoard_RAGameTick();
                 simulatedTicks++;
 #else
                 pfClsScr();
@@ -298,6 +300,7 @@ void main(void)
            a different number of frames at the same simulation frame have run
            those hooks a different number of times. */
         PartyBoard_RenderedFrames++;
+        PartyBoard_RAFramePump();
         /* Defect D6, detection only. PARTYBOARD_ADVANCE_FRAME is this bool, not
          * a count, and Hu3DExec runs once per rendered frame - so a frame that
          * batches two simulation ticks advances the animation clock once, for
