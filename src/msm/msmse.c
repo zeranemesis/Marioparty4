@@ -2,6 +2,8 @@
 #include "msm/msmfio.h"
 #include "msm/msmmem.h"
 
+#include <string.h>
+
 #ifdef BYTESWAPPING
 #include "port/byteswap.h"
 

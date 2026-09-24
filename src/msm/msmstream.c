@@ -1,6 +1,9 @@
 #include "msm/msmstream.h"
 #include "msm/msmmem.h"
 #include "msm/msmsys.h"
+#include "msm/msmfio.h"
+
+#include <string.h>
 #ifdef TARGET_PC
 #include "port/netplay_runtime.h"
 #endif

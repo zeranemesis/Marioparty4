@@ -1,5 +1,6 @@
 #include "msm/msmmus.h"
 #include "msm/msmmem.h"
+#include "msm/msmfio.h"
 #include "musyx/seq.h"
 
 #ifdef BYTESWAPPING
