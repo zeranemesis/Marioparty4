@@ -545,6 +545,18 @@ endif ()
 
 install(TARGETS ${BINARY_TARGETS} ${EXTRA_TARGETS} DESTINATION ${CMAKE_INSTALL_PREFIX})
 aurora_install_runtime_dlls(partyboard ${CMAKE_INSTALL_PREFIX})
+# RmlUi is fetched EXCLUDE_FROM_ALL, so it is built but never installed. Where
+# the build uses shared libraries (the Linux presets), the executable then
+# needs a librmlui.so that is not in the install tree, and linuxdeploy cannot
+# package the AppImage ("Could not find dependency: librmlui.so").
+foreach (rmlui_target rmlui_core rmlui_debugger)
+    if (TARGET ${rmlui_target})
+        get_target_property(rmlui_type ${rmlui_target} TYPE)
+        if (rmlui_type STREQUAL "SHARED_LIBRARY")
+            install(TARGETS ${rmlui_target} LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX} RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX})
+        endif ()
+    endif ()
+endforeach ()
 
 if (NOT APPLE)
     install(DIRECTORY ${CMAKE_SOURCE_DIR}/res DESTINATION ${CMAKE_INSTALL_PREFIX})
