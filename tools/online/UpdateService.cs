@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Net;
 using System.Security.Cryptography;
@@ -15,7 +15,7 @@ sealed class UpdateInfo {
 }
 
 static class UpdateService {
-    public const string CurrentVersion = "0.15.6";
+    public const string CurrentVersion = "0.16.0";
     const string ManifestUrl = "https://raw.githubusercontent.com/zeranemesis/Marioparty4/audio-local/update.json";
 
     static string Json(string text, string key) {
