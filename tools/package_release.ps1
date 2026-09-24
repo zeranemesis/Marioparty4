@@ -1,4 +1,4 @@
-# Builds the folder a second PC needs, and proves the zip carries it intact.
+﻿# Builds the folder a second PC needs, and proves the zip carries it intact.
 #
 # WHY THIS IS A SCRIPT. The lobby refuses to start a game unless both PCs hold
 # byte-identical folders: Wire.BuildHash in tools/online/Connection.cs hashes
@@ -256,6 +256,11 @@ try {
         platform     = 'win-x64'
         executable   = 'partyboard.exe'
         launcher     = 'PartyBoardOnline.exe'
+        # What a launcher may ask of the companion in this package. CubeShelf reads this rather
+        # than probing: an older companion treats an unknown flag as no flag, opens its ordinary
+        # window and says nothing, so the launcher would wait on a lobby nobody is creating.
+        # An absent field means an older package, which is exactly the answer needed.
+        capabilities = @('launcher-invites')
         discIncluded = $false
         validation   = 'TEST. Aucune session entre deux machines physiques n a jamais ete menee.'
     } | ConvertTo-Json -Depth 4
