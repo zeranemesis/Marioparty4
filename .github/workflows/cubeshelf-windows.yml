@@ -51,6 +51,8 @@ jobs:
           git -C extern/aurora apply ../../patches/aurora-partyboard.patch
           git -C extern/aurora apply --check ../../patches/aurora-render-fixes.patch
           git -C extern/aurora apply ../../patches/aurora-render-fixes.patch
+          git -C extern/aurora apply --check ../../patches/aurora-android-surface-deadlock.patch
+          git -C extern/aurora apply ../../patches/aurora-android-surface-deadlock.patch
 
       - name: Enable Visual Studio environment
         uses: ilammy/msvc-dev-cmd@v1

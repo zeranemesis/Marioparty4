@@ -10,6 +10,8 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
+import android.system.ErrnoException;
+import android.system.Os;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.View;
@@ -17,6 +19,9 @@ import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
+
+import com.mariopartyrd.partyboard.online.LobbyActivity;
+import com.mariopartyrd.partyboard.online.OnlineService;
 
 import org.libsdl.app.SDLActivity;
 
@@ -72,11 +77,80 @@ public class PartyBoardActivity extends SDLActivity {
         return out.toArray(new String[0]);
     }
 
+    // Set when the online lobby (the ":online" process) started this game:
+    // the disc it verified and the loopback barrier it waits on. Environment
+    // variables because the native side reads them exactly where Windows reads
+    // the ones PartyBoardOnline.exe sets (src/port/portmain.cpp).
+    private boolean onlineSession;
+    private String onlineLanguage;
+
+    private void exportOnlineEnvironment(Intent intent) {
+        String barrier = intent == null ? null : intent.getStringExtra(OnlineService.EXTRA_BARRIER);
+        String disc = intent == null ? null : intent.getStringExtra(OnlineService.EXTRA_DISC);
+        onlineSession = barrier != null && disc != null;
+        onlineLanguage = intent == null ? null : intent.getStringExtra(OnlineService.EXTRA_LANGUAGE);
+        try {
+            if (onlineSession) {
+                Os.setenv("PARTYBOARD_ONLINE_BARRIER", barrier, true);
+                Os.setenv("PARTYBOARD_ONLINE_DISC", disc, true);
+            } else {
+                Os.unsetenv("PARTYBOARD_ONLINE_BARRIER");
+                Os.unsetenv("PARTYBOARD_ONLINE_DISC");
+            }
+        } catch (ErrnoException e) {
+            Log.w(TAG, "Unable to pass the online session to the game", e);
+        }
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        exportOnlineEnvironment(getIntent());
         super.onCreate(savedInstanceState);
         useDisplayCutout();
         hideSystemBars();
+    }
+
+    // Called from the game's "Play Online" entry (src/port/ui/online.cpp) on
+    // the SDL thread. The game then ends itself; the lobby restarts it for the
+    // session, like the Windows companion does.
+    public boolean openOnlineLobby(String nickname, String disc, String language, String invitation) {
+        try {
+            Intent lobby = new Intent(this, LobbyActivity.class);
+            lobby.putExtra(LobbyActivity.EXTRA_NICKNAME, nickname);
+            lobby.putExtra(LobbyActivity.EXTRA_DISC, disc);
+            lobby.putExtra(LobbyActivity.EXTRA_LANGUAGE, language);
+            if (invitation != null && !invitation.isEmpty()) {
+                lobby.putExtra(LobbyActivity.EXTRA_INVITATION, invitation);
+            }
+            lobby.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(lobby);
+            return true;
+        } catch (RuntimeException e) {
+            Log.e(TAG, "Unable to open the online lobby", e);
+            return false;
+        }
+    }
+
+    @Override
+    protected void onDestroy() {
+        boolean finishing = isFinishing();
+        if (finishing && onlineSession) {
+            // Back to the salon, which now says how the session ended.
+            try {
+                Intent lobby = new Intent(this, LobbyActivity.class);
+                lobby.putExtra(LobbyActivity.EXTRA_LANGUAGE, onlineLanguage);
+                lobby.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(lobby);
+            } catch (RuntimeException e) {
+                Log.w(TAG, "Unable to return to the online lobby", e);
+            }
+        }
+        super.onDestroy();
+        if (finishing) {
+            // SDL refuses to run main() twice in one process, and the next
+            // start may carry different --netplay arguments: end this one.
+            System.exit(0);
+        }
     }
 
     // Draw beside the notch or camera hole as well. Android 15 does this by

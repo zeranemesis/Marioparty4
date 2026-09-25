@@ -534,6 +534,13 @@ void FriendsWindow::act(const std::string &action, const std::string &key, bool 
         // Nothing to close here: the lobby opens inside the game, on the invitation.
         if (action == "join") {
             if (const auto payload = online::cubeshelf::join_payload(key)) {
+#ifdef __ANDROID__
+                // The phone's lobby is its own screen, which restarts the game for the session.
+                if (open_android_lobby(*payload)) {
+                    PartyBoard_IsRunning = false;
+                    return;
+                }
+#endif
                 push(std::make_unique<OnlineWindow>(*payload));
             }
             else {

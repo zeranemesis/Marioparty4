@@ -8,7 +8,12 @@
 #include <aurora/rmlui.hpp>
 #include <fmt/format.h>
 
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <ranges>
 
@@ -233,11 +238,39 @@ Document *top_document() noexcept
     return nullptr;
 }
 
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
+// A phone reports about 2.5 to 3 pixels per dp, which leaves the UI only 360
+// to 440 dp of height: every menu here is laid out for a PC window (720 to
+// 960 dp tall), and the prelaunch list and the settings panes overlap. Keep
+// at least 720 dp of height, as a 1280x720 window has. The screen controls are
+// placed in pixels (touch_overlay.cpp), so they keep their physical size.
+static void fit_ui_to_small_screens() noexcept
+{
+    constexpr float kMinimumHeightDp = 720.0f;
+    auto *context = aurora::rmlui::get_context();
+    if (context == nullptr) {
+        return;
+    }
+    const float density = aurora::window::get_window_size().scale;
+    const float height = static_cast<float>(context->GetDimensions().y);
+    if (density <= 0.0f || height <= 0.0f) {
+        return;
+    }
+    const float scale = std::min(density, height / kMinimumHeightDp);
+    if (std::abs(aurora::rmlui::get_ui_scale() - scale) > 0.001f) {
+        aurora::rmlui::set_ui_scale(scale);
+    }
+}
+#endif
+
 void update() noexcept
 {
     if (!aurora::rmlui::is_initialized()) {
         return;
     }
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
+    fit_ui_to_small_screens();
+#endif
 
     input::update_input();
     // A friend's invitation becomes a toast whichever screen the player is on, menu open or not.

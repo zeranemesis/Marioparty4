@@ -41,7 +41,8 @@ $projectPath = Split-Path $PSScriptRoot -Parent
 $pairs = @(
     @{ Submodule = 'extern/musyx';  Patches = @('patches/musyx-partyboard.patch') },
     @{ Submodule = 'extern/aurora'; Patches = @('patches/aurora-partyboard.patch',
-                                                'patches/aurora-render-fixes.patch') }
+                                                'patches/aurora-render-fixes.patch',
+                                                'patches/aurora-android-surface-deadlock.patch') }
 )
 
 $failures = New-Object Collections.Generic.List[string]

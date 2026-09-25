@@ -99,6 +99,8 @@ jobs:
           git -C extern/aurora apply ../../patches/aurora-partyboard.patch
           git -C extern/aurora apply --check ../../patches/aurora-render-fixes.patch
           git -C extern/aurora apply ../../patches/aurora-render-fixes.patch
+          git -C extern/aurora apply --check ../../patches/aurora-android-surface-deadlock.patch
+          git -C extern/aurora apply ../../patches/aurora-android-surface-deadlock.patch
 
       # Aurora drops a draw whose pipeline is still compiling instead of delaying
       # it, so a player with an empty cache sees missing geometry on every scene's
@@ -197,6 +199,8 @@ jobs:
           git -C extern/aurora apply ../../patches/aurora-partyboard.patch
           git -C extern/aurora apply --check ../../patches/aurora-render-fixes.patch
           git -C extern/aurora apply ../../patches/aurora-render-fixes.patch
+          git -C extern/aurora apply --check ../../patches/aurora-android-surface-deadlock.patch
+          git -C extern/aurora apply ../../patches/aurora-android-surface-deadlock.patch
 
       - name: Install dependencies
         run: brew install cmake ninja
@@ -275,6 +279,8 @@ jobs:
           git -C extern/aurora apply ../../patches/aurora-partyboard.patch
           git -C extern/aurora apply --check ../../patches/aurora-render-fixes.patch
           git -C extern/aurora apply ../../patches/aurora-render-fixes.patch
+          git -C extern/aurora apply --check ../../patches/aurora-android-surface-deadlock.patch
+          git -C extern/aurora apply ../../patches/aurora-android-surface-deadlock.patch
 
       - name: Install dependencies
         run: |
@@ -309,6 +315,11 @@ jobs:
 
       - name: Stage stripped JNI library
         run: ANDROID_STAGE_ABIS="${{matrix.abi}}" platforms/android/scripts/stage-jni-libs.sh
+
+      # The online lobby's protocol, on the JVM (the PC companion runs Tests.cs).
+      - name: Test online lobby
+        working-directory: platforms/android
+        run: ./gradlew :app:testReleaseUnitTest
 
       # The run number only grows, so each build installs over the previous one.
       - name: Build APK
@@ -418,6 +429,8 @@ jobs:
           git -C extern/aurora apply ../../patches/aurora-partyboard.patch
           git -C extern/aurora apply --check ../../patches/aurora-render-fixes.patch
           git -C extern/aurora apply ../../patches/aurora-render-fixes.patch
+          git -C extern/aurora apply --check ../../patches/aurora-android-surface-deadlock.patch
+          git -C extern/aurora apply ../../patches/aurora-android-surface-deadlock.patch
 
       - name: Enable Visual Studio environment
         uses: ilammy/msvc-dev-cmd@v1

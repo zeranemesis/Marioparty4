@@ -76,10 +76,17 @@ android {
     lint {
         abortOnError false
     }
+
+    testOptions {
+        // Lobby code logs through android.util only on paths the tests do not take.
+        unitTests.returnDefaultValues = true
+    }
 }
 
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
+    // The online lobby's protocol (src/test): the PC companion's Tests.cs, for the phone.
+    testImplementation 'junit:junit:4.13.2'
 }
 
 tasks.configureEach { task ->

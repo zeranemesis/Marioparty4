@@ -113,3 +113,42 @@ Supported extras:
 - `partyboard_args`: single shell-like argument string
 - `partyboard_argv`: string-array argv
 - `partyboard_disc`: compatibility shortcut (single ISO path)
+
+## Online Play
+
+**Play Online** (menu bar or prelaunch) opens the phone's lobby, the
+counterpart of `PartyBoardOnline.exe` (`app/src/main/java/.../online/`, a Java
+port of `tools/online`). Like on Windows the lobby is its own process
+(`:online`) and restarts the game with the `--netplay-*` arguments, because
+the game reads them once at start:
+
+- `LobbyActivity`: nickname, disc (full SHA-256, Mario Party 4 USA rev 1),
+  2 to 4 players, create/join, invitation copy/share/paste, players with disc
+  agreement and ping, start (host only), diagnostic export. French or English,
+  following the game's language. Sharing a text that contains a `PB4.`
+  invitation to Party Board opens the lobby on it and joins once the disc is
+  verified; so does a CubeShelf friend's invitation.
+- `OnlineService`: a foreground service holding the session, the TLS control
+  channels and the authenticated UDP relay while the game runs.
+- `Session`/`Lobby`/`Bridge`/`MeshRelay`/`Gateway`/`Wire`/`Invitation`: the
+  same protocol as the PC companion (PB4 invitations, PBAUTO3 handshake,
+  PCP → NAT-PMP → UPnP temporary mappings, HMAC-sealed game datagrams).
+- The start barrier: Windows named events become a loopback TCP link
+  (`GameLink`, `PARTYBOARD_ONLINE_BARRIER`, `src/port/portmain.cpp`), which
+  also tells the lobby when the game has exited.
+
+Differences from the PC:
+
+- Hosting needs Wi-Fi or Ethernet (a mobile operator's shared NAT cannot be
+  opened); joining works on mobile data.
+- If the box refuses every automatic mapping, the lobby is still created for
+  the same Wi-Fi: its invitation then carries only the host's local address.
+- The build hash is the installed APK's, prefixed `partyboard-android`: phones
+  play with phones running the same build, never with a PC (another
+  architecture would not stay in lockstep).
+
+Tests: `./gradlew :app:testDebugUnitTest` (invitations, datagrams, replay
+window, lobby state machine, pinned TLS handshake).
+
+Debug builds accept `--es online_test_public 10.0.2.2` on `LobbyActivity` so
+two emulators can play through the host PC's port forwarding.

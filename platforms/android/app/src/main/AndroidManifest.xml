@@ -13,6 +13,14 @@
     <!-- CubeShelf friends' presence and RetroAchievements go over HTTPS (src/port/http.cpp). -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Online lobby (online/): the relay stays in the foreground while the game
+         runs, tells a guest when the host starts, and asks the Wi-Fi box for a
+         temporary port through UPnP discovery (multicast). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <application
         android:allowBackup="true"
@@ -50,6 +58,37 @@
                 <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
             </intent-filter>
         </activity>
+
+        <!-- The online lobby, the phone's PartyBoardOnline.exe. Its own process,
+             so it outlives the game process it restarts with its netplay
+             arguments; its own task, so the game and the lobby switch cleanly.
+             Sharing a PB4 invitation to Party Board opens it on that lobby. -->
+        <activity
+            android:name="com.mariopartyrd.partyboard.online.LobbyActivity"
+            android:process=":online"
+            android:taskAffinity="com.mariopartyrd.partyboard.online"
+            android:launchMode="singleTask"
+            android:exported="true"
+            android:label="@string/online_lobby"
+            android:theme="@android:style/Theme.Material.NoActionBar"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density">
+            <intent-filter android:label="@string/online_join">
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name="com.mariopartyrd.partyboard.online.OnlineService"
+            android:process=":online"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps a peer-to-peer multiplayer game session (lobby and input relay) alive while the game runs in another process." />
+        </service>
     </application>
 
 </manifest>
