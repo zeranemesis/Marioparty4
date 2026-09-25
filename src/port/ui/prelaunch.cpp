@@ -654,14 +654,14 @@ namespace {
         if (!status.manifest.notes.empty()) {
             body += "<br/><br/>" + escape(ui_translate("What changed:")) + update_notes_rml(status.manifest.notes);
         }
-        body += "<br/><br/>" + escape(ui_translate("Your saves and settings are kept."));
+        body += "<br/><br/>" + escape(ui_translate("The download opens in your browser: open the file once it is downloaded to install the update. Your saves and settings are kept."));
         host.push(std::make_unique<Modal>(Modal::Props {
             .title = "Update Available",
             .bodyRml = body,
             .actions = {
                 ModalAction { .label = "Later", .onPressed = [](Modal &modal) { modal.pop(); } },
-                ModalAction { .label = "Install", .onPressed = [](Modal &modal) {
-                                 update::install();
+                ModalAction { .label = "Download", .onPressed = [](Modal &modal) {
+                                 update::download();
                                  modal.pop();
                              } },
             },
@@ -767,10 +767,13 @@ Prelaunch::Prelaunch()
                 if (status.state == update::State::Available) {
                     push_update_modal(*this, status);
                 }
+                else if (status.state == update::State::Downloading) {
+                    update::download();
+                }
                 else if (status.state == update::State::Failed) {
-                    // Retry whatever failed: the install when a newer build is known, else the check.
+                    // Retry whatever failed: the download when a newer build is known, else the check.
                     if (status.manifest.versionCode > status.installedVersionCode) {
-                        update::install();
+                        update::download();
                     }
                     else {
                         update::check(false);
@@ -955,14 +958,10 @@ void Prelaunch::update()
                 action = "Update";
                 break;
             case update::State::Downloading:
-                state = "checking";
-                message = status.progress >= 0
-                    ? fmt::format(fmt::runtime(ui_translate("Downloading the update... {}%")), status.progress)
-                    : ui_translate("Downloading the update...");
-                break;
-            case update::State::Installing:
-                state = "checking";
-                message = ui_translate("Confirm the installation in Android's window.");
+                // The download may not have finished or been opened: the button stays to start it again.
+                state = "available";
+                message = ui_translate("Open the downloaded file to install the update.");
+                action = "Download";
                 break;
             case update::State::Failed:
                 state = "failed";

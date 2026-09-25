@@ -3,6 +3,8 @@ package com.mariopartyrd.partyboard;
 import android.app.ActionBar;
 import android.content.ClipData;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
@@ -227,22 +229,16 @@ public class PartyBoardActivity extends SDLActivity {
         }
     }
 
-    // App updates from GitHub. Called from native code (src/port/app_update.cpp),
-    // installUpdate on a worker thread since it downloads the APK.
+    // The build number the GitHub update manifest is compared with
+    // (src/port/app_update.cpp, called from a worker thread).
+    @SuppressWarnings("deprecation")
     public long getInstalledVersionCode() {
-        return PartyBoardUpdater.installedVersionCode(this);
-    }
-
-    public String installUpdate(String url, String sha256) {
-        return PartyBoardUpdater.downloadAndInstall(this, url, sha256);
-    }
-
-    public int getUpdateProgress() {
-        return PartyBoardUpdater.progress();
-    }
-
-    public String takeUpdateInstallFailure() {
-        return PartyBoardUpdater.takeInstallFailure();
+        try {
+            PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            return Build.VERSION.SDK_INT >= Build.VERSION_CODES.P ? info.getLongVersionCode() : info.versionCode;
+        } catch (PackageManager.NameNotFoundException e) {
+            return 0;
+        }
     }
 
     public String getDisplayNameForUri(String uriString) {

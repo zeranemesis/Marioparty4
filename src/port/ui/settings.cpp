@@ -827,7 +827,7 @@ SettingsWindow::SettingsWindow(bool prelaunch)
                 {
                     .key = "Check for Updates",
                     .helpText = "Look for a newer build on GitHub when Party Board starts. When there is one, the home "
-                                "screen offers to install it; nothing is downloaded without asking.",
+                                "screen offers to download it; nothing is downloaded without asking.",
                 });
             leftPane.register_control(leftPane.add_button("Check Now").on_pressed([] { update::check(false); }), rightPane,
                 [](Pane &pane) { pane.add_text("Look for a newer build on GitHub now. The answer shows on the home screen, under the version."); });

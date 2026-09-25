@@ -92,11 +92,11 @@ Build workflow) publishes its APK to the GitHub release
 
 When Party Board starts (Settings > Interface > Check for Updates, on by
 default) it reads the manifest. A newer build shows under the version on the
-home screen; pressing Update lists the changes and, once confirmed, downloads
-the APK, checks its SHA-256 and hands it to Android, which asks to allow
-installing apps from Party Board the first time, then to confirm. Saves and
-settings are kept. Without network the check says nothing and the game plays
-offline as usual.
+home screen; pressing Update lists the changes and, once confirmed, opens the
+APK's download in the browser. Opening the downloaded file installs it over the
+app, keeping the saves and settings. The app asks for no install permission of
+its own: Play Protect blocks unknown apps that do. Without network the check
+says nothing and the game plays offline as usual.
 
 ## Launch With Runtime Args (adb)
 

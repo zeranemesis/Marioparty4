@@ -1,6 +1,5 @@
 // Android app updates from GitHub (port/app_update.hpp). The manifest is fetched with
-// port/http.hpp; the download, the SHA-256 check and the hand-off to Android's installer run in
-// Java (PartyBoardUpdater), reached through PartyBoardActivity.
+// port/http.hpp; the APK itself is downloaded by the browser, the way the first install was.
 
 #include "port/app_update.hpp"
 
@@ -9,14 +8,13 @@
 #include <aurora/lib/logging.hpp>
 #include <fmt/format.h>
 
-#include <initializer_list>
 #include <mutex>
 #include <thread>
-#include <vector>
 
 #ifdef __ANDROID__
+#include <SDL3/SDL_error.h>
+#include <SDL3/SDL_misc.h>
 #include <SDL3/SDL_system.h>
-#include <SDL3/SDL_timer.h>
 #include <jni.h>
 #endif
 
@@ -29,7 +27,7 @@ namespace {
 #ifdef __ANDROID__
     aurora::Module UpdateLog("partyboard::update");
 
-    // A check or an install owns a worker thread.
+    // A check owns a worker thread.
     bool gWorking = false;
 
 #if defined(__aarch64__)
@@ -40,115 +38,34 @@ namespace {
     constexpr std::string_view kAbi = "";
 #endif
 
-    constexpr Uint64 kPollIntervalMs = 250;
-
-    // One call into PartyBoardActivity. The class comes from the activity object rather than
-    // FindClass, which cannot see the app's classes from a thread the VM did not start.
-    class ActivityCall {
-    public:
-        ActivityCall()
-        {
-            mEnv = static_cast<JNIEnv *>(SDL_GetAndroidJNIEnv());
-            if (mEnv == nullptr) {
-                return;
+    // PartyBoardActivity.getInstalledVersionCode(). The class comes from the activity object
+    // rather than FindClass, which cannot see the app's classes from a thread the VM did not start.
+    std::int64_t installed_version_code()
+    {
+        auto *env = static_cast<JNIEnv *>(SDL_GetAndroidJNIEnv());
+        if (env == nullptr || env->PushLocalFrame(8) != 0) {
+            if (env != nullptr) {
+                env->ExceptionClear();
             }
-            if (mEnv->PushLocalFrame(16) != 0) {
-                mEnv->ExceptionClear();
-                mEnv = nullptr;
-                return;
-            }
-            mActivity = static_cast<jobject>(SDL_GetAndroidActivity());
-            if (mActivity != nullptr) {
-                mClass = mEnv->GetObjectClass(mActivity);
-            }
-            clear_exception();
+            return 0;
         }
-
-        ~ActivityCall()
-        {
-            if (mEnv != nullptr) {
-                clear_exception();
-                mEnv->PopLocalFrame(nullptr);
+        std::int64_t code = 0;
+        if (auto *activity = static_cast<jobject>(SDL_GetAndroidActivity())) {
+            jclass activityClass = env->GetObjectClass(activity);
+            const jmethodID method =
+                activityClass != nullptr ? env->GetMethodID(activityClass, "getInstalledVersionCode", "()J") : nullptr;
+            if (method != nullptr && !env->ExceptionCheck()) {
+                code = static_cast<std::int64_t>(env->CallLongMethod(activity, method));
             }
         }
-
-        ActivityCall(const ActivityCall &) = delete;
-        ActivityCall &operator=(const ActivityCall &) = delete;
-
-        jmethodID method(const char *name, const char *signature)
-        {
-            if (mEnv == nullptr || mActivity == nullptr || mClass == nullptr) {
-                return nullptr;
-            }
-            const jmethodID id = mEnv->GetMethodID(mClass, name, signature);
-            return clear_exception() ? nullptr : id;
+        if (env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+            code = 0;
         }
-
-        std::int64_t call_long(const char *name)
-        {
-            const jmethodID id = method(name, "()J");
-            if (id == nullptr) {
-                return 0;
-            }
-            const jlong value = mEnv->CallLongMethod(mActivity, id);
-            return clear_exception() ? 0 : static_cast<std::int64_t>(value);
-        }
-
-        int call_int(const char *name, int fallback)
-        {
-            const jmethodID id = method(name, "()I");
-            if (id == nullptr) {
-                return fallback;
-            }
-            const jint value = mEnv->CallIntMethod(mActivity, id);
-            return clear_exception() ? fallback : static_cast<int>(value);
-        }
-
-        // Nothing when Java returned null.
-        std::optional<std::string> call_string(const char *name, const char *signature, std::initializer_list<jvalue> args,
-            bool &ok)
-        {
-            ok = false;
-            const jmethodID id = method(name, signature);
-            if (id == nullptr) {
-                return std::nullopt;
-            }
-            std::vector<jvalue> values(args);
-            auto *result = static_cast<jstring>(mEnv->CallObjectMethodA(mActivity, id, values.data()));
-            if (clear_exception()) {
-                return std::nullopt;
-            }
-            ok = true;
-            if (result == nullptr) {
-                return std::nullopt;
-            }
-            const char *utf = mEnv->GetStringUTFChars(result, nullptr);
-            if (utf == nullptr) {
-                clear_exception();
-                return std::string {};
-            }
-            std::string text(utf);
-            mEnv->ReleaseStringUTFChars(result, utf);
-            return text;
-        }
-
-        jstring string(const std::string &text) { return mEnv != nullptr ? mEnv->NewStringUTF(text.c_str()) : nullptr; }
-
-    private:
-        bool clear_exception()
-        {
-            if (mEnv == nullptr || !mEnv->ExceptionCheck()) {
-                return false;
-            }
-            mEnv->ExceptionDescribe();
-            mEnv->ExceptionClear();
-            return true;
-        }
-
-        JNIEnv *mEnv = nullptr;
-        jobject mActivity = nullptr;
-        jclass mClass = nullptr;
-    };
+        env->PopLocalFrame(nullptr);
+        return code;
+    }
 
     void fail(std::string error, std::string detail = {})
     {
@@ -159,27 +76,7 @@ namespace {
         gStatus.state = silent ? State::Idle : State::Failed;
         gStatus.error = std::move(error);
         gStatus.detail = std::move(detail);
-        gStatus.progress = -1;
         gWorking = false;
-    }
-
-    // Java reports "cancelled" when the player declines Android's prompt; anything else is the
-    // installer's own message.
-    void fail_install(const std::string &failure)
-    {
-        if (failure == "cancelled") {
-            fail("The update was cancelled.");
-        }
-        // Signed with another key: the installed build came from a run that signed with a key of
-        // its own. Only uninstalling (which deletes the saves) changes the key.
-        else if (failure.find("INCOMPATIBLE") != std::string::npos || failure.find("signature") != std::string::npos) {
-            fail("This build is signed with a different key than the installed one. Back up your saves, uninstall "
-                 "Party Board once, then install the update from GitHub.",
-                failure);
-        }
-        else {
-            fail("The update could not be installed.", failure);
-        }
     }
 
     void run_check()
@@ -199,11 +96,7 @@ namespace {
             fail("The update manifest on GitHub is invalid.");
             return;
         }
-        std::int64_t installed = 0;
-        {
-            ActivityCall call;
-            installed = call.call_long("getInstalledVersionCode");
-        }
+        const std::int64_t installed = installed_version_code();
         const bool newer = offers_update(*manifest, installed, kAbi);
         UpdateLog.info("Installed build {}, GitHub has build {} for {}{}", installed, manifest->versionCode,
             manifest->abi, newer ? ": update available" : "");
@@ -214,35 +107,6 @@ namespace {
         gStatus.installedVersionCode = installed;
         gStatus.error.clear();
         gStatus.detail.clear();
-        gWorking = false;
-    }
-
-    void run_install(Manifest manifest)
-    {
-        bool ok = false;
-        std::optional<std::string> error;
-        {
-            ActivityCall call;
-            error = call.call_string("installUpdate", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
-                { jvalue { .l = call.string(manifest.downloadUrl) }, jvalue { .l = call.string(manifest.sha256) } }, ok);
-        }
-        if (!ok) {
-            fail("The update could not be started.");
-            return;
-        }
-        if (error) {
-            if (*error == "checksum") {
-                fail("The download does not match the SHA-256 GitHub announced. Nothing was installed.");
-            }
-            else {
-                fail("The update could not be downloaded.", *error);
-            }
-            return;
-        }
-        UpdateLog.info("Build {} handed to the Android installer", manifest.versionCode);
-        std::lock_guard lock(gMutex);
-        gStatus.state = State::Installing;
-        gStatus.progress = 100;
         gWorking = false;
     }
 #endif
@@ -266,7 +130,7 @@ void check([[maybe_unused]] bool quiet)
     }
     {
         std::lock_guard lock(gMutex);
-        if (gWorking || gStatus.state == State::Installing) {
+        if (gWorking) {
             return;
         }
         gWorking = true;
@@ -279,55 +143,33 @@ void check([[maybe_unused]] bool quiet)
 #endif
 }
 
-void install()
+void download()
 {
 #ifdef __ANDROID__
-    Manifest manifest;
+    std::string url;
     {
         std::lock_guard lock(gMutex);
         if (gWorking || gStatus.manifest.versionCode <= gStatus.installedVersionCode) {
             return;
         }
-        gWorking = true;
-        gStatus.state = State::Downloading;
-        gStatus.progress = 0;
-        gStatus.error.clear();
-        gStatus.detail.clear();
-        manifest = gStatus.manifest;
+        url = gStatus.manifest.downloadUrl;
     }
-    std::thread(run_install, std::move(manifest)).detach();
+    // The browser downloads the APK and Android installs it over this one, keeping the saves:
+    // no install permission in the app, nothing for Play Protect to hold against it.
+    if (!SDL_OpenURL(url.c_str())) {
+        fail("Could not open the download.", SDL_GetError());
+        return;
+    }
+    UpdateLog.info("Opened {} in the browser", url);
+    std::lock_guard lock(gMutex);
+    gStatus.state = State::Downloading;
+    gStatus.error.clear();
+    gStatus.detail.clear();
 #endif
 }
 
 Status status()
 {
-#ifdef __ANDROID__
-    State state;
-    {
-        std::lock_guard lock(gMutex);
-        state = gStatus.state;
-    }
-    // Both answers come from Java: poll them, a few times a second, outside the lock.
-    static Uint64 lastPoll = 0;
-    const Uint64 now = SDL_GetTicks();
-    if ((state == State::Downloading || state == State::Installing) && now - lastPoll >= kPollIntervalMs) {
-        lastPoll = now;
-        ActivityCall call;
-        if (state == State::Downloading) {
-            const int progress = call.call_int("getUpdateProgress", -1);
-            std::lock_guard lock(gMutex);
-            if (gStatus.state == State::Downloading) {
-                gStatus.progress = progress;
-            }
-        }
-        else {
-            bool ok = false;
-            if (auto failure = call.call_string("takeUpdateInstallFailure", "()Ljava/lang/String;", {}, ok)) {
-                fail_install(*failure);
-            }
-        }
-    }
-#endif
     std::lock_guard lock(gMutex);
     return gStatus;
 }
