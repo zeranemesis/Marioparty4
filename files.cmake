@@ -92,6 +92,8 @@ set(PORT_FILES
         src/port/retroachievements_badges.cpp
         src/port/retroachievements_memory.cpp
         src/port/board_coverage.cpp
+        src/port/app_update.cpp
+        src/port/app_update_manifest.cpp
         src/port/crash_report.cpp
         src/port/dolassets.cpp
         #        src/port/dvd.c

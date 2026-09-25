@@ -105,6 +105,21 @@ inline std::string ui_translate(std::string_view text)
         {"Automatic", "Automatique"}, {"Always", "Toujours"}, {"Never", "Jamais"},
         {"A GameCube controller drawn on the screen, for playing on a phone or a tablet. Automatic shows it on touch screens whenever no gamepad is plugged into port 1.", "Une manette GameCube dessinée à l’écran, pour jouer sur téléphone ou tablette. En automatique, elle s’affiche sur les écrans tactiles dès qu’aucune manette n’est branchée sur le port 1."},
         {"How visible the screen controller is over the game.", "Visibilité de la manette à l’écran par-dessus le jeu."},
+        {"Update Available", "Mise à jour disponible"}, {"Update", "Mettre à jour"}, {"Download", "Télécharger"}, {"Later", "Plus tard"}, {"Retry", "Réessayer"},
+        {"Check for Updates", "Rechercher les mises à jour"}, {"Check Now", "Rechercher maintenant"},
+        {"Look for a newer build on GitHub when Party Board starts. When there is one, the home screen offers to download it; nothing is downloaded without asking.", "Cherche une version plus récente sur GitHub au démarrage de Party Board. S’il y en a une, l’écran d’accueil propose de la télécharger ; rien n’est téléchargé sans votre accord."},
+        {"Look for a newer build on GitHub now. The answer shows on the home screen, under the version.", "Cherche tout de suite une version plus récente sur GitHub. La réponse s’affiche sur l’écran d’accueil, sous la version."},
+        {"Checking GitHub for an update...", "Recherche d’une mise à jour sur GitHub…"},
+        {"Party Board is up to date (build {}).", "Party Board est à jour (build {})."},
+        {"Build {} is available.", "La build {} est disponible."},
+        {"Open the downloaded file to install the update.", "Ouvrez le fichier téléchargé pour installer la mise à jour."},
+        {"Party Board build {} is available. This phone has build {}.", "La build {} de Party Board est disponible. Ce téléphone a la build {}."},
+        {"What changed:", "Ce qui change :"},
+        {"The download opens in your browser: open the file once it is downloaded to install the update. Your saves and settings are kept.", "Le téléchargement s’ouvre dans votre navigateur : ouvrez le fichier une fois téléchargé pour installer la mise à jour. Vos sauvegardes et vos réglages sont conservés."},
+        {"Could not open the download.", "Impossible d’ouvrir le téléchargement."},
+        {"Could not reach GitHub.", "Impossible de joindre GitHub."},
+        {"GitHub did not send the update manifest.", "GitHub n’a pas envoyé le manifeste de mise à jour."},
+        {"The update manifest on GitHub is invalid.", "Le manifeste de mise à jour sur GitHub est invalide."},
     };
     for (const auto &entry : entries) if (entry.source == text) return std::string(entry.translated);
     return std::string(text);

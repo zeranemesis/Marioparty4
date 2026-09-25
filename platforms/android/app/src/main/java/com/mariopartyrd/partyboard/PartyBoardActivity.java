@@ -3,6 +3,8 @@ package com.mariopartyrd.partyboard;
 import android.app.ActionBar;
 import android.content.ClipData;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
@@ -224,6 +226,18 @@ public class PartyBoardActivity extends SDLActivity {
             getContentResolver().takePersistableUriPermission(uri, permissionFlag);
         } catch (SecurityException | IllegalArgumentException e) {
             Log.w(TAG, "Unable to persist " + permissionName + " URI permission for " + uri, e);
+        }
+    }
+
+    // The build number the GitHub update manifest is compared with
+    // (src/port/app_update.cpp, called from a worker thread).
+    @SuppressWarnings("deprecation")
+    public long getInstalledVersionCode() {
+        try {
+            PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            return Build.VERSION.SDK_INT >= Build.VERSION_CODES.P ? info.getLongVersionCode() : info.versionCode;
+        } catch (PackageManager.NameNotFoundException e) {
+            return 0;
         }
     }
 
