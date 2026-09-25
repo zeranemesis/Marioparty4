@@ -138,6 +138,7 @@ jobs:
           build/x-linux-ci-${{matrix.preset}}/tests/online_invitation_test
           build/x-linux-ci-${{matrix.preset}}/tests/cubeshelf_social_test tools/tests/fixtures
           build/x-linux-ci-${{matrix.preset}}/tests/touch_controls_test
+          build/x-linux-ci-${{matrix.preset}}/tests/disc_version_test
 
       - name: Generate AppImage
         run: ci/build-appimage.sh

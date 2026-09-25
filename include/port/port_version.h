@@ -5,22 +5,14 @@
 #include <cstdlib>
 #include <dvd.h>
 #include <initializer_list>
+#include <string>
 #include <types.h>
-#include "version.h"
+#include "port/disc_version.hpp"
 
 /**
  * Functionality for switching game behavior based on the loaded game version (e.g. PAL/JPN, GC/Wii)
  */
 namespace partyboard::version {
-enum class GameVersion : u8 {
-    UsaRev0 = VERSION_NO_ENG0,
-    UsaRev1 = VERSION_NO_ENG1,
-    PalRev0 = VERSION_NO_PAL0,
-    PalRev1 = VERSION_NO_PAL1,
-    PalRev2 = VERSION_NO_PAL2,
-    Jpn = VERSION_NO_JP,
-};
-
 bool isRegionPal();
 bool isRegionJpn();
 bool isRegionUsa();
@@ -28,6 +20,9 @@ bool isRegionUsa();
 GameVersion getGameVersion();
 
 const DVDDiskID& getDiskID();
+
+// The loaded disc as shown to the player, e.g. "USA Rev 1" or "EUR Rev 2".
+std::string describe();
 
 void init();
 

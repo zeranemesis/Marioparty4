@@ -208,7 +208,7 @@ namespace {
         return result;
     }
 
-    std::string get_error_msg(iso::ValidationError error)
+    std::string get_error_msg(iso::ValidationError error, const iso::DiscInfo &info)
     {
         switch (error) {
             default:
@@ -218,9 +218,14 @@ namespace {
             case iso::ValidationError::InvalidImage:
                 return "The selected file is not a valid disc image.";
             case iso::ValidationError::WrongGame:
-                return "The selected game is not supported by Party Board.";
+                return "The selected game is not supported by Party Board. Choose a USA or European Mario Party 4 "
+                       "GameCube disc image.";
             case iso::ValidationError::WrongVersion:
-                return "Party Board currently supports GameCube USA Rev 0 disc images only.";
+                if (info.known && info.region == version::DiscRegion::Japan) {
+                    return "The Japanese version of Mario Party 4 is not supported yet. Please use the USA or "
+                           "European version.";
+                }
+                return "This version of Mario Party 4 is not supported yet. Please use the USA or European version.";
             case iso::ValidationError::Canceled:
                 return "Disc verification was canceled. Party Board cannot guarantee the selected disc image "
                        "is compatible.";
@@ -269,7 +274,7 @@ namespace {
             state.pendingDiscPath = result.path;
             state.pendingDiscInfo = result.info;
             state.pendingDiscValidation = result.validation;
-            state.errorString = escape(get_error_msg(result.validation));
+            state.errorString = escape(get_error_msg(result.validation, result.info));
             return;
         }
 
@@ -285,7 +290,7 @@ namespace {
         state.pendingDiscPath.clear();
         state.pendingDiscInfo = {};
         state.pendingDiscValidation = iso::ValidationError::Unknown;
-        state.errorString = escape(get_error_msg(result.validation));
+        state.errorString = escape(get_error_msg(result.validation, result.info));
     }
 
     class DiscVerificationModal : public WindowSmall {
@@ -820,8 +825,11 @@ void Prelaunch::update()
     if (mDiscDetail != nullptr) {
         if (activeDiscLoaded) {
             mDiscDetail->SetProperty(Rml::PropertyId::Display, Rml::Style::Display::Block);
-            Rml::String innerRML = "GameCube • ";
-            innerRML += state.activeDiscInfo.isPal ? "EUR" : "USA";
+            Rml::String innerRML = "GameCube";
+            if (state.activeDiscInfo.known) {
+                innerRML += " • "
+                    + version::describe(state.activeDiscInfo.region, state.activeDiscInfo.revision, ui_translate("Rev"));
+            }
             mDiscDetail->SetInnerRML(innerRML);
         }
         else {
