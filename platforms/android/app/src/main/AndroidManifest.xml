@@ -10,9 +10,14 @@
     <uses-feature android:name="android.hardware.type.pc" android:required="false" />
 
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- CubeShelf friends' presence and RetroAchievements go over HTTPS (src/port/http.cpp). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
         android:allowBackup="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:hardwareAccelerated="true"
         android:appCategory="game"
         android:icon="@mipmap/icon"
@@ -23,14 +28,20 @@
         <meta-data android:name="android.game_mode_config"
             android:resource="@xml/game_mode_config" />
 
+        <!-- SDLActivity ends the process (System.exit) if the activity is ever
+             re-created while the game runs, so every configuration change a phone
+             can make mid-game is listed in configChanges. The orientation matches
+             what SDL requests once the game window exists (Aurora asks for both
+             landscapes), so the app does not start in portrait and then turn. -->
         <activity
             android:name="com.mariopartyrd.partyboard.PartyBoardActivity"
             android:alwaysRetainTaskState="true"
-            android:configChanges="layoutDirection|locale|grammaticalGender|fontScale|fontWeightAdjustment|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
+            android:configChanges="layoutDirection|locale|grammaticalGender|fontScale|fontWeightAdjustment|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation|density|touchscreen|colorMode|mcc|mnc"
             android:exported="true"
             android:label="@string/app_name"
             android:launchMode="singleInstance"
-            android:preferMinimalPostProcessing="true">
+            android:preferMinimalPostProcessing="true"
+            android:screenOrientation="userLandscape">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

@@ -107,6 +107,7 @@ jobs:
       - name: Check pipeline cache seed
         run: python3 tools/check_pipeline_cache_seed.py
 
+
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -127,6 +128,17 @@ jobs:
 
       - name: Build
         run: cmake --build --preset x-linux-ci-${{matrix.preset}}
+
+      # What the in-game lobby and Friends tab rely on where CubeShelf cannot run: the PB4
+      # invitation must stay byte-identical to PartyBoardOnline.exe, and the profile export and
+      # sealed presence must open exactly as CubeShelf wrote them (tools/tests/fixtures).
+      - name: Online, CubeShelf and screen controller tests
+        run: |
+          cmake --build --preset x-linux-ci-${{matrix.preset}} --target online_tests
+          build/x-linux-ci-${{matrix.preset}}/tests/online_invitation_test
+          build/x-linux-ci-${{matrix.preset}}/tests/cubeshelf_social_test tools/tests/fixtures
+          build/x-linux-ci-${{matrix.preset}}/tests/touch_controls_test
+          build/x-linux-ci-${{matrix.preset}}/tests/disc_version_test
 
       - name: Generate AppImage
         run: ci/build-appimage.sh
@@ -292,24 +304,44 @@ jobs:
       - name: Stage stripped JNI library
         run: ANDROID_STAGE_ABIS="${{matrix.abi}}" platforms/android/scripts/stage-jni-libs.sh
 
+      # The run number only grows, so each build installs over the previous one.
       - name: Build APK
         working-directory: platforms/android
+        env:
+          PARTYBOARD_VERSION_CODE: ${{github.run_number}}
         run: ./gradlew :app:assembleRelease --rerun-tasks
 
-      # Android refuses to install an unsigned APK. Sign a copy with a throwaway
-      # debug key generated for this run, so a build can be installed for
-      # testing. It is not a release signature: the key changes every run, so a
-      # newer build may need the previous one uninstalled first. The password
-      # protects nothing and is Android's conventional debug-keystore one.
-      - name: Sign APK with a debug key
+      # Android refuses to install an unsigned APK, and only installs an update
+      # signed with the same key as the installed app; uninstalling instead
+      # deletes the saves, settings and CubeShelf profile. So every build is
+      # signed with the same key: the repository's ANDROID_KEYSTORE_BASE64
+      # secret (with ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and
+      # ANDROID_KEY_PASSWORD) when it is set, otherwise the public test key in
+      # platforms/android/partyboard-test.keystore. That key is not a release
+      # signature: anyone can sign with it, like Android's own debug key.
+      - name: Sign APK
         working-directory: platforms/android/app/build/outputs/apk/release
+        env:
+          KEYSTORE_BASE64: ${{secrets.ANDROID_KEYSTORE_BASE64}}
+          KEYSTORE_PASSWORD: ${{secrets.ANDROID_KEYSTORE_PASSWORD}}
+          KEY_ALIAS: ${{secrets.ANDROID_KEY_ALIAS}}
+          KEY_PASSWORD: ${{secrets.ANDROID_KEY_PASSWORD}}
         run: |
           BUILD_TOOLS="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools/36.1.0"
-          keytool -genkeypair -noprompt -keystore "$RUNNER_TEMP/debug.keystore"             -storepass android -keypass android -alias androiddebugkey             -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Party Board Debug,O=Party Board,C=US"
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/signing.keystore"
+            KEYSTORE="$RUNNER_TEMP/signing.keystore"
+            OUTPUT=app-${{matrix.abi}}-signed.apk
+          else
+            KEYSTORE="$GITHUB_WORKSPACE/platforms/android/partyboard-test.keystore"
+            export KEYSTORE_PASSWORD=android KEY_ALIAS=androiddebugkey KEY_PASSWORD=android
+            OUTPUT=app-${{matrix.abi}}-debug-signed.apk
+          fi
           "$BUILD_TOOLS/zipalign" -f -p 4 app-${{matrix.abi}}-release-unsigned.apk aligned.apk
-          "$BUILD_TOOLS/apksigner" sign --ks "$RUNNER_TEMP/debug.keystore" --ks-pass pass:android             --key-pass pass:android --out app-${{matrix.abi}}-debug-signed.apk aligned.apk
-          "$BUILD_TOOLS/apksigner" verify --verbose app-${{matrix.abi}}-debug-signed.apk
-          rm aligned.apk
+          "$BUILD_TOOLS/apksigner" sign --ks "$KEYSTORE" --ks-pass env:KEYSTORE_PASSWORD \
+            --ks-key-alias "$KEY_ALIAS" --key-pass env:KEY_PASSWORD --out "$OUTPUT" aligned.apk
+          "$BUILD_TOOLS/apksigner" verify --print-certs "$OUTPUT"
+          rm -f aligned.apk "$RUNNER_TEMP/signing.keystore"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
@@ -317,7 +349,7 @@ jobs:
           name: partyboard-${{env.PARTY_BOARD_VERSION}}-android-${{matrix.artifact_arch}}
           path: |
             platforms/android/app/build/outputs/apk/release/app-${{matrix.abi}}-release-unsigned.apk
-            platforms/android/app/build/outputs/apk/release/app-${{matrix.abi}}-debug-signed.apk
+            platforms/android/app/build/outputs/apk/release/app-${{matrix.abi}}-*signed.apk
 
   build-windows:
     name: Build Windows (${{matrix.name}})

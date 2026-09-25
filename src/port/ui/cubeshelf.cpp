@@ -1,21 +1,32 @@
 #include "cubeshelf.hpp"
 
+#include "../file_select.hpp"
+#include "localization.hpp"
 #include "modal.hpp"
+#include "online.hpp"
 #include "pane.hpp"
 #include "port/main.h"
+#include "port/online/cubeshelf_friends.hpp"
+#include "string_button.hpp"
 
+#include <SDL3/SDL_clipboard.h>
 #include <SDL3/SDL_stdinc.h>
+#include <aurora/lib/window.hpp>
 #include <nlohmann/json.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <mutex>
 #include <random>
 #include <set>
 #include <sstream>
 #include <system_error>
+#include <thread>
 
 namespace partyboard::ui::cubeshelf {
 namespace {
@@ -146,6 +157,85 @@ namespace {
     clock::time_point sLastTick {};
     std::set<std::string> sAnnounced;
 
+    // Where CubeShelf cannot run (Android, or the game started without it), the game reads the
+    // friends itself from a profile exported by CubeShelf on the PC. Windows keeps going through
+    // CubeShelf and its companion.
+    bool native_mode() noexcept
+    {
+#if defined(_WIN32)
+        return false;
+#else
+        return !directory().has_value();
+#endif
+    }
+
+    bool french() noexcept
+    {
+        return getSettings().game.language.getValue() == GameLanguage::French;
+    }
+
+    // MainWindow.InGame.cs InGameText, for a device that reads its friends but never hosts.
+    std::map<std::string, std::string> native_text(bool fr)
+    {
+        const auto t = [fr](const char *f, const char *e) { return std::string(fr ? f : e); };
+        return {
+            { "tab", t("Amis", "Friends") },
+            { "title", t("Amis", "Friends") },
+            { "friendsSection", t("Amis", "Friends") },
+            { "noFriends", t("Pas encore d’amis. Ajoute-les dans CubeShelf sur ton PC, puis exporte ton profil de nouveau.",
+                               "No friends yet. Add them in CubeShelf on your PC, then export your profile again.") },
+            { "join", t("Rejoindre", "Join") },
+            { "inviteTitle", t("Invitation", "Invitation") },
+            { "inviteToast", t("t’invite à jouer. Menu, onglet Amis, pour rejoindre.", "invites you to play. Menu, Friends tab, to join.") },
+            { "notice", t("Cet appareil lit tes amis et leurs invitations. C’est ton PC qui publie ta présence et crée les salons.",
+                            "This device reads your friends and their invitations. Your PC publishes your presence and creates lobbies.") },
+        };
+    }
+
+    std::optional<State> native_state()
+    {
+        online::cubeshelf::start();
+        const bool fr = french();
+        const auto view = online::cubeshelf::view(fr);
+        State state;
+        state.fresh = true;
+        state.revision = view.revision;
+        state.ready = view.hasProfile;
+        state.me = view.me;
+        state.text = native_text(fr);
+        state.notice = view.hasProfile ? state.text["notice"] : std::string();
+        for (const auto &v : view.friends) {
+            state.friends.push_back(Friend {
+                .key = v.key,
+                .handle = v.handle,
+                .status = v.status,
+                .label = v.label,
+                .inviteId = v.inviteId,
+                .invitesYou = v.invitesYou,
+            });
+        }
+        return state;
+    }
+
+    // The file picker answers on its own schedule, possibly from another thread; the window
+    // collects the path on its next update.
+    std::mutex sPickedMutex;
+    std::optional<std::string> sPickedProfile;
+
+    void profile_picked(void *, const char *path, const char *error)
+    {
+        if (path == nullptr || error != nullptr) {
+            return;
+        }
+        std::lock_guard lock(sPickedMutex);
+        sPickedProfile = path;
+    }
+
+    constexpr SDL_DialogFileFilter kProfileFilters[] = {
+        { "CubeShelf profile", "cubeshelf-profile" },
+        { "All Files", "*" },
+    };
+
 } // namespace
 
 std::optional<State> read_state_unchecked();
@@ -158,7 +248,7 @@ std::string State::t(const char *key, const char *fallback) const
 
 bool available() noexcept
 {
-    return directory().has_value();
+    return directory().has_value() || native_mode();
 }
 
 std::optional<State> read_state() noexcept
@@ -167,6 +257,9 @@ std::optional<State> read_state() noexcept
     // noexcept: a throw would be std::terminate, a crash in the middle of a game. A state file
     // that cannot be read is simply no state.
     try {
+        if (native_mode()) {
+            return native_state();
+        }
         return read_state_unchecked();
     }
     catch (...) {
@@ -282,6 +375,11 @@ void FriendsWindow::build(Rml::Element *content)
     mRevision = state ? state->revision : -1;
     mFresh = state && state->fresh;
 
+    if (native_mode() && (!state || !state->ready)) {
+        build_import(content);
+        return;
+    }
+
     auto &pane = add_child<Pane>(content, Pane::Type::Controlled);
 
     if (!state || !state->fresh) {
@@ -333,11 +431,124 @@ void FriendsWindow::build(Rml::Element *content)
         }
     }
 
+    if (native_mode()) {
+        pane.add_section("CubeShelf profile");
+        pane.add_button("Refresh now").on_pressed([] { online::cubeshelf::refresh_now(); });
+        pane.add_button("Forget this profile").on_pressed([this] {
+            push(std::make_unique<Modal>(Modal::Props {
+                .title = "Forget this profile",
+                .bodyRml = "This device will no longer see your friends. Your PC and your friends are not affected; you can import the profile again at any time.",
+                .actions = {
+                    ModalAction {
+                        .label = "Cancel",
+                        .onPressed = [](Modal &modal) { modal.pop(); },
+                    },
+                    ModalAction {
+                        .label = "Forget",
+                        .onPressed = [this](Modal &modal) {
+                            modal.pop();
+                            online::cubeshelf::forget_profile();
+                            refresh_active_tab();
+                        },
+                    },
+                },
+            }));
+        });
+    }
+
     pane.finalize();
+}
+
+void FriendsWindow::build_import(Rml::Element *content)
+{
+    auto &leftPane = add_child<Pane>(content, Pane::Type::Controlled);
+    auto &rightPane = add_child<Pane>(content, Pane::Type::Uncontrolled);
+
+    leftPane.add_section("Import your CubeShelf profile");
+    leftPane.register_control(leftPane.add_child<StringButton>(StringButton::Props {
+                                  .key = "Passphrase",
+                                  .getValue = [this] { return mPassphrase; },
+                                  .setValue = [this](Rml::String value) { mPassphrase = std::move(value); },
+                                  .maxLength = 256,
+                                  .type = "password",
+                                  .secret = true,
+                              }),
+        rightPane, [](Pane &pane) { pane.add_text("The passphrase you chose in CubeShelf when exporting the profile."); });
+    leftPane.register_control(leftPane.add_button("Import from a file").on_pressed([] {
+        partyboard::ShowFileSelect(&profile_picked, nullptr, aurora::window::get_sdl_window(), kProfileFilters,
+            static_cast<int>(std::size(kProfileFilters)), nullptr, false);
+    }),
+        rightPane, [](Pane &pane) { pane.add_text("Choose the .cubeshelf-profile file exported by CubeShelf and copied to this device."); });
+    leftPane.register_control(leftPane.add_button("Import from the clipboard").on_pressed([this] {
+        char *text = SDL_HasClipboardText() ? SDL_GetClipboardText() : nullptr;
+        std::string value = text != nullptr ? text : "";
+        SDL_free(text);
+        start_import(std::move(value), false);
+    }),
+        rightPane, [](Pane &pane) { pane.add_text("If you sent yourself the content of the file (it starts with CSP1-), copy it, then import it from here."); });
+
+    leftPane.add_text("On your PC, open CubeShelf, then My profile, Play on a phone, and export your profile. This device will then see your friends and their invitations; your PC keeps publishing your presence.");
+    mImportStatus = leftPane.add_text(mImportMessage);
+    leftPane.finalize();
+}
+
+struct FriendsWindow::ImportJob {
+    std::atomic<bool> done = false;
+    online::cubeshelf::ImportError error = online::cubeshelf::ImportError::None;
+};
+
+void FriendsWindow::set_import_message(std::string message)
+{
+    mImportMessage = std::move(message);
+    if (mImportStatus != nullptr) {
+        mImportStatus->SetInnerRML(escape(ui_translate(mImportMessage)));
+    }
+}
+
+void FriendsWindow::start_import(std::string source, bool fromFile)
+{
+    if (mImport) {
+        return;
+    }
+    if (source.empty()) {
+        set_import_message(fromFile ? "No file was chosen." : "The clipboard is empty.");
+        return;
+    }
+    if (mPassphrase.empty()) {
+        set_import_message("Type the passphrase first.");
+        return;
+    }
+    set_import_message("Importing...");
+    // PBKDF2 takes about a second on a phone: never on the frame.
+    auto job = std::make_shared<ImportJob>();
+    mImport = job;
+    std::thread([job, source = std::move(source), passphrase = mPassphrase, fromFile] {
+        job->error = fromFile ? online::cubeshelf::import_from_path(source, passphrase) : online::cubeshelf::import_from_text(source, passphrase);
+        job->done = true;
+    }).detach();
 }
 
 void FriendsWindow::act(const std::string &action, const std::string &key, bool closesGame)
 {
+    if (native_mode()) {
+        // Nothing to close here: the lobby opens inside the game, on the invitation.
+        if (action == "join") {
+            if (const auto payload = online::cubeshelf::join_payload(key)) {
+                push(std::make_unique<OnlineWindow>(*payload));
+            }
+            else {
+                push_toast({
+                    .type = "error",
+                    .title = "Invitation",
+                    .content = "That invitation is no longer valid: the lobby was closed or has expired.",
+                    .duration = std::chrono::seconds(6),
+                });
+                refresh_active_tab();
+            }
+        }
+        return;
+    }
+
     if (!closesGame) {
         send(action, key, false);
         return;
@@ -399,6 +610,30 @@ void FriendsWindow::send(const std::string &action, const std::string &key, bool
 void FriendsWindow::update()
 {
     const auto now = clock::now();
+
+    if (native_mode()) {
+        std::optional<std::string> picked;
+        {
+            std::lock_guard lock(sPickedMutex);
+            picked.swap(sPickedProfile);
+        }
+        if (picked) {
+            start_import(std::move(*picked), true);
+        }
+        if (mImport && mImport->done) {
+            const auto error = mImport->error;
+            mImport.reset();
+            if (error == online::cubeshelf::ImportError::None) {
+                mPassphrase.clear();
+                mImportMessage.clear();
+                mImportStatus = nullptr;
+                refresh_active_tab();
+            }
+            else {
+                set_import_message(online::cubeshelf::import_error_message(error));
+            }
+        }
+    }
 
     if (!mPendingId.empty()) {
         const auto &dir = directory();

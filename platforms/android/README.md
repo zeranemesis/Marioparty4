@@ -61,6 +61,23 @@ Output APK:
 
 - `android/app/build/outputs/apk/debug/app-debug.apk`
 
+## Signing And Updates
+
+Android only installs an update signed with the same key as the installed app;
+uninstalling first deletes the saves, the settings and the CubeShelf profile.
+So every build uses one key:
+
+- local debug builds and CI builds: `partyboard-test.keystore` (password
+  `android`, alias `androiddebugkey`). It is public, like Android's own debug
+  key, so it is only for testing;
+- CI builds of a repository that sets the `ANDROID_KEYSTORE_BASE64`,
+  `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD`
+  secrets: that key instead (`app-<abi>-signed.apk`). Switching from the test
+  key to it needs one last uninstall.
+
+CI sets `versionCode` to its run number, so a newer build always installs over
+an older one.
+
 ## Launch With Runtime Args (adb)
 
 You can pass command-line args through the activity intent:

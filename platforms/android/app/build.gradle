@@ -9,6 +9,10 @@ def syncPartyBoardAssets = tasks.register('syncPartyBoardAssets', Sync) {
         into 'res'
         exclude '**/.DS_Store'
     }
+    // Shader pipelines seen on PC, which Aurora compiles before the first frame
+    // instead of dropping draws on a scene's first visit. Desktop installs it
+    // next to the binary; here Aurora reads it from the assets through SDL.
+    from(new File(partyboardRepoDir, 'initial_pipeline_cache.db'))
     into partyboardGeneratedAssetsDir
 }
 
@@ -20,13 +24,26 @@ android {
         applicationId 'com.mariopartyrd.partyboard'
         minSdk 26
         targetSdk 36
-        versionCode 1
+        // CI passes its run number so each build installs over the last one.
+        versionCode((System.getenv('PARTYBOARD_VERSION_CODE') ?: '1').toInteger())
         versionName '0.1.0'
+    }
+
+    // The public test key CI signs with: a local debug build and a CI build
+    // then install over each other without losing saves. Not a release key.
+    signingConfigs {
+        partyboardTest {
+            storeFile file('../partyboard-test.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
     }
 
     buildTypes {
         debug {
             minifyEnabled false
+            signingConfig signingConfigs.partyboardTest
         }
         release {
             minifyEnabled false
@@ -39,6 +56,12 @@ android {
             jniLibs.srcDirs = ['src/main/jniLibs']
             assets.srcDirs = [partyboardGeneratedAssetsDir]
         }
+    }
+
+    androidResources {
+        // SQLite seeks all over the file; a compressed asset has to be
+        // inflated again from the start on every backward seek.
+        noCompress 'db'
     }
 
     splits {

@@ -13,6 +13,7 @@
 #include "port/settings.h"
 #include "imgui.h"
 #include "modal.hpp"
+#include "online.hpp"
 #include "settings.hpp"
 #include "ui.hpp"
 #include "window.hpp"
@@ -73,6 +74,9 @@ MenuBar::MenuBar()
             .duration = std::chrono::seconds(5),
         });
     });
+#else
+    // No companion process on Android/iOS/Linux/macOS: the lobby lives in the game.
+    mTabBar->add_tab("Play Online", [this] { push(std::make_unique<OnlineWindow>()); });
 #endif
     // mTabBar->add_tab("Warp", [] {
     //     // TODO
@@ -137,7 +141,7 @@ MenuBar::MenuBar()
                             [dismiss](Modal& modal) {
                                 // mDoAud_seStartMenu(kSoundClick); // TODO PC
                                 dismiss(modal);
-                                // IsRunning = false; // TODO PC
+                                PartyBoard_IsRunning = false;
                             },
                     },
                 },

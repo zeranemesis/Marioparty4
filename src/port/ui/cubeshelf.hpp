@@ -3,6 +3,7 @@
 #include "window.hpp"
 
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -65,9 +66,20 @@ public:
     void update() override;
 
 private:
+    struct ImportJob;
+
     void build(Rml::Element *content);
+    // Where the game reads friends itself: no profile yet, so offer to import one.
+    void build_import(Rml::Element *content);
+    void start_import(std::string source, bool fromFile);
+    void set_import_message(std::string message);
     void act(const std::string &action, const std::string &key, bool closesGame);
     void send(const std::string &action, const std::string &key, bool closesGame);
+
+    std::string mPassphrase;
+    std::string mImportMessage;
+    Rml::Element *mImportStatus = nullptr;
+    std::shared_ptr<ImportJob> mImport;
 
     long long mRevision = -1;
     bool mFresh = false;

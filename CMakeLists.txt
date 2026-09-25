@@ -101,6 +101,7 @@ FetchContent_Declare(json
 FetchContent_MakeAvailable(json)
 
 include(cmake/rcheevos.cmake)
+include(cmake/mbedtls.cmake)
 
 set(VERSION 1)
 set(PARTY_BOARD_BUNDLE_NAME PartyBoard)
@@ -225,7 +226,7 @@ if (tracy_SOURCE_DIR)
     target_include_directories(dol PRIVATE ${tracy_SOURCE_DIR}/profiler/src)
 endif()
 target_link_libraries(dol PUBLIC aurora::core aurora::card aurora::dvd aurora::gx aurora::mtx aurora::os aurora::si aurora::vi aurora::pad musyx absl::flat_hash_map nlohmann_json::nlohmann_json fmt::fmt rmlui_debugger)
-target_link_libraries(dol PRIVATE rcheevos)
+target_link_libraries(dol PRIVATE rcheevos mbedcrypto)
 # HTTPS for RetroAchievements, through each platform's own networking stack
 # (include/port/http.hpp). Only the curl backend needs anything from the system;
 # without it the feature is simply unavailable rather than breaking the build.
@@ -650,3 +651,19 @@ foreach (target IN LISTS BINARY_TARGETS)
         endif ()
     endforeach ()
 endforeach ()
+
+# Native online, CubeShelf, screen controller and disc version unit tests. Not part of the default build; CI builds and runs them
+# (cmake --build <dir> --target online_tests, then run each from <dir>/tests).
+add_executable(online_invitation_test EXCLUDE_FROM_ALL tools/tests/online_invitation_test.cpp src/port/online/invitation.cpp)
+target_include_directories(online_invitation_test PRIVATE include)
+add_executable(cubeshelf_social_test EXCLUDE_FROM_ALL tools/tests/cubeshelf_social_test.cpp src/port/online/cubeshelf_social.cpp)
+target_include_directories(cubeshelf_social_test PRIVATE include)
+target_link_libraries(cubeshelf_social_test PRIVATE mbedcrypto nlohmann_json::nlohmann_json)
+add_executable(touch_controls_test EXCLUDE_FROM_ALL tools/tests/touch_controls_test.cpp src/port/touch_controls.cpp)
+target_include_directories(touch_controls_test PRIVATE include extern/aurora/include)
+target_compile_definitions(touch_controls_test PRIVATE TARGET_PC)
+add_executable(disc_version_test EXCLUDE_FROM_ALL tools/tests/disc_version_test.cpp)
+target_include_directories(disc_version_test PRIVATE include)
+set_target_properties(online_invitation_test cubeshelf_social_test touch_controls_test disc_version_test PROPERTIES
+        CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+add_custom_target(online_tests DEPENDS online_invitation_test cubeshelf_social_test touch_controls_test disc_version_test)

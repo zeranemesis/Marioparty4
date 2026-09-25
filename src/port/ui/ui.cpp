@@ -17,6 +17,7 @@
 #include "cubeshelf.hpp"
 #include "input.hpp"
 #include "prelaunch.hpp"
+#include "touch_overlay.hpp"
 #include "window.hpp"
 
 #include <port/settings.h>
@@ -132,6 +133,11 @@ const char *connection_state_icon(SDL_JoystickConnectionState state) noexcept
 void handle_event(const SDL_Event &event) noexcept
 {
     if (!aurora::rmlui::is_initialized()) {
+        return;
+    }
+
+    // In game, a thumb on the screen controller is the controller's alone.
+    if (TouchOverlay::handle_event(event)) {
         return;
     }
 

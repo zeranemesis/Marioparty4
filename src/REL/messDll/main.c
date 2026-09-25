@@ -9,11 +9,13 @@
 #include "game/wipe.h"
 
 #include "ext_math.h"
+#include "port/version_runtime.h"
 
 static void fn_1_2BC(omObjData *arg0);
 static void fn_1_300(omObjData *arg0);
 static void fn_1_E88(void);
-#if VERSION_PAL
+// PC: the PAL viewer (language switch with X) is kept for PAL discs
+#if VERSION_PAL || defined(TARGET_PC)
 static void fn_1_1174();
 #endif
 static s32 fn_1_11B0(s16 arg0, s16 arg1);
@@ -22,11 +24,11 @@ static Process *lbl_1_bss_34;
 static omObjData *lbl_1_bss_30;
 static omObjData *lbl_1_bss_2C;
 static u8 lbl_1_bss_pad[0x20];
-#if VERSION_PAL
+#if VERSION_PAL || defined(TARGET_PC)
 static Process *lbl_1_bss_C;
 #endif
 static Process *lbl_1_bss_8;
-#if VERSION_PAL
+#if VERSION_PAL || defined(TARGET_PC)
 static s16 lbl_1_bss_4;
 #else
 static u8 lbl_1_bss_4_pad[4];
@@ -50,6 +52,18 @@ void ObjectSetup(void)
     Hu3DCameraViewportSet(1, 0.0f, 0.0f, HU_FB_WIDTHF, HU_FB_HEIGHTF, 0.0f, 1.0f);
     lbl_1_bss_30 = omAddObjEx(lbl_1_bss_34, 0, 0x40, 0, -1, fn_1_2BC);
     lbl_1_bss_2C = omAddObjEx(lbl_1_bss_34, 0x7FDA, 0, 0, -1, omOutView);
+#ifdef TARGET_PC
+    if (VERSION_RT_PAL) {
+        GWGameStat.language = 1;
+    }
+    HuWinInit(1);
+    if (VERSION_RT_PAL) {
+        lbl_1_bss_C = HuPrcChildCreate(fn_1_E88, 100, 0x3000, 0, lbl_1_bss_34);
+    }
+    else {
+        lbl_1_bss_8 = HuPrcChildCreate(fn_1_E88, 100, 0x3000, 0, lbl_1_bss_34);
+    }
+#else
 #if VERSION_PAL
     GWGameStat.language = 1;
 #endif
@@ -60,6 +74,7 @@ void ObjectSetup(void)
     lbl_1_bss_8
 #endif
         = HuPrcChildCreate(fn_1_E88, 100, 0x3000, 0, lbl_1_bss_34);
+#endif
 }
 
 static void fn_1_2BC(omObjData *arg0)
@@ -131,7 +146,7 @@ static char *lbl_1_data_32C[]
           "042_mg_445", "043_mg_447", "044_mg_448", "045_mg_449", "046_mg_450", "047_tutorial", "048_Option_Rooml", "049_Map6_event", "050_charley",
           "051_Present_Room", "052_Extra_Room", "053_Staff_Post", "054_Staff_Name", "055_Opening_Demo", "056_mgex_inst", NULL };
 
-#if VERSION_PAL
+#if VERSION_PAL || defined(TARGET_PC)
 char *lbl_1_data_438[] = {
     "ENGLISH", "GERMANY", "FRENCH", "ITALY", "SPANISH"
 };
@@ -147,7 +162,7 @@ static void fn_1_E88(void)
     s16 temp_r3;
     s16 var_r25;
     s16 var_r27;
-#if VERSION_PAL
+#if VERSION_PAL || defined(TARGET_PC)
     s16 var_r26 = 0;
 #endif
     s16 var_r28;
@@ -178,7 +193,23 @@ static void fn_1_E88(void)
         var_r27++;
         var_r28++;
     }
-#if VERSION_NTSC
+#ifdef TARGET_PC
+    if (VERSION_RT_PAL) {
+        fn_1_1174();
+        HU_WIN_MES_SET_PTR(lbl_1_bss_0, (uintptr_t)lbl_1_data_438[0]);
+    }
+    else {
+        temp_r3 = HuWinExCreateStyled(-10000.0f, 32.0f, 316, 40, -1, 0);
+        HuWinExAnimIn(temp_r3);
+        HuWinAttrSet(temp_r3, 0x800);
+        HuWinMesSpeedSet(temp_r3, 0);
+        HU_WIN_MES_SET_PTR(temp_r3, MAKE_MESSID_PTR(lbl_1_data_32C[0]));
+        lbl_1_bss_0 = HuWinCreate(460.0f, 32.0f, 100, 40, 0);
+        HuWinAttrSet(lbl_1_bss_0, 0x800);
+        HuWinMesSpeedSet(lbl_1_bss_0, 0);
+        HU_WIN_MES_SET_PTR(lbl_1_bss_0, MAKE_MESSID_PTR("\x1F\x01_\x1F\x02"));
+    }
+#elif VERSION_NTSC
     temp_r3 = HuWinExCreateStyled(-10000.0f, 32.0f, 316, 40, -1, 0);
     HuWinExAnimIn(temp_r3);
     HuWinAttrSet(temp_r3, 0x800);
@@ -196,7 +227,9 @@ static void fn_1_E88(void)
     var_r31 = 0;
     var_r30 = 0;
     while (1) {
-#if VERSION_PAL
+#ifdef TARGET_PC
+#define _WINDOW (VERSION_RT_PAL ? lbl_1_bss_2 : lbl_1_bss_0)
+#elif VERSION_PAL
 #define _WINDOW lbl_1_bss_2
 #else
 #define _WINDOW lbl_1_bss_0
@@ -209,7 +242,22 @@ static void fn_1_E88(void)
         HU_WIN_MES_SET_PTR(_WINDOW, MAKE_MESSID_PTR("\x1F\x01_\x1F\x02"));
         temp_r3_2 = fn_1_11B0(var_r31, var_r30);
 #undef _WINDOW
-#if VERSION_PAL
+#ifdef TARGET_PC
+        if (VERSION_RT_PAL && (temp_r3_2 & 0x400)) {
+            HuWinAllKill();
+            HuPrcVSleep();
+            var_r26++;
+            if (var_r26 >= 5) {
+                var_r26 = 0;
+            }
+            GWGameStat.language = var_r26 + 1;
+            HuWinInit(1);
+            HuPrcVSleep();
+            fn_1_1174();
+            HU_WIN_MES_SET_PTR(lbl_1_bss_0, (uintptr_t)lbl_1_data_438[var_r26]);
+        }
+        else
+#elif VERSION_PAL
         if (temp_r3_2 & 0x400) {
             HuWinAllKill();
             HuPrcVSleep();
@@ -265,7 +313,7 @@ static void fn_1_E88(void)
 
 static char *lbl_1_data_440[] = { "]1^", "]2^", "]3^", "]4^", "]5^", "]6^", "]7^", "]8^" };
 
-#if VERSION_PAL
+#if VERSION_PAL || defined(TARGET_PC)
 static void fn_1_1174()
 {
     lbl_1_bss_4 = HuWinExCreateStyled(-10000.0f, 32.0f, 316, 40, -1, 0);
@@ -296,7 +344,16 @@ static s32 fn_1_11B0(s16 arg0, s16 arg1)
 
     var_r27 = 0;
     var_r26 = 0;
-#if VERSION_PAL
+#ifdef TARGET_PC
+    if (VERSION_RT_PAL) {
+        HuWinHomeClear(lbl_1_bss_4);
+        HU_WIN_MES_SET_PTR(lbl_1_bss_4, MAKE_MESSID_PTR(lbl_1_data_32C[arg0]));
+    }
+    else {
+        HuWinHomeClear(lbl_1_bss_2);
+        HU_WIN_MES_SET_PTR(lbl_1_bss_2, MAKE_MESSID_PTR(lbl_1_data_32C[arg0]));
+    }
+#elif VERSION_PAL
     HuWinHomeClear(lbl_1_bss_4);
     HU_WIN_MES_SET_PTR(lbl_1_bss_4, MAKE_MESSID_PTR(lbl_1_data_32C[arg0]));
 #else
@@ -315,16 +372,20 @@ static s32 fn_1_11B0(s16 arg0, s16 arg1)
     if (spC[0] <= 16.0f) {
         spC[0] = 32.0f;
     }
-    lbl_1_data_410 = HuWinCreate(-10000.0f, -10000.0f, spC[0], spC[1], (VERSION_PAL) ? 1 : 0);
-#if VERSION_PAL
+    lbl_1_data_410 = HuWinCreate(-10000.0f, -10000.0f, spC[0], spC[1], (VERSION_RT_PAL) ? 1 : 0);
+#ifdef TARGET_PC
+    if (VERSION_RT_PAL) {
+        HuWinMesPalSet(lbl_1_data_410, 7, 0, 0, 0);
+    }
+#elif VERSION_PAL
     HuWinMesPalSet(lbl_1_data_410, 7, 0, 0, 0);
 #endif
     for (i = 0; i < 8; i++) {
         HU_WIN_INSERT_MES_SET_PTR(lbl_1_data_410, MAKE_MESSID_PTR(lbl_1_data_440[i]), (s16)i);
     }
     temp_r30 = &winData[lbl_1_data_410];
-    temp_r30->push_key |= (VERSION_PAL) ? 0x760 : 0x360;
-    temp_r30->key_auto = (VERSION_PAL) ? 0x460 : 0x60;
+    temp_r30->push_key |= (VERSION_RT_PAL) ? 0x760 : 0x360;
+    temp_r30->key_auto = (VERSION_RT_PAL) ? 0x460 : 0x60;
     HuWinMesSet(lbl_1_data_410, temp_r28);
     var_r29 = MessData_MesPtrGet(messDataPtr, temp_r28);
     while (*var_r29 != 0) {
@@ -332,7 +393,9 @@ static s32 fn_1_11B0(s16 arg0, s16 arg1)
             var_r27 = 1;
         }
 
-#if VERSION_PAL
+#ifdef TARGET_PC
+        if (*var_r29 == (VERSION_RT_PAL ? 0xFF : 0)) {
+#elif VERSION_PAL
         if (*var_r29 == 0xFF) {
 #else
         if (*var_r29 == 0) {
@@ -347,13 +410,13 @@ static s32 fn_1_11B0(s16 arg0, s16 arg1)
         return temp_r30->key_down;
     }
     if (var_r26 == 0) {
-        while (!(HuPadBtnRep[0] & ((VERSION_PAL) ? 0x760 : 0x360))) {
+        while (!(HuPadBtnRep[0] & ((VERSION_RT_PAL) ? 0x760 : 0x360))) {
             HuPrcVSleep();
         }
         return HuPadBtnRep[0];
     }
     while (temp_r30->stat != 0) {
-        if (HuPadBtnRep[0] & ((VERSION_PAL) ? 0x460 : 0x60)) {
+        if (HuPadBtnRep[0] & ((VERSION_RT_PAL) ? 0x460 : 0x60)) {
             return HuPadBtnDown[0];
         }
         HuPrcVSleep();

@@ -96,6 +96,9 @@ struct UserSettings {
 
         // Input
         ConfigVar<bool> allowBackgroundInput;
+        // On-screen controller: 0 = automatic (phones and tablets without a gamepad), 1 = always, 2 = never.
+        ConfigVar<int> touchControls;
+        ConfigVar<int> touchControlsOpacity; // percent
 
         // Cheats
         ConfigVar<bool> infiniteHearts;
@@ -133,6 +136,11 @@ struct UserSettings {
         ConfigVar<std::string> username;
         ConfigVar<std::string> token;
     } retroAchievements;
+
+    struct {
+        // The name shown to the other players in an online lobby.
+        ConfigVar<std::string> nickname;
+    } online;
 };
 
 UserSettings& getSettings();

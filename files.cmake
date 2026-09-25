@@ -106,6 +106,9 @@ set(PORT_FILES
         src/port/mods_test.inc
         src/port/netplay_transport.cpp
         src/port/netplay_runtime.cpp
+        src/port/online/cubeshelf_friends.cpp
+        src/port/online/cubeshelf_social.cpp
+        src/port/online/invitation.cpp
         src/port/OS.c
         src/port/portmain.cpp
         src/port/rollback.cpp
@@ -116,6 +119,7 @@ set(PORT_FILES
         src/port/settings.cpp
         src/port/stubs.c
         src/port/thp_player.cpp
+        src/port/touch_controls.cpp
         src/port/version.cpp
 
         src/port/ui/achievements.cpp
@@ -143,8 +147,12 @@ set(PORT_FILES
         src/port/ui/nav_types.hpp
         src/port/ui/number_button.cpp
         src/port/ui/number_button.hpp
+        src/port/ui/online.cpp
+        src/port/ui/online.hpp
         src/port/ui/overlay.cpp
         src/port/ui/overlay.hpp
+        src/port/ui/touch_overlay.cpp
+        src/port/ui/touch_overlay.hpp
         src/port/ui/pane.cpp
         src/port/ui/pane.hpp
         src/port/ui/menu_bar.cpp

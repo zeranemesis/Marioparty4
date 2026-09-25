@@ -10,12 +10,22 @@
 
 namespace partyboard {
 
+// Phones are 19.5:9 to 21:9: stretching the 4:3 picture across one widens
+// everything by about two thirds, and the bars either side are where the
+// on-screen controls sit. Desktop keeps filling the window. Only a default:
+// a choice the player made, or a preset they picked, is kept.
+#ifdef __ANDROID__
+constexpr bool kLockAspectRatioByDefault = true;
+#else
+constexpr bool kLockAspectRatioByDefault = false;
+#endif
+
 UserSettings g_userSettings = {
     .video = {
         .enableFullscreen {"video.enableFullscreen", false},
         .enableVsync {"video.enableVsync", true},
         .targetFrameRate {"video.targetFrameRate", 60},
-        .lockAspectRatio {"video.lockAspectRatio", false},
+        .lockAspectRatio {"video.lockAspectRatio", kLockAspectRatioByDefault},
         .enableAdaptiveWidescreen {"video.enableAdaptiveWidescreen", false},
         .enableFpsOverlay {"game.enableFpsOverlay", false},
         .fpsOverlayCorner {"game.fpsOverlayCorner", 0},
@@ -52,6 +62,8 @@ UserSettings g_userSettings = {
 
         // Input
         .allowBackgroundInput {"game.allowBackgroundInput", true},
+        .touchControls {"game.touchControls", 0},
+        .touchControlsOpacity {"game.touchControlsOpacity", 60},
 
         // Cheats
         .infiniteHearts {"game.infiniteHearts", false},
@@ -85,6 +97,9 @@ UserSettings g_userSettings = {
         .enabled {"retroAchievements.enabled", true},
         .username {"retroAchievements.username", ""},
         .token {"retroAchievements.token", ""},
+    },
+    .online = {
+        .nickname {"online.nickname", ""},
     },
 };
 
@@ -128,6 +143,8 @@ void registerSettings() {
     Register(g_userSettings.game.unlockAllMinigames);
     Register(g_userSettings.game.unlockBowsersGnarlyParty);
     Register(g_userSettings.game.allowBackgroundInput);
+    Register(g_userSettings.game.touchControls);
+    Register(g_userSettings.game.touchControlsOpacity);
 
     Register(g_userSettings.backend.isoPath);
     Register(g_userSettings.backend.isoVerification);
@@ -144,6 +161,8 @@ void registerSettings() {
     Register(g_userSettings.retroAchievements.enabled);
     Register(g_userSettings.retroAchievements.username);
     Register(g_userSettings.retroAchievements.token);
+
+    Register(g_userSettings.online.nickname);
 }
 
 }

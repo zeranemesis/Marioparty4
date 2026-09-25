@@ -19,6 +19,7 @@
 
 #include "ext_math.h"
 #include "version.h"
+#include "port/version_runtime.h"
 
 extern s32 rand8(void);
 
@@ -817,7 +818,11 @@ static void M457GameExec(omObjData *object)
                     espDispOn(sprIdTbl[i]);
                 }
             }
-#if VERSION_NTSC
+#if VERSION_NTSC || defined(TARGET_PC)
+#ifdef TARGET_PC
+            // A USA disc shows this text sprite (with a howl), a PAL disc a message instead (ShoveMesMain)
+            if (VERSION_RT_NTSC) {
+#endif
             if (lbl_1_bss_60 <= 25) {
                 temp_f28 = lbl_1_bss_60 / 25.0;
                 temp_f26 = 1.0f - (1.0f - temp_f28) * (1.0f - temp_f28) * (1.0f - temp_f28);
@@ -835,6 +840,9 @@ static void M457GameExec(omObjData *object)
             else {
                 espAttrSet(sprIdTbl[17], HUSPR_ATTR_DISPOFF);
             }
+#ifdef TARGET_PC
+            }
+#endif
 #endif
             for (i = 0; i < 2; i++) {
                 sp150[i] = playerObj[i];
@@ -1156,7 +1164,7 @@ static void ShoveMesMain(void)
     s16 temp_r31;
     WindowData *temp_r30;
     PlayerData *spC[2];
-#if VERSION_PAL
+#if VERSION_PAL || defined(TARGET_PC)
     float var_f30;
     double var_f29;
     double var_f28;
@@ -1175,7 +1183,15 @@ static void ShoveMesMain(void)
     }
     HuWinComKeyWait(PAD_BUTTON_A, PAD_BUTTON_A, PAD_BUTTON_A, PAD_BUTTON_A, REFRESH_RATE);
     HuWinComKeyReset();
-#if VERSION_NTSC
+#ifdef TARGET_PC
+    if (VERSION_RT_NTSC) {
+        temp_r31 = HuWinCreate(215.0f, 100.0f, 130, 37, 1);
+    }
+    else {
+        HuWinMesMaxSizeGet(1, sp14, MAKE_MESSID(48, 32));
+        temp_r31 = HuWinCreate(-10000.0f, 100.0f, sp14[0], 0x25, 1);
+    }
+#elif VERSION_NTSC
     temp_r31 = HuWinCreate(215.0f, 100.0f, 130, 37, 1);
 #else
     HuWinMesMaxSizeGet(1, sp14, MAKE_MESSID(48, 32));
@@ -1184,7 +1200,11 @@ static void ShoveMesMain(void)
     HuSprColorSet(winData[temp_r31].group, 0, 0xFF, 0xFF, 0xCC);
     HuWinBGTPLvlSet(temp_r31, 0.9f);
     temp_r30 = &winData[temp_r31];
-#if VERSION_PAL
+#ifdef TARGET_PC
+    if (VERSION_RT_PAL) {
+        var_f29 = temp_r30->pos_x;
+    }
+#elif VERSION_PAL
     var_f29 = temp_r30->pos_x;
 #endif
     temp_r30->mess_color = 0;
@@ -1192,7 +1212,14 @@ static void ShoveMesMain(void)
     temp_r30->attr |= 0x80;
     for (var_r28 = 15, var_f31 = 0.0f; var_r28 != 0; var_r28--, var_f31 += 2.0f / 30) {
         HuWinScaleSet(temp_r31, 1.0f, 1.0 * (1.0f - (1.0f - var_f31) * (1.0f - var_f31)));
-#if VERSION_NTSC
+#ifdef TARGET_PC
+        if (VERSION_RT_NTSC) {
+            HuWinPosSet(temp_r31, 215.0f, 100.0 + 37.0 * (1.0f - (1.0f - var_f31) * (1.0f - var_f31)) / -4.0);
+        }
+        else {
+            HuWinPosSet(temp_r31, var_f29, 100.0 + 37.0 * (1.0f - (1.0f - var_f31) * (1.0f - var_f31)) / -4.0);
+        }
+#elif VERSION_NTSC
         HuWinPosSet(temp_r31, 215.0f, 100.0 + 37.0 * (1.0f - (1.0f - var_f31) * (1.0f - var_f31)) / -4.0);
 #else
         HuWinPosSet(temp_r31, var_f29, 100.0 + 37.0 * (1.0f - (1.0f - var_f31) * (1.0f - var_f31)) / -4.0);
@@ -1204,11 +1231,42 @@ static void ShoveMesMain(void)
     HuPrcSleep(REFRESH_RATE);
     HuWinExAnimOut(temp_r31);
     HuWinExCleanup(temp_r31);
-#if VERSION_PAL
+#ifdef TARGET_PC
+    if (VERSION_RT_PAL) {
+        temp_r31 = 0;
+    }
+#elif VERSION_PAL
     temp_r31 = 0;
 #endif
     m457MesEndF = 0;
-#if VERSION_PAL
+#ifdef TARGET_PC
+    if (VERSION_RT_PAL) {
+        while (gameState != 1008) {
+            HuPrcVSleep();
+        }
+        HuWinMesMaxSizeGet(1, spC_2, MAKE_MESSID(48, 33));
+        temp_r31 = HuWinCreate(-10000.0f, 100.0f, spC_2[0], spC_2[1], 1);
+        HuSprColorSet(winData[temp_r31].group, 0, 0xFF, 0xFF, 0xCC);
+        HuWinBGTPLvlSet(temp_r31, 0.9f);
+        var_r29 = &winData[temp_r31];
+        var_f28 = var_r29->pos_x;
+        var_r29->mess_color = 0;
+        var_r29->mess_shadow_color = 9;
+        var_r29->attr |= 0x80;
+        for (var_r26 = 5, var_f30 = 0.0f; var_r26 != 0; var_r26--, var_f30 += 0.2f) {
+            HuWinScaleSet(temp_r31, 1.0f, (double)(1.0f - ((1.0f - var_f30) * (1.0f - var_f30))));
+            HuWinPosSet(temp_r31, var_f28, 100.0 + (((double)spC_2[1] * (1.0f - ((1.0f - var_f30) * (1.0f - var_f30)))) / -4.0));
+            HuPrcVSleep();
+        }
+        HuWinScaleSet(temp_r31, 1.0f, 1.0f);
+        HuWinMesSet(temp_r31, MAKE_MESSID(48, 33));
+        HuWinMesSpeedSet(temp_r31, 0);
+        HuPrcSleep(0x32);
+        HuWinExAnimOut(temp_r31);
+        HuWinExCleanup(temp_r31);
+        temp_r31 = 0;
+    }
+#elif VERSION_PAL
     while (gameState != 1008) {
         HuPrcVSleep();
     }
@@ -1338,7 +1396,11 @@ static void M457Main(omObjData *object)
             if (lbl_1_bss_60 <= 0) {
                 gameState++;
                 lbl_1_bss_60 = 0;
-#if VERSION_NTSC
+#ifdef TARGET_PC
+                if (VERSION_RT_NTSC) {
+                    HuAudFXPlay(MSM_SE_BOWSER_HOWL);
+                }
+#elif VERSION_NTSC
                 HuAudFXPlay(MSM_SE_BOWSER_HOWL);
 #endif
             }

@@ -13,11 +13,14 @@
 #include "partyboard_version.h"
 #include "ui/menu_bar.hpp"
 #include "ui/overlay.hpp"
+#include "ui/touch_overlay.hpp"
 #include "ui/precompile.hpp"
 #include "ui/prelaunch.hpp"
 #include "ui/preset.hpp"
 
+#include <SDL3/SDL_events.h>
 #include <SDL3/SDL_filesystem.h>
+#include <SDL3/SDL_log.h>
 #include <aurora/aurora.h>
 #include <aurora/event.h>
 #include <dolphin/gx/GXAurora.h>
@@ -130,7 +133,32 @@ void aurora_log_callback(AuroraLogLevel level, const char* module, const char *m
             out = stderr;
             break;
     }
+#ifdef __ANDROID__
+    // stdout and stderr lead nowhere on Android; SDL's log is what reaches logcat.
+    (void)out;
+    (void)levelStr;
+    SDL_LogPriority priority = SDL_LOG_PRIORITY_INFO;
+    switch (level) {
+        case LOG_DEBUG:
+            priority = SDL_LOG_PRIORITY_DEBUG;
+            break;
+        case LOG_INFO:
+            priority = SDL_LOG_PRIORITY_INFO;
+            break;
+        case LOG_WARNING:
+            priority = SDL_LOG_PRIORITY_WARN;
+            break;
+        case LOG_ERROR:
+            priority = SDL_LOG_PRIORITY_ERROR;
+            break;
+        case LOG_FATAL:
+            priority = SDL_LOG_PRIORITY_CRITICAL;
+            break;
+    }
+    SDL_LogMessage(SDL_LOG_CATEGORY_APPLICATION, priority, "[%s] %s", module, message);
+#else
     fprintf(out, "[%s | %s] %s\n", levelStr, module, message);
+#endif
     if (level == LOG_FATAL) {
         fflush(out);
         abort();
@@ -316,15 +344,28 @@ static std::filesystem::path calculate_config_path() {
 #endif
 #endif
 
-    const auto result = SDL_GetPrefPath("MarioPartyRD", "Party Board");
+    // On Android this is the app's internal files directory (Context.getFilesDir()):
+    // private, kept across updates, removed only on uninstall or "Clear storage".
+    // Config, memory cards, achievements and the pipeline cache all live there.
+    char* result = SDL_GetPrefPath("MarioPartyRD", "Party Board");
     if (!result) {
         PartyBoardMainLog.error("Unable to get PrefPath: {}", SDL_GetError());
+        return {};
     }
 
-    return reinterpret_cast<const char8_t*>(result);
+    std::filesystem::path configPath = reinterpret_cast<const char8_t*>(result);
+    SDL_free(result);
+    return configPath;
 }
 
 static void EnsureInitialPipelineCache(const std::filesystem::path& configDir) {
+#ifdef __ANDROID__
+    // The seed is an APK asset, not a file next to the binary (SDL_GetBasePath()
+    // is "./" here). Aurora merges it itself through SDL_IOFromFile, which reads
+    // assets, so there is nothing to copy.
+    (void)configDir;
+    return;
+#endif
     if (configDir.empty()) {
         return;
     }
@@ -437,6 +478,41 @@ static bool online_wait_for_start(bool pumpEvents) {
 #endif
 }
 
+// Phones and tablets (SDL sends these on Android and iOS; never on desktop).
+//
+// Pausing is SDL's job, not ours: on Android the next SDL_PumpEvents after the
+// activity pauses blocks until it resumes (SDL_HINT_ANDROID_BLOCK_ON_PAUSE,
+// on by default) and SDL pauses the audio device with it, so game logic, the
+// MusyX output and rendering all stop. Aurora reports it as AURORA_PAUSED /
+// AURORA_UNPAUSED, which main.c uses to reset the frame pacer.
+//
+// What SDL cannot do is keep our data: a backgrounded app can be killed with
+// no further notice, and by then nothing runs. This must happen in an event
+// watch, because the events themselves are only queued -- the thread blocks
+// before the game loop could ever read them. Settings are already written on
+// every change and memory cards on every CARD call; this is the last chance.
+static bool SDLCALL OnAppLifecycleEvent(void*, SDL_Event* event) {
+    switch (event->type) {
+        case SDL_EVENT_WILL_ENTER_BACKGROUND:
+        case SDL_EVENT_TERMINATING:
+            PartyBoardMainLog.info("{}, saving settings",
+                event->type == SDL_EVENT_TERMINATING ? "Terminating" : "Entering background");
+            partyboard::config::Save();
+            fflush(stdout);
+            fflush(stderr);
+            break;
+        case SDL_EVENT_DID_ENTER_FOREGROUND:
+            PartyBoardMainLog.info("Back in the foreground");
+            break;
+        case SDL_EVENT_LOW_MEMORY:
+            PartyBoardMainLog.warn("The system reported low memory");
+            break;
+        default:
+            break;
+    }
+    return true;
+}
+
 extern "C" bool PartyBoard_OnlineWaitForStart(void) { return online_wait_for_start(true); }
 extern "C" bool PartyBoard_OnlineBarrierProbe(void) { return online_wait_for_start(false); }
 
@@ -517,6 +593,9 @@ extern "C" int port_main(int argc, char* argv[]) {
         config.allowTextureDumps = std::getenv("PARTYBOARD_DUMP_TEXTURES") != nullptr;
         auroraInfo = aurora_initialize(argc, argv, &config);
     }
+    if (!SDL_AddEventWatch(OnAppLifecycleEvent, nullptr)) {
+        PartyBoardMainLog.warn("Unable to watch app lifecycle events: {}", SDL_GetError());
+    }
 
 #ifdef PARTY_BOARD_DISCORD
     partyboard::discord::initialize();
@@ -556,6 +635,8 @@ extern "C" int port_main(int argc, char* argv[]) {
     }
 
     partyboard::ui::initialize();
+    // Under the overlay, so toasts stay readable over the screen controls.
+    partyboard::ui::push_document(std::make_unique<partyboard::ui::TouchOverlay>(), true, true);
     partyboard::ui::push_document(std::make_unique<partyboard::ui::Overlay>(), true, true);
     partyboard::ui::push_document(std::make_unique<partyboard::ui::MenuBar>(), false);
 
@@ -697,6 +778,14 @@ extern "C" int port_main(int argc, char* argv[]) {
     if (!aurora_dvd_open(dvd_path.c_str())) {
         PartyBoardMainLog.error("Failed to open DVD image: {}", dvd_path);
         if (!onlineDisc.empty()) { partyboard::ui::shutdown(); aurora_shutdown(); return 3; }
+        // Do not remember a disc that cannot be opened (e.g. an Android document
+        // whose provider hands out a stream that cannot seek), or every launch
+        // would boot straight into it again instead of offering the disc picker.
+        if (launcherDisc.empty() && dvd_path == partyboard::getSettings().backend.isoPath.getValue()) {
+            partyboard::getSettings().backend.isoPath.setValue("");
+            partyboard::getSettings().backend.isoVerification.setValue(partyboard::DiscVerificationState::Unknown);
+            partyboard::config::Save();
+        }
     }
 
     // Mods must be overlaid before anything reads the FST.
