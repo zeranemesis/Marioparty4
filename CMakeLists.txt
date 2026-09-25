@@ -664,6 +664,9 @@ target_include_directories(touch_controls_test PRIVATE include extern/aurora/inc
 target_compile_definitions(touch_controls_test PRIVATE TARGET_PC)
 add_executable(disc_version_test EXCLUDE_FROM_ALL tools/tests/disc_version_test.cpp)
 target_include_directories(disc_version_test PRIVATE include)
-set_target_properties(online_invitation_test cubeshelf_social_test touch_controls_test disc_version_test PROPERTIES
+add_executable(app_update_test EXCLUDE_FROM_ALL tools/tests/app_update_test.cpp src/port/app_update_manifest.cpp)
+target_include_directories(app_update_test PRIVATE include)
+target_link_libraries(app_update_test PRIVATE nlohmann_json::nlohmann_json)
+set_target_properties(online_invitation_test cubeshelf_social_test touch_controls_test disc_version_test app_update_test PROPERTIES
         CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
-add_custom_target(online_tests DEPENDS online_invitation_test cubeshelf_social_test touch_controls_test disc_version_test)
+add_custom_target(online_tests DEPENDS online_invitation_test cubeshelf_social_test touch_controls_test disc_version_test app_update_test)

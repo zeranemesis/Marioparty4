@@ -78,6 +78,26 @@ So every build uses one key:
 CI sets `versionCode` to its run number, so a newer build always installs over
 an older one.
 
+## Updates From GitHub
+
+Each change that reaches `audio-local` (or a `v*` tag, or a hand-run of the
+Build workflow) publishes its APK to the GitHub release
+`partyboard-android-latest` (`scripts/publish-update.sh`):
+
+- `PartyBoard-android-arm64-v8a.apk`: the newest build under a name that never
+  changes, to install the app the first time;
+- `PartyBoard-android-arm64-v8a-<build>.apk`: the five newest builds;
+- `android-update.json`: the manifest the app reads: build number, APK URL,
+  SHA-256 and the commits since the previous published build.
+
+When Party Board starts (Settings > Interface > Check for Updates, on by
+default) it reads the manifest. A newer build shows under the version on the
+home screen; pressing Update lists the changes and, once confirmed, downloads
+the APK, checks its SHA-256 and hands it to Android, which asks to allow
+installing apps from Party Board the first time, then to confirm. Saves and
+settings are kept. Without network the check says nothing and the game plays
+offline as usual.
+
 ## Launch With Runtime Args (adb)
 
 You can pass command-line args through the activity intent:

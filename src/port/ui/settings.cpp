@@ -5,6 +5,7 @@
 #include "aurora/gfx.h"
 #include "bool_button.hpp"
 #include "controller_config.hpp"
+#include "port/app_update.hpp"
 #include "port/config.hpp"
 #include "../imgui/ImGuiEngine.hpp"
 #include "../file_select.hpp"
@@ -821,6 +822,16 @@ SettingsWindow::SettingsWindow(bool prelaunch)
         auto &rightPane = add_child<Pane>(content, Pane::Type::Uncontrolled);
 
         leftPane.add_section("Party Board");
+        if (update::supported()) {
+            config_bool_select(leftPane, rightPane, getSettings().backend.checkForUpdates,
+                {
+                    .key = "Check for Updates",
+                    .helpText = "Look for a newer build on GitHub when Party Board starts. When there is one, the home "
+                                "screen offers to install it; nothing is downloaded without asking.",
+                });
+            leftPane.register_control(leftPane.add_button("Check Now").on_pressed([] { update::check(false); }), rightPane,
+                [](Pane &pane) { pane.add_text("Look for a newer build on GitHub now. The answer shows on the home screen, under the version."); });
+        }
 #if PARTY_BOARD_CAN_OPEN_DATA_FOLDER
         leftPane.register_control(leftPane.add_button("Open Data Folder").on_pressed([] {
             // mDoAud_seStartMenu(kSoundClick); // TODO PC

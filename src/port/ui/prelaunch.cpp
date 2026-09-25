@@ -2,6 +2,7 @@
 
 #include "prelaunch.hpp"
 
+#include "port/app_update.hpp"
 #include "port/config.hpp"
 #include "../file_select.hpp"
 #include "../iso_validate.hpp"
@@ -66,6 +67,10 @@ namespace {
         </disc-info>
         <version-info class="intro-item delay-5">
             <div class="version">Version <span id="version-text"></span></div>
+            <div id="update" class="update">
+                <span id="update-message" />
+                <button id="update-download"><span id="update-download-label" /><icon /></button>
+            </div>
         </version-info>
     </content>
 </body>
@@ -611,6 +616,61 @@ bool is_restart_pending() noexcept
     return false;
 }
 
+namespace {
+
+    // Changes past this many lines are left to the GitHub release page.
+    constexpr std::size_t kMaxNoteLines = 12;
+
+    Rml::String update_notes_rml(const std::string &notes)
+    {
+        Rml::String rml;
+        std::size_t lines = 0;
+        std::size_t start = 0;
+        while (start < notes.size()) {
+            std::size_t end = notes.find('\n', start);
+            if (end == std::string::npos) {
+                end = notes.size();
+            }
+            const auto line = notes.substr(start, end - start);
+            start = end + 1;
+            if (line.empty()) {
+                continue;
+            }
+            if (lines == kMaxNoteLines) {
+                rml += "<br/>...";
+                break;
+            }
+            rml += "<br/>" + escape(line);
+            ++lines;
+        }
+        return rml;
+    }
+
+    // Asks before downloading: the player sees which build it is and what changed.
+    void push_update_modal(Document &host, const update::Status &status)
+    {
+        Rml::String body = escape(fmt::format(fmt::runtime(ui_translate("Party Board build {} is available. This phone has build {}.")),
+            status.manifest.versionCode, status.installedVersionCode));
+        if (!status.manifest.notes.empty()) {
+            body += "<br/><br/>" + escape(ui_translate("What changed:")) + update_notes_rml(status.manifest.notes);
+        }
+        body += "<br/><br/>" + escape(ui_translate("Your saves and settings are kept."));
+        host.push(std::make_unique<Modal>(Modal::Props {
+            .title = "Update Available",
+            .bodyRml = body,
+            .actions = {
+                ModalAction { .label = "Later", .onPressed = [](Modal &modal) { modal.pop(); } },
+                ModalAction { .label = "Install", .onPressed = [](Modal &modal) {
+                                 update::install();
+                                 modal.pop();
+                             } },
+            },
+            .onDismiss = [](Modal &modal) { modal.pop(); },
+        }));
+    }
+
+} // namespace
+
 void apply_intro_animation(Rml::Element *element, const char *delay_class)
 {
     if (element == nullptr || delay_class == nullptr) {
@@ -695,6 +755,33 @@ Prelaunch::Prelaunch()
     mDiscStatus = mDocument->GetElementById("disc-status");
     mDiscDetail = mDocument->GetElementById("disc-version");
     mVersion = mDocument->GetElementById("version-text");
+    mUpdateStatus = mDocument->GetElementById("update");
+    mUpdateMessage = mDocument->GetElementById("update-message");
+    mUpdateDownload = mDocument->GetElementById("update-download");
+    mUpdateDownloadLabel = mDocument->GetElementById("update-download-label");
+
+    if (update::supported()) {
+        if (mUpdateDownload != nullptr) {
+            listen(mUpdateDownload, Rml::EventId::Click, [this](Rml::Event &) {
+                const auto status = update::status();
+                if (status.state == update::State::Available) {
+                    push_update_modal(*this, status);
+                }
+                else if (status.state == update::State::Failed) {
+                    // Retry whatever failed: the install when a newer build is known, else the check.
+                    if (status.manifest.versionCode > status.installedVersionCode) {
+                        update::install();
+                    }
+                    else {
+                        update::check(false);
+                    }
+                }
+            });
+        }
+        if (getSettings().backend.checkForUpdates.getValue()) {
+            update::check(true);
+        }
+    }
 
     listen(mDocument, Rml::EventId::Transitionend, [this](Rml::Event &event) {
         auto *target = event.GetTargetElement();
@@ -842,6 +929,64 @@ void Prelaunch::update()
             versionStr = versionStr.substr(1);
         }
         mVersion->SetInnerRML(escape(versionStr));
+    }
+    if (mUpdateStatus != nullptr && update::supported()) {
+        const auto status = update::status();
+        const char *state = nullptr;
+        std::string message;
+        const char *action = nullptr;
+        switch (status.state) {
+            case update::State::Checking:
+                if (!status.quiet) {
+                    state = "checking";
+                    message = ui_translate("Checking GitHub for an update...");
+                }
+                break;
+            case update::State::UpToDate:
+                if (!status.quiet) {
+                    state = "checking";
+                    message = fmt::format(fmt::runtime(ui_translate("Party Board is up to date (build {}).")),
+                        status.installedVersionCode);
+                }
+                break;
+            case update::State::Available:
+                state = "available";
+                message = fmt::format(fmt::runtime(ui_translate("Build {} is available.")), status.manifest.versionCode);
+                action = "Update";
+                break;
+            case update::State::Downloading:
+                state = "checking";
+                message = status.progress >= 0
+                    ? fmt::format(fmt::runtime(ui_translate("Downloading the update... {}%")), status.progress)
+                    : ui_translate("Downloading the update...");
+                break;
+            case update::State::Installing:
+                state = "checking";
+                message = ui_translate("Confirm the installation in Android's window.");
+                break;
+            case update::State::Failed:
+                state = "failed";
+                message = ui_translate(status.error);
+                if (!status.detail.empty()) {
+                    message += " (" + status.detail + ")";
+                }
+                action = "Retry";
+                break;
+            case update::State::Idle:
+                break;
+        }
+        if (state != nullptr) {
+            mUpdateStatus->SetAttribute("state", state);
+        }
+        else {
+            mUpdateStatus->RemoveAttribute("state");
+        }
+        if (mUpdateMessage != nullptr) {
+            mUpdateMessage->SetInnerRML(escape(message));
+        }
+        if (mUpdateDownloadLabel != nullptr && action != nullptr) {
+            mUpdateDownloadLabel->SetInnerRML(escape(ui_translate(action)));
+        }
     }
 
     Document::update();

@@ -227,6 +227,24 @@ public class PartyBoardActivity extends SDLActivity {
         }
     }
 
+    // App updates from GitHub. Called from native code (src/port/app_update.cpp),
+    // installUpdate on a worker thread since it downloads the APK.
+    public long getInstalledVersionCode() {
+        return PartyBoardUpdater.installedVersionCode(this);
+    }
+
+    public String installUpdate(String url, String sha256) {
+        return PartyBoardUpdater.downloadAndInstall(this, url, sha256);
+    }
+
+    public int getUpdateProgress() {
+        return PartyBoardUpdater.progress();
+    }
+
+    public String takeUpdateInstallFailure() {
+        return PartyBoardUpdater.takeInstallFailure();
+    }
+
     public String getDisplayNameForUri(String uriString) {
         if (uriString == null || uriString.isEmpty()) {
             return "";
