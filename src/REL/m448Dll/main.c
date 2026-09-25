@@ -19,6 +19,7 @@
 
 #include "ext_math.h"
 #include "version.h"
+#include "port/version_runtime.h"
 
 s32 rand8(void);
 
@@ -1293,12 +1294,16 @@ void fn_1_6DAC(void)
     HuWinMesColSet(temp_r31, 0);
     HuWinMesSet(temp_r31, MAKE_MESSID(43, 1));
     if (((sp8[0]->unk0C == -1) || (sp8[0]->unk08 == -1)) && ((sp8[1]->unk0C == -1) || (sp8[1]->unk08 == -1))) {
-#if VERSION_PAL
+#ifdef TARGET_PC
+        // PAL messages can have several pages: the CPU confirms each of them
+        var_r24 = VERSION_RT_PAL ? HuWinKeyWaitNumGet(DATA_MAKE_NUM(DATADIR_M412, 1)) : 1;
+        for (i2 = 0; i2 < var_r24; i2++) {
+#elif VERSION_PAL
         var_r24 = HuWinKeyWaitNumGet(DATA_MAKE_NUM(DATADIR_M412, 1));
         for (i2 = 0; i2 < var_r24; i2++) {
 #endif
             HuWinComKeyWait(0x100, 0x100, 0x100, 0x100, REFRESH_RATE);
-#if VERSION_PAL
+#if VERSION_PAL || defined(TARGET_PC)
         }
 #endif
         }
@@ -1332,12 +1337,16 @@ void fn_1_6DAC(void)
         HuWinMesColSet(temp_r31, 0);
         HuWinMesSet(temp_r31, MAKE_MESSID(43, 10));
         if ((sp8[0]->unk0C == -1 || sp8[0]->unk08 == -1) && (sp8[1]->unk0C == -1 || sp8[1]->unk08 == -1)) {
-#if VERSION_PAL
+#ifdef TARGET_PC
+            // PAL messages can have several pages: the CPU confirms each of them
+            var_r28 = VERSION_RT_PAL ? HuWinKeyWaitNumGet(DATA_MAKE_NUM(DATADIR_M412, 10)) : 1;
+            for (i3 = 0; i3 < var_r28; i3++) {
+#elif VERSION_PAL
             var_r28 = HuWinKeyWaitNumGet(DATA_MAKE_NUM(DATADIR_M412, 10));
             for (i3 = 0; i3 < var_r28; i3++) {
 #endif
                 HuWinComKeyWait(0x100, 0x100, 0x100, 0x100, REFRESH_RATE);
-#if VERSION_PAL
+#if VERSION_PAL || defined(TARGET_PC)
             }
 #endif
         }

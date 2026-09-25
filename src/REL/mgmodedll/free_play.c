@@ -12,6 +12,7 @@
 #include "game/wipe.h"
 
 #include "ext_math.h"
+#include "port/version_runtime.h"
 #include <string.h>
 
 #ifndef __MWERKS__
@@ -228,7 +229,30 @@ s32 fn_1_6D28(void)
         }
         fn_1_AE20(lbl_1_bss_264C[lbl_1_bss_318[mgTypeCurr][0]][0], 10, 450, 216);
     }
-    #if VERSION_NTSC
+    #ifdef TARGET_PC
+    if (VERSION_RT_NTSC) {
+        espAttrReset(lbl_1_bss_2C2C[19], HUSPR_ATTR_DISPOFF);
+        espPosSet(lbl_1_bss_2C2C[19], 204, (sp8 * 38) + 154);
+        espPriSet(lbl_1_bss_2C2C[19], 7);
+        espTPLvlSet(lbl_1_bss_2C2C[19], 0.7);
+        espAttrSet(lbl_1_bss_2C2C[17], HUSPR_ATTR_DISPOFF);
+        espPosSet(lbl_1_bss_2C2C[17], 204, 126);
+        espPriSet(lbl_1_bss_2C2C[17], 8);
+        espAttrSet(lbl_1_bss_2C2C[18], HUSPR_ATTR_DISPOFF);
+        espPosSet(lbl_1_bss_2C2C[18], 204, 410);
+        espPriSet(lbl_1_bss_2C2C[18], 8);
+        espBankSet(lbl_1_bss_2C2C[18], 1);
+    }
+    else {
+        espAttrSet(lbl_1_bss_2C2C[17], HUSPR_ATTR_DISPOFF);
+        espPosSet(lbl_1_bss_2C2C[17], 204, 126);
+        espPriSet(lbl_1_bss_2C2C[17], 8);
+        espAttrSet(lbl_1_bss_2C2C[18], HUSPR_ATTR_DISPOFF);
+        espPosSet(lbl_1_bss_2C2C[18], 204, 410);
+        espPriSet(lbl_1_bss_2C2C[18], 8);
+        espBankSet(lbl_1_bss_2C2C[18], 1);
+    }
+    #elif VERSION_NTSC
     espAttrReset(lbl_1_bss_2C2C[19], HUSPR_ATTR_DISPOFF);
     espPosSet(lbl_1_bss_2C2C[19], 204, (sp8 * 38) + 154);
     espPriSet(lbl_1_bss_2C2C[19], 7);
@@ -258,7 +282,28 @@ s32 fn_1_6D28(void)
     while (WipeStatGet()) {
         HuPrcVSleep();
     }
-    #if VERSION_PAL
+    #ifdef TARGET_PC
+    // PAL discs explain this mode first (message 57), then show the cursor
+    if (VERSION_RT_PAL) {
+        if(lbl_1_bss_2A6 == 2) {
+            HuWinMesMaxSizeGet(1, winSize, MAKE_MESSID(57, 0));
+            winId = HuWinExCreateStyled(-10000, -10000, winSize[0], winSize[1], -1, 1);
+            winP = &winData[winId];
+            winP->active_pad = 1;
+            HuWinMesPalSet(winId, 7, 0, 0, 0);
+            HuWinPriSet(winId, 3);
+            HuWinExAnimIn(winId);
+            HuWinMesSet(winId, MAKE_MESSID(57, 0));
+            HuWinMesWait(winId);
+            HuWinExAnimOut(winId);
+            HuWinExCleanup(winId);
+        }
+        espAttrReset(lbl_1_bss_2C2C[19], HUSPR_ATTR_DISPOFF);
+        espPosSet(lbl_1_bss_2C2C[19], 204, (sp8*38)+154);
+        espPriSet(lbl_1_bss_2C2C[19], 7);
+        espTPLvlSet(lbl_1_bss_2C2C[19], 0.7f);
+    }
+    #elif VERSION_PAL
     if(lbl_1_bss_2A6 == 2) {
         HuWinMesMaxSizeGet(1, winSize, MAKE_MESSID(57, 0));
         winId = HuWinExCreateStyled(-10000, -10000, winSize[0], winSize[1], -1, 1);

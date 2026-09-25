@@ -13,6 +13,7 @@
 
 #include "dolphin.h"
 #include "ext_math.h"
+#include "port/version_runtime.h"
 
 static void fn_1_6F80(void);
 static void fn_1_7210(void);
@@ -49,6 +50,42 @@ static s16 lbl_1_data_22A = -1;
 static s16 lbl_1_data_22C = -1;
 static s16 lbl_1_data_22E = -1;
 
+#ifdef TARGET_PC
+// Item name messages: PAL discs keep them at 8/0-13, USA discs at 8/14-27
+static s32 lbl_1_data_230_pal[] = {
+    MAKE_MESSID(8, 0),
+    MAKE_MESSID(8, 1),
+    MAKE_MESSID(8, 2),
+    MAKE_MESSID(8, 3),
+    MAKE_MESSID(8, 4),
+    MAKE_MESSID(8, 5),
+    MAKE_MESSID(8, 6),
+    MAKE_MESSID(8, 7),
+    MAKE_MESSID(8, 8),
+    MAKE_MESSID(8, 9),
+    MAKE_MESSID(8, 10),
+    MAKE_MESSID(8, 11),
+    MAKE_MESSID(8, 12),
+    MAKE_MESSID(8, 13)
+};
+static s32 lbl_1_data_230_ntsc[] = {
+    MAKE_MESSID(8, 14),
+    MAKE_MESSID(8, 15),
+    MAKE_MESSID(8, 16),
+    MAKE_MESSID(8, 17),
+    MAKE_MESSID(8, 18),
+    MAKE_MESSID(8, 19),
+    MAKE_MESSID(8, 20),
+    MAKE_MESSID(8, 21),
+    MAKE_MESSID(8, 22),
+    MAKE_MESSID(8, 23),
+    MAKE_MESSID(8, 24),
+    MAKE_MESSID(8, 25),
+    MAKE_MESSID(8, 26),
+    MAKE_MESSID(8, 27)
+};
+#define lbl_1_data_230 (VERSION_RT_PAL ? lbl_1_data_230_pal : lbl_1_data_230_ntsc)
+#else
 #if VERSION_PAL
 static s32 lbl_1_data_230[] = {
     MAKE_MESSID(8, 0),
@@ -83,6 +120,7 @@ static s32 lbl_1_data_230[] = {
     MAKE_MESSID(8, 26),
     MAKE_MESSID(8, 27)
 };
+#endif
 #endif
 void fn_1_6EF0(void) {
     BoardRollDispSet(0);
@@ -221,7 +259,7 @@ static void fn_1_74BC(s32 arg0) {
 static void fn_1_7574(void) {
     s32 temp_r3;
     s32 temp_r29;
-    #if VERSION_PAL
+    #if VERSION_PAL || defined(TARGET_PC)
     s32 playerNo = GWSystem.player_curr;
     #endif
     s32 temp_r28;
@@ -239,7 +277,11 @@ static void fn_1_7574(void) {
             BoardWinCreate(0, MAKE_MESSID(48, 16), -1);
             BoardWinInsertMesSet(temp_r28, 0);
             BoardWinInsertMesSet(lbl_1_data_230[temp_r29], 1);
-            #if VERSION_PAL
+            #ifdef TARGET_PC
+            if (VERSION_RT_PAL) {
+                GWSystem.player_curr = i;
+            }
+            #elif VERSION_PAL
             GWSystem.player_curr = i;
             #endif
             BoardWinPlayerSet(i);
@@ -247,7 +289,11 @@ static void fn_1_7574(void) {
             BoardWinKill();
         }
     }
-    #if VERSION_PAL
+    #ifdef TARGET_PC
+    if (VERSION_RT_PAL) {
+        GWSystem.player_curr = playerNo;
+    }
+    #elif VERSION_PAL
     GWSystem.player_curr = playerNo;
     #endif
 }

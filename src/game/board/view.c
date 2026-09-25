@@ -16,6 +16,7 @@
 #include "game/board/ui.h"
 
 #include "ext_math.h"
+#include "port/version_runtime.h"
 
 typedef struct {
     struct {
@@ -393,7 +394,13 @@ static void CreateButtonWin(void)
 
     if (viewControls != 2) {
         var_r31 = MAKE_MESSID(0x09, 0x05);
-#if VERSION_PAL
+#ifdef TARGET_PC
+        // The window layout follows the loaded disc: PAL places it after its text width
+        if (VERSION_RT_PAL) {
+            HuWinMesMaxSizeGet(1, sp8, var_r31);
+            posX = 288 - ((sp8[0] / 2) - 32);
+        }
+#elif VERSION_PAL
         HuWinMesMaxSizeGet(1, sp8, var_r31);
         posX = 288 - ((sp8[0] / 2) - 32);
 #endif
@@ -401,7 +408,15 @@ static void CreateButtonWin(void)
     }
     else {
         var_r31 = MAKE_MESSID(0x10, 0x4D);
-#if VERSION_PAL
+#ifdef TARGET_PC
+        if (VERSION_RT_PAL) {
+            posX = -10000.0f;
+            posY = 324.0f;
+        }
+        else {
+            posY = 328.0f;
+        }
+#elif VERSION_PAL
         posX = -10000.0f;
         posY = 324.0f;
 #else
@@ -409,7 +424,11 @@ static void CreateButtonWin(void)
 #endif
     }
     HuWinMesMaxSizeGet(1, sp8, var_r31);
-#if VERSION_NTSC
+#ifdef TARGET_PC
+    if (VERSION_RT_NTSC) {
+        posX = -10000.0f;
+    }
+#elif VERSION_NTSC
     posX = -10000.0f;
 #endif
     buttonWin = HuWinCreate(posX, posY, sp8[0], sp8[1], 0);

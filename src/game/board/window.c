@@ -4,6 +4,7 @@
 #include "game/disp.h"
 
 #include "game/gamework_data.h"
+#include "port/version_runtime.h"
 
 static s8 winChoice;
 static s8 autoPickF;
@@ -106,7 +107,12 @@ static void ExecBoardWindow(void) {
         if (size[0] <= size_win[0]) {
             size[0] = size_win[0];
             pos[0] = pos_win[0];
-            #if VERSION_PAL
+            #ifdef TARGET_PC
+            // PAL discs widen this window for their longer texts
+            if(VERSION_RT_PAL && winPosIdx == 1) {
+                size[0] += 4;
+            }
+            #elif VERSION_PAL
             if(winPosIdx == 1) {
                 size[0] += 4;
             }

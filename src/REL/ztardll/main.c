@@ -12,6 +12,7 @@
 #include "game/wipe.h"
 
 #include "REL/ztardll.h"
+#include "port/version_runtime.h"
 #include "game/frand.h"
 
 #ifndef __MWERKS__
@@ -1270,7 +1271,12 @@ s32 fn_1_524C(s32 arg0)
     var_r22 = &winData[var_r24];
     HuWinPriSet(var_r24, 5);
     HuWinPosSet(var_r24, (576.0f - var_r22->w) / 2, 300.0f);
-#if VERSION_PAL
+#ifdef TARGET_PC
+    // PAL scales this message down to fit its window
+    if (VERSION_RT_PAL) {
+        HuWinScaleSet(var_r24, 0.95f, 1.0f);
+    }
+#elif VERSION_PAL
     HuWinScaleSet(var_r24, 0.95f, 1.0f);
 #endif
     HuWinAttrSet(var_r24, 0x800);
