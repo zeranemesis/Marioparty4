@@ -14,6 +14,7 @@
 
 #include "RmlUi/Debugger/Debugger.h"
 #include "aurora/lib/window.hpp"
+#include "cubeshelf.hpp"
 #include "input.hpp"
 #include "prelaunch.hpp"
 #include "window.hpp"
@@ -233,6 +234,8 @@ void update() noexcept
     }
 
     input::update_input();
+    // A friend's invitation becomes a toast whichever screen the player is on, menu open or not.
+    cubeshelf::tick();
     const auto update_documents = [](auto &documents) {
         const std::size_t count = documents.size();
         for (std::size_t i = 0; i < count && i < documents.size(); ++i) {

@@ -128,6 +128,8 @@ set(PORT_FILES
         src/port/ui/component.hpp
         src/port/ui/controller_config.cpp
         src/port/ui/controller_config.hpp
+        src/port/ui/cubeshelf.cpp
+        src/port/ui/cubeshelf.hpp
         src/port/ui/document.cpp
         src/port/ui/document.hpp
         src/port/ui/event.cpp

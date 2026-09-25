@@ -8,6 +8,7 @@
 
 #include "achievements.hpp"
 #include "aurora/rmlui.hpp"
+#include "cubeshelf.hpp"
 #include "port/main.h"
 #include "port/settings.h"
 #include "imgui.h"
@@ -49,6 +50,11 @@ MenuBar::MenuBar()
                 },
             .autoSelect = false,
         });
+    // Only when CubeShelf launched the game: it is what knows the friends. Started any other way,
+    // the menu is exactly what it was.
+    if (cubeshelf::available()) {
+        mTabBar->add_tab(cubeshelf::tab_title(), [this] { push(std::make_unique<cubeshelf::FriendsWindow>()); });
+    }
     mTabBar->add_tab("Settings", [this] { push(std::make_unique<SettingsWindow>()); });
 
 #if defined(_WIN32)

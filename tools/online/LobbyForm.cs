@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Linq;
 using System.Diagnostics;
@@ -12,8 +12,10 @@ sealed class MainForm : Form {
     Label status,discLabel,footer;TextBox invitation,nickname;ListView players;ComboBox playerCount;FlowLayoutPanel missingMods;
     Button host,join,copy,play,cancel,choose,paste,update;Session session;DiscFile disc;
     readonly CancellationTokenSource fileCancel=new CancellationTokenSource();bool closing,hashing;
-    Report lastReport;
-    public MainForm() {
+    Report lastReport;readonly Startup startup;bool startupApplied;
+    public MainForm():this(Startup.Manual) {}
+    public MainForm(Startup requested) {
+        startup=requested??Startup.Manual;
         Text="PartyBoard — Salon en ligne v"+UpdateService.CurrentVersion;ClientSize=new Size(840,760);MinimumSize=new Size(800,790);
         StartPosition=FormStartPosition.CenterScreen;Font=new Font("Segoe UI",11);BackColor=Color.FromArgb(245,247,252);
         var root=new TableLayoutPanel{Dock=DockStyle.Fill,Padding=new Padding(24),ColumnCount=1,RowCount=11};
@@ -59,6 +61,9 @@ sealed class MainForm : Form {
         update=Make("Vérifier les mises à jour",CheckForUpdates);actions.Controls.Add(update);
         footer=new Label{Dock=DockStyle.Fill,Font=new Font("Segoe UI",9),ForeColor=Color.DimGray};root.Controls.Add(footer,0,10);UpdateFooter();
         nickname.TextChanged+=(s,e)=>RefreshLobby();RefreshControls();RefreshLobby();Task.Run(()=>StartupUpdateCheck());
+        // Not in the constructor: UI() drops a callback while the handle does not exist, so a disc
+        // that verified faster than the window appeared would vanish without a trace.
+        Shown+=(s,e)=>{if(startupApplied)return;startupApplied=true;ApplyStartup();};
         FormClosing+=(s,e)=>{closing=true;fileCancel.Cancel();var old=session;session=null;if(old!=null)old.Dispose();if(disc!=null)disc.Dispose();};
     }
     Button Make(string text,Action action){var b=new Button{Text=text,AutoSize=true,Height=38,MinimumSize=new Size(160,38),Margin=new Padding(0,3,12,3),FlatStyle=FlatStyle.Flat,BackColor=Color.White};b.Click+=(s,e)=>{try{action();}catch(Exception ex){SetStatus(Friendly(ex));}};return b;}
@@ -144,14 +149,20 @@ sealed class MainForm : Form {
     void ChooseDisc(){
         if(session!=null || hashing)return;
         using(var picker=new OpenFileDialog{Title="Choisir Mario Party 4 USA Rev 1",Filter="Images de disque|*.iso;*.gcm;*.rvz;*.wia;*.gcz;*.ciso|Tous les fichiers|*.*",CheckFileExists=true}){
-            if(picker.ShowDialog(this)!=DialogResult.OK)return;string path=picker.FileName;
-            if(disc!=null){disc.Dispose();disc=null;}hashing=true;RefreshLobby();SetStatus("Vérification du disque… Vous pouvez laisser cette fenêtre ouverte.");
-            Task.Run(()=>{try{
-                var verified=DiscFile.Verify(path,p=>UI(()=>discLabel.Text=Path.GetFileName(path)+"\nVérification SHA-256 : "+p+" %"),fileCancel.Token);
-                if(closing){verified.Dispose();return;}
-                UI(()=>{disc=verified;hashing=false;discLabel.Text=Path.GetFileName(path)+"\nFichier vérifié et protégé contre les modifications";SetStatus("Disque vérifié. Créez un salon ou collez l'invitation de votre ami.");RefreshLobby();});
-            }catch(Exception e){UI(()=>{hashing=false;discLabel.Text="Aucun disque vérifié";SetStatus(Friendly(e));RefreshLobby();});}});
+            if(picker.ShowDialog(this)!=DialogResult.OK)return;
+            LoadDisc(picker.FileName,pendingStartupAction?(Action)RunStartupAction:null);
         }
+    }
+    // The same verification whether the player picked the file or a launcher named it. onVerified
+    // runs on the UI thread once the hash is complete, and never when it failed.
+    void LoadDisc(string path,Action onVerified){
+        if(session!=null || hashing || string.IsNullOrEmpty(path))return;
+        if(disc!=null){disc.Dispose();disc=null;}hashing=true;RefreshLobby();SetStatus("Vérification du disque… Vous pouvez laisser cette fenêtre ouverte.");
+        Task.Run(()=>{try{
+            var verified=DiscFile.Verify(path,p=>UI(()=>discLabel.Text=Path.GetFileName(path)+"\nVérification SHA-256 : "+p+" %"),fileCancel.Token);
+            if(closing){verified.Dispose();return;}
+            UI(()=>{disc=verified;hashing=false;discLabel.Text=Path.GetFileName(path)+"\nFichier vérifié et protégé contre les modifications";SetStatus("Disque vérifié. Créez un salon ou collez l'invitation de votre ami.");RefreshLobby();if(onVerified!=null)onVerified();});
+        }catch(Exception e){UI(()=>{hashing=false;discLabel.Text="Aucun disque vérifié";SetStatus(Friendly(e));RefreshLobby();});}});
     }
     void Begin(bool create,string invitationText,int players=2){
         if(session!=null || disc==null || hashing)return;
@@ -166,7 +177,7 @@ sealed class MainForm : Form {
         session=current;lastReport=current.Report;current.Host=create;RefreshLobby();
         current.Report.Write("role="+(create?"host":"guest")+" connection_requested");
         Task.Run(()=>{try{
-            if(create){current.Create(players);UI(()=>{if(session==current && current.Bridge==null){invitation.Text=current.Invite.Encode();RefreshControls();SetStatus("Salon créé. Copiez l'invitation et envoyez-la à "+(players>2?"vos amis":"votre ami")+". Vous seul pourrez lancer le jeu.");}});}
+            if(create){current.Create(players);UI(()=>{if(session==current && current.Bridge==null){var encoded=current.Invite.Encode();invitation.Text=encoded;PublishInvitation(encoded);RefreshControls();SetStatus(startup.InvitationOut!=null?"Salon créé. Ton launcher a l'invitation : invite tes amis depuis lui. Garde cette fenêtre ouverte.":"Salon créé. Copiez l'invitation et envoyez-la à "+(players>2?"vos amis":"votre ami")+". Vous seul pourrez lancer le jeu.");}});}
             else current.Join(invitationText);
         }catch(Exception e){current.Dispose();UI(()=>{if(session==current){Reset();SetStatus(Friendly(e));}});}});
     }
@@ -209,6 +220,49 @@ sealed class MainForm : Form {
         }
     }
     static string Friendly(Exception e){if(e is IOException)return e.Message;if(e is System.ComponentModel.Win32Exception)return "Windows n'a pas donné son autorisation. Réessayez et acceptez sa demande.";if(e is OperationCanceledException)return "Vérification annulée.";return "L'opération n'a pas abouti. Vérifiez votre connexion ou recréez le salon.";}
+    // What CubeShelf (or any launcher) asked for before the player touched anything.
+    //
+    // Nothing here bypasses a rule the player would otherwise meet: the disc is verified with the
+    // same full SHA-256, the lobby refuses mismatched files just the same, and only the host can
+    // start the game. It removes the typing, not the checks.
+    void ApplyStartup(){
+        if(startup.Mode==StartupMode.Manual)return;
+        if(startup.Nickname!=null)nickname.Text=startup.Nickname;
+        if(startup.Invitation!=null)invitation.Text=startup.Invitation;
+
+        // Without a disc there is nothing to verify and nothing to join with. Say which step is
+        // missing rather than opening a window that looks ready and refuses on click.
+        if(startup.DiscPath==null || !File.Exists(startup.DiscPath)){
+            SetStatus(startup.Mode==StartupMode.Join
+                ?"Invitation reçue. Choisissez votre disque : la partie commencera dès qu'il sera vérifié."
+                :"Choisissez votre disque : le salon sera créé dès qu'il sera vérifié.");
+            pendingStartupAction=true;RefreshLobby();return;
+        }
+        LoadDisc(startup.DiscPath,RunStartupAction);
+    }
+    bool pendingStartupAction;
+    void RunStartupAction(){
+        if(startup.Mode==StartupMode.Manual || session!=null)return;
+        pendingStartupAction=false;
+        if(startup.Mode==StartupMode.Host)Begin(true,"",SelectedPlayers());
+        else Begin(false,invitation.Text);
+    }
+    // Writing the invitation where the launcher is watching is what lets it show "invite your
+    // friends" without the host copying anything by hand. Best effort: a lobby that was created
+    // must not be torn down because a file could not be written.
+    void PublishInvitation(string encoded){
+        if(startup.InvitationOut==null || string.IsNullOrEmpty(encoded))return;
+        try{
+            var directory=Path.GetDirectoryName(startup.InvitationOut);
+            if(!string.IsNullOrEmpty(directory))Directory.CreateDirectory(directory);
+            var temporary=startup.InvitationOut+".tmp";
+            File.WriteAllText(temporary,encoded,new System.Text.UTF8Encoding(false));
+            if(File.Exists(startup.InvitationOut))File.Delete(startup.InvitationOut);
+            File.Move(temporary,startup.InvitationOut);
+        }catch(Exception e){
+            if(!(e is IOException || e is UnauthorizedAccessException || e is NotSupportedException || e is ArgumentException))throw;
+        }
+    }
     void Reset(){var old=session;session=null;if(old!=null)Task.Run(()=>old.Dispose());RefreshLobby();SetStatus(disc!=null?"Créez un salon ou rejoignez votre ami.":"Choisissez votre disque pour commencer.");}
 }
 }

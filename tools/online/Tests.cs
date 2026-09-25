@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Text;
 using System.Linq;
@@ -812,6 +812,41 @@ static class Tests {
             }finally{if(!game.Process.HasExited)game.Process.Kill();game.Process.Dispose();}
         }
     }
+    static void StartupOptions() {
+        Func<string,string> none=_=>null;
+        var env=new System.Collections.Generic.Dictionary<string,string>{
+            {Startup.NicknameVariable,"  Camille  "},
+            {Startup.DiscVariable,"D:\\jeux\\mp4.iso"},
+            {Startup.InviteVariable," PBINV-abc "},
+            {Startup.InviteOutVariable,"C:\\tmp\\invite.txt"}};
+        Func<string,string> full=name=>{string v;return env.TryGetValue(name,out v)?v:null;};
+
+        // Double-clicking the companion must behave exactly as before, whatever is exported.
+        Check(Startup.Parse(new string[0],full).Mode==StartupMode.Manual,"no flag means manual");
+        Check(Startup.Parse(new[]{"--self-test"},full).Mode==StartupMode.Manual,"unknown flag means manual");
+
+        var join=Startup.Parse(new[]{"--join"},full);
+        Check(join.Mode==StartupMode.Join,"--join asks to join");
+        Check(join.Nickname=="Camille","nickname is trimmed");
+        Check(join.Invitation=="PBINV-abc","invitation is trimmed");
+        Check(join.DiscPath=="D:\\jeux\\mp4.iso","disc comes from the environment");
+
+        var host=Startup.Parse(new[]{"--host"},full);
+        Check(host.Mode==StartupMode.Host,"--host asks to host");
+        Check(host.InvitationOut=="C:\\tmp\\invite.txt","host reports the invitation back");
+
+        // Joining nothing is not joining. Falling back to the manual window beats a lobby error
+        // the player cannot act on.
+        Check(Startup.Parse(new[]{"--join"},none).Mode==StartupMode.Manual,"join without an invitation falls back");
+        Func<string,string> blank=name=>name==Startup.InviteVariable?"   ":null;
+        Check(Startup.Parse(new[]{"--join"},blank).Mode==StartupMode.Manual,"blank invitation falls back");
+
+        // Hosting needs nothing but the intent: the companion makes the invitation itself.
+        Check(Startup.Parse(new[]{"--host"},none).Mode==StartupMode.Host,"host needs no invitation");
+        Check(Startup.Parse(new[]{"--host"},none).DiscPath==null,"absent variables stay null");
+        Check(Startup.Parse(null,full).Mode==StartupMode.Manual,"null arguments are tolerated");
+        Check(Startup.Parse(new[]{"--join"},null).Mode==StartupMode.Manual,"null environment is tolerated");
+    }
     static void Reports() {
         var report=new Report(Path.GetTempPath());report.Write("role=host test=export");
         Check(report.Read().Contains("role=host test=export"),"report export");
@@ -840,6 +875,6 @@ static class Tests {
         Check(pairing.Add(remi,0,"remi-0")==null && pairing.Add(remi,1,"remi-1")!=null,"a third guest pairs exactly like the first two");
         Reject(()=>pairing.Add(Wire.Random(16),2,"x"),"a channel index outside 0/1 is refused");
     }
-    public static int Run() {try{Reports();Codecs();Leases();LobbyRules();Discs();CancelLoading();MeshWiringTest();MeshRouting();ControlOnlyLink();ChannelPairingTest();Tls(0,true,true);for(int mode=0;mode<4;mode++)Tls(mode,mode==0);Console.WriteLine("PASS: "+checks+" checks; host-only lobby start, full disk hash and locks, UDP ping, native loading barrier/cancel, TLS loss before/after commit, authenticated UDP for 4800 native ticks and a real three-peer UDP mesh. No real router/firewall changes.");return 0;}catch(Exception e){Console.Error.WriteLine("FAIL: "+e.ToString());return 1;}}
+    public static int Run() {try{StartupOptions();Reports();Codecs();Leases();LobbyRules();Discs();CancelLoading();MeshWiringTest();MeshRouting();ControlOnlyLink();ChannelPairingTest();Tls(0,true,true);for(int mode=0;mode<4;mode++)Tls(mode,mode==0);Console.WriteLine("PASS: "+checks+" checks; host-only lobby start, full disk hash and locks, UDP ping, native loading barrier/cancel, TLS loss before/after commit, authenticated UDP for 4800 native ticks and a real three-peer UDP mesh. No real router/firewall changes.");return 0;}catch(Exception e){Console.Error.WriteLine("FAIL: "+e.ToString());return 1;}}
 }
 }

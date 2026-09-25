@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Linq;
 using System.Collections.Generic;
@@ -439,7 +439,9 @@ static class Program {
         }
         if(args.Length==1 && args[0]=="--diagnose") {try{var r=Route.Detect();Console.WriteLine("Connexion physique détectée. Aucun port ouvert.");return 0;}catch(Exception e){Console.WriteLine(e.Message);return 1;}}
         Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);
-        Application.Run(new MainForm());return 0;
+        // --host / --join let a launcher open the companion on a lobby instead of on an empty
+        // form. Everything it needs beyond the intent travels in the environment; see Startup.cs.
+        Application.Run(new MainForm(Startup.FromEnvironment(args)));return 0;
     }
 }
 }
