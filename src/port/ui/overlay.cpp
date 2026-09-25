@@ -129,7 +129,7 @@ namespace {
         return "Back";
     }
 
-#if defined(TARGET_ANDROID) || (defined(__APPLE__) && TARGET_OS_IOS && !TARGET_OS_MACCATALYST)
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS && !TARGET_OS_MACCATALYST)
     constexpr auto kMenuNotificationPrefix = "3-finger tap or";
 #else
     constexpr auto kMenuNotificationPrefix = "Press F1 or";
@@ -142,7 +142,7 @@ namespace {
 
         auto *message = append(elem, "message");
         auto *row = append(message, "row");
-        append(row, "span")->SetInnerRML(kMenuNotificationPrefix);
+        append(row, "span")->SetInnerRML(ui_translate(kMenuNotificationPrefix));
         auto *icon = append(row, "icon");
         icon->SetClass("controller", true);
         append(row, "span")->SetInnerRML(escape(back_button_name()));

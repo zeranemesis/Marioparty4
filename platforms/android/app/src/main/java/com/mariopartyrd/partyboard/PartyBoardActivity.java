@@ -9,6 +9,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
 import android.util.Log;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
@@ -111,6 +112,19 @@ public class PartyBoardActivity extends SDLActivity {
             if (actionBar != null) {
                 actionBar.hide();
             }
+        }
+    }
+
+    @Override
+    public void onBackPressed() {
+        // Back never closes Party Board: like F1 and B on a PC, it opens the
+        // menu in game and goes back inside a menu (src/port/ui/input.cpp).
+        // The menu has its own Quit entry.
+        try {
+            SDLActivity.onNativeKeyDown(KeyEvent.KEYCODE_BACK);
+            SDLActivity.onNativeKeyUp(KeyEvent.KEYCODE_BACK);
+        } catch (UnsatisfiedLinkError e) {
+            super.onBackPressed();
         }
     }
 

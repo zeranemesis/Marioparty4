@@ -718,6 +718,19 @@ void handle_event(const SDL_Event &event) noexcept
         return;
     }
 
+    // The Android back button (and back gesture) plays the part of F1 and B:
+    // in game it opens the Party Board menu, inside a menu it goes back.
+    if (event.type == SDL_EVENT_KEY_DOWN && event.key.scancode == SDL_SCANCODE_AC_BACK) {
+        if (!event.key.repeat) {
+            const auto key = any_document_visible() ? Rml::Input::KI_ESCAPE : Rml::Input::KI_F1;
+            context->ProcessMouseLeave();
+            context->ProcessKeyDown(key, 0);
+            context->ProcessKeyUp(key, 0);
+            sync_input_block();
+        }
+        return;
+    }
+
     if (event.type == SDL_EVENT_FINGER_DOWN || event.type == SDL_EVENT_FINGER_MOTION || event.type == SDL_EVENT_FINGER_UP
         || event.type == SDL_EVENT_FINGER_CANCELED) {
         if (handle_touch_menu_tap(*context, event)) {

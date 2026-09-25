@@ -86,6 +86,9 @@ UserSettings g_userSettings = {
         .username {"retroAchievements.username", ""},
         .token {"retroAchievements.token", ""},
     },
+    .online = {
+        .nickname {"online.nickname", ""},
+    },
 };
 
 UserSettings& getSettings() {
@@ -144,6 +147,8 @@ void registerSettings() {
     Register(g_userSettings.retroAchievements.enabled);
     Register(g_userSettings.retroAchievements.username);
     Register(g_userSettings.retroAchievements.token);
+
+    Register(g_userSettings.online.nickname);
 }
 
 }

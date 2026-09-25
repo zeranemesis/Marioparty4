@@ -9,6 +9,7 @@
 #include "port/settings.h"
 #include "port/netplay_runtime.h"
 #include "modal.hpp"
+#include "online.hpp"
 #include "preset.hpp"
 #include "settings.hpp"
 #include "partyboard_version.h"
@@ -671,6 +672,12 @@ Prelaunch::Prelaunch()
                     prelaunch_state().errorString = "Impossible d'ouvrir le mode en ligne. Vérifiez que PartyBoardOnline.exe est présent dans le dossier du jeu.";
                 }
             });
+            apply_intro_animation(mMenuButtons.back()->root(), "delay-2");
+        }
+#else
+        if (!PartyBoard_NetplayEnabled()) {
+            mMenuButtons.push_back(std::make_unique<Button>(menuList, "Play Online"));
+            mMenuButtons.back()->on_pressed([this] { push(std::make_unique<OnlineWindow>()); });
             apply_intro_animation(mMenuButtons.back()->root(), "delay-2");
         }
 #endif

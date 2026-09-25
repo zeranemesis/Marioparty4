@@ -133,6 +133,11 @@ struct UserSettings {
         ConfigVar<std::string> username;
         ConfigVar<std::string> token;
     } retroAchievements;
+
+    struct {
+        // The name shown to the other players in an online lobby.
+        ConfigVar<std::string> nickname;
+    } online;
 };
 
 UserSettings& getSettings();
