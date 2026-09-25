@@ -107,13 +107,6 @@ jobs:
       - name: Check pipeline cache seed
         run: python3 tools/check_pipeline_cache_seed.py
 
-      # The native PB4 invitation codec used by the in-game lobby on Android,
-      # iOS, Linux and macOS must stay byte-identical to PartyBoardOnline.exe.
-      - name: Online invitation tests
-        run: |
-          c++ -std=c++20 -Wall -Wextra -Werror -Iinclude tools/tests/online_invitation_test.cpp \
-            src/port/online/invitation.cpp -o "$RUNNER_TEMP/online_invitation_test"
-          "$RUNNER_TEMP/online_invitation_test"
 
       - name: Install dependencies
         run: |
@@ -135,6 +128,15 @@ jobs:
 
       - name: Build
         run: cmake --build --preset x-linux-ci-${{matrix.preset}}
+
+      # What the in-game lobby and Friends tab rely on where CubeShelf cannot run: the PB4
+      # invitation must stay byte-identical to PartyBoardOnline.exe, and the profile export and
+      # sealed presence must open exactly as CubeShelf wrote them (tools/tests/fixtures).
+      - name: Online and CubeShelf tests
+        run: |
+          cmake --build --preset x-linux-ci-${{matrix.preset}} --target online_tests
+          build/x-linux-ci-${{matrix.preset}}/tests/online_invitation_test
+          build/x-linux-ci-${{matrix.preset}}/tests/cubeshelf_social_test tools/tests/fixtures
 
       - name: Generate AppImage
         run: ci/build-appimage.sh

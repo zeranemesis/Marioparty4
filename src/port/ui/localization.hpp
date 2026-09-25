@@ -85,6 +85,21 @@ inline std::string ui_translate(std::string_view text)
         {"This invitation comes from an older version of Party Board. Both players need the same version.", "Cette invitation vient d’une version plus ancienne de Party Board. Les deux joueurs doivent avoir la même version."},
         {"This invitation has expired. The host must create a new lobby.", "Cette invitation a expiré. L’hôte doit recréer un salon."},
         {"The invitation is incomplete. Copy all of it from your friend's device.", "L’invitation est incomplète. Copiez-la entièrement depuis l’appareil de votre ami."},
+        {"CubeShelf profile", "Profil CubeShelf"}, {"Refresh now", "Actualiser maintenant"}, {"Forget this profile", "Oublier ce profil"}, {"Forget", "Oublier"},
+        {"This device will no longer see your friends. Your PC and your friends are not affected; you can import the profile again at any time.", "Cet appareil ne verra plus tes amis. Ton PC et tes amis ne sont pas concernés ; tu pourras réimporter le profil à tout moment."},
+        {"Import your CubeShelf profile", "Importer ton profil CubeShelf"}, {"Passphrase", "Mot de passe"},
+        {"The passphrase you chose in CubeShelf when exporting the profile.", "Le mot de passe choisi dans CubeShelf au moment de l’export."},
+        {"Import from a file", "Importer depuis un fichier"}, {"Import from the clipboard", "Importer depuis le presse-papiers"},
+        {"Choose the .cubeshelf-profile file exported by CubeShelf and copied to this device.", "Choisis le fichier .cubeshelf-profile exporté par CubeShelf et copié sur cet appareil."},
+        {"If you sent yourself the content of the file (it starts with CSP1-), copy it, then import it from here.", "Si tu t’es envoyé le contenu du fichier (il commence par CSP1-), copie-le puis importe-le d’ici."},
+        {"On your PC, open CubeShelf, then My profile, Play on a phone, and export your profile. This device will then see your friends and their invitations; your PC keeps publishing your presence.", "Sur ton PC, ouvre CubeShelf, puis Mon profil, Jouer sur téléphone, et exporte ton profil. Cet appareil verra alors tes amis et leurs invitations ; ton PC continue de publier ta présence."},
+        {"No file was chosen.", "Aucun fichier choisi."}, {"Type the passphrase first.", "Saisis d’abord le mot de passe."}, {"Importing...", "Import en cours…"},
+        {"Profile imported.", "Profil importé."}, {"This is not a profile exported by CubeShelf.", "Ce n’est pas un profil exporté par CubeShelf."},
+        {"Wrong passphrase, or the file was modified.", "Mot de passe incorrect, ou fichier modifié."},
+        {"This profile comes from a CubeShelf version this Party Board does not read.", "Ce profil vient d’une version de CubeShelf que ce Party Board ne lit pas."},
+        {"The key in this profile is unreadable.", "La clé de ce profil est illisible."},
+        {"The profile is unreadable: the file was modified or cut short.", "Profil illisible : le fichier a été modifié ou tronqué."},
+        {"That invitation is no longer valid: the lobby was closed or has expired.", "Cette invitation n’est plus valable : le salon a été fermé ou a expiré."},
     };
     for (const auto &entry : entries) if (entry.source == text) return std::string(entry.translated);
     return std::string(text);

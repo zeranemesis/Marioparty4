@@ -13,7 +13,8 @@ namespace partyboard::ui {
 
 class OnlineWindow : public Window {
 public:
-    OnlineWindow();
+    // With an invitation -- one a CubeShelf friend sent -- the window opens on joining it.
+    explicit OnlineWindow(std::string invitation = {});
 
 private:
     void build(Rml::Element *content);

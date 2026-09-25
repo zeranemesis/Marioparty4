@@ -106,6 +106,8 @@ set(PORT_FILES
         src/port/mods_test.inc
         src/port/netplay_transport.cpp
         src/port/netplay_runtime.cpp
+        src/port/online/cubeshelf_friends.cpp
+        src/port/online/cubeshelf_social.cpp
         src/port/online/invitation.cpp
         src/port/OS.c
         src/port/portmain.cpp

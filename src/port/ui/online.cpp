@@ -76,11 +76,15 @@ namespace {
 
 } // namespace
 
-OnlineWindow::OnlineWindow()
+OnlineWindow::OnlineWindow(std::string invitation)
 {
     ensure_initialized();
     mStatus = disc_ready() ? "Disc ready. Create a lobby or paste your friend's invitation." : "Choose your disc to get started.";
     add_tab("Online Lobby", [this](Rml::Element *content) { build(content); });
+    if (!invitation.empty()) {
+        mInvitation = trimmed(std::move(invitation));
+        join_lobby();
+    }
 }
 
 void OnlineWindow::build(Rml::Element *content)
