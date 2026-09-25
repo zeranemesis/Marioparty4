@@ -107,6 +107,14 @@ jobs:
       - name: Check pipeline cache seed
         run: python3 tools/check_pipeline_cache_seed.py
 
+      # The native PB4 invitation codec used by the in-game lobby on Android,
+      # iOS, Linux and macOS must stay byte-identical to PartyBoardOnline.exe.
+      - name: Online invitation tests
+        run: |
+          c++ -std=c++20 -Wall -Wextra -Werror -Iinclude tools/tests/online_invitation_test.cpp \
+            src/port/online/invitation.cpp -o "$RUNNER_TEMP/online_invitation_test"
+          "$RUNNER_TEMP/online_invitation_test"
+
       - name: Install dependencies
         run: |
           sudo apt-get update
