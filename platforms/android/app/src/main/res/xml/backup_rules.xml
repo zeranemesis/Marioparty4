@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 and older (Auto Backup). Keep the player's data: config.json,
+     the memory card, achievements, controller bindings. Leave out what can be
+     rebuilt and would only eat into the 25 MB backup quota, past which Android
+     backs up nothing at all, memory card included. Keep in step with
+     data_extraction_rules.xml. -->
+<full-backup-content>
+    <exclude domain="file" path="pipeline_cache.db" />
+    <exclude domain="file" path="pipeline_cache.db-wal" />
+    <exclude domain="file" path="pipeline_cache.db-shm" />
+    <exclude domain="file" path="dawn_cache.db" />
+    <exclude domain="file" path="dawn_cache.db-wal" />
+    <exclude domain="file" path="dawn_cache.db-shm" />
+    <exclude domain="file" path="config.json.tmp" />
+    <exclude domain="file" path="texture_dumps" />
+    <exclude domain="file" path="retroachievements/badges" />
+</full-backup-content>

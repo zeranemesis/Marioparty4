@@ -9,6 +9,10 @@ def syncPartyBoardAssets = tasks.register('syncPartyBoardAssets', Sync) {
         into 'res'
         exclude '**/.DS_Store'
     }
+    // Shader pipelines seen on PC, which Aurora compiles before the first frame
+    // instead of dropping draws on a scene's first visit. Desktop installs it
+    // next to the binary; here Aurora reads it from the assets through SDL.
+    from(new File(partyboardRepoDir, 'initial_pipeline_cache.db'))
     into partyboardGeneratedAssetsDir
 }
 
@@ -39,6 +43,12 @@ android {
             jniLibs.srcDirs = ['src/main/jniLibs']
             assets.srcDirs = [partyboardGeneratedAssetsDir]
         }
+    }
+
+    androidResources {
+        // SQLite seeks all over the file; a compressed asset has to be
+        // inflated again from the start on every backward seek.
+        noCompress 'db'
     }
 
     splits {
