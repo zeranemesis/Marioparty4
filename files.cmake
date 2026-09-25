@@ -89,6 +89,7 @@ set(PORT_FILES
         src/port/crash_uploader.cpp
         src/port/http.cpp
         src/port/retroachievements.cpp
+        src/port/retroachievements_badges.cpp
         src/port/retroachievements_memory.cpp
         src/port/board_coverage.cpp
         src/port/crash_report.cpp

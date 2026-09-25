@@ -8,6 +8,7 @@
 #include "nav_types.hpp"
 #include "pane.hpp"
 #include "localization.hpp"
+#include "ui.hpp"
 
 namespace partyboard::ui {
 namespace {
@@ -106,13 +107,15 @@ namespace {
 
     Rml::String build_ra_info_rml(const ra::AchievementInfo &a)
     {
+        // Title and description come from the server: escaped, or a '<' or '&'
+        // in one would be read as markup.
         Rml::String s = fmt::format(R"(<div class="achievement-header">)"
                                     R"(<span class="achievement-name{}">{}</span>)"
                                     R"(<span class="achievement-badge{}">{} - {} pts</span>)"
                                     R"(</div>)"
                                     R"(<p class="achievement-desc">{}</p>)",
-            a.unlocked ? " unlocked" : "", a.title, a.unlocked ? " unlocked" : " locked",
-            ui_translate(a.unlocked ? "Unlocked" : "Locked"), a.points, a.description);
+            a.unlocked ? " unlocked" : "", escape(a.title), a.unlocked ? " unlocked" : " locked",
+            ui_translate(a.unlocked ? "Unlocked" : "Locked"), a.points, escape(a.description));
         // Every row gets a bar. Only achievements the set measures have steps in
         // between ("3/9"); the others are all-or-nothing in RetroAchievements,
         // so their bar is empty until the unlock and full after it.
@@ -139,6 +142,18 @@ namespace {
         RaAchievementRow(Rml::Element *parent, const ra::AchievementInfo &a)
             : FluentComponent(createRowRoot(parent))
         {
+            // The badge, or an empty square of the same size while it downloads,
+            // so the text of every row starts at the same place.
+            if (!a.image.empty()) {
+                auto *icon = append(mRoot, "img");
+                icon->SetAttribute("src", a.image);
+                icon->SetClass("achievement-icon", true);
+            }
+            else {
+                auto *icon = append(mRoot, "div");
+                icon->SetClass("achievement-icon", true);
+                icon->SetClass("pending", true);
+            }
             auto *infoDiv = append(mRoot, "div");
             infoDiv->SetClass("achievement-info", true);
             infoDiv->SetInnerRML(build_ra_info_rml(a));

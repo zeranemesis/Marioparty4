@@ -17,8 +17,10 @@ static char* copy_utf8(NSString* text) {
     return strdup(utf8);
 }
 
-int PartyBoard_HttpPostApple(const char* url, const void* body, size_t bodyLength, const char* contentType,
-    const char* userAgent, char** outBody, size_t* outLength, char** outError) {
+// A GET passes an empty content type and no body. NSURLSession follows
+// redirects by itself.
+int PartyBoard_HttpRequestApple(const char* method, const char* url, const void* body, size_t bodyLength,
+    const char* contentType, const char* userAgent, char** outBody, size_t* outLength, char** outError) {
     *outBody = NULL;
     *outLength = 0;
     *outError = NULL;
@@ -31,10 +33,12 @@ int PartyBoard_HttpPostApple(const char* url, const void* body, size_t bodyLengt
         }
 
         NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL:target];
-        request.HTTPMethod = @"POST";
-        request.HTTPBody = [NSData dataWithBytes:body length:bodyLength];
+        request.HTTPMethod = [NSString stringWithUTF8String:method];
         request.timeoutInterval = 30.0;
-        [request setValue:[NSString stringWithUTF8String:contentType] forHTTPHeaderField:@"Content-Type"];
+        if (contentType[0] != '\0') {
+            request.HTTPBody = [NSData dataWithBytes:body length:bodyLength];
+            [request setValue:[NSString stringWithUTF8String:contentType] forHTTPHeaderField:@"Content-Type"];
+        }
         [request setValue:[NSString stringWithUTF8String:userAgent] forHTTPHeaderField:@"User-Agent"];
 
         __block int status = 0;

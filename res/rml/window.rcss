@@ -384,6 +384,19 @@ progress.ra-total fill {
     min-width: 0;
 }
 
+/* A RetroAchievements badge; the pictures are 64x64. */
+.achievement-icon {
+    flex: 0 0 auto;
+    width: 64dp;
+    height: 64dp;
+    margin: 2dp 4dp 0 0;
+}
+
+.achievement-icon.pending {
+    border-radius: 6dp;
+    background-color: rgba(255, 255, 255, 8%);
+}
+
 .achievement-header {
     display: flex;
     align-items: center;

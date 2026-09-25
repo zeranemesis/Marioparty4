@@ -11,8 +11,9 @@
 #include <winhttp.h>
 #elif defined(__APPLE__)
 #define PARTYBOARD_HTTP_APPLE 1
-extern "C" int PartyBoard_HttpPostApple(const char* url, const void* body, size_t bodyLength,
-    const char* contentType, const char* userAgent, char** outBody, size_t* outLength, char** outError);
+extern "C" int PartyBoard_HttpRequestApple(const char* method, const char* url, const void* body,
+    size_t bodyLength, const char* contentType, const char* userAgent, char** outBody, size_t* outLength,
+    char** outError);
 #elif defined(__ANDROID__) || defined(ANDROID)
 #define PARTYBOARD_HTTP_ANDROID 1
 #include <SDL3/SDL_system.h>
@@ -27,6 +28,11 @@ namespace partyboard::http {
 namespace {
 constexpr long kTimeoutSeconds = 30;
 }
+
+// Each backend implements this once; post() and get() at the end of the file
+// are the public entry points. A GET passes an empty body and content type.
+static Response perform(const char* method, const std::string& url, const std::string& body,
+    const std::string& contentType, const std::string& userAgent);
 
 #if defined(PARTYBOARD_HTTP_WINHTTP)
 
@@ -60,8 +66,8 @@ struct Handle {
 
 bool available() { return true; }
 
-Response post(const std::string& url, const std::string& body, const std::string& contentType,
-    const std::string& userAgent) {
+static Response perform(const char* method, const std::string& url, const std::string& body,
+    const std::string& contentType, const std::string& userAgent) {
     Response response;
     const std::wstring wideUrl = widen(url);
 
@@ -95,16 +101,19 @@ Response post(const std::string& url, const std::string& body, const std::string
         return response;
     }
     const DWORD flags = parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0;
-    Handle request{WinHttpOpenRequest(connection.h, L"POST", path.c_str(), nullptr, WINHTTP_NO_REFERER,
-        WINHTTP_DEFAULT_ACCEPT_TYPES, flags)};
+    Handle request{WinHttpOpenRequest(connection.h, widen(method).c_str(), path.c_str(), nullptr,
+        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags)};
     if (request.h == nullptr) {
         response.error = last_error("WinHttpOpenRequest");
         return response;
     }
 
-    const std::wstring headers = L"Content-Type: " + widen(contentType) + L"\r\n";
-    if (!WinHttpSendRequest(request.h, headers.c_str(), static_cast<DWORD>(-1),
-            const_cast<char*>(body.data()), static_cast<DWORD>(body.size()), static_cast<DWORD>(body.size()), 0)
+    // WinHTTP follows redirects by itself.
+    const std::wstring headers =
+        contentType.empty() ? std::wstring() : L"Content-Type: " + widen(contentType) + L"\r\n";
+    if (!WinHttpSendRequest(request.h, headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
+            headers.empty() ? 0 : static_cast<DWORD>(-1), const_cast<char*>(body.data()),
+            static_cast<DWORD>(body.size()), static_cast<DWORD>(body.size()), 0)
         || !WinHttpReceiveResponse(request.h, nullptr)) {
         response.error = last_error("WinHttpSendRequest");
         return response;
@@ -145,14 +154,14 @@ Response post(const std::string& url, const std::string& body, const std::string
 
 bool available() { return true; }
 
-Response post(const std::string& url, const std::string& body, const std::string& contentType,
-    const std::string& userAgent) {
+static Response perform(const char* method, const std::string& url, const std::string& body,
+    const std::string& contentType, const std::string& userAgent) {
     Response response;
     char* outBody = nullptr;
     size_t outLength = 0;
     char* outError = nullptr;
-    response.status = PartyBoard_HttpPostApple(url.c_str(), body.data(), body.size(), contentType.c_str(),
-        userAgent.c_str(), &outBody, &outLength, &outError);
+    response.status = PartyBoard_HttpRequestApple(method, url.c_str(), body.data(), body.size(),
+        contentType.c_str(), userAgent.c_str(), &outBody, &outLength, &outError);
     if (outBody != nullptr) {
         response.body.assign(outBody, outLength);
         std::free(outBody);
@@ -183,9 +192,10 @@ jstring utf(JNIEnv* env, const std::string& text) { return env->NewStringUTF(tex
 
 bool available() { return true; }
 
-Response post(const std::string& url, const std::string& body, const std::string& contentType,
-    const std::string& userAgent) {
+static Response perform(const char* method, const std::string& url, const std::string& body,
+    const std::string& contentType, const std::string& userAgent) {
     Response response;
+    const bool sendsBody = !contentType.empty();
     // SDL attaches the calling thread to the VM if it is not already.
     auto* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
     if (env == nullptr) {
@@ -229,28 +239,34 @@ Response post(const std::string& url, const std::string& body, const std::string
     env->CallVoidMethod(connection, env->GetMethodID(httpClass, "setConnectTimeout", "(I)V"), timeoutMs);
     env->CallVoidMethod(connection, env->GetMethodID(httpClass, "setReadTimeout", "(I)V"), timeoutMs);
     env->CallVoidMethod(connection, env->GetMethodID(httpClass, "setRequestMethod", "(Ljava/lang/String;)V"),
-        utf(env, "POST"));
-    env->CallVoidMethod(connection, env->GetMethodID(httpClass, "setDoOutput", "(Z)V"), JNI_TRUE);
+        utf(env, method));
     const jmethodID setHeader =
         env->GetMethodID(httpClass, "setRequestProperty", "(Ljava/lang/String;Ljava/lang/String;)V");
-    env->CallVoidMethod(connection, setHeader, utf(env, "Content-Type"), utf(env, contentType));
+    if (sendsBody) {
+        env->CallVoidMethod(connection, env->GetMethodID(httpClass, "setDoOutput", "(Z)V"), JNI_TRUE);
+        env->CallVoidMethod(connection, setHeader, utf(env, "Content-Type"), utf(env, contentType));
+    }
     env->CallVoidMethod(connection, setHeader, utf(env, "User-Agent"), utf(env, userAgent));
     if (failed(env)) {
         return done("configuring the request failed");
     }
 
-    jobject output = env->CallObjectMethod(connection,
-        env->GetMethodID(httpClass, "getOutputStream", "()Ljava/io/OutputStream;"));
-    if (output == nullptr || failed(env)) {
-        return done("connection failed");
-    }
-    jclass outputClass = env->FindClass("java/io/OutputStream");
-    jbyteArray payload = env->NewByteArray(static_cast<jsize>(body.size()));
-    env->SetByteArrayRegion(payload, 0, static_cast<jsize>(body.size()), reinterpret_cast<const jbyte*>(body.data()));
-    env->CallVoidMethod(output, env->GetMethodID(outputClass, "write", "([B)V"), payload);
-    env->CallVoidMethod(output, env->GetMethodID(outputClass, "close", "()V"));
-    if (failed(env)) {
-        return done("sending the request failed");
+    // A GET has nothing to write; the connection opens on getResponseCode.
+    if (sendsBody) {
+        jobject output = env->CallObjectMethod(connection,
+            env->GetMethodID(httpClass, "getOutputStream", "()Ljava/io/OutputStream;"));
+        if (output == nullptr || failed(env)) {
+            return done("connection failed");
+        }
+        jclass outputClass = env->FindClass("java/io/OutputStream");
+        jbyteArray payload = env->NewByteArray(static_cast<jsize>(body.size()));
+        env->SetByteArrayRegion(payload, 0, static_cast<jsize>(body.size()),
+            reinterpret_cast<const jbyte*>(body.data()));
+        env->CallVoidMethod(output, env->GetMethodID(outputClass, "write", "([B)V"), payload);
+        env->CallVoidMethod(output, env->GetMethodID(outputClass, "close", "()V"));
+        if (failed(env)) {
+            return done("sending the request failed");
+        }
     }
 
     const jint status = env->CallIntMethod(connection, env->GetMethodID(httpClass, "getResponseCode", "()I"));
@@ -299,8 +315,8 @@ size_t append(char* data, size_t size, size_t count, void* userdata) {
 
 bool available() { return true; }
 
-Response post(const std::string& url, const std::string& body, const std::string& contentType,
-    const std::string& userAgent) {
+static Response perform(const char* method, const std::string& url, const std::string& body,
+    const std::string& contentType, const std::string& userAgent) {
     static std::once_flag once;
     std::call_once(once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
 
@@ -310,15 +326,23 @@ Response post(const std::string& url, const std::string& body, const std::string
         response.error = "curl_easy_init failed";
         return response;
     }
-    const std::string header = "Content-Type: " + contentType;
-    curl_slist* headers = curl_slist_append(nullptr, header.c_str());
+    curl_slist* headers = nullptr;
     char errorBuffer[CURL_ERROR_SIZE] = {};
 
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.data());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    if (std::strcmp(method, "POST") == 0) {
+        const std::string header = "Content-Type: " + contentType;
+        headers = curl_slist_append(nullptr, header.c_str());
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.data());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    } else {
+        // The other backends follow redirects by themselves; curl has to be told.
+        curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+    }
     curl_easy_setopt(curl, CURLOPT_USERAGENT, userAgent.c_str());
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, kTimeoutSeconds);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
@@ -344,12 +368,22 @@ Response post(const std::string& url, const std::string& body, const std::string
 
 bool available() { return false; }
 
-Response post(const std::string&, const std::string&, const std::string&, const std::string&) {
+static Response perform(const char*, const std::string&, const std::string&, const std::string&,
+    const std::string&) {
     Response response;
     response.error = "this build has no HTTPS backend";
     return response;
 }
 
 #endif
+
+Response post(const std::string& url, const std::string& body, const std::string& contentType,
+    const std::string& userAgent) {
+    return perform("POST", url, body, contentType, userAgent);
+}
+
+Response get(const std::string& url, const std::string& userAgent) {
+    return perform("GET", url, std::string(), std::string(), userAgent);
+}
 
 } // namespace partyboard::http

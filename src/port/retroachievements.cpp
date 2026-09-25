@@ -3,6 +3,7 @@
 #include "port/config.hpp"
 #include "port/http.hpp"
 #include "port/netplay_runtime.h"
+#include "port/retroachievements_badges.hpp"
 #include "port/retroachievements_memory.hpp"
 #include "port/settings.h"
 #include "ui/ui.hpp"
@@ -30,6 +31,10 @@ namespace partyboard::ra {
 namespace {
 
 aurora::Module Log("partyboard::ra");
+
+// The server injects warnings as fake achievements with ids from 101000000;
+// they are not part of the game's set.
+constexpr uint32_t kFirstWarningId = 101000000u;
 
 // Work finished on a worker thread, to be completed on the main thread. rcheevos
 // callbacks and the toasts they raise then all run where the UI lives.
@@ -162,11 +167,19 @@ void RC_CCONV log_message(const char* message, const rc_client_t*) { Log.info("r
 
 void RC_CCONV handle_event(const rc_client_event_t* event, rc_client_t*) {
     switch (event->type) {
-    case RC_CLIENT_EVENT_ACHIEVEMENT_TRIGGERED:
+    case RC_CLIENT_EVENT_ACHIEVEMENT_TRIGGERED: {
         ++s_revision;
-        toast("Achievement Unlocked!", event->achievement->title);
-        Log.info("Unlocked \"{}\" ({} points)", event->achievement->title, event->achievement->points);
+        const rc_client_achievement_t* achievement = event->achievement;
+        // With its badge when it is on disk; a toast whose content starts with
+        // '<' is markup, so the title is escaped.
+        const std::string image = badges::source(achievement->badge_name, false);
+        toast("Achievement Unlocked!",
+            image.empty() ? std::string(achievement->title)
+                          : "<row class=\"badge\"><img src=\"" + image + "\"/><span>"
+                    + ui::escape(achievement->title) + "</span></row>");
+        Log.info("Unlocked \"{}\" ({} points)", achievement->title, achievement->points);
         break;
+    }
     case RC_CLIENT_EVENT_GAME_COMPLETED:
         toast("RetroAchievements", "Every achievement unlocked!");
         break;
@@ -225,6 +238,37 @@ std::string disc_hash(const std::string& path) {
     return ok ? std::string(hash) : std::string();
 }
 
+// Downloads the badges of the loaded set that are not on disk yet, then has the
+// achievements window redraw with them.
+void fetch_badges() {
+    std::vector<badges::Badge> list;
+    rc_client_achievement_list_t* all = rc_client_create_achievement_list(
+        s_client, RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE, RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_LOCK_STATE);
+    if (all == nullptr) {
+        return;
+    }
+    for (uint32_t b = 0; b < all->num_buckets; ++b) {
+        const rc_client_achievement_bucket_t& bucket = all->buckets[b];
+        for (uint32_t i = 0; i < bucket.num_achievements; ++i) {
+            const rc_client_achievement_t* a = bucket.achievements[i];
+            char url[512] = {};
+            if (a->id >= kFirstWarningId || a->badge_name[0] == '\0'
+                || rc_client_achievement_get_image_url(a, RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED, url, sizeof(url))
+                    != RC_OK) {
+                continue;
+            }
+            list.push_back({a->badge_name, url});
+        }
+    }
+    rc_client_destroy_achievement_list(all);
+    std::weak_ptr<Completions> completions = s_completions;
+    badges::fetch(std::move(list), s_userAgent, [completions] {
+        if (auto sink = completions.lock()) {
+            sink->push([] { ++s_revision; });
+        }
+    });
+}
+
 void load_game() {
     const std::string path = getSettings().backend.isoPath;
     if (path.empty()) {
@@ -261,6 +305,7 @@ void load_game() {
                             std::string(game->title) + ": " + std::to_string(summary.num_unlocked_achievements)
                                 + "/" + std::to_string(summary.num_core_achievements) + " unlocked");
                         logUnmappedAddresses();
+                        fetch_badges();
                         toast("RetroAchievements", game->title);
                     } else if (result == RC_NO_GAME_LOADED) {
                         set_state(State::NoSet, "This disc has no achievement set");
@@ -318,19 +363,19 @@ std::vector<AchievementInfo> achievements() {
         const rc_client_achievement_bucket_t& bucket = list->buckets[b];
         for (uint32_t i = 0; i < bucket.num_achievements; ++i) {
             const rc_client_achievement_t* a = bucket.achievements[i];
-            // The server injects warnings as fake achievements with ids from
-            // 101000000; they are not part of the game's set.
-            if (a->id >= 101000000u) {
+            if (a->id >= kFirstWarningId) {
                 continue;
             }
+            const bool unlocked = (a->unlocked & RC_CLIENT_ACHIEVEMENT_UNLOCKED_SOFTCORE) != 0;
             result.push_back({
                 .id = a->id,
                 .title = a->title,
                 .description = a->description,
                 .points = a->points,
-                .unlocked = (a->unlocked & RC_CLIENT_ACHIEVEMENT_UNLOCKED_SOFTCORE) != 0,
+                .unlocked = unlocked,
                 .progress = a->measured_progress,
                 .progressPercent = a->measured_percent,
+                .image = badges::source(a->badge_name, !unlocked),
             });
         }
     }

@@ -15,6 +15,7 @@ Party Board unlocks the Mario Party 4 achievement set
 | HTTPS through each platform's own stack | `src/port/http.cpp`, `src/port/http_apple.m` |
 | Login fields and status | Settings > RetroAchievements (`src/port/ui/settings.cpp`) |
 | Achievement list with progress | F1 > Achievements (`src/port/ui/achievements.cpp`) |
+| Badges: downloaded once, kept on disk, shown in the list and the unlock notification | `src/port/retroachievements_badges.cpp` |
 
 **Identification.** The disc is hashed with rcheevos' own GameCube method (disc
 header, apploader and `main.dol` segments), read through nod, so an RVZ image
@@ -59,6 +60,14 @@ suspended during online sessions, whose rollback replays ticks.
 
 The password is handed to rcheevos and never stored; only the session token the
 server returns is kept in the settings, as every RetroAchievements client does.
+
+Badges are plain GETs to `media.retroachievements.org`, the address rcheevos
+gives for each achievement, and carry no credentials. Each is downloaded once,
+when a set loads, into `<config>/retroachievements/badges/<name>.png`; deleting
+that folder only makes the next session fetch them again. Only the unlocked
+picture is downloaded: the locked one is the same picture greyed on the spot,
+as the site greys its own. Offline, the list shows an empty square where each
+missing badge goes, and gives up after three requests fail in a row.
 
 ## Debugging
 

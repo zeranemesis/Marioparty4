@@ -2,7 +2,7 @@
 
 #include <string>
 
-// A minimal HTTPS client: one blocking POST, backed by each platform's own
+// A minimal HTTPS client: one blocking POST or GET, backed by each platform's own
 // networking stack so that no TLS library has to be built or shipped.
 //
 //   Windows              WinHTTP
@@ -10,7 +10,8 @@
 //   Android              HttpURLConnection   (through JNI)
 //   Linux and others     libcurl             (when found at configure time)
 //
-// It exists for RetroAchievements, whose server only speaks HTTPS. It blocks,
+// It exists for RetroAchievements, whose server only speaks HTTPS: POST for its
+// API, GET for the achievement badges. It blocks,
 // so callers run it on a worker thread, never on the game thread.
 namespace partyboard::http {
 
@@ -28,5 +29,8 @@ bool available();
 
 Response post(const std::string& url, const std::string& body, const std::string& contentType,
     const std::string& userAgent);
+
+// Redirects are followed.
+Response get(const std::string& url, const std::string& userAgent);
 
 } // namespace partyboard::http

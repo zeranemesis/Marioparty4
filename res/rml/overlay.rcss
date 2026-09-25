@@ -113,6 +113,18 @@ toast.achievement heading {
     color: #00b4fa;
 }
 
+/* The badge beside the title of an unlocked RetroAchievements achievement. */
+toast.achievement message row.badge {
+    align-items: center;
+    gap: 12dp;
+}
+
+toast.achievement message row.badge img {
+    flex: 0 0 auto;
+    width: 48dp;
+    height: 48dp;
+}
+
 toast.controller-warning {
     top: auto;
     right: auto;

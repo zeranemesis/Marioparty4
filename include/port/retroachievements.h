@@ -45,12 +45,16 @@ struct AchievementInfo {
     // "12/20" for achievements that measure progress, empty otherwise.
     std::string progress;
     float progressPercent;
+    // The badge as an RmlUi image source, greyed while locked; empty until it
+    // has been downloaded (src/port/retroachievements_badges.cpp).
+    std::string image;
 };
 
 // The set's achievements, empty unless a set is loaded. The server's warning
 // entries (such as "Unknown Emulator") are left out.
 std::vector<AchievementInfo> achievements();
-// Changes whenever an achievement unlocks, so a window knows to refresh.
+// Changes whenever an achievement unlocks or the badges finish downloading, so
+// a window knows to refresh.
 uint32_t revision();
 
 enum class State {
