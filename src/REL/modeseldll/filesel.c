@@ -513,7 +513,7 @@ loop_exit:
             if (temp_r28 == -2) {
                 HU_WIN_INSERT_MES_SET_PTR(lbl_1_bss_148, MAKE_MESSID_PTR(lbl_1_data_278[temp_r31]), 0);
 #ifdef TARGET_PC
-                if (partyboard_version_is_ntsc()) {
+                if (partyboard_version_is_pal()) {
                     HuWinMesSet(lbl_1_bss_148, MAKE_MESSID(16, 0x39));
                 } else {
                     HuWinMesSet(lbl_1_bss_148, MAKE_MESSID(16, 0x37));
@@ -1122,6 +1122,7 @@ s32 fn_1_61B4(void)
                                         GWGameStat.language = GwLanguageSave;
                                     }
                                     GwLanguage = GWGameStat.language;
+                                    _ClearFlag(0x1000B);
                                 }
 #else
                                 #if VERSION_PAL
