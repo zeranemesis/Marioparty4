@@ -652,13 +652,16 @@ foreach (target IN LISTS BINARY_TARGETS)
     endforeach ()
 endforeach ()
 
-# Native online and CubeShelf unit tests. Not part of the default build; CI builds and runs them
+# Native online, CubeShelf and screen controller unit tests. Not part of the default build; CI builds and runs them
 # (cmake --build <dir> --target online_tests, then run each from <dir>/tests).
 add_executable(online_invitation_test EXCLUDE_FROM_ALL tools/tests/online_invitation_test.cpp src/port/online/invitation.cpp)
 target_include_directories(online_invitation_test PRIVATE include)
 add_executable(cubeshelf_social_test EXCLUDE_FROM_ALL tools/tests/cubeshelf_social_test.cpp src/port/online/cubeshelf_social.cpp)
 target_include_directories(cubeshelf_social_test PRIVATE include)
 target_link_libraries(cubeshelf_social_test PRIVATE mbedcrypto nlohmann_json::nlohmann_json)
-set_target_properties(online_invitation_test cubeshelf_social_test PROPERTIES
+add_executable(touch_controls_test EXCLUDE_FROM_ALL tools/tests/touch_controls_test.cpp src/port/touch_controls.cpp)
+target_include_directories(touch_controls_test PRIVATE include extern/aurora/include)
+target_compile_definitions(touch_controls_test PRIVATE TARGET_PC)
+set_target_properties(online_invitation_test cubeshelf_social_test touch_controls_test PROPERTIES
         CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
-add_custom_target(online_tests DEPENDS online_invitation_test cubeshelf_social_test)
+add_custom_target(online_tests DEPENDS online_invitation_test cubeshelf_social_test touch_controls_test)

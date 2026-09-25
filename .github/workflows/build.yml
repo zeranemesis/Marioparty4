@@ -132,11 +132,12 @@ jobs:
       # What the in-game lobby and Friends tab rely on where CubeShelf cannot run: the PB4
       # invitation must stay byte-identical to PartyBoardOnline.exe, and the profile export and
       # sealed presence must open exactly as CubeShelf wrote them (tools/tests/fixtures).
-      - name: Online and CubeShelf tests
+      - name: Online, CubeShelf and screen controller tests
         run: |
           cmake --build --preset x-linux-ci-${{matrix.preset}} --target online_tests
           build/x-linux-ci-${{matrix.preset}}/tests/online_invitation_test
           build/x-linux-ci-${{matrix.preset}}/tests/cubeshelf_social_test tools/tests/fixtures
+          build/x-linux-ci-${{matrix.preset}}/tests/touch_controls_test
 
       - name: Generate AppImage
         run: ci/build-appimage.sh

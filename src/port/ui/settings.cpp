@@ -193,6 +193,8 @@ namespace {
         getSettings().game.enableTurboKeybind.setValue(false);
     }
 
+    constexpr std::array<const char *, 3> kTouchControlModes = { "Automatic", "Always", "Never" };
+
     const Rml::String kInternalResolutionHelpText = "Configure the resolution used for rendering the game. Higher values are more demanding on "
                                                     "your graphics hardware.";
     const Rml::String kShadowResolutionHelpText = "Configure the shadow-map resolution. Higher values improve shadow quality but increase GPU "
@@ -597,6 +599,51 @@ SettingsWindow::SettingsWindow(bool prelaunch)
                 .helpText = "Allow controller input even when the game window is not focused.",
                 .onChange = [](bool value) { aurora_set_background_input(value); },
             });
+
+        leftPane.add_section("Screen Controller");
+        leftPane.register_control(leftPane.add_select_button({
+                                      .key = "Screen Controller",
+                                      .getValue = [] { return Rml::String { kTouchControlModes[std::clamp(getSettings().game.touchControls.getValue(), 0, 2)] }; },
+                                      .isModified =
+                                          [] {
+                                              const auto &v = getSettings().game.touchControls;
+                                              return v.getValue() != v.getDefaultValue();
+                                          },
+                                  }),
+            rightPane, [](Pane &pane) {
+                for (int i = 0; i < static_cast<int>(kTouchControlModes.size()); ++i) {
+                    pane.add_button({
+                                        .text = kTouchControlModes[i],
+                                        .isSelected = [i] { return getSettings().game.touchControls.getValue() == i; },
+                                    })
+                        .on_pressed([i] {
+                            getSettings().game.touchControls.setValue(i);
+                            config::Save();
+                        });
+                }
+                pane.add_rml("<br/>");
+                pane.add_text("A GameCube controller drawn on the screen, for playing on a phone or a tablet. Automatic shows it on "
+                              "touch screens whenever no gamepad is plugged into port 1.");
+            });
+        leftPane.register_control(leftPane.add_child<NumberButton>(NumberButton::Props {
+                                      .key = "Screen Controller Opacity",
+                                      .getValue = [] { return getSettings().game.touchControlsOpacity.getValue(); },
+                                      .setValue =
+                                          [](int value) {
+                                              getSettings().game.touchControlsOpacity.setValue(std::clamp(value, 10, 100));
+                                              config::Save();
+                                          },
+                                      .isModified =
+                                          [] {
+                                              const auto &v = getSettings().game.touchControlsOpacity;
+                                              return v.getValue() != v.getDefaultValue();
+                                          },
+                                      .min = 10,
+                                      .max = 100,
+                                      .step = 10,
+                                      .suffix = "%",
+                                  }),
+            rightPane, [](Pane &pane) { pane.add_text("How visible the screen controller is over the game."); });
 
         leftPane.add_section("Tools");
         addOption("Turbo Key", getSettings().game.enableTurboKeybind, "Hold Tab to unlock the FPS, speeding up the game.",

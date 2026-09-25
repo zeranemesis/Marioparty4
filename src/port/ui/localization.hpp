@@ -100,6 +100,10 @@ inline std::string ui_translate(std::string_view text)
         {"The key in this profile is unreadable.", "La clé de ce profil est illisible."},
         {"The profile is unreadable: the file was modified or cut short.", "Profil illisible : le fichier a été modifié ou tronqué."},
         {"That invitation is no longer valid: the lobby was closed or has expired.", "Cette invitation n’est plus valable : le salon a été fermé ou a expiré."},
+        {"Screen Controller", "Manette à l’écran"}, {"Screen Controller Opacity", "Opacité de la manette à l’écran"},
+        {"Automatic", "Automatique"}, {"Always", "Toujours"}, {"Never", "Jamais"},
+        {"A GameCube controller drawn on the screen, for playing on a phone or a tablet. Automatic shows it on touch screens whenever no gamepad is plugged into port 1.", "Une manette GameCube dessinée à l’écran, pour jouer sur téléphone ou tablette. En automatique, elle s’affiche sur les écrans tactiles dès qu’aucune manette n’est branchée sur le port 1."},
+        {"How visible the screen controller is over the game.", "Visibilité de la manette à l’écran par-dessus le jeu."},
     };
     for (const auto &entry : entries) if (entry.source == text) return std::string(entry.translated);
     return std::string(text);

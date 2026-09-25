@@ -13,6 +13,7 @@
 #include "partyboard_version.h"
 #include "ui/menu_bar.hpp"
 #include "ui/overlay.hpp"
+#include "ui/touch_overlay.hpp"
 #include "ui/precompile.hpp"
 #include "ui/prelaunch.hpp"
 #include "ui/preset.hpp"
@@ -556,6 +557,8 @@ extern "C" int port_main(int argc, char* argv[]) {
     }
 
     partyboard::ui::initialize();
+    // Under the overlay, so toasts stay readable over the screen controls.
+    partyboard::ui::push_document(std::make_unique<partyboard::ui::TouchOverlay>(), true, true);
     partyboard::ui::push_document(std::make_unique<partyboard::ui::Overlay>(), true, true);
     partyboard::ui::push_document(std::make_unique<partyboard::ui::MenuBar>(), false);
 

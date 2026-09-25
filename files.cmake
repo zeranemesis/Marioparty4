@@ -119,6 +119,7 @@ set(PORT_FILES
         src/port/settings.cpp
         src/port/stubs.c
         src/port/thp_player.cpp
+        src/port/touch_controls.cpp
         src/port/version.cpp
 
         src/port/ui/achievements.cpp
@@ -150,6 +151,8 @@ set(PORT_FILES
         src/port/ui/online.hpp
         src/port/ui/overlay.cpp
         src/port/ui/overlay.hpp
+        src/port/ui/touch_overlay.cpp
+        src/port/ui/touch_overlay.hpp
         src/port/ui/pane.cpp
         src/port/ui/pane.hpp
         src/port/ui/menu_bar.cpp

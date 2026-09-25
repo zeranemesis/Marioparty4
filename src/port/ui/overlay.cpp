@@ -1,6 +1,7 @@
 // Credits: TwilitRealm
 
 #include "overlay.hpp"
+#include "touch_overlay.hpp"
 
 #include "aurora/lib/logging.hpp"
 #include "port/achievements.h"
@@ -265,7 +266,9 @@ void Overlay::update()
     }
 
     u32 buttonCount;
+    // On a phone the screen controller is port 1's controller: nothing to warn about.
     const bool showControllerWarning = PADGetIndexForPort(PAD_CHAN0) < 0 && PADGetKeyButtonBindings(PAD_CHAN0, &buttonCount) == nullptr
+        && !TouchOverlay::stands_in_for_gamepad()
         && dynamic_cast<Window *>(top_document()) == nullptr && dynamic_cast<WindowSmall *>(top_document()) == nullptr;
     if (showControllerWarning && mControllerWarning == nullptr) {
         mControllerWarning = create_controller_warning(mDocument);

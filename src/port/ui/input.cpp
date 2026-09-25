@@ -696,6 +696,14 @@ void release_input_block() noexcept
     sPadInputBlocked = false;
 }
 
+void open_menu() noexcept
+{
+    if (auto *context = aurora::rmlui::get_context()) {
+        dispatch_menu_key(*context);
+        sync_input_block();
+    }
+}
+
 void reset_input_state() noexcept
 {
     clear_gamepad_repeats();

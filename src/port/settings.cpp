@@ -52,6 +52,8 @@ UserSettings g_userSettings = {
 
         // Input
         .allowBackgroundInput {"game.allowBackgroundInput", true},
+        .touchControls {"game.touchControls", 0},
+        .touchControlsOpacity {"game.touchControlsOpacity", 60},
 
         // Cheats
         .infiniteHearts {"game.infiniteHearts", false},
@@ -131,6 +133,8 @@ void registerSettings() {
     Register(g_userSettings.game.unlockAllMinigames);
     Register(g_userSettings.game.unlockBowsersGnarlyParty);
     Register(g_userSettings.game.allowBackgroundInput);
+    Register(g_userSettings.game.touchControls);
+    Register(g_userSettings.game.touchControlsOpacity);
 
     Register(g_userSettings.backend.isoPath);
     Register(g_userSettings.backend.isoVerification);
