@@ -1974,7 +1974,7 @@ static void CreatePickerWindow(UnkUiWork01 *arg0, s32 arg1)
     float posY;
     float yOfs;
     s32 var_r30;
-#if VERSION_NTSC
+#if VERSION_NTSC && !defined(TARGET_PC)
     switch (GWGameStat.language) {
         case 1:
             yOfs = 0.0f;
@@ -1984,6 +1984,7 @@ static void CreatePickerWindow(UnkUiWork01 *arg0, s32 arg1)
             break;
     }
 #else
+    // PC: 0 for every language, the NTSC switch leaves yOfs unset for the PAL languages 2-5
     yOfs = 0;
 #endif
     if (arg1 != 0) {
