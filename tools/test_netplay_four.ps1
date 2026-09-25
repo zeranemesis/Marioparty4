@@ -22,6 +22,9 @@
 
 param(
     [string]$Exe = "",
+    # What tools/run_all_tests.ps1 passes, so the release gate tests the binary it
+    # is about to ship rather than a local build tree the runner does not have.
+    [string]$BinaryDirectory = "",
     [int]$Frames = 900,
     [int]$Players = 4
 )
@@ -29,6 +32,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 
+if (-not $Exe -and $BinaryDirectory) {
+    $directory = if ([IO.Path]::IsPathRooted($BinaryDirectory)) { $BinaryDirectory } else { Join-Path $root $BinaryDirectory }
+    $Exe = Join-Path $directory 'partyboard.exe'
+}
 if (-not $Exe) {
     # The build output, not build/install: install is written by a separate step
     # and has been a day stale before now, which turned two earlier measurements

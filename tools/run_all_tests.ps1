@@ -67,11 +67,11 @@ $notApplicableExit = @{
 }
 
 # Most scripts compile and run their own standalone test with cl.exe and never
-# touch partyboard.exe. Only these two launch it, and only they accept
+# touch partyboard.exe. Only these three launch it, and only they accept
 # -BinaryDirectory - so only they are given it. Passing it to a script that does
 # not take it is an error, and not passing it to one that does means the CI run
 # silently tests the wrong binary, or no binary at all.
-$takesBinaryDirectory = @('test_netplay_boot', 'test_netplay_pad')
+$takesBinaryDirectory = @('test_netplay_boot', 'test_netplay_four', 'test_netplay_pad')
 
 $scripts = @(Get-ChildItem $PSScriptRoot -Filter 'test_*.ps1' | Sort-Object Name)
 if ($scripts.Count -eq 0) { Write-Output 'No test_*.ps1 found.'; exit 2 }
