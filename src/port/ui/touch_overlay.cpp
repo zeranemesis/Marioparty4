@@ -228,6 +228,11 @@ void TouchOverlay::update()
 bool TouchOverlay::handle_event(const SDL_Event &event) noexcept
 {
     auto *self = sInstance;
+    // Android may not cancel the fingers of an app sent to the background: nothing stays held.
+    if (self != nullptr && (event.type == SDL_EVENT_WILL_ENTER_BACKGROUND || event.type == SDL_EVENT_DID_ENTER_FOREGROUND)) {
+        self->mController.release_all();
+        return false;
+    }
     if (self == nullptr || !self->mShown) {
         return false;
     }

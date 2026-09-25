@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <limits>
+#include <mutex>
 #include <string>
 #include <system_error>
 
@@ -247,6 +248,10 @@ void partyboard::config::LoadFromFileName(const char* path) {
 }
 
 void partyboard::config::Save() {
+    // Also called from the Android lifecycle watch, on SDL's Java thread, while the game thread
+    // may be saving too: both would write the same temporary file.
+    static std::mutex saveMutex;
+    std::lock_guard lock(saveMutex);
     const auto configJsonPath = GetConfigJsonPath();
     if (configJsonPath.empty()) {
         return;
