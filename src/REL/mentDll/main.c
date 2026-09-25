@@ -18,6 +18,7 @@
 extern s32 rand8(void);
 #include "game/audio.h"
 #include "port/settings.h"
+#include "port/version_runtime.h"
 #ifdef TARGET_PC
 #include "port/netplay_runtime.h"
 #include <stdio.h>
@@ -3800,6 +3801,24 @@ s32 lbl_1_data_5BC[4][2] = {
     { 0xA5, 0x18 },
 };
 
+#ifdef TARGET_PC
+// Menu layout of the loaded disc: the PAL row 1 is placed for its longer text
+static float lbl_1_data_5DC_ntsc[5][5] = {
+    { 262.0f, 119.0f, 1.3f, 227.0f, 455.0f },
+    { 314.0f, 168.0f, 0.75f, 265.0f, 416.0f },
+    { 366.0f, 204.0f, 0.75f, 240.0f, 440.0f },
+    { 418.0f, 240.0f, 0.75f, 300.0f, 381.0f },
+    { -1.0f, 289.0f, 1.3f, 220.0f, 460.0f },
+};
+static float lbl_1_data_5DC_pal[5][5] = {
+    { 262.0f, 119.0f, 1.3f, 227.0f, 455.0f },
+    { 314.0f, 168.0f, 0.75f, 300.0f, 381.0f },
+    { 366.0f, 204.0f, 0.75f, 240.0f, 440.0f },
+    { 418.0f, 240.0f, 0.75f, 300.0f, 381.0f },
+    { -1.0f, 289.0f, 1.3f, 220.0f, 460.0f },
+};
+#define lbl_1_data_5DC (VERSION_RT_PAL ? lbl_1_data_5DC_pal : lbl_1_data_5DC_ntsc)
+#else
 #if VERSION_NTSC
 float lbl_1_data_5DC[5][5] = {
     { 262.0f, 119.0f, 1.3f, 227.0f, 455.0f },
@@ -3816,6 +3835,7 @@ float lbl_1_data_5DC[5][5] = {
     { 418.0f, 240.0f, 0.75f, 300.0f, 381.0f },
     { -1.0f, 289.0f, 1.3f, 220.0f, 460.0f },
 };
+#endif
 #endif
 
 s32 lbl_1_data_640[4][5] = {
@@ -4676,7 +4696,12 @@ void fn_1_18F74(omObjData *arg0, MentDllUnkBss35BCStruct *arg1)
     }
 }
 
-#if VERSION_PAL
+#ifdef TARGET_PC
+
+#define POSX1 (VERSION_RT_PAL ? 353 : 321)
+#define POSX2 (VERSION_RT_PAL ? 325 : 295)
+
+#elif VERSION_PAL
 
 #define POSX1 353
 #define POSX2 325
@@ -4745,7 +4770,14 @@ void fn_1_190E8(void)
     HuSprPosSet(var_r30, 0x47, 340.0f, lbl_1_data_5DC[0][1]);
     HuSprScaleSet(var_r30, 0x47, 0.0f, 0.0f);
     HuSprAttrReset(var_r30, 0x47, HUSPR_ATTR_DISPOFF);
-    #if VERSION_NTSC
+    #ifdef TARGET_PC
+    if (VERSION_RT_NTSC) {
+        HuSprAttrReset(var_r30, 0x48, HUSPR_ATTR_DISPOFF);
+        HuSprPosSet(var_r30, 0x48, 366.0f, lbl_1_data_5DC[1][1]);
+        HuSprAttrReset(var_r30, 0x49, HUSPR_ATTR_DISPOFF);
+        HuSprPosSet(var_r30, 0x49, 367.0f, 2.0f + lbl_1_data_5DC[1][1]);
+    }
+    #elif VERSION_NTSC
     HuSprAttrReset(var_r30, 0x48, HUSPR_ATTR_DISPOFF);
     HuSprPosSet(var_r30, 0x48, 366.0f, lbl_1_data_5DC[1][1]);
     HuSprAttrReset(var_r30, 0x49, HUSPR_ATTR_DISPOFF);
@@ -5021,7 +5053,12 @@ void fn_1_19C98(omObjData *arg0, MentDllUnkBss35BCStruct *arg1)
                         break;
                     case 1:
                         if (var_r26 == 1) {
-                            #if VERSION_NTSC
+                            #ifdef TARGET_PC
+                            if (VERSION_RT_NTSC) {
+                                HuSprPosSet(var_r30, 0x48, 366.0f + var_f31, lbl_1_data_5DC[1][1]);
+                                HuSprPosSet(var_r30, 0x49, 367.0f + var_f31, 2.0f + lbl_1_data_5DC[1][1]);
+                            }
+                            #elif VERSION_NTSC
                             HuSprPosSet(var_r30, 0x48, 366.0f + var_f31, lbl_1_data_5DC[1][1]);
                             HuSprPosSet(var_r30, 0x49, 367.0f + var_f31, 2.0f + lbl_1_data_5DC[1][1]);
                             #endif
@@ -5031,7 +5068,12 @@ void fn_1_19C98(omObjData *arg0, MentDllUnkBss35BCStruct *arg1)
                             HuSprPosSet(var_r30, 0x4D, POSX2+1 + var_f31, 2.0f + lbl_1_data_5DC[1][1]);
                         }
                         else {
-                            #if VERSION_NTSC
+                            #ifdef TARGET_PC
+                            if (VERSION_RT_NTSC) {
+                                HuSprPosSet(var_r30, 0x48, 366.0f - var_f31, lbl_1_data_5DC[1][1]);
+                                HuSprPosSet(var_r30, 0x49, 367.0f - var_f31, 2.0f + lbl_1_data_5DC[1][1]);
+                            }
+                            #elif VERSION_NTSC
                             HuSprPosSet(var_r30, 0x48, 366.0f - var_f31, lbl_1_data_5DC[1][1]);
                             HuSprPosSet(var_r30, 0x49, 367.0f - var_f31, 2.0f + lbl_1_data_5DC[1][1]);
                             #endif
@@ -5040,7 +5082,12 @@ void fn_1_19C98(omObjData *arg0, MentDllUnkBss35BCStruct *arg1)
                             HuSprPosSet(var_r30, 0x4B, POSX2 - var_f31, lbl_1_data_5DC[1][1]);
                             HuSprPosSet(var_r30, 0x4D, POSX2+1 - var_f31, 2.0f + lbl_1_data_5DC[1][1]);
                         }
-                        #if VERSION_NTSC
+                        #ifdef TARGET_PC
+                        if (VERSION_RT_NTSC) {
+                            HuSprScaleSet(var_r30, 0x48, 1.0f, var_f30);
+                            HuSprScaleSet(var_r30, 0x49, 1.0f, var_f30);
+                        }
+                        #elif VERSION_NTSC
                         HuSprScaleSet(var_r30, 0x48, 1.0f, var_f30);
                         HuSprScaleSet(var_r30, 0x49, 1.0f, var_f30);
                         #endif
