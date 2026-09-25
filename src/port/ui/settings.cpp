@@ -422,6 +422,9 @@ SettingsWindow::SettingsWindow(bool prelaunch)
 
         leftPane.add_section("Display");
 
+#ifndef __ANDROID__
+        // There is no window on a phone: SDL answers "leave fullscreen" by
+        // bringing back the status and navigation bars over the game.
         leftPane.register_control(leftPane.add_button("Toggle Fullscreen").on_pressed([] {
             // mDoAud_seStartMenu(kSoundItemChange); // TODO PC
             getSettings().video.enableFullscreen.setValue(!getSettings().video.enableFullscreen);
@@ -437,6 +440,7 @@ SettingsWindow::SettingsWindow(bool prelaunch)
             VICenterWindow();
         }),
             rightPane, [](Pane &pane) { pane.clear(); });
+#endif
         config_bool_select(leftPane, rightPane, getSettings().video.enableVsync,
             {
                 .key = "Enable VSync",

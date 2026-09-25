@@ -10,12 +10,22 @@
 
 namespace partyboard {
 
+// Phones are 19.5:9 to 21:9: stretching the 4:3 picture across one widens
+// everything by about two thirds, and the bars either side are where the
+// on-screen controls sit. Desktop keeps filling the window. Only a default:
+// a choice the player made, or a preset they picked, is kept.
+#ifdef __ANDROID__
+constexpr bool kLockAspectRatioByDefault = true;
+#else
+constexpr bool kLockAspectRatioByDefault = false;
+#endif
+
 UserSettings g_userSettings = {
     .video = {
         .enableFullscreen {"video.enableFullscreen", false},
         .enableVsync {"video.enableVsync", true},
         .targetFrameRate {"video.targetFrameRate", 60},
-        .lockAspectRatio {"video.lockAspectRatio", false},
+        .lockAspectRatio {"video.lockAspectRatio", kLockAspectRatioByDefault},
         .enableAdaptiveWidescreen {"video.enableAdaptiveWidescreen", false},
         .enableFpsOverlay {"game.enableFpsOverlay", false},
         .fpsOverlayCorner {"game.fpsOverlayCorner", 0},

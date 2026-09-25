@@ -14,6 +14,7 @@ import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
+import android.view.WindowManager;
 
 import org.libsdl.app.SDLActivity;
 
@@ -72,7 +73,24 @@ public class PartyBoardActivity extends SDLActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        useDisplayCutout();
         hideSystemBars();
+    }
+
+    // Draw beside the notch or camera hole as well. Android 15 does this by
+    // default for apps targeting it; before that, a landscape game with hidden
+    // system bars gets a black band on the cutout side. The screen controls
+    // keep clear of the cutout through SDL's safe area.
+    private void useDisplayCutout() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            return;
+        }
+        Window window = getWindow();
+        WindowManager.LayoutParams attributes = window.getAttributes();
+        attributes.layoutInDisplayCutoutMode = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+            ? WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            : WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        window.setAttributes(attributes);
     }
 
     @Override
