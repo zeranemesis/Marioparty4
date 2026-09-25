@@ -21,6 +21,9 @@ import android.view.WindowManager;
 import org.libsdl.app.SDLActivity;
 
 import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -74,9 +77,27 @@ public class PartyBoardActivity extends SDLActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        logJavaCrashes();
         super.onCreate(savedInstanceState);
         useDisplayCutout();
         hideSystemBars();
+    }
+
+    // A Java exception ends the process before the game can log it: add it to the
+    // run's log (src/port/run_log.cpp) so LauncherActivity's report shows it.
+    private void logJavaCrashes() {
+        final Thread.UncaughtExceptionHandler previous = Thread.getDefaultUncaughtExceptionHandler();
+        final File log = LauncherActivity.logFile(this);
+        Thread.setDefaultUncaughtExceptionHandler((thread, error) -> {
+            try (PrintWriter writer = new PrintWriter(new FileWriter(log, true))) {
+                writer.println("JAVA EXCEPTION in thread " + thread.getName());
+                error.printStackTrace(writer);
+            } catch (IOException | RuntimeException ignored) {
+            }
+            if (previous != null) {
+                previous.uncaughtException(thread, error);
+            }
+        });
     }
 
     // Draw beside the notch or camera hole as well. Android 15 does this by

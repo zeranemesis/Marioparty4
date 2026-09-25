@@ -38,6 +38,7 @@
 #include <port/netplay_runtime.h>
 #include <port/port_version.h>
 #include <port/retroachievements.h>
+#include <port/run_log.hpp>
 
 #include <aurora/dvd.h>
 #include <aurora/lib/logging.hpp>
@@ -134,9 +135,10 @@ void aurora_log_callback(AuroraLogLevel level, const char* module, const char *m
             break;
     }
 #ifdef __ANDROID__
-    // stdout and stderr lead nowhere on Android; SDL's log is what reaches logcat.
+    // stdout and stderr lead nowhere on Android; SDL's log is what reaches logcat, and
+    // run_log keeps a copy the player can send when the game closes on its own.
     (void)out;
-    (void)levelStr;
+    partyboard::run_log::write(levelStr, module, message);
     SDL_LogPriority priority = SDL_LOG_PRIORITY_INFO;
     switch (level) {
         case LOG_DEBUG:
@@ -524,6 +526,12 @@ extern "C" int port_main(int argc, char* argv[]) {
     }
     mainCalled = true;
 
+    partyboard::run_log::open();
+    // Every return from here is the game closing on purpose, not a crash.
+    struct CleanExit {
+        ~CleanExit() { partyboard::run_log::mark_clean_exit(); }
+    } cleanExit;
+
     partyboard::registerSettings();
     partyboard::config::FinishRegistration();
 
@@ -593,6 +601,7 @@ extern "C" int port_main(int argc, char* argv[]) {
         config.allowTextureDumps = std::getenv("PARTYBOARD_DUMP_TEXTURES") != nullptr;
         auroraInfo = aurora_initialize(argc, argv, &config);
     }
+    PartyBoardMainLog.info("Graphics ready: {} backend", backend_name(auroraInfo.backend));
     if (!SDL_AddEventWatch(OnAppLifecycleEvent, nullptr)) {
         PartyBoardMainLog.warn("Unable to watch app lifecycle events: {}", SDL_GetError());
     }

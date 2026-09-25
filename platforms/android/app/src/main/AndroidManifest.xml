@@ -28,6 +28,20 @@
         <meta-data android:name="android.game_mode_config"
             android:resource="@xml/game_mode_config" />
 
+        <!-- Entry point: starts the game at once, or first shows a report when
+             the previous run crashed (LauncherActivity.java). Translucent so a
+             normal start shows nothing of it. -->
+        <activity
+            android:name="com.mariopartyrd.partyboard.LauncherActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
         <!-- SDLActivity ends the process (System.exit) if the activity is ever
              re-created while the game runs, so every configuration change a phone
              can make mid-game is listed in configChanges. The orientation matches
@@ -42,10 +56,6 @@
             android:launchMode="singleInstance"
             android:preferMinimalPostProcessing="true"
             android:screenOrientation="userLandscape">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
             <intent-filter>
                 <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
             </intent-filter>

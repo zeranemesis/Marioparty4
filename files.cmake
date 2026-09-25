@@ -118,6 +118,7 @@ set(PORT_FILES
         src/port/rollback_animation_test.cpp
         src/port/rollback_io.cpp
         src/port/rollback_scene.cpp
+        src/port/run_log.cpp
         src/port/settings.cpp
         src/port/stubs.c
         src/port/thp_player.cpp
