@@ -21,7 +21,10 @@ android {
     compileSdk 36
 
     defaultConfig {
-        applicationId 'com.mariopartyrd.partyboard'
+        // Not the upstream project's ID: an APK under Mario Party R&D's package
+        // name but signed with another key looks like a repackaged copy, which
+        // Play Protect blocks outright. The Java package (namespace) stays.
+        applicationId 'com.zeranemesis.partyboard'
         minSdk 26
         targetSdk 36
         // CI passes its run number so each build installs over the last one.

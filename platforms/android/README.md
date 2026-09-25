@@ -104,7 +104,7 @@ You can pass command-line args through the activity intent:
 
 # TODO
 ```bash
-adb shell am start -n com.mariopartyrd.partyboard/.PartyBoardActivity \
+adb shell am start -n com.zeranemesis.partyboard/com.mariopartyrd.partyboard.PartyBoardActivity \
   --es partyboard_args "'/sdcard/Download/GMPE01_00.iso'"
 ```
 
