@@ -1,6 +1,8 @@
 #include "port/retroachievements_badges.hpp"
 
 #include "port/http.hpp"
+// port/main.h names std::filesystem::path without including it.
+#include <filesystem>
 #include "port/main.h"
 
 #include <aurora/lib/logging.hpp>
@@ -12,7 +14,6 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
-#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <mutex>
