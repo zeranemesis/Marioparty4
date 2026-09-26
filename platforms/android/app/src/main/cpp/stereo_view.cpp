@@ -256,6 +256,7 @@ bool StereoView::game_frame(StereoFrame& out) {
   free->tag = mNextTag++;
   free->views[0] = mViews[0];
   free->views[1] = mViews[1];
+  free->board = mBoardMode;
   out.image = static_cast<uint32_t>(free - mSlots.begin());
   out.tag = free->tag;
   for (int eye = 0; eye < 2; ++eye) {
@@ -295,6 +296,11 @@ uint32_t StereoView::generation() const {
 void StereoView::set_screen_required(bool required) {
   std::lock_guard lock{mMutex};
   mScreenRequired = required;
+}
+
+void StereoView::set_board_mode(bool board) {
+  std::lock_guard lock{mMutex};
+  mBoardMode = board;
 }
 
 bool StereoView::world_only() const {
@@ -383,10 +389,13 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
     XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
     XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
     wait.timeout = XR_INFINITE_DURATION;
-    if (XR_SUCCEEDED(xrAcquireSwapchainImage(mSwapchain, &acquire, &index)) &&
-        XR_SUCCEEDED(xrWaitSwapchainImage(mSwapchain, &wait))) {
-      g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, 0, 0, 0, mSwapchainImages[index].image, GL_TEXTURE_2D, 0, 0,
-                     0, 0, static_cast<GLsizei>(mEyeWidth * 2), static_cast<GLsizei>(mEyeHeight), 1);
+    const bool keepBoard = mShown && newest->board && !newest->hasWorld && mShownHasWorld && mShownIsBoard;
+    if (keepBoard || (XR_SUCCEEDED(xrAcquireSwapchainImage(mSwapchain, &acquire, &index)) &&
+                     XR_SUCCEEDED(xrWaitSwapchainImage(mSwapchain, &wait)))) {
+      if (!keepBoard) {
+        g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, 0, 0, 0, mSwapchainImages[index].image, GL_TEXTURE_2D, 0, 0,
+                       0, 0, static_cast<GLsizei>(mEyeWidth * 2), static_cast<GLsizei>(mEyeHeight), 1);
+      }
       uint32_t hudIndex = 0;
       mHudShown = false;
       if (XR_SUCCEEDED(xrAcquireSwapchainImage(mHudSwapchain, &acquire, &hudIndex)) &&
@@ -408,11 +417,14 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
         glFinish();
       }
       XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-      xrReleaseSwapchainImage(mSwapchain, &release);
-      mShownViews[0] = newest->views[0];
-      mShownViews[1] = newest->views[1];
+      if (!keepBoard) xrReleaseSwapchainImage(mSwapchain, &release);
+      if (!keepBoard) {
+        mShownViews[0] = newest->views[0];
+        mShownViews[1] = newest->views[1];
+        mShownHasWorld = newest->hasWorld;
+        mShownIsBoard = newest->board;
+      }
       mShown = true;
-      mShownHasWorld = newest->hasWorld;
       static bool loggedFirstImage = false;
       if (!loggedFirstImage) {
         LOGI("Stereo: first eye image copied to OpenXR (tag %llu)", static_cast<unsigned long long>(newest->tag));
@@ -498,6 +510,10 @@ __attribute__((visibility("default"))) bool PartyBoardQuest_StereoWorldOnly() {
 
 __attribute__((visibility("default"))) void PartyBoardQuest_StereoScreenRequired(bool required) {
   if (quest::g_stereoView != nullptr) quest::g_stereoView->set_screen_required(required);
+}
+
+__attribute__((visibility("default"))) void PartyBoardQuest_StereoBoardMode(bool board) {
+  if (quest::g_stereoView != nullptr) quest::g_stereoView->set_board_mode(board);
 }
 
 __attribute__((visibility("default"))) void PartyBoardQuest_StereoCancelled(uint32_t image, uint64_t tag) {

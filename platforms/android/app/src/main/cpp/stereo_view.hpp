@@ -57,6 +57,7 @@ public:
   // Aurora's render thread: the frame drawing `image` went to the GPU.
   void submitted(uint32_t image, uint64_t tag, int syncFd, bool hasWorld = false);
   void set_screen_required(bool required);
+  void set_board_mode(bool board);
   bool screen_required() const;
   bool world_only() const;
   bool world_visible() const { return mShown && mShownHasWorld; }
@@ -74,6 +75,7 @@ private:
     uint64_t tag = 0;
     int fence = -1;
     bool hasWorld = false;
+    bool board = false;
     GLsync copyFence = nullptr;
     XrView views[2]{};
   };
@@ -101,6 +103,8 @@ private:
   std::chrono::steady_clock::time_point mStatsAt = std::chrono::steady_clock::now();
   bool mEnabled = false;
   bool mScreenRequired = false;
+  bool mBoardMode = false;
+  bool mShownIsBoard = false;
   float mHudWidth = 0.76f, mHudHeight = 0.57f;
   XrView mViews[2]{};
   float mWorld[16]{};

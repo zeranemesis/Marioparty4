@@ -18,6 +18,8 @@ void PartyBoard_StereoEndCamera(void);
 void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view);
 // Whether the current camera draws into the headset; visibility uses both eyes.
 BOOL PartyBoard_StereoActive(void);
+// MR board presentation also remains active after the camera's draw scope.
+BOOL PartyBoard_StereoBoardPresentation(void);
 BOOL PartyBoard_StereoSphereVisible(float x, float y, float z, float radius);
 
 #ifdef __cplusplus

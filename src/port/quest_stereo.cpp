@@ -51,6 +51,7 @@ using SubmittedFn = void (*)(uint32_t image, uint64_t tag, int syncFd, bool hasW
 using GenerationFn = uint32_t (*)(void);
 using WorldOnlyFn = bool (*)();
 using ScreenRequiredFn = void (*)(bool);
+using BoardModeFn = void (*)(bool);
 using CancelledFn = void (*)(uint32_t image, uint64_t tag);
 
 struct Quest {
@@ -61,6 +62,7 @@ struct Quest {
     GenerationFn generation = nullptr;
     CancelledFn cancelled = nullptr;
     ScreenRequiredFn screenRequired = nullptr;
+    BoardModeFn boardMode = nullptr;
     WorldOnlyFn worldOnly = nullptr;
     uint32_t registeredGeneration = 0;
 };
@@ -136,6 +138,7 @@ bool find_quest()
             sQuest.generation = reinterpret_cast<GenerationFn>(dlsym(lib, "PartyBoardQuest_StereoGeneration"));
             sQuest.worldOnly = reinterpret_cast<WorldOnlyFn>(dlsym(lib, "PartyBoardQuest_StereoWorldOnly"));
             sQuest.screenRequired = reinterpret_cast<ScreenRequiredFn>(dlsym(lib, "PartyBoardQuest_StereoScreenRequired"));
+            sQuest.boardMode = reinterpret_cast<BoardModeFn>(dlsym(lib, "PartyBoardQuest_StereoBoardMode"));
             sQuest.cancelled = reinterpret_cast<CancelledFn>(dlsym(lib, "PartyBoardQuest_StereoCancelled"));
             __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Stereo bridge: symbols %s",
                 sQuest.frame && sQuest.images && sQuest.submitted && sQuest.generation && sQuest.cancelled
@@ -146,7 +149,8 @@ bool find_quest()
         }
     }
     return sQuest.frame != nullptr && sQuest.images != nullptr && sQuest.submitted != nullptr
-        && sQuest.generation != nullptr && sQuest.cancelled != nullptr && sQuest.screenRequired != nullptr && sQuest.worldOnly != nullptr;
+        && sQuest.generation != nullptr && sQuest.cancelled != nullptr && sQuest.screenRequired != nullptr
+        && sQuest.worldOnly != nullptr && sQuest.boardMode != nullptr;
 #else
     return false;
 #endif
@@ -206,6 +210,7 @@ extern "C" void PartyBoard_StereoBeginCamera(s16 cameraNo)
     }
 #endif
     sQuest.screenRequired(screenRequired);
+    sQuest.boardMode(!screenRequired && scene >= DLL_w01Dll && scene <= DLL_w06Dll);
     if (screenRequired || !register_images()) {
         return;
     }
@@ -313,6 +318,12 @@ extern "C" void PartyBoard_StereoEndCamera(void)
 extern "C" BOOL PartyBoard_StereoActive(void)
 {
     return sActive ? TRUE : FALSE;
+}
+
+extern "C" BOOL PartyBoard_StereoBoardPresentation(void)
+{
+    const OMOVL scene = omCurrentOvlGet();
+    return scene >= DLL_w01Dll && scene <= DLL_w06Dll && find_quest() && sQuest.worldOnly() ? TRUE : FALSE;
 }
 
 extern "C" BOOL PartyBoard_StereoSphereVisible(float x, float y, float z, float radius)

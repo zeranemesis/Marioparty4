@@ -13,6 +13,7 @@ struct StereoViewTestAccess {
     view.mSlots[image].state = StereoView::State::Copying;
   }
   static void copied(StereoView& view, uint32_t image) { view.release_slot(view.mSlots[image]); }
+  static bool board(const StereoView& view, uint32_t image) { return view.mSlots[image].board; }
 
 };
 }
@@ -72,8 +73,16 @@ int main() {
     view.cancelled(frame.image, frame.tag);
   }
   quest::StereoFrame queued[3]{};
+  view.set_board_mode(true);
+  assert(view.game_frame(frame));
+  assert(quest::StereoViewTestAccess::board(view, frame.image));
+  view.set_board_mode(false);
+  // Pending board frames keep their presentation policy across scene changes.
+  assert(quest::StereoViewTestAccess::board(view, frame.image));
+  view.cancelled(frame.image, frame.tag);
   for (auto& item : queued) {
     assert(view.game_frame(item));
+    assert(!quest::StereoViewTestAccess::board(view, item.image));
   }
   // Frames held for asynchronous rendering must never be reclaimed by age.
   for (int i = 0; i < 100; ++i) {
