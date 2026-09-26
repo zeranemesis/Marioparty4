@@ -40,6 +40,7 @@
 #include <dolphin/vi.h>
 #include <game/disp.h>
 #include <port/config.hpp>
+#include <port/display_rate.hpp>
 #include <port/dolassets.h>
 #include <port/main.h>
 #include <port/mods.h>
@@ -55,6 +56,7 @@
 #include <stdlib.h>
 
 extern "C" int game_main();
+extern "C" int PartyBoard_TargetFrameRateFor(bool netplayEnabled, int configured);
 
 using namespace std::string_literals;
 using namespace std::string_view_literals;
@@ -665,6 +667,10 @@ extern "C" int port_main(int argc, char* argv[]) {
         config.allowTextureDumps = std::getenv("PARTYBOARD_DUMP_TEXTURES") != nullptr;
         auroraInfo = aurora_initialize(argc, argv, &config);
     }
+    // Above 60 FPS the screen has to be asked for its high refresh rate (Android keeps games at
+    // 60 Hz otherwise). An online session always renders at 60 (PartyBoard_TargetFrameRateFor).
+    partyboard::display::request_frame_rate(PartyBoard_TargetFrameRateFor(PartyBoard_NetplayEnabled(),
+        partyboard::getSettings().video.targetFrameRate.getValue()));
     if (!SDL_AddEventWatch(OnAppLifecycleEvent, nullptr)) {
         PartyBoardMainLog.warn("Unable to watch app lifecycle events: {}", SDL_GetError());
     }

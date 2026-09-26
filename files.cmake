@@ -123,6 +123,7 @@ set(PORT_FILES
         src/port/thp_player.cpp
         src/port/touch_controls.cpp
         src/port/test_input.cpp
+        src/port/display_rate.cpp
         src/port/version.cpp
 
         src/port/ui/achievements.cpp

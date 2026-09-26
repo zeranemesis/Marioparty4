@@ -13,7 +13,9 @@ import android.provider.OpenableColumns;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.util.Log;
+import android.view.Display;
 import android.view.KeyEvent;
+import android.view.Surface;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
@@ -113,6 +115,27 @@ public class PartyBoardActivity extends SDLActivity {
         super.onCreate(savedInstanceState);
         useDisplayCutout();
         hideSystemBars();
+        // The game asks for its frame rate before the surface exists; a surface
+        // without a rate vote is held to 60 FPS or less (48 on a 144 Hz screen).
+        // Vote again each time Android creates or resizes the surface.
+        if (mSurface != null) {
+            mSurface.getHolder().addCallback(new android.view.SurfaceHolder.Callback() {
+                @Override
+                public void surfaceCreated(android.view.SurfaceHolder holder) {
+                }
+
+                @Override
+                public void surfaceChanged(android.view.SurfaceHolder holder, int format, int width, int height) {
+                    if (preferredFrameRate > 0f) {
+                        setPreferredFrameRate(preferredFrameRate);
+                    }
+                }
+
+                @Override
+                public void surfaceDestroyed(android.view.SurfaceHolder holder) {
+                }
+            });
+        }
     }
 
     // Called from the game's "Play Online" entry (src/port/ui/online.cpp) on
@@ -185,6 +208,10 @@ public class PartyBoardActivity extends SDLActivity {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) {
             hideSystemBars();
+            // A surface created again after the background forgets its frame rate.
+            if (preferredFrameRate > 0f) {
+                setPreferredFrameRate(preferredFrameRate);
+            }
         }
     }
 
@@ -306,6 +333,85 @@ public class PartyBoardActivity extends SDLActivity {
         } catch (SecurityException | IllegalArgumentException e) {
             Log.w(TAG, "Unable to persist " + permissionName + " URI permission for " + uri, e);
         }
+    }
+
+    // Refresh rates the screen offers at its current resolution, for the Frame
+    // Rate setting (src/port/display_rate.cpp). A 120 Hz phone answers 60 and
+    // 120; offering 144 there would only be a number the screen cannot show.
+    public float[] getSupportedRefreshRates() {
+        Display display = getWindowManager().getDefaultDisplay();
+        Display.Mode current = display.getMode();
+        List<Float> rates = new ArrayList<>();
+        for (Display.Mode mode : display.getSupportedModes()) {
+            if (mode.getPhysicalWidth() != current.getPhysicalWidth()
+                || mode.getPhysicalHeight() != current.getPhysicalHeight()) {
+                continue;
+            }
+            float rate = Math.round(mode.getRefreshRate());
+            if (!rates.contains(rate)) {
+                rates.add(rate);
+            }
+        }
+        float[] out = new float[rates.size()];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = rates.get(i);
+        }
+        return out;
+    }
+
+    // Android caps a game at 60 FPS unless it asks for more, whatever the screen
+    // can do, and a rate the screen cannot divide evenly (60 on a 144 Hz panel)
+    // judders. Called from the SDL thread at start and when the Frame Rate
+    // setting changes: pick the slowest mode that shows this rate exactly
+    // (60 FPS on a 60 Hz mode rather than 120 Hz, for the battery), and tell
+    // the surface the rate too, which variable-refresh (LTPO) screens use.
+    private volatile float preferredFrameRate;
+
+    private static boolean shows(float refresh, float fps) {
+        float ratio = refresh / fps;
+        return ratio >= 0.99f && Math.abs(ratio - Math.round(ratio)) < 0.02f;
+    }
+
+    public void setPreferredFrameRate(final float fps) {
+        preferredFrameRate = fps;
+        runOnUiThread(() -> {
+            Window window = getWindow();
+            WindowManager.LayoutParams attributes = window.getAttributes();
+            Display display = getWindowManager().getDefaultDisplay();
+            Display.Mode current = display.getMode();
+            Display.Mode exact = null;
+            Display.Mode fastest = null;
+            for (Display.Mode mode : display.getSupportedModes()) {
+                if (mode.getPhysicalWidth() != current.getPhysicalWidth()
+                    || mode.getPhysicalHeight() != current.getPhysicalHeight()) {
+                    continue;
+                }
+                if (shows(mode.getRefreshRate(), fps) && (exact == null || mode.getRefreshRate() < exact.getRefreshRate())) {
+                    exact = mode;
+                }
+                if (fastest == null || mode.getRefreshRate() > fastest.getRefreshRate()) {
+                    fastest = mode;
+                }
+            }
+            Display.Mode chosen = exact != null ? exact : (fps > 60.5f ? fastest : null);
+            int modeId = chosen != null ? chosen.getModeId() : 0;
+            if (attributes.preferredDisplayModeId != modeId) {
+                attributes.preferredDisplayModeId = modeId;
+                window.setAttributes(attributes);
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && mSurface != null) {
+                Surface surface = mSurface.getHolder().getSurface();
+                if (surface != null && surface.isValid()) {
+                    try {
+                        surface.setFrameRate(fps, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
+                    } catch (IllegalArgumentException | IllegalStateException e) {
+                        Log.w(TAG, "Surface frame rate not accepted", e);
+                    }
+                }
+            }
+            Log.i(TAG, "Preferred frame rate " + fps + " (display mode " + modeId
+                + (chosen != null ? ", " + chosen.getRefreshRate() + " Hz" : "") + ")");
+        });
     }
 
     // The build number the GitHub update manifest is compared with

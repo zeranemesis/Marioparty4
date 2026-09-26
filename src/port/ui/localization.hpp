@@ -20,6 +20,7 @@ inline std::string ui_translate(std::string_view text)
         {"Play", "Jouer"}, {"Play Online", "Jouer en ligne"}, {"Select Disc Image", "Sélectionner l’image disque"}, {"Prelaunch", "Avant le lancement"},
         {"Online mode", "Mode en ligne"}, {"PartyBoardOnline.exe is missing or could not be started.", "PartyBoardOnline.exe est absent ou ne peut pas être démarré."},
         {"The online lobby could not be opened.", "Le salon en ligne n'a pas pu être ouvert."},
+        {"<br/>This screen refreshes at up to {} Hz.", "<br/>Cet écran monte jusqu'à {} Hz."},
         {"Welcome to Party Board", "Bienvenue dans Party Board"},
         {"Choose a preset to get started. You can change any setting later from the Settings menu.", "Choisissez un préréglage pour commencer. Vous pourrez le modifier plus tard dans les paramètres."},
         {"Classic", "Classique"}, {"Enhancements disabled to match the GameCube version.", "Améliorations désactivées pour correspondre à la version GameCube."},

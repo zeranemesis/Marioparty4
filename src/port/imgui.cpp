@@ -192,7 +192,18 @@ class Limiter
                 m_overheadTimeIdx = (m_overheadTimeIdx + 1) % m_overheadTimes.size();
             }
         }
-        Reset();
+        // Frames are due on a fixed schedule, one period after the previous
+        // deadline, not one period after this wake-up. Restarting from "now"
+        // stacked the sleep on top of the V-Sync wait: 60 FPS on a 144 Hz screen
+        // came out as 48 (every frame rounded up to three refreshes), and since
+        // the game advances one step per frame at 60, it ran 20% slow. Only a
+        // real stall (more than a period behind) restarts the schedule.
+        m_oldTime += targetFrameTime;
+        const auto now = delta_clock::now();
+        if (now - m_oldTime > targetFrameTime)
+        {
+            m_oldTime = now;
+        }
     }
 
     duration_t SleepTime(duration_t targetFrameTime)
