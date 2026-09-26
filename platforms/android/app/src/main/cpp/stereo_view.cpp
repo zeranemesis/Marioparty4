@@ -141,11 +141,24 @@ bool StereoView::init(XrInstance instance, XrSession session, XrSystemId system,
   xrEnumerateSwapchainImages(mSwapchain, imageCount, &imageCount,
                              reinterpret_cast<XrSwapchainImageBaseHeader*>(mSwapchainImages.data()));
 
+  mHudPixelsWidth = std::min(1280u, mEyeWidth * 2);
+  mHudPixelsHeight = mHudPixelsWidth * 3 / 4;
+  info.width = mHudPixelsWidth;
+  info.height = mHudPixelsHeight;
+  if (!check(instance, xrCreateSwapchain(session, &info, &mHudSwapchain), "xrCreateSwapchain (HUD)")) {
+    destroy();
+    return false;
+  }
+  xrEnumerateSwapchainImages(mHudSwapchain, 0, &imageCount, nullptr);
+  mHudImages.assign(imageCount, {XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR});
+  xrEnumerateSwapchainImages(mHudSwapchain, imageCount, &imageCount,
+                            reinterpret_cast<XrSwapchainImageBaseHeader*>(mHudImages.data()));
+
   // The images the game draws into, seen here as GL textures.
   for (auto& slot : mSlots) {
     AHardwareBuffer_Desc desc{};
     desc.width = mEyeWidth * 2;
-    desc.height = mEyeHeight;
+    desc.height = mEyeHeight + mHudPixelsHeight;
     desc.layers = 1;
     desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
     desc.usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
@@ -208,6 +221,11 @@ void StereoView::destroy() {
     xrDestroySwapchain(mSwapchain);
     mSwapchain = XR_NULL_HANDLE;
   }
+  if (mHudSwapchain != XR_NULL_HANDLE) {
+    xrDestroySwapchain(mHudSwapchain);
+    mHudSwapchain = XR_NULL_HANDLE;
+  }
+  mHudShown = false;
   mShown = false;
 }
 
@@ -251,7 +269,7 @@ bool StereoView::game_frame(StereoFrame& out) {
 }
 
 bool StereoView::images(void** buffers, uint32_t capacity, uint32_t& count, uint32_t& width, uint32_t& height,
-                        uint32_t& generation) {
+                        uint32_t& generation, uint32_t& eyeHeight, uint32_t& hudWidth, uint32_t& hudHeight) {
   std::lock_guard lock{mMutex};
   if (capacity < mSlots.size() || mSlots[0].buffer == nullptr) {
     return false;
@@ -261,7 +279,10 @@ bool StereoView::images(void** buffers, uint32_t capacity, uint32_t& count, uint
   }
   count = static_cast<uint32_t>(mSlots.size());
   width = mEyeWidth * 2;
-  height = mEyeHeight;
+  height = mEyeHeight + mHudPixelsHeight;
+  eyeHeight = mEyeHeight;
+  hudWidth = mHudPixelsWidth;
+  hudHeight = mHudPixelsHeight;
   generation = mGeneration;
   return true;
 }
@@ -366,6 +387,17 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
         XR_SUCCEEDED(xrWaitSwapchainImage(mSwapchain, &wait))) {
       g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, 0, 0, 0, mSwapchainImages[index].image, GL_TEXTURE_2D, 0, 0,
                      0, 0, static_cast<GLsizei>(mEyeWidth * 2), static_cast<GLsizei>(mEyeHeight), 1);
+      uint32_t hudIndex = 0;
+      mHudShown = false;
+      if (XR_SUCCEEDED(xrAcquireSwapchainImage(mHudSwapchain, &acquire, &hudIndex)) &&
+          XR_SUCCEEDED(xrWaitSwapchainImage(mHudSwapchain, &wait))) {
+        g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, 0, static_cast<GLint>(mEyeHeight), 0,
+                      mHudImages[hudIndex].image, GL_TEXTURE_2D, 0, 0, 0, 0,
+                      static_cast<GLsizei>(mHudPixelsWidth), static_cast<GLsizei>(mHudPixelsHeight), 1);
+        glFlush();
+        XrSwapchainImageReleaseInfo hudRelease{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        mHudShown = XR_SUCCEEDED(xrReleaseSwapchainImage(mHudSwapchain, &hudRelease));
+      }
       // Keep the source lease until this GPU copy completes. The compositor
       // synchronizes the released destination; the game must not reuse its source.
       copyFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
@@ -440,6 +472,21 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
   return reinterpret_cast<const XrCompositionLayerBaseHeader*>(&mLayer);
 }
 
+const XrCompositionLayerBaseHeader* StereoView::hud_layer(XrSpace viewSpace, const void* next) {
+  if (!world_visible() || !mHudShown) return nullptr;
+  mHudLayer = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+  mHudLayer.next = next;
+  mHudLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+  mHudLayer.space = viewSpace;
+  mHudLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+  mHudLayer.subImage.swapchain = mHudSwapchain;
+  mHudLayer.subImage.imageRect = {{0, 0}, {static_cast<int32_t>(mHudPixelsWidth), static_cast<int32_t>(mHudPixelsHeight)}};
+  mHudLayer.pose.orientation.w = 1.f;
+  mHudLayer.pose.position = {0.f, -0.12f, -0.7f};
+  mHudLayer.size = {0.72f, 0.54f};
+  return reinterpret_cast<const XrCompositionLayerBaseHeader*>(&mHudLayer);
+}
+
 } // namespace quest
 
 // The game side (src/port/quest_stereo.cpp) finds these with dlsym.
@@ -466,9 +513,11 @@ __attribute__((visibility("default"))) bool PartyBoardQuest_StereoFrame(quest::S
 
 __attribute__((visibility("default"))) bool PartyBoardQuest_StereoImages(void** buffers, uint32_t capacity,
                                                                          uint32_t* count, uint32_t* width,
-                                                                         uint32_t* height, uint32_t* generation) {
+                                                                         uint32_t* height, uint32_t* generation,
+                                                                         uint32_t* eyeHeight, uint32_t* hudWidth, uint32_t* hudHeight) {
   quest::StereoView* view = quest::g_stereoView;
-  return view != nullptr && view->images(buffers, capacity, *count, *width, *height, *generation);
+  return view != nullptr && view->images(buffers, capacity, *count, *width, *height, *generation,
+                                        *eyeHeight, *hudWidth, *hudHeight);
 }
 
 __attribute__((visibility("default"))) uint32_t PartyBoardQuest_StereoGeneration(void) {

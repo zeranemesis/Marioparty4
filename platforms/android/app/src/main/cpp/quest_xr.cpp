@@ -964,7 +964,7 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   modelFlip.flags = XR_COMPOSITION_LAYER_IMAGE_LAYOUT_VERTICAL_FLIP_BIT_FB;
   const auto* modelLayer = model ? app.stereo.layer(app.stage, app.extensions.imageLayout ? &modelFlip : nullptr) : nullptr;
 
-  std::array<const XrCompositionLayerBaseHeader*, 4> layers{};
+  std::array<const XrCompositionLayerBaseHeader*, 5> layers{};
   uint32_t layerCount = 0;
 
   XrCompositionLayerPassthroughFB room{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
@@ -1021,6 +1021,9 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   // The images come from Aurora like the screen's, so they need the same flip.
   if (modelLayer) {
     layers[layerCount++] = modelLayer;
+    if (const auto* hud = app.stereo.hud_layer(app.view, app.extensions.imageLayout ? &modelFlip : nullptr)) {
+      layers[layerCount++] = hud;
+    }
   }
 
   XrCompositionLayerQuad help{XR_TYPE_COMPOSITION_LAYER_QUAD};

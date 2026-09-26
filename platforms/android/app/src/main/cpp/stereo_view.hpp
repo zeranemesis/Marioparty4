@@ -46,12 +46,13 @@ public:
   // XR thread: the newest image the game drew, copied into the swapchain; the
   // layer showing it (or the previous one), nullptr before the first.
   const XrCompositionLayerBaseHeader* layer(XrSpace space, const void* next);
+  const XrCompositionLayerBaseHeader* hud_layer(XrSpace viewSpace, const void* next);
 
   // Game thread (PartyBoardQuest_StereoFrame): an image and the view to draw it with.
   bool game_frame(StereoFrame& out);
   // Game thread: the images, to register with Aurora.
   bool images(void** buffers, uint32_t capacity, uint32_t& count, uint32_t& width, uint32_t& height,
-              uint32_t& generation);
+              uint32_t& generation, uint32_t& eyeHeight, uint32_t& hudWidth, uint32_t& hudHeight);
   uint32_t generation() const;
   // Aurora's render thread: the frame drawing `image` went to the GPU.
   void submitted(uint32_t image, uint64_t tag, int syncFd, bool hasWorld = false);
@@ -82,6 +83,11 @@ private:
   EGLDisplay mDisplay = EGL_NO_DISPLAY;
   XrInstance mInstance = XR_NULL_HANDLE;
   XrSwapchain mSwapchain = XR_NULL_HANDLE;
+  XrSwapchain mHudSwapchain = XR_NULL_HANDLE;
+  std::vector<XrSwapchainImageOpenGLESKHR> mHudImages;
+  uint32_t mHudPixelsWidth = 1280, mHudPixelsHeight = 960;
+  bool mHudShown = false;
+  XrCompositionLayerQuad mHudLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
   std::vector<XrSwapchainImageOpenGLESKHR> mSwapchainImages;
   uint32_t mEyeWidth = 0;
   uint32_t mEyeHeight = 0;

@@ -13,7 +13,7 @@ diff --git a/include/aurora/stereo.h b/include/aurora/stereo.h
 new file mode 100644
 --- /dev/null
 +++ b/include/aurora/stereo.h
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,45 @@
 +#ifndef AURORA_STEREO_H
 +#define AURORA_STEREO_H
 +
@@ -28,13 +28,16 @@ new file mode 100644
 +//
 +// Between AuroraStereoBegin and AuroraStereoEnd, each GX draw made with a
 +// perspective projection is also drawn for two eyes, into an image holding
-+// both side by side (left eye on the left). The game's own frame is drawn as
-+// usual. For eye e, the draw's projection is replaced by clip[e]: a row-major
++// both side by side (left eye on the left), followed by a single HUD region
++// below the eye images. The hidden screen's world and HUD are skipped.
++// For eye e, the draw's projection is replaced by clip[e]: a row-major
 +// 4x4 matrix taking a view-space position (what GXLoadPosMtxImm gives) to GX
 +// clip space, with GX's depth conventions (z/w from -1 at near to 0 at far).
 +//
 +// The images are AHardwareBuffers (RGBA8, GPU color output), registered once,
-+// twice as wide as an eye. When the frame that drew into one has been
++// twice as wide as an eye, and eyeHeight + hudHeight tall. Orthographic
++// draws keep their game projection in the hudWidth x hudHeight region.
++// When the frame that drew into one has been
 +// submitted to the GPU, `callback` runs on Aurora's render thread with the
 +// image's index, the frame tag given to AuroraStereoBegin and a sync fd that
 +// signals once the GPU has written the image (-1: nothing to wait for). The
@@ -43,8 +46,9 @@ new file mode 100644
 +typedef void (*AuroraStereoCallback)(uint32_t image, uint64_t frameTag, int syncFd, bool hasWorld, void* user);
 +
 +bool AuroraStereoRegisterImages(void* const* hardwareBuffers, uint32_t count, uint32_t width, uint32_t height,
++                                uint32_t eyeHeight, uint32_t hudWidth, uint32_t hudHeight,
 +                                AuroraStereoCallback callback, void* user);
-+void AuroraStereoBegin(uint32_t image, const float clip[2][16], const float hudClip[2][16], uint64_t frameTag);
++void AuroraStereoBegin(uint32_t image, const float clip[2][16], uint64_t frameTag);
 +void AuroraStereoEnd(void);
 +// Suppress the unused screen world even when all eye buffers are busy.
 +void AuroraStereoWorldOnly(bool enabled);
@@ -97,7 +101,16 @@ diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
  };
  
  struct TextureCopy {
-@@ -1132,6 +1137,53 @@
+@@ -495,6 +500,8 @@
+ }
+ 
+ static inline void push_command(CommandType type, const Command::Data& data) {
++  // A viewport, clear, offscreen operation or other draw breaks adjacency.
++  stereo::invalidate_world_merge();
+   if (g_currentRenderPass == UINT32_MAX)
+     UNLIKELY {
+       Log.warn("Dropping command {}", magic_enum::enum_name(type));
+@@ -1132,6 +1139,69 @@
      enqueue_pass(frame, g_recordingFrameSlot, g_currentRenderPass);
      g_currentRenderPass = UINT32_MAX;
    }
@@ -125,11 +138,11 @@ diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
 +      .stereoTag = desc.tag,
 +      .stereoHasWorld = desc.hasWorld,
 +  };
-+  pass.commands.reserve(desc.eyes[0]->size() + desc.eyes[1]->size() + 4);
++  pass.commands.reserve(desc.eyes[0]->size() + desc.eyes[1]->size() + desc.hud->size() + 6);
 +  for (uint32_t eye = 0; eye < 2; ++eye) {
 +    const auto left = static_cast<float>(eye * desc.eyeWidth);
 +    const auto width = static_cast<float>(desc.eyeWidth);
-+    const auto height = static_cast<float>(desc.size.height);
++    const auto height = static_cast<float>(desc.eyeHeight);
 +    pass.commands.push_back({
 +        .type = CommandType::SetViewport,
 +        .data = {.setViewport = {left, 0.f, width, height, 0.f, 1.f}},
@@ -137,7 +150,7 @@ diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
 +    pass.commands.push_back({
 +        .type = CommandType::SetScissor,
 +        .data = {.setScissor = {static_cast<int32_t>(eye * desc.eyeWidth), 0, static_cast<int32_t>(desc.eyeWidth),
-+                                static_cast<int32_t>(desc.size.height)}},
++                                static_cast<int32_t>(desc.eyeHeight)}},
 +    });
 +    for (const auto& draw : *desc.eyes[eye]) {
 +      pass.commands.push_back({
@@ -146,12 +159,28 @@ diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
 +      });
 +    }
 +  }
++  pass.commands.push_back({
++      .type = CommandType::SetViewport,
++      .data = {.setViewport = {0.f, static_cast<float>(desc.eyeHeight), static_cast<float>(desc.hudWidth),
++                              static_cast<float>(desc.hudHeight), 0.f, 1.f}},
++  });
++  pass.commands.push_back({
++      .type = CommandType::SetScissor,
++      .data = {.setScissor = {0, static_cast<int32_t>(desc.eyeHeight), static_cast<int32_t>(desc.hudWidth),
++                             static_cast<int32_t>(desc.hudHeight)}},
++  });
++  for (const auto& draw : *desc.hud) {
++    pass.commands.push_back({
++        .type = CommandType::Draw,
++        .data = {.draw = ShaderDrawCommand{.type = ShaderType::GX, .gx = draw}},
++    });
++  }
 +  frame.renderPasses.emplace_back(std::move(pass));
 +  gfx::enqueue_pass(frame, g_recordingFrameSlot, static_cast<uint32_t>(frame.renderPasses.size() - 1));
  }
  
  void end_frame(EndFrameCallback callback) {
-@@ -1322,6 +1374,9 @@
+@@ -1322,6 +1392,9 @@
          .stencilClearValue = passInfo.stencilClearValue,
      };
      depthStencilAttachmentPtr = &depthStencilAttachment;
@@ -165,7 +194,7 @@ diff --git a/lib/gfx/stereo.cpp b/lib/gfx/stereo.cpp
 new file mode 100644
 --- /dev/null
 +++ b/lib/gfx/stereo.cpp
-@@ -0,0 +1,365 @@
+@@ -0,0 +1,411 @@
 +#include "stereo.hpp"
 +
 +#include <aurora/stereo.h>
@@ -199,19 +228,20 @@ new file mode 100644
 +std::vector<Image> g_images;
 +uint32_t g_width = 0;
 +uint32_t g_height = 0;
++uint32_t g_eyeHeight = 0, g_hudWidth = 0, g_hudHeight = 0;
 +AuroraStereoCallback g_callback = nullptr;
 +void* g_callbackUser = nullptr;
 +
 +// Game thread: the frame being recorded.
 +bool g_recording = false;
++bool g_worldMergeable = false;
 +bool g_worldOnly = false;
 +int32_t g_image = -1;
 +uint64_t g_frameTag = 0;
 +bool g_loggedGeometry = false;
 +std::array<Mat4x4<float>, 2> g_clip{};
-+std::array<Mat4x4<float>, 2> g_hudClip{};
 +std::array<std::vector<gx::DrawData>, 2> g_eyeDraws;
-+std::array<std::vector<gx::DrawData>, 2> g_hudDraws;
++std::vector<gx::DrawData> g_hudDraws;
 +webgpu::TextureWithSampler g_color; // multisampled, when the game's frame is
 +webgpu::TextureWithSampler g_depth;
 +
@@ -260,9 +290,38 @@ new file mode 100644
 +#endif
 +}
 +
++void invalidate_world_merge() noexcept {
++#if defined(__ANDROID__)
++  g_worldMergeable = false;
++#endif
++}
++
++gx::DrawData* last_world_draw() noexcept {
++#if defined(__ANDROID__)
++  if (g_worldMergeable && g_recording && g_image >= 0 && !is_offscreen() &&
++      gx::g_gxState.projType == GX_PERSPECTIVE && !g_eyeDraws[0].empty()) {
++    return &g_eyeDraws[0].back();
++  }
++#endif
++  return nullptr;
++}
++
++void mirror_merged_world_draw() noexcept {
++#if defined(__ANDROID__)
++  auto& source = g_eyeDraws[0].back();
++  auto& target = g_eyeDraws[1].back();
++  target.vertRange = source.vertRange;
++  target.idxRange = source.idxRange;
++  target.vtxCount = source.vtxCount;
++  target.indexCount = source.indexCount;
++  // Keep the right eye's projection uniforms and all pipeline state intact.
++#endif
++}
++
 +bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const gx::ShaderInfo& info, uint32_t vtxStart,
 +                    const gx::BindGroupRanges& ranges) noexcept {
 +#if defined(__ANDROID__)
++  g_worldMergeable = false;
 +  if (is_offscreen()) return false;
 +  if (g_image < 0) {
 +    return g_worldOnly && gx::g_gxState.projType == GX_PERSPECTIVE;
@@ -282,14 +341,23 @@ new file mode 100644
 +    draw.dstAlpha = UINT32_MAX;
 +  }
 +  draw.pipeline = pipeline_ref(spatialConfig);
++  if (!world) {
++    // The original orthographic uniforms draw the interface once in an atlas
++    // region. OpenXR presents it as a separate, sharp quad for both eyes.
++    g_hudDraws.push_back(draw);
++    // Once this frame has a world, its screen is hidden. Avoid drawing the
++    // same interface again into that unused screen; empty frames retain it.
++    return !g_eyeDraws[0].empty();
++  }
 +  const auto gameProj = gx::g_gxState.proj;
 +  for (size_t eye = 0; eye < 2; ++eye) {
 +    // Mat4x4 stores GX rows; its multiplication composes in reversed order.
-+    gx::g_gxState.proj = world ? g_clip[eye] : gameProj * g_hudClip[eye];
++    gx::g_gxState.proj = g_clip[eye];
 +    draw.uniformRange = gx::build_uniform(info, vtxStart, ranges);
-+    (world ? g_eyeDraws[eye] : g_hudDraws[eye]).push_back(draw);
++    g_eyeDraws[eye].push_back(draw);
 +  }
 +  gx::g_gxState.proj = gameProj;
++  g_worldMergeable = world;
 +  // The eye passes own these world draws; avoid rendering the same scene a
 +  // third time into the flat game screen. Offscreen/shadow draws stay intact.
 +  return world;
@@ -300,6 +368,7 @@ new file mode 100644
 +
 +void end_frame() noexcept {
 +#if defined(__ANDROID__)
++  g_worldMergeable = false;
 +  g_recording = false;
 +  // Even without geometry, clear and submit the leased image. Dropping it
 +  // leaks a ring slot and leaves the preceding scene visible in the room.
@@ -314,8 +383,7 @@ new file mode 100644
 +      g_image = -1;
 +      g_eyeDraws[0].clear();
 +      g_eyeDraws[1].clear();
-+      g_hudDraws[0].clear();
-+      g_hudDraws[1].clear();
++      g_hudDraws.clear();
 +      return;
 +    }
 +    image = g_images[g_image];
@@ -333,10 +401,6 @@ new file mode 100644
 +
 +  const bool hasWorld = !g_eyeDraws[0].empty();
 +  const size_t worldDraws = g_eyeDraws[0].size();
-+  for (size_t eye = 0; eye < 2; ++eye) {
-+    g_eyeDraws[eye].insert(g_eyeDraws[eye].end(), g_hudDraws[eye].begin(), g_hudDraws[eye].end());
-+    g_hudDraws[eye].clear();
-+  }
 +  PassDesc desc{
 +      .color = samples > 1 ? g_color.view : image.view,
 +      .resolve = samples > 1 ? image.view : wgpu::TextureView{},
@@ -344,10 +408,14 @@ new file mode 100644
 +      .size = {g_width, g_height, 1},
 +      .sampleCount = samples,
 +      .eyeWidth = g_width / 2,
++      .eyeHeight = g_eyeHeight,
++      .hudWidth = g_hudWidth,
++      .hudHeight = g_hudHeight,
 +      .image = g_image,
 +      .tag = g_frameTag,
 +      .hasWorld = hasWorld,
 +      .eyes = {&g_eyeDraws[0], &g_eyeDraws[1]},
++      .hud = &g_hudDraws,
 +  };
 +  enqueue_pass(desc);
 +  if (!g_loggedGeometry && hasWorld) {
@@ -356,6 +424,7 @@ new file mode 100644
 +  }
 +  g_eyeDraws[0].clear();
 +  g_eyeDraws[1].clear();
++  g_hudDraws.clear();
 +  g_image = -1;
 +#endif
 +}
@@ -435,6 +504,7 @@ new file mode 100644
 +using namespace aurora::gfx::stereo;
 +
 +bool AuroraStereoRegisterImages(void* const* hardwareBuffers, uint32_t count, uint32_t width, uint32_t height,
++                                uint32_t eyeHeight, uint32_t hudWidth, uint32_t hudHeight,
 +                                AuroraStereoCallback callback, void* user) {
 +#if defined(__ANDROID__)
 +  if (!webgpu::g_device) {
@@ -475,6 +545,9 @@ new file mode 100644
 +  g_images = std::move(images);
 +  g_width = width;
 +  g_height = height;
++  g_eyeHeight = eyeHeight;
++  g_hudWidth = hudWidth;
++  g_hudHeight = hudHeight;
 +  g_callback = callback;
 +  g_callbackUser = user;
 +  g_loggedGeometry = false;
@@ -485,28 +558,29 @@ new file mode 100644
 +  (void)count;
 +  (void)width;
 +  (void)height;
++  (void)eyeHeight;
++  (void)hudWidth;
++  (void)hudHeight;
 +  (void)callback;
 +  (void)user;
 +  return false;
 +#endif
 +}
 +
-+void AuroraStereoBegin(uint32_t image, const float clip[2][16], const float hudClip[2][16], uint64_t frameTag) {
++void AuroraStereoBegin(uint32_t image, const float clip[2][16], uint64_t frameTag) {
 +#if defined(__ANDROID__)
 +  // GX queues draws in its FIFO. Consume the preceding camera's commands
 +  // with its existing clip matrices before switching to this camera/view.
 +  gx::fifo::drain();
++  g_worldMergeable = false;
 +  g_clip[0] = to_mat(clip[0]);
 +  g_clip[1] = to_mat(clip[1]);
-+  g_hudClip[0] = to_mat(hudClip[0]);
-+  g_hudClip[1] = to_mat(hudClip[1]);
 +  g_image = static_cast<int32_t>(image);
 +  g_frameTag = frameTag;
 +  g_recording = true;
 +#else
 +  (void)image;
 +  (void)clip;
-+  (void)hudClip;
 +  (void)frameTag;
 +#endif
 +}
@@ -517,6 +591,7 @@ new file mode 100644
 +  // they would only be decoded at aurora_end_frame, after g_recording is off.
 +  gx::fifo::drain();
 +  g_recording = false;
++  g_worldMergeable = false;
 +#endif
 +}
 +
@@ -535,7 +610,7 @@ diff --git a/lib/gfx/stereo.hpp b/lib/gfx/stereo.hpp
 new file mode 100644
 --- /dev/null
 +++ b/lib/gfx/stereo.hpp
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,54 @@
 +#pragma once
 +
 +// Stereo rendering for a VR headset (include/aurora/stereo.h).
@@ -549,8 +624,13 @@ new file mode 100644
 +namespace aurora::gfx::stereo {
 +
 +// GX draws are being copied for the eyes (a perspective draw since
-+// AuroraStereoBegin). Merging draws is off meanwhile: each eye keeps its own.
++// AuroraStereoBegin). Each eye keeps its own projection uniforms.
 +bool recording() noexcept;
++
++// Only consecutive perspective draws in the same camera may share geometry.
++gx::DrawData* last_world_draw() noexcept;
++void mirror_merged_world_draw() noexcept;
++void invalidate_world_merge() noexcept;
 +
 +// A GX draw just pushed to the game's frame: its eye copies, each with the
 +// eye's projection in its own uniforms (command_processor.cpp).
@@ -573,10 +653,14 @@ new file mode 100644
 +  wgpu::Extent3D size;
 +  uint32_t sampleCount = 1;
 +  uint32_t eyeWidth = 0;
++  uint32_t eyeHeight = 0;
++  uint32_t hudWidth = 0;
++  uint32_t hudHeight = 0;
 +  int32_t image = -1;
 +  uint64_t tag = 0;
 +  bool hasWorld = false;
 +  const std::vector<gx::DrawData>* eyes[2]{};
++  const std::vector<gx::DrawData>* hud = nullptr;
 +};
 +void enqueue_pass(const PassDesc& desc) noexcept; // common.cpp
 +
@@ -592,18 +676,28 @@ diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
  #include "dolphin/gx/GXAurora.h"
  #include "gx.hpp"
  #include "gx_fmt.hpp"
-@@ -1569,8 +1570,9 @@
+@@ -1568,7 +1569,9 @@
+   if (pos + totalVtxBytes > size)
      UNLIKELY { handle_draw_overrun(totalVtxBytes, data, pos, size); }
  
-   auto* lastDraw = !g_gxState.stateDirty ? gfx::get_last_draw_command<DrawData>() : nullptr;
-+  // While the eyes record (VR), each draw keeps its own copies there: no merging.
+-  auto* lastDraw = !g_gxState.stateDirty ? gfx::get_last_draw_command<DrawData>() : nullptr;
++  const bool stereoRecording = gfx::stereo::recording();
++  auto* lastDraw = !g_gxState.stateDirty
++      ? (stereoRecording ? gfx::stereo::last_world_draw() : gfx::get_last_draw_command<DrawData>()) : nullptr;
    const bool canMerge = lastDraw != nullptr && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
--                        lastDraw->instanceCount == 1;
-+                        lastDraw->instanceCount == 1 && !gfx::stereo::recording();
+                         lastDraw->instanceCount == 1;
  
-   // Push raw vertex data to buffer. Merged draws must remain byte-contiguous with the previous range.
-   gfx::Range vertRange = gfx::push_verts(data + pos, totalVtxBytes, canMerge ? 0 : 4);
-@@ -1671,7 +1673,7 @@
+@@ -1607,6 +1610,9 @@
+     }
+     lastDraw->vtxCount += vtxCount;
+     lastDraw->indexCount += numIndices;
++    if (stereoRecording) {
++      gfx::stereo::mirror_merged_world_draw();
++    }
+     ++gfx::g_mergedDrawCallCount;
+     return;
+   }
+@@ -1671,7 +1677,7 @@
    } else if (prim == GX_POINTS) {
      instanceCount = vtxCount;
    }
@@ -612,7 +706,7 @@ diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
        .pipeline = pipeline,
        .vertRange = vertRange,
        .idxRange = idxRange,
-@@ -1681,7 +1683,10 @@
+@@ -1681,7 +1687,10 @@
        .instanceCount = instanceCount,
        .bindGroups = bindGroups,
        .dstAlpha = g_gxState.dstAlpha,

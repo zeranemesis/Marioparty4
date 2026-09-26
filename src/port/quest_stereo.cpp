@@ -46,7 +46,7 @@ struct QuestStereoFrame {
 
 using FrameFn = bool (*)(QuestStereoFrame *frame);
 using ImagesFn = bool (*)(void **buffers, uint32_t capacity, uint32_t *count, uint32_t *width, uint32_t *height,
-    uint32_t *generation);
+    uint32_t *generation, uint32_t *eyeHeight, uint32_t *hudWidth, uint32_t *hudHeight);
 using SubmittedFn = void (*)(uint32_t image, uint64_t tag, int syncFd, bool hasWorld, void *user);
 using GenerationFn = uint32_t (*)(void);
 using WorldOnlyFn = bool (*)();
@@ -73,8 +73,6 @@ OMOVL sScene = DLL_NONE;
 bool sSceneFitted = false;
 float sSceneScale = 1.0f;
 float sSceneCenter[3]{};
-Mtx sBoardReferenceView{};
-bool sBoardReferenceSet = false;
 float sEyeClip[2][16]{};
 
 struct Mat4 {
@@ -166,10 +164,11 @@ bool register_images()
     }
     void *buffers[8] {};
     uint32_t count = 0, width = 0, height = 0, imagesGeneration = 0;
-    if (!sQuest.images(buffers, 8, &count, &width, &height, &imagesGeneration) || count == 0) {
+    uint32_t eyeHeight = 0, hudWidth = 0, hudHeight = 0;
+    if (!sQuest.images(buffers, 8, &count, &width, &height, &imagesGeneration, &eyeHeight, &hudWidth, &hudHeight) || count == 0) {
         return false;
     }
-    if (!AuroraStereoRegisterImages(buffers, count, width, height, sQuest.submitted, nullptr)) {
+    if (!AuroraStereoRegisterImages(buffers, count, width, height, eyeHeight, hudWidth, hudHeight, sQuest.submitted, nullptr)) {
         return false;
     }
     sQuest.registeredGeneration = imagesGeneration;
@@ -223,7 +222,6 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
     if (scene != sScene) {
         sScene = scene;
         sSceneFitted = false;
-        sBoardReferenceSet = false;
         sSceneScale = 1.0f;
         std::memset(sSceneCenter, 0, sizeof(sSceneCenter));
     }
@@ -284,36 +282,18 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
     if (minigame && sSceneFitted) {
         sceneWorld.m[1][3] += 600.0f; // arena center 15 cm above table at default scale
     }
-    // Preserve the game's camera movement relative to the board's initial
-    // view. A fixed inverse lets later pans/rotations/zooms move the diorama.
-    if (board && sSceneFitted && !sBoardReferenceSet) {
-        std::memcpy(sBoardReferenceView, view, sizeof(sBoardReferenceView));
-        sBoardReferenceSet = true;
-    }
+    // Cancel the game camera every frame: the tracked headset supplies the
+    // viewpoint, while the board stays at its physical table anchor.
     const Mat4 world = multiply(multiply(from_rows(sFrame.world), sceneWorld),
-        inverse_affine(board && sBoardReferenceSet ? sBoardReferenceView : view));
-    Mat4 anchor = from_rows(sFrame.world);
-    const float anchorScale = std::sqrt(anchor.m[0][0]*anchor.m[0][0] + anchor.m[1][0]*anchor.m[1][0] + anchor.m[2][0]*anchor.m[2][0]);
-    for (int r = 0; r < 3; ++r) {
-        for (int c = 0; c < 3; ++c) anchor.m[r][c] /= anchorScale > 0 ? anchorScale : 1.0f;
-    }
-    Mat4 panel{};
-    panel.m[0][0] = sFrame.hudWidth * 0.5f;
-    panel.m[1][1] = sFrame.hudHeight * 0.5f;
-    panel.m[1][3] = sFrame.hudHeight * 0.5f + 0.05f;
-    panel.m[2][3] = -0.45f;
-    panel.m[3][3] = 1.0f;
-    const Mat4 hudWorld = multiply(anchor, panel);
-    float clip[2][16], hudClip[2][16];
+        inverse_affine(view));
+    float clip[2][16];
     for (int eye = 0; eye < 2; ++eye) {
         const Mat4 eyeClip
             = multiply(from_rows(sFrame.eyeProj[eye]), multiply(from_rows(sFrame.eyeView[eye]), world));
         std::memcpy(clip[eye], eyeClip.m, sizeof(clip[eye]));
-        const Mat4 hudEyeClip = multiply(from_rows(sFrame.eyeProj[eye]), multiply(from_rows(sFrame.eyeView[eye]), hudWorld));
-        std::memcpy(hudClip[eye], hudEyeClip.m, sizeof(hudClip[eye]));
     }
     std::memcpy(sEyeClip, clip, sizeof(sEyeClip));
-    AuroraStereoBegin(sFrame.image, clip, hudClip, sFrame.tag);
+    AuroraStereoBegin(sFrame.image, clip, sFrame.tag);
     sCameraViewSet = true;
 }
 

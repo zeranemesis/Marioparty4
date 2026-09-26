@@ -45,9 +45,12 @@ int main() {
   assert(!partyboard::quest::board_fit(maximum, minimum, scale, center));
   assert(!partyboard::quest::board_fit(minimum, minimum, scale, center));
   quest::StereoView view;
+  // A separately composited HUD must not show stale menus before a world.
+  assert(view.hud_layer(XR_NULL_HANDLE, nullptr) == nullptr);
   quest::StereoViewTestAccess::enable(view);
   quest::StereoFrame frame{};
   view.set_screen_required(true);
+  assert(view.hud_layer(XR_NULL_HANDLE, nullptr) == nullptr);
   assert(view.screen_required() && !view.game_frame(frame) && !view.world_only());
   view.set_screen_required(false);
   assert(!view.screen_required() && view.world_only());
