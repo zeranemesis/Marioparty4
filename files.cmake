@@ -126,6 +126,7 @@ set(PORT_FILES
         src/port/display_rate.cpp
         src/port/gamepad_priority.cpp
         src/port/perf_hint.cpp
+        src/port/quest_stereo.cpp
         src/port/version.cpp
 
         src/port/ui/achievements.cpp

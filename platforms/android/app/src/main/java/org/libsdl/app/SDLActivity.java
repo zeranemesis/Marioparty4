@@ -1964,11 +1964,22 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
         nativePermissionResult(requestCode, result);
     }
 
+    /** Lets the app handle some links itself (Meta Quest installs its updates, QuestUpdater). */
+    public interface UrlHandler {
+        boolean openURL(String url);
+    }
+
+    public static volatile UrlHandler mUrlHandler;
+
     /**
      * This method is called by SDL using JNI.
      */
     public static boolean openURL(String url)
     {
+        UrlHandler handler = mUrlHandler;
+        if (handler != null && handler.openURL(url)) {
+            return true;
+        }
         try {
             Intent i = new Intent(Intent.ACTION_VIEW);
             i.setData(Uri.parse(url));

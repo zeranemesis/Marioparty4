@@ -28,6 +28,7 @@ import com.google.mlkit.vision.codescanner.GmsBarcodeScanning;
 import com.mariopartyrd.partyboard.online.LobbyActivity;
 import com.mariopartyrd.partyboard.online.RestartActivity;
 import com.mariopartyrd.partyboard.online.OnlineService;
+import com.mariopartyrd.partyboard.quest.QuestVr;
 
 import org.libsdl.app.SDLActivity;
 
@@ -102,6 +103,14 @@ public class PartyBoardActivity extends SDLActivity {
             } else {
                 Os.unsetenv("PARTYBOARD_ONLINE_BARRIER");
                 Os.unsetenv("PARTYBOARD_ONLINE_DISC");
+            }
+            // Opt-in private audio diagnostics for device validation.
+            if (intent != null && intent.getBooleanExtra("partyboard_audio_diagnostics", false)
+                    && (getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+                Os.setenv("PARTYBOARD_AUDIO_DIAGNOSTIC_DIR", getFilesDir().getAbsolutePath(), true);
+                Os.setenv("PARTYBOARD_AUDIO_TIMING_DIAGNOSTICS", new java.io.File(getFilesDir(), "audio_timing_diagnostic.log").getAbsolutePath(), true);
+                Os.setenv("PARTYBOARD_RENDER_DIAGNOSTICS", "1", true);
+                Os.setenv("PARTYBOARD_SEQ_DIAGNOSTICS", "all", true);
             }
             // Automated tests only (src/port/test_input.cpp): never in a release build.
             String testInput = intent == null ? null : intent.getStringExtra("partyboard_test_input");
@@ -225,6 +234,11 @@ public class PartyBoardActivity extends SDLActivity {
         }
         exportOnlineEnvironment(getIntent());
         super.onCreate(savedInstanceState);
+        // Meta Quest: the game shows on a virtual screen in the headset instead
+        // of this window, and the Touch controllers are its gamepad.
+        if (mSurface != null && QuestVr.isHeadset()) {
+            QuestVr.start(this, mSurface);
+        }
         useDisplayCutout();
         hideSystemBars();
         // The game asks for its frame rate before the surface exists; a surface
@@ -286,6 +300,9 @@ public class PartyBoardActivity extends SDLActivity {
             }
         }
         super.onDestroy();
+        // After SDL's onDestroy, which waits for the game: nothing draws into
+        // the headset's surface any more.
+        QuestVr.stop();
         if (finishing) {
             // SDL refuses to run main() twice in one process, and the next
             // start may carry different --netplay arguments: end this one.
@@ -451,6 +468,9 @@ public class PartyBoardActivity extends SDLActivity {
     // Rate setting (src/port/display_rate.cpp). A 120 Hz phone answers 60 and
     // 120; offering 144 there would only be a number the screen cannot show.
     public float[] getSupportedRefreshRates() {
+        if (QuestVr.isStarted()) {
+            return QuestVr.refreshRates();
+        }
         Display display = getWindowManager().getDefaultDisplay();
         Display.Mode current = display.getMode();
         List<Float> rates = new ArrayList<>();
@@ -486,6 +506,11 @@ public class PartyBoardActivity extends SDLActivity {
 
     public void setPreferredFrameRate(final float fps) {
         preferredFrameRate = fps;
+        if (QuestVr.isStarted()) {
+            // The headset's display, not this window's, shows the game.
+            QuestVr.setFrameRate(fps);
+            return;
+        }
         runOnUiThread(() -> {
             Window window = getWindow();
             WindowManager.LayoutParams attributes = window.getAttributes();

@@ -131,6 +131,11 @@ public class SDLControllerManager
         if ((device == null) || (deviceId < 0)) {
             return false;
         }
+        // Meta Quest: the Touch controllers reach the game through OpenXR
+        // (QuestControllers); their Android input devices would be extra players.
+        if (QuestControllers.ignores(device)) {
+            return false;
+        }
         int sources = device.getSources();
 
         /* This is called for every button press, so let's not spam the logs */

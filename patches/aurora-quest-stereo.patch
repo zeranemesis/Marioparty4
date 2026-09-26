@@ -1,0 +1,643 @@
+diff --git a/cmake/aurora_gx.cmake b/cmake/aurora_gx.cmake
+--- a/cmake/aurora_gx.cmake
++++ b/cmake/aurora_gx.cmake
+@@ -4,6 +4,7 @@ add_library(aurora_gx STATIC
+         lib/gfx/depth_peek.cpp
+         lib/gfx/pipeline_cache.cpp
+         lib/gfx/render_worker.cpp
++        lib/gfx/stereo.cpp
+         lib/gfx/dds_io.cpp
+         lib/gfx/tex_copy_conv.cpp
+         lib/gfx/tex_palette_conv.cpp
+diff --git a/include/aurora/stereo.h b/include/aurora/stereo.h
+new file mode 100644
+--- /dev/null
++++ b/include/aurora/stereo.h
+@@ -0,0 +1,41 @@
++#ifndef AURORA_STEREO_H
++#define AURORA_STEREO_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// Stereo rendering for a VR headset (Android; elsewhere these do nothing).
++//
++// Between AuroraStereoBegin and AuroraStereoEnd, each GX draw made with a
++// perspective projection is also drawn for two eyes, into an image holding
++// both side by side (left eye on the left). The game's own frame is drawn as
++// usual. For eye e, the draw's projection is replaced by clip[e]: a row-major
++// 4x4 matrix taking a view-space position (what GXLoadPosMtxImm gives) to GX
++// clip space, with GX's depth conventions (z/w from -1 at near to 0 at far).
++//
++// The images are AHardwareBuffers (RGBA8, GPU color output), registered once,
++// twice as wide as an eye. When the frame that drew into one has been
++// submitted to the GPU, `callback` runs on Aurora's render thread with the
++// image's index, the frame tag given to AuroraStereoBegin and a sync fd that
++// signals once the GPU has written the image (-1: nothing to wait for). The
++// callee owns the fd.
++
++typedef void (*AuroraStereoCallback)(uint32_t image, uint64_t frameTag, int syncFd, bool hasWorld, void* user);
++
++bool AuroraStereoRegisterImages(void* const* hardwareBuffers, uint32_t count, uint32_t width, uint32_t height,
++                                AuroraStereoCallback callback, void* user);
++void AuroraStereoBegin(uint32_t image, const float clip[2][16], const float hudClip[2][16], uint64_t frameTag);
++void AuroraStereoEnd(void);
++// Suppress the unused screen world even when all eye buffers are busy.
++void AuroraStereoWorldOnly(bool enabled);
++bool AuroraStereoActive(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/lib/aurora.cpp b/lib/aurora.cpp
+--- a/lib/aurora.cpp
++++ b/lib/aurora.cpp
+@@ -2,6 +2,7 @@
+ 
+ #ifdef AURORA_ENABLE_GX
+ #include "gfx/common.hpp"
++#include "gfx/stereo.hpp"
+ #include "gx/fifo.hpp"
+ #include "imgui.hpp"
+ #include "webgpu/gpu.hpp"
+@@ -337,6 +338,8 @@ void end_frame() noexcept {
+       ZoneScopedN("Queue Submit");
+       g_queue.Submit(1, &buffer);
+     }
++    // The headset's eye images drawn by this frame go to it (gfx/stereo.cpp).
++    gfx::stereo::after_submit();
+     if (canPresent && g_surface) {
+       ZoneScopedN("Present");
+       auto presentStatus = g_surface.Present();
+diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
+--- a/lib/gfx/common.cpp
++++ b/lib/gfx/common.cpp
+@@ -11,6 +11,7 @@
+ #endif
+ #include "pipeline_cache.hpp"
+ #include "render_worker.hpp"
++#include "stereo.hpp"
+ #include "tex_copy_conv.hpp"
+ #include "tex_palette_conv.hpp"
+ #include "texture_replacement.hpp"
+@@ -182,6 +183,10 @@
+   bool captureDepthSnapshot = false;
+   bool sealed = false;
+   std::vector<tex_palette_conv::ConvRequest> paletteConvs;
++  // The eyes' pass for a VR headset (stereo.cpp): the shared image it draws into.
++  int32_t stereoImage = -1;
++  uint64_t stereoTag = 0;
++  bool stereoHasWorld = false;
+ };
+ 
+ struct TextureCopy {
+@@ -1132,6 +1137,53 @@
+     enqueue_pass(frame, g_recordingFrameSlot, g_currentRenderPass);
+     g_currentRenderPass = UINT32_MAX;
+   }
++  // After the game's own passes, so their indices are left alone.
++  stereo::end_frame();
++}
++
++void stereo::enqueue_pass(const PassDesc& desc) noexcept {
++  auto& frame = current_frame_packet();
++  RenderPass pass{
++      .label = "Stereo eyes",
++      .colorView = desc.color,
++      .resolveView = desc.resolve,
++      .depthStencilView = desc.depth,
++      .targetSize = desc.size,
++      .msaaSamples = desc.sampleCount,
++      .clearColorValue = {0.f, 0.f, 0.f, 0.f},
++      .clearDepthValue = gx::UseReversedZ ? 0.f : 1.f,
++      .clearColor = true,
++      .clearDepth = true,
++      .hasDepth = true,
++      .hasStencil = false,
++      .offscreen = true,
++      .stereoImage = desc.image,
++      .stereoTag = desc.tag,
++      .stereoHasWorld = desc.hasWorld,
++  };
++  pass.commands.reserve(desc.eyes[0]->size() + desc.eyes[1]->size() + 4);
++  for (uint32_t eye = 0; eye < 2; ++eye) {
++    const auto left = static_cast<float>(eye * desc.eyeWidth);
++    const auto width = static_cast<float>(desc.eyeWidth);
++    const auto height = static_cast<float>(desc.size.height);
++    pass.commands.push_back({
++        .type = CommandType::SetViewport,
++        .data = {.setViewport = {left, 0.f, width, height, 0.f, 1.f}},
++    });
++    pass.commands.push_back({
++        .type = CommandType::SetScissor,
++        .data = {.setScissor = {static_cast<int32_t>(eye * desc.eyeWidth), 0, static_cast<int32_t>(desc.eyeWidth),
++                                static_cast<int32_t>(desc.size.height)}},
++    });
++    for (const auto& draw : *desc.eyes[eye]) {
++      pass.commands.push_back({
++          .type = CommandType::Draw,
++          .data = {.draw = ShaderDrawCommand{.type = ShaderType::GX, .gx = draw}},
++      });
++    }
++  }
++  frame.renderPasses.emplace_back(std::move(pass));
++  gfx::enqueue_pass(frame, g_recordingFrameSlot, static_cast<uint32_t>(frame.renderPasses.size() - 1));
+ }
+ 
+ void end_frame(EndFrameCallback callback) {
+@@ -1322,6 +1374,9 @@
+         .stencilClearValue = passInfo.stencilClearValue,
+     };
+     depthStencilAttachmentPtr = &depthStencilAttachment;
++  }
++  if (passInfo.stereoImage >= 0) {
++    stereo::begin_access(passInfo.stereoImage, passInfo.stereoTag, passInfo.stereoHasWorld);
+   }
+   const auto label = fmt::format("Render pass {}", passIndex);
+   const wgpu::RenderPassDescriptor renderPassDescriptor{
+diff --git a/lib/gfx/stereo.cpp b/lib/gfx/stereo.cpp
+new file mode 100644
+--- /dev/null
++++ b/lib/gfx/stereo.cpp
+@@ -0,0 +1,365 @@
++#include "stereo.hpp"
++
++#include <aurora/stereo.h>
++
++#include "../internal.hpp"
++#include "../webgpu/gpu.hpp"
++#include "../gx/shader_info.hpp"
++#include "../gx/fifo.hpp"
++
++#include <array>
++#include <mutex>
++
++#if defined(__ANDROID__)
++#include <android/hardware_buffer.h>
++#include <unistd.h>
++#endif
++
++namespace aurora::gfx::stereo {
++namespace {
++Module Log("aurora::gfx::stereo");
++
++#if defined(__ANDROID__)
++struct Image {
++  wgpu::SharedTextureMemory memory;
++  wgpu::Texture texture;
++  wgpu::TextureView view;
++};
++
++// Set once by AuroraStereoRegisterImages (game thread), then read by both threads.
++std::mutex g_imagesMutex;
++std::vector<Image> g_images;
++uint32_t g_width = 0;
++uint32_t g_height = 0;
++AuroraStereoCallback g_callback = nullptr;
++void* g_callbackUser = nullptr;
++
++// Game thread: the frame being recorded.
++bool g_recording = false;
++bool g_worldOnly = false;
++int32_t g_image = -1;
++uint64_t g_frameTag = 0;
++bool g_loggedGeometry = false;
++std::array<Mat4x4<float>, 2> g_clip{};
++std::array<Mat4x4<float>, 2> g_hudClip{};
++std::array<std::vector<gx::DrawData>, 2> g_eyeDraws;
++std::array<std::vector<gx::DrawData>, 2> g_hudDraws;
++webgpu::TextureWithSampler g_color; // multisampled, when the game's frame is
++webgpu::TextureWithSampler g_depth;
++
++// Render thread: images drawn into by the frame being encoded.
++struct Accessed {
++  int32_t image;
++  uint64_t tag;
++  bool hasWorld;
++};
++std::vector<Accessed> g_accessed;
++
++Mat4x4<float> to_mat(const float m[16]) noexcept {
++  return {
++      {m[0], m[1], m[2], m[3]},
++      {m[4], m[5], m[6], m[7]},
++      {m[8], m[9], m[10], m[11]},
++      {m[12], m[13], m[14], m[15]},
++  };
++}
++
++webgpu::TextureWithSampler create_target(wgpu::TextureFormat format, uint32_t sampleCount, const char* label) {
++  const wgpu::TextureDescriptor descriptor{
++      .label = label,
++      .usage = wgpu::TextureUsage::RenderAttachment,
++      .dimension = wgpu::TextureDimension::e2D,
++      .size = {g_width, g_height, 1},
++      .format = format,
++      .mipLevelCount = 1,
++      .sampleCount = sampleCount,
++  };
++  webgpu::TextureWithSampler target;
++  target.texture = webgpu::g_device.CreateTexture(&descriptor);
++  target.view = target.texture.CreateView();
++  target.size = descriptor.size;
++  target.format = format;
++  return target;
++}
++#endif
++} // namespace
++
++bool recording() noexcept {
++#if defined(__ANDROID__)
++  return g_image >= 0;
++#else
++  return false;
++#endif
++}
++
++bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const gx::ShaderInfo& info, uint32_t vtxStart,
++                    const gx::BindGroupRanges& ranges) noexcept {
++#if defined(__ANDROID__)
++  if (is_offscreen()) return false;
++  if (g_image < 0) {
++    return g_worldOnly && gx::g_gxState.projType == GX_PERSPECTIVE;
++  }
++  const bool world = gx::g_gxState.projType == GX_PERSPECTIVE;
++  if (world && !g_recording) {
++    return false;
++  }
++  auto spatialConfig = config;
++  if (spatialConfig.colorUpdate) {
++    spatialConfig.alphaUpdate = true; // transparent MR targets need coverage
++  }
++  if (!world) {
++    spatialConfig.depthCompare = false;
++    spatialConfig.depthUpdate = false;
++    spatialConfig.dstAlpha = UINT32_MAX;
++    draw.dstAlpha = UINT32_MAX;
++  }
++  draw.pipeline = pipeline_ref(spatialConfig);
++  const auto gameProj = gx::g_gxState.proj;
++  for (size_t eye = 0; eye < 2; ++eye) {
++    // Mat4x4 stores GX rows; its multiplication composes in reversed order.
++    gx::g_gxState.proj = world ? g_clip[eye] : gameProj * g_hudClip[eye];
++    draw.uniformRange = gx::build_uniform(info, vtxStart, ranges);
++    (world ? g_eyeDraws[eye] : g_hudDraws[eye]).push_back(draw);
++  }
++  gx::g_gxState.proj = gameProj;
++  // The eye passes own these world draws; avoid rendering the same scene a
++  // third time into the flat game screen. Offscreen/shadow draws stay intact.
++  return world;
++#else
++  return false;
++#endif
++}
++
++void end_frame() noexcept {
++#if defined(__ANDROID__)
++  g_recording = false;
++  // Even without geometry, clear and submit the leased image. Dropping it
++  // leaks a ring slot and leaves the preceding scene visible in the room.
++  if (g_image < 0) {
++    g_image = -1;
++    return;
++  }
++  Image image;
++  {
++    std::lock_guard lock{g_imagesMutex};
++    if (static_cast<size_t>(g_image) >= g_images.size()) {
++      g_image = -1;
++      g_eyeDraws[0].clear();
++      g_eyeDraws[1].clear();
++      g_hudDraws[0].clear();
++      g_hudDraws[1].clear();
++      return;
++    }
++    image = g_images[g_image];
++  }
++
++  // Same sample count and formats as the game's frame, so its pipelines draw here too.
++  const auto& config = webgpu::g_graphicsConfig;
++  const uint32_t samples = config.msaaSamples;
++  if (samples > 1 && (g_color.size.width != g_width || g_color.size.height != g_height)) {
++    g_color = create_target(config.surfaceConfiguration.format, samples, "Stereo color");
++  }
++  if (g_depth.size.width != g_width || g_depth.size.height != g_height) {
++    g_depth = create_target(config.depthFormat, samples, "Stereo depth");
++  }
++
++  const bool hasWorld = !g_eyeDraws[0].empty();
++  const size_t worldDraws = g_eyeDraws[0].size();
++  for (size_t eye = 0; eye < 2; ++eye) {
++    g_eyeDraws[eye].insert(g_eyeDraws[eye].end(), g_hudDraws[eye].begin(), g_hudDraws[eye].end());
++    g_hudDraws[eye].clear();
++  }
++  PassDesc desc{
++      .color = samples > 1 ? g_color.view : image.view,
++      .resolve = samples > 1 ? image.view : wgpu::TextureView{},
++      .depth = g_depth.view,
++      .size = {g_width, g_height, 1},
++      .sampleCount = samples,
++      .eyeWidth = g_width / 2,
++      .image = g_image,
++      .tag = g_frameTag,
++      .hasWorld = hasWorld,
++      .eyes = {&g_eyeDraws[0], &g_eyeDraws[1]},
++  };
++  enqueue_pass(desc);
++  if (!g_loggedGeometry && hasWorld) {
++    Log.info("Stereo: first perspective pass ({} world draws per eye, spatial HUD enabled)", worldDraws);
++    g_loggedGeometry = true;
++  }
++  g_eyeDraws[0].clear();
++  g_eyeDraws[1].clear();
++  g_image = -1;
++#endif
++}
++
++void begin_access(int32_t image, uint64_t tag, bool hasWorld) noexcept {
++#if defined(__ANDROID__)
++  Image target;
++  {
++    std::lock_guard lock{g_imagesMutex};
++    if (image < 0 || static_cast<size_t>(image) >= g_images.size()) {
++      return;
++    }
++    target = g_images[image];
++  }
++  // The headset has finished with the image (it copies it out before handing
++  // the index back), and every eye pass clears it: no fence, no contents.
++  wgpu::SharedTextureMemoryBeginAccessDescriptor begin{};
++  begin.concurrentRead = false;
++  begin.initialized = false;
++  begin.fenceCount = 0;
++  // Dawn's Vulkan AHardwareBuffer import requires this chained state, even
++  // when we discard the preceding contents (VK_IMAGE_LAYOUT_UNDEFINED = 0).
++  wgpu::SharedTextureMemoryVkImageLayoutBeginState layoutBegin{};
++  if (webgpu::g_backendType == wgpu::BackendType::Vulkan) {
++    layoutBegin.oldLayout = 0;
++    layoutBegin.newLayout = 0;
++    begin.nextInChain = &layoutBegin;
++  }
++  if (target.memory.BeginAccess(target.texture, &begin) != wgpu::Status::Success) {
++    Log.warn("Stereo image {} not accessible", image);
++    return;
++  }
++  g_accessed.push_back({image, tag, hasWorld});
++#endif
++}
++
++void after_submit() noexcept {
++#if defined(__ANDROID__)
++  for (const auto& accessed : g_accessed) {
++    Image target;
++    {
++      std::lock_guard lock{g_imagesMutex};
++      if (static_cast<size_t>(accessed.image) >= g_images.size()) {
++        continue;
++      }
++      target = g_images[accessed.image];
++    }
++    wgpu::SharedTextureMemoryEndAccessState end{};
++    wgpu::SharedTextureMemoryVkImageLayoutEndState layoutEnd{};
++    if (webgpu::g_backendType == wgpu::BackendType::Vulkan) {
++      end.nextInChain = &layoutEnd;
++    }
++    target.memory.EndAccess(target.texture, &end);
++    int fd = -1;
++    for (size_t i = 0; i < end.fenceCount && fd < 0; ++i) {
++      wgpu::SharedFenceSyncFDExportInfo syncFd{};
++      wgpu::SharedFenceExportInfo info{};
++      info.nextInChain = &syncFd;
++      end.fences[i].ExportInfo(&info);
++      if (info.type == wgpu::SharedFenceType::SyncFD && syncFd.handle >= 0) {
++        fd = dup(syncFd.handle); // the fence keeps its own
++      }
++    }
++    if (g_callback != nullptr) {
++      g_callback(static_cast<uint32_t>(accessed.image), accessed.tag, fd, accessed.hasWorld, g_callbackUser);
++    } else if (fd >= 0) {
++      close(fd);
++    }
++  }
++  g_accessed.clear();
++#endif
++}
++
++} // namespace aurora::gfx::stereo
++
++using namespace aurora;
++using namespace aurora::gfx::stereo;
++
++bool AuroraStereoRegisterImages(void* const* hardwareBuffers, uint32_t count, uint32_t width, uint32_t height,
++                                AuroraStereoCallback callback, void* user) {
++#if defined(__ANDROID__)
++  if (!webgpu::g_device) {
++    return false;
++  }
++  if (webgpu::g_graphicsConfig.surfaceConfiguration.format != wgpu::TextureFormat::RGBA8Unorm) {
++    Log.warn("Stereo needs an RGBA8 frame, not {}",
++             static_cast<uint32_t>(webgpu::g_graphicsConfig.surfaceConfiguration.format));
++    return false;
++  }
++  std::vector<Image> images;
++  for (uint32_t i = 0; i < count; ++i) {
++    wgpu::SharedTextureMemoryAHardwareBufferDescriptor ahb{};
++    ahb.handle = hardwareBuffers[i];
++    wgpu::SharedTextureMemoryDescriptor descriptor{};
++    descriptor.nextInChain = &ahb;
++    descriptor.label = "Stereo image";
++    Image image;
++    image.memory = webgpu::g_device.ImportSharedTextureMemory(&descriptor);
++    if (!image.memory) {
++      Log.warn("Stereo image {} could not be imported", i);
++      return false;
++    }
++    const wgpu::TextureDescriptor textureDescriptor{
++        .label = "Stereo image",
++        .usage = wgpu::TextureUsage::RenderAttachment,
++        .dimension = wgpu::TextureDimension::e2D,
++        .size = {width, height, 1},
++        .format = wgpu::TextureFormat::RGBA8Unorm,
++        .mipLevelCount = 1,
++        .sampleCount = 1,
++    };
++    image.texture = image.memory.CreateTexture(&textureDescriptor);
++    image.view = image.texture.CreateView();
++    images.push_back(std::move(image));
++  }
++  std::lock_guard lock{g_imagesMutex};
++  g_images = std::move(images);
++  g_width = width;
++  g_height = height;
++  g_callback = callback;
++  g_callbackUser = user;
++  g_loggedGeometry = false;
++  Log.info("Stereo: {} images of {}x{}", count, width, height);
++  return true;
++#else
++  (void)hardwareBuffers;
++  (void)count;
++  (void)width;
++  (void)height;
++  (void)callback;
++  (void)user;
++  return false;
++#endif
++}
++
++void AuroraStereoBegin(uint32_t image, const float clip[2][16], const float hudClip[2][16], uint64_t frameTag) {
++#if defined(__ANDROID__)
++  // GX queues draws in its FIFO. Consume the preceding camera's commands
++  // with its existing clip matrices before switching to this camera/view.
++  gx::fifo::drain();
++  g_clip[0] = to_mat(clip[0]);
++  g_clip[1] = to_mat(clip[1]);
++  g_hudClip[0] = to_mat(hudClip[0]);
++  g_hudClip[1] = to_mat(hudClip[1]);
++  g_image = static_cast<int32_t>(image);
++  g_frameTag = frameTag;
++  g_recording = true;
++#else
++  (void)image;
++  (void)clip;
++  (void)hudClip;
++  (void)frameTag;
++#endif
++}
++
++void AuroraStereoEnd(void) {
++#if defined(__ANDROID__)
++  // Closing recording before draining loses deferred display-list draws:
++  // they would only be decoded at aurora_end_frame, after g_recording is off.
++  gx::fifo::drain();
++  g_recording = false;
++#endif
++}
++
++bool AuroraStereoActive(void) { return recording(); }
++
++extern "C" void AuroraStereoWorldOnly(bool enabled) {
++#if defined(__ANDROID__)
++  // The FIFO is deferred: process camera draws before changing the scope.
++  aurora::gx::fifo::drain();
++  aurora::gfx::stereo::g_worldOnly = enabled;
++#else
++  (void)enabled;
++#endif
++}
+diff --git a/lib/gfx/stereo.hpp b/lib/gfx/stereo.hpp
+new file mode 100644
+--- /dev/null
++++ b/lib/gfx/stereo.hpp
+@@ -0,0 +1,45 @@
++#pragma once
++
++// Stereo rendering for a VR headset (include/aurora/stereo.h).
++
++#include "common.hpp"
++#include "../gx/gx.hpp"
++#include "../gx/pipeline.hpp"
++
++#include <vector>
++
++namespace aurora::gfx::stereo {
++
++// GX draws are being copied for the eyes (a perspective draw since
++// AuroraStereoBegin). Merging draws is off meanwhile: each eye keeps its own.
++bool recording() noexcept;
++
++// A GX draw just pushed to the game's frame: its eye copies, each with the
++// eye's projection in its own uniforms (command_processor.cpp).
++bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const gx::ShaderInfo& info, uint32_t vtxStart,
++                    const gx::BindGroupRanges& ranges) noexcept;
++
++// At the end of the frame's recording (gfx::finish): the eyes' render pass.
++void end_frame() noexcept;
++
++// On the render thread: the image is about to be drawn (render pass encode),
++// and the frame using it was just submitted (aurora.cpp).
++void begin_access(int32_t image, uint64_t tag, bool hasWorld) noexcept;
++void after_submit() noexcept;
++
++// What common.cpp turns into the eyes' render pass.
++struct PassDesc {
++  wgpu::TextureView color;
++  wgpu::TextureView resolve;
++  wgpu::TextureView depth;
++  wgpu::Extent3D size;
++  uint32_t sampleCount = 1;
++  uint32_t eyeWidth = 0;
++  int32_t image = -1;
++  uint64_t tag = 0;
++  bool hasWorld = false;
++  const std::vector<gx::DrawData>* eyes[2]{};
++};
++void enqueue_pass(const PassDesc& desc) noexcept; // common.cpp
++
++} // namespace aurora::gfx::stereo
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -1,6 +1,7 @@
+ #include "command_processor.hpp"
+ 
+ #include "../gfx/common.hpp"
++#include "../gfx/stereo.hpp"
+ #include "dolphin/gx/GXAurora.h"
+ #include "gx.hpp"
+ #include "gx_fmt.hpp"
+@@ -1569,8 +1570,9 @@
+     UNLIKELY { handle_draw_overrun(totalVtxBytes, data, pos, size); }
+ 
+   auto* lastDraw = !g_gxState.stateDirty ? gfx::get_last_draw_command<DrawData>() : nullptr;
++  // While the eyes record (VR), each draw keeps its own copies there: no merging.
+   const bool canMerge = lastDraw != nullptr && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
+-                        lastDraw->instanceCount == 1;
++                        lastDraw->instanceCount == 1 && !gfx::stereo::recording();
+ 
+   // Push raw vertex data to buffer. Merged draws must remain byte-contiguous with the previous range.
+   gfx::Range vertRange = gfx::push_verts(data + pos, totalVtxBytes, canMerge ? 0 : 4);
+@@ -1671,7 +1673,7 @@
+   } else if (prim == GX_POINTS) {
+     instanceCount = vtxCount;
+   }
+-  gfx::push_draw_command(DrawData{
++  const DrawData draw{
+       .pipeline = pipeline,
+       .vertRange = vertRange,
+       .idxRange = idxRange,
+@@ -1681,7 +1683,10 @@
+       .instanceCount = instanceCount,
+       .bindGroups = bindGroups,
+       .dstAlpha = g_gxState.dstAlpha,
+-  });
++  };
++  if (!gfx::stereo::record_gx_draw(draw, config, info, vertRange.offset, ranges)) {
++    gfx::push_draw_command(draw);
++  }
+ }
+ 
+ std::string read_string(const u8* data, u32& pos, u32 size, bool bigEndian) {
+diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
+--- a/lib/webgpu/gpu.cpp
++++ b/lib/webgpu/gpu.cpp
+@@ -826,6 +826,13 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+         }
+         requiredFeatures.push_back(feature);
+       }
++#if defined(__ANDROID__)
++      // A VR headset's eye images are shared with its compositor (gfx/stereo.cpp).
++      if (feature == wgpu::FeatureName::SharedTextureMemoryAHardwareBuffer ||
++          feature == wgpu::FeatureName::SharedFenceSyncFD) {
++        requiredFeatures.push_back(feature);
++      }
++#endif
+     }
+ #ifdef WEBGPU_DAWN
+     wgpu::DawnCacheDeviceDescriptor cacheDescriptor({

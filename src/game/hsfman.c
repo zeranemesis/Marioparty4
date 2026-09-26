@@ -21,6 +21,7 @@
 #ifdef TARGET_PC
 #include <assert.h>
 #include "port/frame_interpolation.h"
+#include "port/quest_stereo.h"
 #include "port/widescreen.h"
 extern bool PartyBoard_IsSimulationTick;
 #define PARTYBOARD_ADVANCE_FRAME PartyBoard_IsSimulationTick
@@ -248,6 +249,10 @@ void Hu3DExec(void) {
                 HuSprDispInit();
                 HuSprExec(0x7F);
             }
+#ifdef TARGET_PC
+            // Meta Quest: this camera's 3D layers are also drawn for the headset's eyes.
+            PartyBoard_StereoBeginCamera(Hu3DCameraNo);
+#endif
             if (FogData.fogType != GX_FOG_NONE) {
 #ifdef TARGET_PC
                 renderCamera = *camera;
@@ -354,6 +359,9 @@ void Hu3DExec(void) {
                     Hu3DDrawPost();
                 }
             }
+#ifdef TARGET_PC
+            PartyBoard_StereoEndCamera();
+#endif
         }
     }
     HuSprDispInit();
@@ -1425,6 +1433,9 @@ void Hu3DCameraSet(s32 arg0, Mtx arg1) {
     }
     GXSetScissor(temp_r31->scissorX, temp_r31->scissorY, temp_r31->scissorW, temp_r31->scissorH);
     C_MTXLookAt(arg1, &temp_r31->pos, &temp_r31->up, &temp_r31->target);
+#ifdef TARGET_PC
+    PartyBoard_StereoCameraView(arg0, arg1);
+#endif
 }
 
 BOOL Hu3DModelCameraInfoSet(s16 arg0, u16 arg1) {
