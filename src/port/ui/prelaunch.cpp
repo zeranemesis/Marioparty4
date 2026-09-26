@@ -739,6 +739,18 @@ Prelaunch::Prelaunch()
             });
             apply_intro_animation(mMenuButtons.back()->root(), "delay-2");
         }
+#elif defined(__ANDROID__)
+        if (!PartyBoard_NetplayEnabled()) {
+            mMenuButtons.push_back(std::make_unique<Button>(menuList, "Play Online"));
+            mMenuButtons.back()->on_pressed([] {
+                if (open_android_lobby()) {
+                    PartyBoard_IsRunning = false;
+                } else {
+                    prelaunch_state().errorString = "The online lobby could not be opened.";
+                }
+            });
+            apply_intro_animation(mMenuButtons.back()->root(), "delay-2");
+        }
 #else
         if (!PartyBoard_NetplayEnabled()) {
             mMenuButtons.push_back(std::make_unique<Button>(menuList, "Play Online"));

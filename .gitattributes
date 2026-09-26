@@ -6,6 +6,7 @@
 
 # Enforce platform-specific encodings
 *.bat  text eol=crlf
+*.cmd  text eol=crlf
 *.sh   text eol=lf
 *.sha1 text eol=lf
 

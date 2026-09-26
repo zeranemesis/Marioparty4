@@ -74,8 +74,22 @@ MenuBar::MenuBar()
             .duration = std::chrono::seconds(5),
         });
     });
+#elif defined(__ANDROID__)
+    // The phone's companion: the lobby screen restarts the game for the session.
+    mTabBar->add_tab("Play Online", [this] {
+        if (open_android_lobby()) {
+            PartyBoard_IsRunning = false;
+            return;
+        }
+        push_toast({
+            .type = "error",
+            .title = "Online mode",
+            .content = "The online lobby could not be opened.",
+            .duration = std::chrono::seconds(5),
+        });
+    });
 #else
-    // No companion process on Android/iOS/Linux/macOS: the lobby lives in the game.
+    // No companion process on iOS/Linux/macOS: the lobby lives in the game.
     mTabBar->add_tab("Play Online", [this] { push(std::make_unique<OnlineWindow>()); });
 #endif
     // mTabBar->add_tab("Warp", [] {

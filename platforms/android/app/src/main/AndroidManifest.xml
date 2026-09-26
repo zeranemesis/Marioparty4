@@ -8,11 +8,30 @@
     <uses-feature android:name="android.hardware.gamepad" android:required="false" />
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
     <uses-feature android:name="android.hardware.type.pc" android:required="false" />
+    <!-- Meta Quest (quest/QuestVr.java): the game on a virtual screen, played
+         with the Touch controllers. Not required, so phones install it too. -->
+    <uses-feature android:name="android.hardware.vr.headtracking" android:required="false" android:version="1" />
+    <!-- Mixed reality: the room around the game, and the game kept on the
+         table between sessions (a spatial anchor). -->
+    <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="false" />
+    <uses-permission android:name="com.oculus.permission.USE_ANCHOR_API" />
+    <!-- Without hand tracking declared, Horizon OS refuses to start the game
+         while the controllers sleep; the game still plays with the controllers. -->
+    <uses-feature android:name="oculus.software.handtracking" android:required="false" />
+    <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
 
     <uses-permission android:name="android.permission.VIBRATE" />
     <!-- CubeShelf friends' presence and RetroAchievements go over HTTPS (src/port/http.cpp). -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Online lobby (online/): the relay stays in the foreground while the game
+         runs, tells a guest when the host starts, and asks the Wi-Fi box for a
+         temporary port through UPnP discovery (multicast). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <application
         android:allowBackup="true"
@@ -27,6 +46,8 @@
 
         <meta-data android:name="android.game_mode_config"
             android:resource="@xml/game_mode_config" />
+        <meta-data android:name="com.oculus.supportedDevices"
+            android:value="quest2|quest3|quest3s|questpro" />
 
         <!-- SDLActivity ends the process (System.exit) if the activity is ever
              re-created while the game runs, so every configuration change a phone
@@ -42,14 +63,59 @@
             android:launchMode="singleInstance"
             android:preferMinimalPostProcessing="true"
             android:screenOrientation="userLandscape">
+            <!-- The headset's menu opens over the game instead of pausing it. -->
+            <meta-data android:name="com.oculus.vr.focusaware" android:value="true" />
+            <!-- The VR categories make Horizon OS start the game immersive (in
+                 the headset, not as a 2D window); phones ignore them. -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="com.oculus.intent.category.VR" />
+                <category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
             </intent-filter>
         </activity>
+
+        <!-- The online lobby, the phone's PartyBoardOnline.exe. Its own process,
+             so it outlives the game process it restarts with its netplay
+             arguments; its own task, so the game and the lobby switch cleanly.
+             Sharing a PB4 invitation to Party Board opens it on that lobby. -->
+        <activity
+            android:name="com.mariopartyrd.partyboard.online.LobbyActivity"
+            android:process=":online"
+            android:taskAffinity="com.mariopartyrd.partyboard.online"
+            android:launchMode="singleTask"
+            android:exported="true"
+            android:label="@string/online_lobby"
+            android:theme="@android:style/Theme.Material.NoActionBar"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density">
+            <intent-filter android:label="@string/online_join">
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name="com.mariopartyrd.partyboard.online.RestartActivity"
+            android:process=":online"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <service
+            android:name="com.mariopartyrd.partyboard.online.OnlineService"
+            android:process=":online"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps a peer-to-peer multiplayer game session (lobby and input relay) alive while the game runs in another process." />
+        </service>
     </application>
 
 </manifest>

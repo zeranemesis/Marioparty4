@@ -8,6 +8,7 @@
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_touch.h>
 #include <SDL3/SDL_video.h>
+#include <aurora/lib/webgpu/gpu.hpp>
 #include <aurora/lib/window.hpp>
 #include <dolphin/pad.h>
 
@@ -145,6 +146,9 @@ void TouchOverlay::place(Rml::Element *element, const touch::Circle &circle) con
     element->SetProperty(Rml::PropertyId::Top, Rml::Property((circle.y - circle.radius) * mScaleY, Rml::Unit::PX));
     element->SetProperty(Rml::PropertyId::Width, Rml::Property(size * mScaleX, Rml::Unit::PX));
     element->SetProperty(Rml::PropertyId::Height, Rml::Property(size * mScaleY, Rml::Unit::PX));
+    // RmlUi takes no percentage radius ("50%" is a syntax error there): round it in pixels.
+    element->SetProperty("border-radius", Rml::ToString(circle.radius * mScaleX) + "px");
+    element->SetProperty(Rml::PropertyId::LineHeight, Rml::Property(size * mScaleY, Rml::Unit::PX));
 }
 
 void TouchOverlay::relayout()
@@ -157,26 +161,44 @@ void TouchOverlay::relayout()
     const float width = static_cast<float>(windowSize.width);
     const float height = static_cast<float>(windowSize.height);
     const Rml::Vector2i contextSize = context->GetDimensions();
-    const float scaleX = static_cast<float>(contextSize.x) / width;
-    const float scaleY = static_cast<float>(contextSize.y) / height;
-    if (width == mLayoutWidth && height == mLayoutHeight && scaleX == mScaleX && scaleY == mScaleY) {
+    if (contextSize.x <= 0 || contextSize.y <= 0 || windowSize.native_fb_width == 0 || windowSize.native_fb_height == 0) {
+        return;
+    }
+    // The UI is drawn only over the game picture, which is pillarboxed on a phone (4:3 in a 20:9
+    // screen). The controls used to be laid out over the whole window and then squeezed into the
+    // picture's width: drawn in one place, pressed in another. Lay them out over the picture.
+    const auto viewport = aurora::webgpu::calculate_present_viewport(windowSize.native_fb_width,
+        windowSize.native_fb_height, static_cast<uint32_t>(contextSize.x), static_cast<uint32_t>(contextSize.y));
+    const float toWindowX = width / static_cast<float>(windowSize.native_fb_width);
+    const float toWindowY = height / static_cast<float>(windowSize.native_fb_height);
+    const float originX = viewport.left * toWindowX;
+    const float originY = viewport.top * toWindowY;
+    const float areaWidth = std::max(1.0f, viewport.width * toWindowX);
+    const float areaHeight = std::max(1.0f, viewport.height * toWindowY);
+    const float scaleX = static_cast<float>(contextSize.x) / areaWidth;
+    const float scaleY = static_cast<float>(contextSize.y) / areaHeight;
+    if (width == mLayoutWidth && height == mLayoutHeight && scaleX == mScaleX && scaleY == mScaleY
+        && originX == mOriginX && originY == mOriginY)
+    {
         return;
     }
     mLayoutWidth = width;
     mLayoutHeight = height;
+    mOriginX = originX;
+    mOriginY = originY;
     mScaleX = scaleX;
     mScaleY = scaleY;
 
-    // Keep clear of notches and rounded corners.
+    // Keep clear of notches and rounded corners, where they reach into the picture.
     touch::Insets safe;
     SDL_Rect safeRect {};
     if (auto *window = aurora::window::get_sdl_window(); window != nullptr && SDL_GetWindowSafeArea(window, &safeRect)) {
-        safe.left = std::max(0.0f, static_cast<float>(safeRect.x));
-        safe.top = std::max(0.0f, static_cast<float>(safeRect.y));
-        safe.right = std::max(0.0f, width - static_cast<float>(safeRect.x + safeRect.w));
-        safe.bottom = std::max(0.0f, height - static_cast<float>(safeRect.y + safeRect.h));
+        safe.left = std::max(0.0f, static_cast<float>(safeRect.x) - originX);
+        safe.top = std::max(0.0f, static_cast<float>(safeRect.y) - originY);
+        safe.right = std::max(0.0f, originX + areaWidth - static_cast<float>(safeRect.x + safeRect.w));
+        safe.bottom = std::max(0.0f, originY + areaHeight - static_cast<float>(safeRect.y + safeRect.h));
     }
-    mController.set_layout(touch::make_layout(width, height, safe));
+    mController.set_layout(touch::make_layout(areaWidth, areaHeight, safe));
     for (std::size_t i = 0; i < touch::kControlCount; ++i) {
         place(mElements[i], mController.layout().controls[i]);
     }
@@ -222,6 +244,7 @@ void TouchOverlay::update()
         mKnob->SetProperty(Rml::PropertyId::Top, Rml::Property(top * mScaleY, Rml::Unit::PX));
         mKnob->SetProperty(Rml::PropertyId::Width, Rml::Property(knobRadius * 2.0f * mScaleX, Rml::Unit::PX));
         mKnob->SetProperty(Rml::PropertyId::Height, Rml::Property(knobRadius * 2.0f * mScaleY, Rml::Unit::PX));
+        mKnob->SetProperty("border-radius", Rml::ToString(knobRadius * mScaleX) + "px");
     }
 }
 
@@ -241,14 +264,14 @@ bool TouchOverlay::handle_event(const SDL_Event &event) noexcept
             if (!direct_touch(event.tfinger)) {
                 return false;
             }
-            return self->mController.finger_down(event.tfinger.fingerID, event.tfinger.x * self->mLayoutWidth,
-                event.tfinger.y * self->mLayoutHeight);
+            return self->mController.finger_down(event.tfinger.fingerID, event.tfinger.x * self->mLayoutWidth - self->mOriginX,
+                event.tfinger.y * self->mLayoutHeight - self->mOriginY);
         case SDL_EVENT_FINGER_MOTION:
             if (!self->mController.owns(event.tfinger.fingerID)) {
                 return false;
             }
-            self->mController.finger_move(event.tfinger.fingerID, event.tfinger.x * self->mLayoutWidth,
-                event.tfinger.y * self->mLayoutHeight);
+            self->mController.finger_move(event.tfinger.fingerID, event.tfinger.x * self->mLayoutWidth - self->mOriginX,
+                event.tfinger.y * self->mLayoutHeight - self->mOriginY);
             return true;
         case SDL_EVENT_FINGER_UP:
         case SDL_EVENT_FINGER_CANCELED:

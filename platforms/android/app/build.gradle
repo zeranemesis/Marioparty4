@@ -19,6 +19,7 @@ def syncPartyBoardAssets = tasks.register('syncPartyBoardAssets', Sync) {
 android {
     namespace 'com.mariopartyrd.partyboard'
     compileSdk 36
+    ndkVersion System.getenv('ANDROID_NDK_VERSION') ?: '29.0.14206865'
 
     defaultConfig {
         applicationId 'com.mariopartyrd.partyboard'
@@ -27,6 +28,27 @@ android {
         // CI passes its run number so each build installs over the last one.
         versionCode((System.getenv('PARTYBOARD_VERSION_CODE') ?: '1').toInteger())
         versionName '0.1.0'
+
+        // libpartyboard_quest.so (Meta Quest), for the ABIs the game ships.
+        externalNativeBuild {
+            cmake {
+                abiFilters 'arm64-v8a', 'x86_64'
+                arguments '-DANDROID_STL=c++_static'
+            }
+        }
+    }
+
+    // The Meta Quest headset side (src/main/cpp). The game's own libraries
+    // come prebuilt from the CMake presets through jniLibs.
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+
+    buildFeatures {
+        prefab true
     }
 
     // The public test key CI signs with: a local debug build and a CI build
@@ -37,6 +59,20 @@ android {
             storePassword 'android'
             keyAlias 'androiddebugkey'
             keyPassword 'android'
+        }
+    }
+
+    // Two APKs from the same code: `phone` asks for no install permission (Play
+    // Protect holds that against an app); `quest` does, so a headset, which has
+    // no installer of its own, installs its updates itself (quest/QuestUpdater).
+    // Both run on either device; each follows its own update manifest.
+    flavorDimensions 'device'
+    productFlavors {
+        phone {
+            dimension 'device'
+        }
+        quest {
+            dimension 'device'
         }
     }
 
@@ -76,10 +112,22 @@ android {
     lint {
         abortOnError false
     }
+
+    testOptions {
+        // Lobby code logs through android.util only on paths the tests do not take.
+        unitTests.returnDefaultValues = true
+    }
 }
 
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
+    // Khronos OpenXR loader: finds the headset's runtime (Meta Quest).
+    implementation 'org.khronos.openxr:openxr_loader_for_android:1.1.63'
+    // The online lobby's protocol (src/test): the PC companion's Tests.cs, for the phone.
+    testImplementation 'junit:junit:4.13.2'
+    // CubeShelf's QR code (CubeShelfLink.java): Play services shows the viewfinder itself, so the
+    // app asks for no camera permission.
+    implementation 'com.google.android.gms:play-services-code-scanner:16.1.0'
 }
 
 tasks.configureEach { task ->

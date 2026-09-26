@@ -29,12 +29,13 @@ body {
 .button,
 .stick {
     position: absolute;
-    border-radius: 50%;
+    /* border-radius is set in pixels from code: RmlUi rejects "50%". */
     border: 2dp rgba(255, 255, 255, 70%);
     background-color: rgba(30, 30, 40, 55%);
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    /* Centred with text-align and a line-height set from code: RmlUi draws no bare text
+       inside a flex container, which left every label blank. */
+    display: block;
+    text-align: center;
     font-size: 22dp;
 }
 
@@ -84,7 +85,6 @@ body {
 
 .knob {
     position: absolute;
-    border-radius: 50%;
     background-color: rgba(220, 220, 230, 75%);
     border: 2dp rgba(255, 255, 255, 80%);
 }

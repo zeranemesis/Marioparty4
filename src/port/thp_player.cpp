@@ -221,7 +221,16 @@ public:
             return logical_frame();
         }
         const uint64_t sample = cursor.load(std::memory_order_relaxed);
-        return sample * static_cast<uint64_t>(fps * 100000.0f) / (uint64_t(rate) * 100000);
+        const uint64_t audioFrame = sample * static_cast<uint64_t>(fps * 100000.0f) / (uint64_t(rate) * 100000);
+        // The device paces the picture while it plays. One that stops draining
+        // (no output, audio focus taken by a call, a Bluetooth headset switching,
+        // an emulator started without sound) froze the movie, and with it every
+        // screen that waits for its end: after choosing a save file the game sat
+        // on an empty screen forever. More than a second behind the simulation
+        // clock, the simulation clock takes over.
+        const uint64_t logical = logical_frame();
+        const uint64_t lag = fps > 1.0f ? static_cast<uint64_t>(fps) : 30u;
+        return logical > audioFrame + lag ? logical - lag : audioFrame;
     }
 
     /* D14: two peers left the movie wait two simulation frames apart while

@@ -14,6 +14,11 @@
 
 #include <ctime>
 
+#ifdef __ANDROID__
+#include <SDL3/SDL_system.h>
+#include <jni.h>
+#endif
+
 namespace partyboard::ui {
 namespace {
 
@@ -75,6 +80,47 @@ namespace {
     }
 
 } // namespace
+
+bool open_android_lobby([[maybe_unused]] const std::string &invitation)
+{
+#ifdef __ANDROID__
+    auto *env = static_cast<JNIEnv *>(SDL_GetAndroidJNIEnv());
+    auto activity = static_cast<jobject>(SDL_GetAndroidActivity());
+    if (env == nullptr || activity == nullptr) {
+        return false;
+    }
+    bool opened = false;
+    jclass type = env->GetObjectClass(activity);
+    jmethodID open = type == nullptr ? nullptr
+        : env->GetMethodID(type, "openOnlineLobby", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Z");
+    if (open != nullptr) {
+        const auto &state = prelaunch_state();
+        const std::string disc = state.configuredDiscCanLaunch ? state.configuredDiscPath
+                                                              : getSettings().backend.isoPath.getValue();
+        const bool french = getSettings().game.language.getValue() == GameLanguage::French;
+        jstring name = env->NewStringUTF(getSettings().online.nickname.getValue().c_str());
+        jstring path = env->NewStringUTF(disc.c_str());
+        jstring language = env->NewStringUTF(french ? "fr" : "en");
+        jstring code = env->NewStringUTF(invitation.c_str());
+        opened = env->CallBooleanMethod(activity, open, name, path, language, code) == JNI_TRUE;
+        env->DeleteLocalRef(code);
+        env->DeleteLocalRef(name);
+        env->DeleteLocalRef(path);
+        env->DeleteLocalRef(language);
+    }
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        opened = false;
+    }
+    if (type != nullptr) {
+        env->DeleteLocalRef(type);
+    }
+    env->DeleteLocalRef(activity);
+    return opened;
+#else
+    return false;
+#endif
+}
 
 OnlineWindow::OnlineWindow(std::string invitation)
 {

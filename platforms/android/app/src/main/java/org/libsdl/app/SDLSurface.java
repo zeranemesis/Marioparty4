@@ -47,6 +47,9 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
     // Is SurfaceView ready for rendering
     protected boolean mIsSurfaceReady;
 
+    // Is on-screen keyboard visible
+    protected boolean mKeyboardVisible;
+
     // Pinch events
     private final ScaleGestureDetector scaleGestureDetector;
 
@@ -91,13 +94,66 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
     }
 
     protected Surface getNativeSurface() {
+        if (mUseExternalSurface) {
+            return mExternalSurface;
+        }
         return getHolder().getSurface();
+    }
+
+    // Meta Quest: the game draws into the headset's virtual screen, an OpenXR
+    // surface (QuestVr), instead of this view, which the headset never shows.
+    // From useExternalSurface() on, this view's own surface is ignored.
+    protected boolean mUseExternalSurface;
+    protected Surface mExternalSurface;
+
+    public void useExternalSurface() {
+        mUseExternalSurface = true;
+    }
+
+    // What surfaceCreated() then surfaceChanged() do, for the external surface.
+    // The virtual screen has no physical size: density sets the menus' scale.
+    public void setExternalSurface(Surface surface, int width, int height, float density, float refreshRate) {
+        if (SDLActivity.mSingleton == null) {
+            return;
+        }
+        mExternalSurface = surface;
+        auroraNativeSetSurfaceReady(false);
+        SDLActivity.onNativeSurfaceCreated();
+
+        mWidth = width;
+        mHeight = height;
+        SDLActivity.nativeSetScreenResolution(width, height, width, height, density, refreshRate);
+        SDLActivity.onNativeResize();
+        SDLActivity.onNativeSurfaceChanged();
+
+        mIsSurfaceReady = true;
+        auroraNativeSetSurfaceReady(true);
+        SDLActivity.mNextNativeState = SDLActivity.NativeState.RESUMED;
+        SDLActivity.handleNativeState();
+    }
+
+    // Another external surface (a new resolution): what surfaceDestroyed()
+    // then surfaceCreated() and surfaceChanged() do, as when a phone leaves
+    // the game and comes back.
+    public void replaceExternalSurface(Surface surface, int width, int height, float density, float refreshRate) {
+        if (SDLActivity.mSingleton == null) {
+            return;
+        }
+        auroraNativeSetSurfaceReady(false);
+        SDLActivity.mNextNativeState = SDLActivity.NativeState.PAUSED;
+        SDLActivity.handleNativeState();
+        mIsSurfaceReady = false;
+        SDLActivity.onNativeSurfaceDestroyed();
+        setExternalSurface(surface, width, height, density, refreshRate);
     }
 
     // Called when we have a valid drawing surface
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
         Log.v("SDL", "surfaceCreated()");
+        if (mUseExternalSurface) {
+            return;
+        }
         auroraNativeSetSurfaceReady(false);
         SDLActivity.onNativeSurfaceCreated();
     }
@@ -106,6 +162,9 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
     @Override
     public void surfaceDestroyed(SurfaceHolder holder) {
         Log.v("SDL", "surfaceDestroyed()");
+        if (mUseExternalSurface) {
+            return;
+        }
         auroraNativeSetSurfaceReady(false);
 
         // Transition to pause, if needed
@@ -122,7 +181,7 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
                                int format, int width, int height) {
         Log.v("SDL", "surfaceChanged()");
 
-        if (SDLActivity.mSingleton == null) {
+        if (SDLActivity.mSingleton == null || mUseExternalSurface) {
             return;
         }
 
@@ -213,6 +272,18 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
                                                WindowInsets.Type.displayCutout());
 
             SDLActivity.onNativeInsetsChanged(combined.left, combined.right, combined.top, combined.bottom);
+
+            if (insets.isVisible(WindowInsets.Type.ime())) {
+                if (!mKeyboardVisible) {
+                    mKeyboardVisible = true;
+                    SDLActivity.onNativeScreenKeyboardShown();
+                }
+            } else {
+                if (mKeyboardVisible) {
+                    mKeyboardVisible = false;
+                    SDLActivity.onNativeScreenKeyboardHidden();
+                }
+            }
         }
 
         // Pass these to any child views in case they need them
@@ -318,11 +389,11 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
     protected void enableSensor(int sensortype, boolean enabled) {
         // TODO: This uses getDefaultSensor - what if we have >1 accels?
         if (enabled) {
-            mSensorManager.registerListener(this,
+            SDLSensorManager.registerListener(mSensorManager, this,
                             mSensorManager.getDefaultSensor(sensortype),
-                            SensorManager.SENSOR_DELAY_GAME, null);
+                            SensorManager.SENSOR_DELAY_GAME);
         } else {
-            mSensorManager.unregisterListener(this,
+            SDLSensorManager.unregisterListener(mSensorManager, this,
                             mSensorManager.getDefaultSensor(sensortype));
         }
     }

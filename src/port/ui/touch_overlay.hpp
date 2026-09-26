@@ -38,6 +38,9 @@ private:
     float mScaleY = 1.0f;
     float mLayoutWidth = 0.0f;
     float mLayoutHeight = 0.0f;
+    // Where the game picture (and so the UI) starts in the window.
+    float mOriginX = 0.0f;
+    float mOriginY = 0.0f;
     int mOpacity = -1;
     bool mShown = false;
 };

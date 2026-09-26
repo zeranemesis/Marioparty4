@@ -330,6 +330,10 @@
         "CMAKE_DISABLE_FIND_PACKAGE_zstd": {
           "type": "BOOL",
           "value": true
+        },
+        "PARTYBOARD_EXPERIMENTAL_MUSYX_AUDIO": {
+          "type": "BOOL",
+          "value": true
         }
       }
     },

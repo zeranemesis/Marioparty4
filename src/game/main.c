@@ -22,6 +22,7 @@
 #include "port/settings.h"
 #include "port/imgui.h"
 #include "port/frame_interpolation.h"
+#include "port/perf_hint.h"
 #include "port/main.h"
 #include "port/rollback.h"
 #include "port/rollback_animation.h"
@@ -241,6 +242,7 @@ void main(void)
          * 60 Hz tick polls PAD from this fresh state immediately before the
          * game consumes it. Events remain queued for aurora_update next loop. */
         SDL_PumpEvents();
+        PartyBoard_PerfFrameBegin();
         simulationTicks = frame_pacer_simulation_tick();
         simulatedTicks = 0;
         finalizedTicks = 0;
@@ -413,6 +415,7 @@ void main(void)
         }
         ui_update();
         aurora_end_frame();
+        PartyBoard_PerfFrameEnd();
         if (!disableFrameLimiter || PartyBoard_NetplayEnabled()) {
             frame_limiter();
         }

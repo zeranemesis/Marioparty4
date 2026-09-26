@@ -5,6 +5,7 @@
 #include "modal.hpp"
 #include "online.hpp"
 #include "pane.hpp"
+#include "port/android_bridge.hpp"
 #include "port/main.h"
 #include "port/online/cubeshelf_friends.hpp"
 #include "string_button.hpp"
@@ -12,6 +13,7 @@
 #include <SDL3/SDL_clipboard.h>
 #include <SDL3/SDL_stdinc.h>
 #include <aurora/lib/window.hpp>
+#include <fmt/format.h>
 #include <nlohmann/json.hpp>
 
 #include <atomic>
@@ -27,6 +29,7 @@
 #include <sstream>
 #include <system_error>
 #include <thread>
+#include <utility>
 
 namespace partyboard::ui::cubeshelf {
 namespace {
@@ -432,6 +435,7 @@ void FriendsWindow::build(Rml::Element *content)
     }
 
     if (native_mode()) {
+        add_link_section(pane);
         pane.add_section("CubeShelf profile");
         pane.add_button("Refresh now").on_pressed([] { online::cubeshelf::refresh_now(); });
         pane.add_button("Forget this profile").on_pressed([this] {
@@ -464,6 +468,9 @@ void FriendsWindow::build_import(Rml::Element *content)
     auto &leftPane = add_child<Pane>(content, Pane::Type::Controlled);
     auto &rightPane = add_child<Pane>(content, Pane::Type::Uncontrolled);
 
+#ifdef __ANDROID__
+    add_link_section(leftPane);
+#endif
     leftPane.add_section("Import your CubeShelf profile");
     leftPane.register_control(leftPane.add_child<StringButton>(StringButton::Props {
                                   .key = "Passphrase",
@@ -490,6 +497,132 @@ void FriendsWindow::build_import(Rml::Element *content)
     leftPane.add_text("On your PC, open CubeShelf, then My profile, Play on a phone, and export your profile. This device will then see your friends and their invitations; your PC keeps publishing your presence.");
     mImportStatus = leftPane.add_text(mImportMessage);
     leftPane.finalize();
+}
+
+void FriendsWindow::add_link_section([[maybe_unused]] Pane &pane)
+{
+#ifdef __ANDROID__
+    pane.add_section("Account and saves (QR code)");
+    pane.add_text("In CubeShelf on your PC: My profile, Play on a phone, Show the QR code. Both devices must be on the same Wi-Fi.");
+    pane.add_button("Scan: get my account and my saves").on_pressed([this] { start_link(0); });
+    pane.add_button("Scan: send my saves to the PC").on_pressed([this] { start_link(1); });
+    pane.add_button("Paste the code shown under the QR code").on_pressed([this] {
+        char *text = SDL_HasClipboardText() ? SDL_GetClipboardText() : nullptr;
+        std::string value = text != nullptr ? text : "";
+        SDL_free(text);
+        if (value.find("CSL1:") == std::string::npos) {
+            set_link_message("The clipboard holds no CubeShelf code (it starts with CSL1:).");
+            return;
+        }
+        mLinkCode = value;
+        set_link_message("Code pasted. Choose what to do: get my account and my saves, or send my saves to the PC.");
+    });
+    mLinkStatus = pane.add_text(mLinkMessage);
+#endif
+}
+
+void FriendsWindow::set_link_message(std::string message)
+{
+    mLinkMessage = std::move(message);
+    if (mLinkStatus != nullptr) {
+        mLinkStatus->SetInnerRML(escape(ui_translate(mLinkMessage)));
+    }
+}
+
+void FriendsWindow::start_link([[maybe_unused]] int mode)
+{
+#ifdef __ANDROID__
+    if (mLinkActive) {
+        return;
+    }
+    bool started = false;
+    const bool fr = french();
+    const std::string code = std::exchange(mLinkCode, {});
+    android::with_activity("startCubeShelfLink", "(ILjava/lang/String;Z)Z", [&](JNIEnv *env, jobject activity, jmethodID method) {
+        jstring text = env->NewStringUTF(code.c_str());
+        started = env->CallBooleanMethod(activity, method, static_cast<jint>(mode), text, fr ? JNI_TRUE : JNI_FALSE) == JNI_TRUE;
+        env->DeleteLocalRef(text);
+    });
+    if (!started) {
+        set_link_message("The QR code transfer could not start.");
+        return;
+    }
+    mLinkActive = true;
+    set_link_message(mode == 0 ? "Getting your account and your saves from the PC..." : "Sending your saves to the PC...");
+#endif
+}
+
+void FriendsWindow::poll_link()
+{
+#ifdef __ANDROID__
+    if (!mLinkActive) {
+        return;
+    }
+    std::string raw;
+    android::with_activity("pollCubeShelfLink", "()Ljava/lang/String;", [&](JNIEnv *env, jobject activity, jmethodID method) {
+        auto value = static_cast<jstring>(env->CallObjectMethod(activity, method));
+        raw = android::to_string(env, value);
+        if (value != nullptr) {
+            env->DeleteLocalRef(value);
+        }
+    });
+    const auto result = nlohmann::json::parse(raw, nullptr, false);
+    if (result.is_discarded() || !result.is_object()) {
+        return;
+    }
+    const std::string state = result.value("state", "");
+    if (state == "scanning" || state == "working" || state == "idle") {
+        return;
+    }
+    mLinkActive = false;
+    const std::string message = result.value("message", "");
+    if (state == "error") {
+        set_link_message(message.empty() ? "The transfer failed." : message);
+        return;
+    }
+    if (result.value("mode", 0) == 1) {
+        set_link_message(message.empty() ? "Saves sent to the PC." : message);
+        return;
+    }
+    // Mode 0: the account comes in now; the saves at the next start.
+    std::string imported = "Your account is on this device.";
+    if (result.contains("profile") && result["profile"].is_string()) {
+        const auto error = online::cubeshelf::import_from_document(result["profile"].get<std::string>());
+        if (error != online::cubeshelf::ImportError::None) {
+            imported = online::cubeshelf::import_error_message(error);
+        }
+    }
+    const int saves = result.value("saves", 0);
+    if (saves <= 0) {
+        set_link_message(imported + " " + ui_translate("The PC had no Mario Party 4 save to send."));
+        refresh_active_tab();
+        return;
+    }
+    push(std::make_unique<Modal>(Modal::Props {
+        .title = "CubeShelf",
+        .bodyRml = escape(ui_translate(imported) + " "
+            + fmt::format(fmt::runtime(ui_translate("{} save file(s) received from the PC. They replace this device's at the next start (the old ones are kept in save-backups).")), saves)),
+        .actions = {
+            ModalAction {
+                .label = "Later",
+                .onPressed = [this](Modal &modal) {
+                    modal.pop();
+                    refresh_active_tab();
+                },
+            },
+            ModalAction {
+                .label = "Restart now",
+                .onPressed = [](Modal &modal) {
+                    modal.pop();
+                    android::with_activity("restartGame", "()V", [](JNIEnv *env, jobject activity, jmethodID method) {
+                        env->CallVoidMethod(activity, method);
+                    });
+                    PartyBoard_IsRunning = false;
+                },
+            },
+        },
+    }));
+#endif
 }
 
 struct FriendsWindow::ImportJob {
@@ -534,6 +667,13 @@ void FriendsWindow::act(const std::string &action, const std::string &key, bool 
         // Nothing to close here: the lobby opens inside the game, on the invitation.
         if (action == "join") {
             if (const auto payload = online::cubeshelf::join_payload(key)) {
+#ifdef __ANDROID__
+                // The phone's lobby is its own screen, which restarts the game for the session.
+                if (open_android_lobby(*payload)) {
+                    PartyBoard_IsRunning = false;
+                    return;
+                }
+#endif
                 push(std::make_unique<OnlineWindow>(*payload));
             }
             else {
@@ -612,6 +752,7 @@ void FriendsWindow::update()
     const auto now = clock::now();
 
     if (native_mode()) {
+        poll_link();
         std::optional<std::string> picked;
         {
             std::lock_guard lock(sPickedMutex);

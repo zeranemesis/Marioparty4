@@ -7,6 +7,9 @@
 #include "controller_config.hpp"
 #include "port/app_update.hpp"
 #include "port/config.hpp"
+#include "port/display_rate.hpp"
+#include "port/netplay_runtime.h"
+#include "localization.hpp"
 #include "../imgui/ImGuiEngine.hpp"
 #include "../file_select.hpp"
 #include "graphics_tuner.hpp"
@@ -19,6 +22,8 @@
 #include "ui.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <fmt/format.h>
 #include <aurora/aurora.h>
 #include <game/disp.h>
 #include <gx/GXAurora.h>
@@ -32,6 +37,8 @@ Rml::String s_raPendingUser;
 Rml::String s_raPendingPassword;
 } // namespace
 
+extern "C" int PartyBoard_TargetFrameRateFor(bool netplayEnabled, int configured);
+
 namespace partyboard::ui {
 namespace {
 
@@ -40,9 +47,13 @@ namespace {
         GameLanguage value;
     };
 
+    // Every language a European disc carries (mess/*_g|f|s|i.dat); a USA disc is English only.
     constexpr std::array kLanguageChoices = {
         LanguageChoice { "English", GameLanguage::English },
         LanguageChoice { "French", GameLanguage::French },
+        LanguageChoice { "German", GameLanguage::German },
+        LanguageChoice { "Spanish", GameLanguage::Spanish },
+        LanguageChoice { "Italian", GameLanguage::Italian },
     };
 
     constexpr std::array kCardFileTypes = {
@@ -347,9 +358,10 @@ SettingsWindow::SettingsWindow(bool prelaunch)
                                           .key = "Language",
                                           .getValue =
                                               [] {
-                                                  const auto &state = prelaunch_state();
-                                                  if (getSettings().game.language.getValue() == GameLanguage::French) {
-                                                      return kLanguageChoices[1].name;
+                                                  for (const auto &choice : kLanguageChoices) {
+                                                      if (getSettings().game.language.getValue() == choice.value) {
+                                                          return choice.name;
+                                                      }
                                                   }
                                                   return kLanguageChoices[0].name;
                                               },
@@ -459,7 +471,20 @@ SettingsWindow::SettingsWindow(bool prelaunch)
                                       },
                                   }),
             rightPane, [](Pane &pane) {
+                // On a phone, only rates the screen shows evenly: a 60/120 Hz screen offers 60 and
+                // 120, a 144 Hz one 144 (120 there would judder between two refresh intervals).
+                const auto screenRates = display::supported_refresh_rates();
+                const int screenMax = screenRates.empty() ? 0 : screenRates.back();
+                const auto shownEvenly = [&screenRates](int frameRate) {
+                    return std::ranges::any_of(screenRates, [frameRate](int refresh) {
+                        const float ratio = static_cast<float>(refresh) / static_cast<float>(frameRate);
+                        return ratio >= 0.99f && std::abs(ratio - std::round(ratio)) < 0.02f;
+                    });
+                };
                 for (const int frameRate : kTargetFrameRates) {
+                    if (!screenRates.empty() && frameRate > kTargetFrameRates[0] && !shownEvenly(frameRate)) {
+                        continue;
+                    }
                     pane.add_button({
                                         .text = Rml::String { std::to_string(frameRate) + " FPS" },
                                         .isSelected = [frameRate] {
@@ -469,7 +494,11 @@ SettingsWindow::SettingsWindow(bool prelaunch)
                         .on_pressed([frameRate] {
                             getSettings().video.targetFrameRate.setValue(frameRate);
                             config::Save();
+                            display::request_frame_rate(PartyBoard_TargetFrameRateFor(PartyBoard_NetplayEnabled(), frameRate));
                         });
+                }
+                if (screenMax > 0) {
+                    pane.add_rml(fmt::format(fmt::runtime(ui_translate("<br/>This screen refreshes at up to {} Hz.")), screenMax));
                 }
                 pane.add_rml("<br/>The original game simulation and audio remain fixed at 60 Hz. Higher settings use latency-compensated 3D and 2D motion, "
                              "colour, opacity, cameras, and transition fades for smoother presentation without delaying input or speeding up gameplay. "

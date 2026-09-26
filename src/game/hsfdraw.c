@@ -11,6 +11,7 @@
 #ifdef TARGET_PC
 #include "port/crash_report.h"
 #include "port/netplay_runtime.h"
+#include "port/quest_stereo.h"
 #include <stdbool.h>
 #include <stdlib.h>
 extern bool PartyBoard_IsSimulationTick;
@@ -405,6 +406,13 @@ BOOL ObjCullCheck(HSFDATA *hsf, HSFOBJECT *objPtr, Mtx mtx) {
     MTXTrans(cullMtx, centerX + min->x, centerY + min->y, centerZ + min->z);
     MTXConcat(mtx, cullMtx, cullMtx);
     radius = scale * sqrtf(centerX * centerX + centerY * centerY + centerZ * centerZ);
+#ifdef TARGET_PC
+    if (PartyBoard_StereoActive()) {
+        // Cull against both headset eyes, rather than disabling culling for
+        // the entire map or using the original flat-screen camera.
+        return PartyBoard_StereoSphereVisible(cullMtx[0][3], cullMtx[1][3], cullMtx[2][3], radius);
+    }
+#endif
     x = cullMtx[0][3];
     y = cullMtx[1][3];
     z = -cullMtx[2][3];

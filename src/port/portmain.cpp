@@ -5,6 +5,15 @@
 #endif
 #include <windows.h>
 #endif
+#ifdef __ANDROID__
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <cstring>
+#endif
 
 #include "imgui/ImGuiEngine.hpp"
 #include "iso_validate.hpp"
@@ -31,6 +40,7 @@
 #include <dolphin/vi.h>
 #include <game/disp.h>
 #include <port/config.hpp>
+#include <port/display_rate.hpp>
 #include <port/dolassets.h>
 #include <port/main.h>
 #include <port/mods.h>
@@ -46,6 +56,7 @@
 #include <stdlib.h>
 
 extern "C" int game_main();
+extern "C" int PartyBoard_TargetFrameRateFor(bool netplayEnabled, int configured);
 
 using namespace std::string_literals;
 using namespace std::string_view_literals;
@@ -473,6 +484,62 @@ static bool online_wait_for_start(bool pumpEvents) {
     if (go) CloseHandle(go);
     if (cancel) CloseHandle(cancel);
     return started;
+#elif defined(__ANDROID__)
+    // The lobby runs in the app's ":online" process (platforms/android,
+    // online/GameLink.java) and hands over "port:secret". READY is the hello
+    // below; GO is one 'G' byte back. The socket is never closed: the lobby
+    // learns this game has ended, however it ended, from the end of stream.
+    static int link = -1;
+    const char *disc = std::getenv("PARTYBOARD_ONLINE_DISC");
+    const char *barrier = std::getenv("PARTYBOARD_ONLINE_BARRIER");
+    if (!PartyBoard_NetplayEnabled() || !disc || !*disc) return true;
+    if (!barrier || !*barrier) return false;
+    const char *colon = std::strchr(barrier, ':');
+    if (!colon || std::strlen(colon + 1) != 32) return false;
+    const long port = std::strtol(barrier, nullptr, 10);
+    if (port <= 0 || port > 65535) return false;
+    if (link < 0) {
+        const int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (fd < 0) return false;
+        sockaddr_in address {};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(static_cast<uint16_t>(port));
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (connect(fd, reinterpret_cast<sockaddr *>(&address), sizeof(address)) != 0) {
+            close(fd);
+            PartyBoardMainLog.error("Online lobby unreachable, leaving");
+            return false;
+        }
+        std::string hello = "PBGAME1\n";
+        hello.append(colon + 1, 32);
+        hello.push_back('R');
+        if (send(fd, hello.data(), hello.size(), MSG_NOSIGNAL) != static_cast<ssize_t>(hello.size())) {
+            close(fd);
+            return false;
+        }
+        link = fd;
+    }
+    bool started = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(2);
+    while (std::chrono::steady_clock::now() < deadline && PartyBoard_IsRunning) {
+        pollfd wait { link, POLLIN, 0 };
+        const int ready = poll(&wait, 1, 10);
+        if (ready < 0) break;
+        if (ready > 0) {
+            char answer = 0;
+            started = recv(link, &answer, 1, 0) == 1 && answer == 'G';
+            break;
+        }
+        if (pumpEvents) {
+            const AuroraEvent *event = aurora_update();
+            while (event && event->type != AURORA_NONE) {
+                if (event->type == AURORA_EXIT) PartyBoard_IsRunning = false;
+                ++event;
+            }
+        }
+    }
+    PartyBoardMainLog.info("Online start barrier: {}", started ? "go" : "cancelled");
+    return started;
 #else
     return true;
 #endif
@@ -538,6 +605,13 @@ extern "C" int port_main(int argc, char* argv[]) {
             onlineDisc.assign(reinterpret_cast<const char *>(utf8.c_str()));
         }
     }
+#elif defined(__ANDROID__)
+    // Set by PartyBoardActivity from the lobby's launch intent.
+    if (PartyBoard_NetplayEnabled()) {
+        if (const auto *path = std::getenv("PARTYBOARD_ONLINE_DISC"); path && *path) {
+            onlineDisc = path;
+        }
+    }
 #endif
 
     // The launcher knows which copy of the game it is starting, and it is the
@@ -593,6 +667,10 @@ extern "C" int port_main(int argc, char* argv[]) {
         config.allowTextureDumps = std::getenv("PARTYBOARD_DUMP_TEXTURES") != nullptr;
         auroraInfo = aurora_initialize(argc, argv, &config);
     }
+    // Above 60 FPS the screen has to be asked for its high refresh rate (Android keeps games at
+    // 60 Hz otherwise). An online session always renders at 60 (PartyBoard_TargetFrameRateFor).
+    partyboard::display::request_frame_rate(PartyBoard_TargetFrameRateFor(PartyBoard_NetplayEnabled(),
+        partyboard::getSettings().video.targetFrameRate.getValue()));
     if (!SDL_AddEventWatch(OnAppLifecycleEvent, nullptr)) {
         PartyBoardMainLog.warn("Unable to watch app lifecycle events: {}", SDL_GetError());
     }
