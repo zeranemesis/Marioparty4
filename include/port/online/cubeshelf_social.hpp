@@ -49,6 +49,9 @@ enum class ImportError {
 // Opens a "CSP1-" export with the passphrase typed on the PC. Whitespace anywhere is ignored.
 std::optional<Profile> import_profile(std::string_view text, std::string_view passphrase, ImportError &error);
 const char *import_error_message(ImportError error) noexcept;
+// The same document already decrypted: what the QR-code transfer (PhoneLink.cs) delivers under
+// its own session key instead of a passphrase.
+std::optional<Profile> import_profile_document(std::string_view json, ImportError &error);
 
 // The profile as kept on the device, unencrypted like CubeShelf's own identity.key: the app's
 // private storage is what protects it.

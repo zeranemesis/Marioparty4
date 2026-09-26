@@ -499,6 +499,21 @@ std::optional<Profile> import_profile(std::string_view text, std::string_view pa
     return profile_from_json(document, error);
 }
 
+std::optional<Profile> import_profile_document(std::string_view text, ImportError &error)
+{
+    error = ImportError::None;
+    if (text.size() > kMaximumProfileText) {
+        error = ImportError::NotAProfile;
+        return std::nullopt;
+    }
+    const json document = json::parse(text.begin(), text.end(), nullptr, false);
+    if (document.is_discarded() || !document.is_object()) {
+        error = ImportError::Unreadable;
+        return std::nullopt;
+    }
+    return profile_from_json(document, error);
+}
+
 const char *import_error_message(ImportError error) noexcept
 {
     switch (error) {

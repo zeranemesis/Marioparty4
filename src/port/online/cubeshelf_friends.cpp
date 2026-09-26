@@ -338,6 +338,13 @@ ImportError import_from_text(const std::string &text, const std::string &passphr
     return adopt(std::move(profile), error);
 }
 
+ImportError import_from_document(const std::string &json)
+{
+    ImportError error = ImportError::None;
+    auto profile = import_profile_document(json, error);
+    return adopt(std::move(profile), error);
+}
+
 ImportError import_from_path(const std::string &path, const std::string &passphrase)
 {
     // SDL reads Android content:// URIs as well as plain paths.

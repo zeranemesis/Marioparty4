@@ -22,7 +22,11 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 
+import com.google.mlkit.vision.barcode.common.Barcode;
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions;
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning;
 import com.mariopartyrd.partyboard.online.LobbyActivity;
+import com.mariopartyrd.partyboard.online.RestartActivity;
 import com.mariopartyrd.partyboard.online.OnlineService;
 
 import org.libsdl.app.SDLActivity;
@@ -109,8 +113,116 @@ public class PartyBoardActivity extends SDLActivity {
         }
     }
 
+    // ---- CubeShelf QR code (CubeShelfLink.java, src/port/ui/cubeshelf.cpp) -------------------
+    private final Object linkLock = new Object();
+    private String linkState = "idle";
+    private String linkMessage = "";
+    private String linkProfile = null;
+    private int linkSaves = 0;
+    private int linkMode = 0;
+
+    private void setLink(String state, String message) {
+        synchronized (linkLock) {
+            linkState = state;
+            linkMessage = message == null ? "" : message;
+        }
+    }
+
+    // Called from the game (mode 0: get the account and the PC's saves, 1: send this phone's saves).
+    // An empty code opens Play services' QR scanner; a pasted CSL1: code is used as it is.
+    public boolean startCubeShelfLink(final int mode, final String code, final boolean french) {
+        synchronized (linkLock) {
+            if (linkState.equals("scanning") || linkState.equals("working")) {
+                return false;
+            }
+            linkMode = mode;
+            linkProfile = null;
+            linkSaves = 0;
+        }
+        if (code != null && code.contains(CubeShelfLink.PREFIX)) {
+            runCubeShelfLink(mode, code, french);
+            return true;
+        }
+        setLink("scanning", "");
+        runOnUiThread(() -> {
+            try {
+                GmsBarcodeScanning.getClient(this, new GmsBarcodeScannerOptions.Builder()
+                        .setBarcodeFormats(Barcode.FORMAT_QR_CODE).build())
+                    .startScan()
+                    .addOnSuccessListener(barcode -> runCubeShelfLink(mode, barcode.getRawValue(), french))
+                    .addOnCanceledListener(() -> setLink("error", french ? "Scan annulé." : "Scan cancelled."))
+                    .addOnFailureListener(e -> setLink("error", french
+                        ? "Scanner indisponible (services Google Play). Copie le code affiché sous le QR code dans CubeShelf, puis colle-le ici."
+                        : "Scanner unavailable (Google Play services). Copy the code shown under the QR code in CubeShelf, then paste it here."));
+            } catch (RuntimeException e) {
+                setLink("error", french ? "Scanner indisponible sur cet appareil." : "Scanner unavailable on this device.");
+            }
+        });
+        return true;
+    }
+
+    private void runCubeShelfLink(final int mode, final String code, final boolean french) {
+        setLink("working", "");
+        Thread worker = new Thread(() -> {
+            try {
+                CubeShelfLink link = CubeShelfLink.parse(code, french);
+                if (mode == 0) {
+                    CubeShelfLink.Received received = link.fetch(getFilesDir(), french);
+                    synchronized (linkLock) {
+                        linkProfile = received.profileJson;
+                        linkSaves = received.saves;
+                    }
+                    setLink("done", "");
+                } else {
+                    setLink("done", link.send(getFilesDir(), french));
+                }
+            } catch (java.io.IOException e) {
+                setLink("error", e.getMessage());
+            }
+        }, "CubeShelf link");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    // Polled by the game each frame while its Friends tab is open. A finished result is handed
+    // over once: {"state","mode","message","profile","saves"}.
+    public String pollCubeShelfLink() {
+        synchronized (linkLock) {
+            try {
+                org.json.JSONObject out = new org.json.JSONObject();
+                out.put("state", linkState);
+                out.put("mode", linkMode);
+                out.put("message", linkMessage);
+                out.put("saves", linkSaves);
+                if (linkProfile != null) {
+                    out.put("profile", linkProfile);
+                }
+                if (linkState.equals("done") || linkState.equals("error")) {
+                    linkState = "idle";
+                    linkProfile = null;
+                }
+                return out.toString();
+            } catch (org.json.JSONException e) {
+                return "{\"state\":\"idle\"}";
+            }
+        }
+    }
+
+    // Starts the game again, for saves that wait for the next start. The game ends itself right
+    // after; RestartActivity (another process) opens it again once this one is gone.
+    public void restartGame() {
+        Intent restart = new Intent(this, RestartActivity.class);
+        restart.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        startActivity(restart);
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        // Saves received from CubeShelf go in before the game opens its memory cards.
+        int applied = CubeShelfLink.applyIncoming(getFilesDir());
+        if (applied > 0) {
+            Log.i(TAG, "Put " + applied + " save file(s) from CubeShelf in place");
+        }
         exportOnlineEnvironment(getIntent());
         super.onCreate(savedInstanceState);
         useDisplayCutout();

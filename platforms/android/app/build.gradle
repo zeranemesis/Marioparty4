@@ -87,6 +87,9 @@ dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
     // The online lobby's protocol (src/test): the PC companion's Tests.cs, for the phone.
     testImplementation 'junit:junit:4.13.2'
+    // CubeShelf's QR code (CubeShelfLink.java): Play services shows the viewfinder itself, so the
+    // app asks for no camera permission.
+    implementation 'com.google.android.gms:play-services-code-scanner:16.1.0'
 }
 
 tasks.configureEach { task ->

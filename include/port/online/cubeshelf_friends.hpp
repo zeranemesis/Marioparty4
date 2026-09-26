@@ -38,6 +38,8 @@ NativeView view(bool french);
 // text) and replaces any stored profile. Blocking: PBKDF2 takes about a second on a phone.
 ImportError import_from_path(const std::string &path, const std::string &passphrase);
 ImportError import_from_text(const std::string &text, const std::string &passphrase);
+// The decrypted profile document a CubeShelf QR code delivered (no passphrase involved).
+ImportError import_from_document(const std::string &json);
 
 void forget_profile() noexcept;
 void refresh_now() noexcept;

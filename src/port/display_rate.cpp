@@ -2,40 +2,12 @@
 
 #include <algorithm>
 
-#ifdef __ANDROID__
-#include <SDL3/SDL_system.h>
-#include <jni.h>
-#endif
+#include "port/android_bridge.hpp"
 
 namespace partyboard::display {
 
 #ifdef __ANDROID__
-namespace {
-    // Calls a method of PartyBoardActivity; false when there is no activity or no such method.
-    template <typename Call>
-    bool with_activity(const char *name, const char *signature, Call &&call)
-    {
-        auto *env = static_cast<JNIEnv *>(SDL_GetAndroidJNIEnv());
-        auto activity = static_cast<jobject>(SDL_GetAndroidActivity());
-        if (env == nullptr || activity == nullptr) {
-            return false;
-        }
-        jclass type = env->GetObjectClass(activity);
-        jmethodID method = type != nullptr ? env->GetMethodID(type, name, signature) : nullptr;
-        if (method != nullptr) {
-            call(env, activity, method);
-        }
-        if (env->ExceptionCheck()) {
-            env->ExceptionClear();
-            method = nullptr;
-        }
-        if (type != nullptr) {
-            env->DeleteLocalRef(type);
-        }
-        env->DeleteLocalRef(activity);
-        return method != nullptr;
-    }
-} // namespace
+using partyboard::android::with_activity;
 #endif
 
 std::vector<int> supported_refresh_rates()

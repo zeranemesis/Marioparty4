@@ -2,6 +2,10 @@
 
 #include "window.hpp"
 
+namespace partyboard::ui {
+class Pane;
+}
+
 #include <map>
 #include <memory>
 #include <optional>
@@ -74,12 +78,22 @@ private:
     void start_import(std::string source, bool fromFile);
     void set_import_message(std::string message);
     void act(const std::string &action, const std::string &key, bool closesGame);
+    // Android: CubeShelf's QR code brings the account and the saves (mode 0), or sends this
+    // device's saves to the PC (mode 1). See platforms/android/.../CubeShelfLink.java.
+    void add_link_section(Pane &pane);
+    void start_link(int mode);
+    void poll_link();
+    void set_link_message(std::string message);
     void send(const std::string &action, const std::string &key, bool closesGame);
 
     std::string mPassphrase;
     std::string mImportMessage;
     Rml::Element *mImportStatus = nullptr;
     std::shared_ptr<ImportJob> mImport;
+    bool mLinkActive = false;
+    std::string mLinkCode;
+    std::string mLinkMessage;
+    Rml::Element *mLinkStatus = nullptr;
 
     long long mRevision = -1;
     bool mFresh = false;
