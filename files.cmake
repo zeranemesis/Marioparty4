@@ -124,6 +124,8 @@ set(PORT_FILES
         src/port/touch_controls.cpp
         src/port/test_input.cpp
         src/port/display_rate.cpp
+        src/port/gamepad_priority.cpp
+        src/port/perf_hint.cpp
         src/port/version.cpp
 
         src/port/ui/achievements.cpp

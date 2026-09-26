@@ -27,6 +27,7 @@
 
 #include <port/settings.h>
 #include <port/test_input.h>
+#include <port/gamepad_priority.hpp>
 
 namespace partyboard::ui {
 namespace {
@@ -69,6 +70,8 @@ bool initialize() noexcept
     // Rml::Debugger::Initialise(aurora::rmlui::get_context());
     // Rml::Debugger::SetVisible(true);
 
+    // Gamepads connected before the game started never sent an event the UI saw.
+    ::partyboard::input::apply_gamepad_priority();
     sInitialized = true;
     return true;
 }
@@ -147,6 +150,9 @@ void handle_event(const SDL_Event &event) noexcept
         return;
     }
 
+    if (event.type == SDL_EVENT_GAMEPAD_ADDED || event.type == SDL_EVENT_GAMEPAD_REMOVED) {
+        ::partyboard::input::apply_gamepad_priority();
+    }
     if (event.type == SDL_EVENT_GAMEPAD_ADDED) {
         auto *gamepad = SDL_GetGamepadFromID(event.gdevice.which);
         if (SDL_GamepadConnected(gamepad)) {
