@@ -5,9 +5,15 @@
 #include "../../extern/aurora/lib/surface_lifecycle.hpp"
 #include <cassert>
 #include <cstdio>
+#include <unistd.h>
 
 namespace quest {
 struct StereoViewTestAccess {
+  static void presented(StereoView& view, uint64_t tag) { view.mPresentedTag = tag; }
+  static int completed(StereoView& view) {
+    auto* slot = view.newest_completed();
+    return slot ? static_cast<int>(slot - view.mSlots.data()) : -1;
+  }
   static void enable(StereoView& view) { view.mEnabled = true; }
   static void copying(StereoView& view, uint32_t image) {
     view.mSlots[image].state = StereoView::State::Copying;
@@ -57,6 +63,28 @@ int main() {
   assert(!partyboard::quest::board_fit(invalid, maximum, scale, center));
   assert(!partyboard::quest::board_fit(maximum, minimum, scale, center));
   assert(!partyboard::quest::board_fit(minimum, minimum, scale, center));
+  {
+    quest::StereoView transfer;
+    quest::StereoViewTestAccess::enable(transfer);
+    quest::StereoFrame oldFrame{}, nextFrame{};
+    assert(transfer.game_frame(oldFrame));
+    assert(transfer.game_frame(nextFrame));
+    int pending[2];
+    assert(pipe(pending) == 0);
+    transfer.submitted(nextFrame.image, nextFrame.tag, pending[0]);
+    assert(quest::StereoViewTestAccess::completed(transfer) == -1);
+    transfer.submitted(oldFrame.image, oldFrame.tag, -1);
+    assert(quest::StereoViewTestAccess::completed(transfer) == static_cast<int>(oldFrame.image));
+    const char signal = 1;
+    assert(write(pending[1], &signal, 1) == 1);
+    assert(quest::StereoViewTestAccess::completed(transfer) == static_cast<int>(nextFrame.image));
+    // A late completed source cannot replace a newer image already shown.
+    quest::StereoViewTestAccess::presented(transfer, nextFrame.tag);
+    assert(quest::StereoViewTestAccess::completed(transfer) == -1);
+    close(pending[1]);
+    quest::StereoViewTestAccess::copied(transfer, oldFrame.image);
+    quest::StereoViewTestAccess::copied(transfer, nextFrame.image);
+  }
   quest::StereoView view;
   // A separately composited HUD must not show stale menus before a world.
   assert(view.hud_layer(XR_NULL_HANDLE, nullptr) == nullptr);

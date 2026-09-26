@@ -227,6 +227,7 @@ void StereoView::destroy() {
   }
   mHudShown = false;
   mShown = false;
+  mPresentedTag = 0;
 }
 
 void StereoView::update(const XrView (&views)[2], const XrPosef& world, float scale, bool enabled, float hudWidth, float hudHeight) {
@@ -333,6 +334,18 @@ void StereoView::cancelled(uint32_t image, uint64_t tag) {
   }
 }
 
+StereoView::Slot* StereoView::newest_completed() {
+  Slot* newest = nullptr;
+  for (auto& slot : mSlots) {
+    if (slot.state != State::Ready || slot.tag <= mPresentedTag) continue;
+    pollfd finished{slot.fence, POLLIN, 0};
+    const bool complete = slot.fence < 0 ||
+        (poll(&finished, 1, 0) > 0 && (finished.revents & POLLIN));
+    if (complete && (!newest || slot.tag > newest->tag)) newest = &slot;
+  }
+  return newest;
+}
+
 const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void* next) {
   if (mSwapchain == XR_NULL_HANDLE) {
     return nullptr;
@@ -350,13 +363,15 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
           release_slot(slot);
         }
       }
-      if (slot.state == State::Ready && (newest == nullptr || slot.tag > newest->tag)) {
-        newest = &slot;
-      }
+
     }
+    // Do not queue a GPU wait on unfinished game work into the XR copy stream.
+    // Resubmit the previous layer until at least one source is complete.
+    newest = newest_completed();
     // Older finished images will never be shown now.
     for (auto& slot : mSlots) {
-      if (slot.state == State::Ready && &slot != newest) {
+      if (slot.state == State::Ready &&
+          (slot.tag <= mPresentedTag || (newest && slot.tag < newest->tag))) {
         // Ready means submitted, not completed. Dropping a fence does not
         // make its image reusable while Aurora's GPU can still write to it.
         pollfd finished{slot.fence, POLLIN, 0};
@@ -425,6 +440,7 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
         mShownIsBoard = newest->board;
       }
       mShown = true;
+      mPresentedTag = newest->tag;
       static bool loggedFirstImage = false;
       if (!loggedFirstImage) {
         LOGI("Stereo: first eye image copied to OpenXR (tag %llu)", static_cast<unsigned long long>(newest->tag));

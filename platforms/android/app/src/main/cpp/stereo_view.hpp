@@ -81,6 +81,7 @@ private:
   };
 
   void release_slot(Slot& slot);
+  Slot* newest_completed(); // Caller holds mMutex.
 
   EGLDisplay mDisplay = EGL_NO_DISPLAY;
   XrInstance mInstance = XR_NULL_HANDLE;
@@ -110,6 +111,7 @@ private:
   float mWorld[16]{};
 
   // The last image shown, resubmitted until the game draws the next one.
+  uint64_t mPresentedTag = 0;
   bool mShown = false;
   bool mShownHasWorld = false;
   XrView mShownViews[2]{};
