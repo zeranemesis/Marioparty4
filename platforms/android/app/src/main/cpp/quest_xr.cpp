@@ -173,6 +173,7 @@ std::atomic_bool g_surfaceSwitched = false;
 
 std::mutex g_ratesMutex;
 std::vector<float> g_refreshRates;
+std::atomic<float> g_activeRefreshRate{0.0f};
 std::atomic<float> g_requestedRefreshRate = 0.0f;
 
 // Rumble from SDL (QuestVr.rumble), applied by the frame loop.
@@ -554,6 +555,9 @@ void query_refresh_rates(App& app) {
   rates.resize(count);
   std::lock_guard lock{g_ratesMutex};
   g_refreshRates = std::move(rates);
+  if (!g_refreshRates.empty()) {
+    g_requestedRefreshRate.store(*std::max_element(g_refreshRates.begin(), g_refreshRates.end()));
+  }
 }
 
 float current_refresh_rate(const App& app) {
@@ -934,6 +938,7 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   if (focused) {
     apply_rumble(app, rumbleSerial);
   }
+  g_activeRefreshRate.store(current_refresh_rate(app), std::memory_order_relaxed);
   const float requested = g_requestedRefreshRate.exchange(0.0f);
   if (requested > 0.0f && app.requestRefreshRate != nullptr) {
     check(app.instance, app.requestRefreshRate(app.session, requested), "xrRequestDisplayRefreshRateFB");
@@ -1173,6 +1178,10 @@ jmethodID static_method(JNIEnv* env, jclass clazz, const char* name, const char*
 
 extern "C" {
 
+__attribute__((visibility("default"))) float PartyBoardQuest_ActiveRefreshRate() {
+  return g_activeRefreshRate.load(std::memory_order_relaxed);
+}
+
 JNIEXPORT jboolean JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_nativeStart(JNIEnv* env, jclass clazz,
                                                                                      jobject activity,
                                                                                      jstring statePath) {
@@ -1213,6 +1222,7 @@ JNIEXPORT void JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_nativeStop
   }
   g_stop.store(true, std::memory_order_release);
   g_thread.join();
+  g_activeRefreshRate.store(0.0f);
   env->DeleteGlobalRef(g_java.activity);
   env->DeleteGlobalRef(g_java.questVr);
   g_java = {};

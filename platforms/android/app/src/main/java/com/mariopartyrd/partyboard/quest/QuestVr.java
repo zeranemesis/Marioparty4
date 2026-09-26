@@ -101,21 +101,12 @@ public final class QuestVr {
         return sStarted ? nativeRefreshRates() : new float[0];
     }
 
-    /**
-     * The slowest headset rate that shows the game's frame rate evenly (60 FPS
-     * on 120 Hz), or the fastest one when none does.
-     */
+    /** Request the fastest mode advertised by the active XR runtime. */
     public static void setFrameRate(float fps) {
-        float exact = 0.0f;
-        float fastest = 0.0f;
+        float chosen = 0.0f;
         for (float rate : refreshRates()) {
-            float ratio = rate / fps;
-            if (ratio >= 0.99f && Math.abs(ratio - Math.round(ratio)) < 0.02f && (exact == 0.0f || rate < exact)) {
-                exact = rate;
-            }
-            fastest = Math.max(fastest, rate);
+            chosen = Math.max(chosen, rate);
         }
-        float chosen = exact > 0.0f ? exact : fastest;
         if (chosen > 0.0f) {
             Log.i(TAG, "Frame rate " + fps + " on a " + chosen + " Hz headset display");
             sRefreshRate = chosen;

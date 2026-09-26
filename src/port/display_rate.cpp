@@ -1,6 +1,9 @@
 #include "port/display_rate.hpp"
 
 #include <algorithm>
+#ifdef __ANDROID__
+#include <dlfcn.h>
+#endif
 
 #include "port/android_bridge.hpp"
 
@@ -9,6 +12,24 @@ namespace partyboard::display {
 #ifdef __ANDROID__
 using partyboard::android::with_activity;
 #endif
+
+int headset_frame_rate()
+{
+#ifdef __ANDROID__
+    using RateFn = float (*)();
+    // Retry resolution: the XR library can start after the game library.
+    static RateFn rate = nullptr;
+    if (!rate) {
+        void *library = dlopen("libpartyboard_quest.so", RTLD_NOW | RTLD_NOLOAD);
+        if (library) {
+            rate = reinterpret_cast<RateFn>(dlsym(library, "PartyBoardQuest_ActiveRefreshRate"));
+            dlclose(library);
+        }
+    }
+    if (rate) return static_cast<int>(rate() + 0.5f);
+#endif
+    return 0;
+}
 
 std::vector<int> supported_refresh_rates()
 {

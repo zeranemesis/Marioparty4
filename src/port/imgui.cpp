@@ -1,4 +1,5 @@
 #include "port/imgui.h"
+#include "port/display_rate.hpp"
 #include "port/frame_interpolation.h"
 #include "port/settings.h"
 #include "port/netplay_runtime.h"
@@ -311,8 +312,15 @@ namespace {
 
 int target_frame_rate()
 {
+    const int headsetRate = partyboard::display::headset_frame_rate();
+    static int lastHeadsetRate = 0;
+    if (headsetRate != lastHeadsetRate) {
+        SDL_Log("Quest render target: %d FPS (simulation 60 Hz, netplay %s)",
+            headsetRate, PartyBoard_NetplayEnabled() ? "60 FPS" : "display rate");
+        lastHeadsetRate = headsetRate;
+    }
     return PartyBoard_TargetFrameRateFor(PartyBoard_NetplayEnabled(),
-        partyboard::getSettings().video.targetFrameRate.getValue());
+        headsetRate > 0 ? headsetRate : partyboard::getSettings().video.targetFrameRate.getValue());
 }
 }
 
