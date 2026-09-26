@@ -105,6 +105,8 @@ jobs:
           git -C extern/aurora apply ../../patches/aurora-mobile-one-local-player.patch
           git -C extern/aurora apply --check ../../patches/aurora-render-worker-idle.patch
           git -C extern/aurora apply ../../patches/aurora-render-worker-idle.patch
+          git -C extern/aurora apply --check ../../patches/aurora-quest-stereo.patch
+          git -C extern/aurora apply ../../patches/aurora-quest-stereo.patch
 
       # Aurora drops a draw whose pipeline is still compiling instead of delaying
       # it, so a player with an empty cache sees missing geometry on every scene's
@@ -209,6 +211,8 @@ jobs:
           git -C extern/aurora apply ../../patches/aurora-mobile-one-local-player.patch
           git -C extern/aurora apply --check ../../patches/aurora-render-worker-idle.patch
           git -C extern/aurora apply ../../patches/aurora-render-worker-idle.patch
+          git -C extern/aurora apply --check ../../patches/aurora-quest-stereo.patch
+          git -C extern/aurora apply ../../patches/aurora-quest-stereo.patch
 
       - name: Install dependencies
         run: brew install cmake ninja
@@ -293,6 +297,8 @@ jobs:
           git -C extern/aurora apply ../../patches/aurora-mobile-one-local-player.patch
           git -C extern/aurora apply --check ../../patches/aurora-render-worker-idle.patch
           git -C extern/aurora apply ../../patches/aurora-render-worker-idle.patch
+          git -C extern/aurora apply --check ../../patches/aurora-quest-stereo.patch
+          git -C extern/aurora apply ../../patches/aurora-quest-stereo.patch
 
       - name: Install dependencies
         run: |
@@ -309,7 +315,8 @@ jobs:
         uses: android-actions/setup-android@v4
 
       - name: Install Android SDK packages
-        run: sdkmanager "platforms;android-36" "build-tools;36.1.0" "ndk;${ANDROID_NDK_VERSION}"
+        # cmake: the app's own Meta Quest library (platforms/android/app/src/main/cpp).
+        run: sdkmanager "platforms;android-36" "build-tools;36.1.0" "ndk;${ANDROID_NDK_VERSION}" "cmake;3.22.1"
 
       - name: Install Rust Android target
         run: |
@@ -319,8 +326,10 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
 
+      # The real audio (MusyX, src/game/audio.c): without it Android builds the
+      # silent src/port/audio.c.
       - name: Configure CMake
-        run: cmake --preset ${{matrix.preset}}
+        run: cmake --preset ${{matrix.preset}} -DPARTYBOARD_EXPERIMENTAL_MUSYX_AUDIO=ON
 
       - name: Build native library
         run: cmake --build --preset ${{matrix.preset}} --target partyboard
@@ -331,7 +340,7 @@ jobs:
       # The online lobby's protocol, on the JVM (the PC companion runs Tests.cs).
       - name: Test online lobby
         working-directory: platforms/android
-        run: ./gradlew :app:testReleaseUnitTest
+        run: ./gradlew :app:testPhoneReleaseUnitTest
 
       # The run number only grows, so each build installs over the previous one.
       - name: Build APK
@@ -348,8 +357,8 @@ jobs:
       # ANDROID_KEY_PASSWORD) when it is set, otherwise the public test key in
       # platforms/android/partyboard-test.keystore. That key is not a release
       # signature: anyone can sign with it, like Android's own debug key.
-      - name: Sign APK
-        working-directory: platforms/android/app/build/outputs/apk/release
+      - name: Sign APKs
+        working-directory: platforms/android/app/build/outputs/apk
         env:
           KEYSTORE_BASE64: ${{secrets.ANDROID_KEYSTORE_BASE64}}
           KEYSTORE_PASSWORD: ${{secrets.ANDROID_KEYSTORE_PASSWORD}}
@@ -360,30 +369,37 @@ jobs:
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/signing.keystore"
             KEYSTORE="$RUNNER_TEMP/signing.keystore"
-            OUTPUT=app-${{matrix.abi}}-signed.apk
+            SUFFIX=signed
           else
             KEYSTORE="$GITHUB_WORKSPACE/platforms/android/partyboard-test.keystore"
             export KEYSTORE_PASSWORD=android KEY_ALIAS=androiddebugkey KEY_PASSWORD=android
-            OUTPUT=app-${{matrix.abi}}-debug-signed.apk
+            SUFFIX=debug-signed
           fi
-          "$BUILD_TOOLS/zipalign" -f -p 4 app-${{matrix.abi}}-release-unsigned.apk aligned.apk
-          "$BUILD_TOOLS/apksigner" sign --ks "$KEYSTORE" --ks-pass env:KEYSTORE_PASSWORD \
-            --ks-key-alias "$KEY_ALIAS" --key-pass env:KEY_PASSWORD --out "$OUTPUT" aligned.apk
-          "$BUILD_TOOLS/apksigner" verify --print-certs "$OUTPUT"
-          rm -f aligned.apk "$RUNNER_TEMP/signing.keystore"
+          # phone: no install permission; quest: installs its updates in the headset.
+          for FLAVOR in phone quest; do
+            INPUT=$FLAVOR/release/app-$FLAVOR-${{matrix.abi}}-release-unsigned.apk
+            OUTPUT=$FLAVOR/release/app-$FLAVOR-${{matrix.abi}}-$SUFFIX.apk
+            "$BUILD_TOOLS/zipalign" -f -p 4 "$INPUT" aligned.apk
+            "$BUILD_TOOLS/apksigner" sign --ks "$KEYSTORE" --ks-pass env:KEYSTORE_PASSWORD \
+              --ks-key-alias "$KEY_ALIAS" --key-pass env:KEY_PASSWORD --out "$OUTPUT" aligned.apk
+            "$BUILD_TOOLS/apksigner" verify --print-certs "$OUTPUT"
+            rm -f aligned.apk
+          done
+          rm -f "$RUNNER_TEMP/signing.keystore"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
           name: partyboard-${{env.PARTY_BOARD_VERSION}}-android-${{matrix.artifact_arch}}
           path: |
-            platforms/android/app/build/outputs/apk/release/app-${{matrix.abi}}-release-unsigned.apk
-            platforms/android/app/build/outputs/apk/release/app-${{matrix.abi}}-*signed.apk
+            platforms/android/app/build/outputs/apk/*/release/app-*-${{matrix.abi}}-release-unsigned.apk
+            platforms/android/app/build/outputs/apk/*/release/app-*-${{matrix.abi}}-*signed.apk
 
       # Every change that reaches audio-local becomes the update the app offers
-      # (src/port/app_update.cpp): the APK and its manifest go to the release
-      # partyboard-android-latest, with the commits since the previous build as
-      # the notes. A v* tag or a hand-run of this workflow publishes too.
+      # (src/port/app_update.cpp): the APKs and their manifests go to the release
+      # partyboard-android-latest (android-update.json for phones,
+      # quest-update.json for the headset), with the commits since the previous
+      # build as the notes. A v* tag or a hand-run of this workflow publishes too.
       - name: Publish Android update
         if: >-
           github.event_name == 'workflow_dispatch' ||
@@ -391,9 +407,14 @@ jobs:
         env:
           GH_TOKEN: ${{github.token}}
         run: |
-          APK=$(ls platforms/android/app/build/outputs/apk/release/app-${{matrix.abi}}-*signed.apk | grep -v unsigned | head -n 1)
           VERSION_NAME=$(sed -n "s/^ *versionName '\(.*\)'$/\1/p" platforms/android/app/build.gradle)
-          platforms/android/scripts/publish-update.sh "$APK" ${{matrix.abi}} ${{github.run_number}} "$VERSION_NAME"
+          signed() {
+            ls platforms/android/app/build/outputs/apk/$1/release/app-$1-${{matrix.abi}}-*signed.apk | grep -v unsigned | head -n 1
+          }
+          # The Quest first: the phone manifest, which every build checks for a
+          # newer version, comes last, so the Quest APK is there when it says so.
+          platforms/android/scripts/publish-update.sh "$(signed quest)" ${{matrix.abi}} ${{github.run_number}} "$VERSION_NAME" quest
+          platforms/android/scripts/publish-update.sh "$(signed phone)" ${{matrix.abi}} ${{github.run_number}} "$VERSION_NAME" android
 
   build-windows:
     name: Build Windows (${{matrix.name}})
@@ -447,6 +468,8 @@ jobs:
           git -C extern/aurora apply ../../patches/aurora-mobile-one-local-player.patch
           git -C extern/aurora apply --check ../../patches/aurora-render-worker-idle.patch
           git -C extern/aurora apply ../../patches/aurora-render-worker-idle.patch
+          git -C extern/aurora apply --check ../../patches/aurora-quest-stereo.patch
+          git -C extern/aurora apply ../../patches/aurora-quest-stereo.patch
 
       - name: Enable Visual Studio environment
         uses: ilammy/msvc-dev-cmd@v1
