@@ -962,7 +962,12 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   app.stereo.update(views, modelPose, app.table.modelScale, model, app.table.screenWidth, app.table.screenWidth * 0.75f);
   XrCompositionLayerImageLayoutFB modelFlip{XR_TYPE_COMPOSITION_LAYER_IMAGE_LAYOUT_FB};
   modelFlip.flags = XR_COMPOSITION_LAYER_IMAGE_LAYOUT_VERTICAL_FLIP_BIT_FB;
-  const auto* modelLayer = model ? app.stereo.layer(app.stage, app.extensions.imageLayout ? &modelFlip : nullptr) : nullptr;
+  XrCompositionLayerSettingsFB modelSettings{XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB};
+  modelSettings.layerFlags = XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SHARPENING_BIT_FB;
+  modelSettings.next = app.extensions.imageLayout ? &modelFlip : nullptr;
+  const void* modelChain = app.extensions.layerSettings ? static_cast<const void*>(&modelSettings)
+                                                       : modelSettings.next;
+  const auto* modelLayer = model ? app.stereo.layer(app.stage, modelChain) : nullptr;
 
   std::array<const XrCompositionLayerBaseHeader*, 5> layers{};
   uint32_t layerCount = 0;

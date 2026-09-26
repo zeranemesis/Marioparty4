@@ -110,7 +110,7 @@ diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
    if (g_currentRenderPass == UINT32_MAX)
      UNLIKELY {
        Log.warn("Dropping command {}", magic_enum::enum_name(type));
-@@ -1132,6 +1139,69 @@
+@@ -1132,6 +1139,71 @@
      enqueue_pass(frame, g_recordingFrameSlot, g_currentRenderPass);
      g_currentRenderPass = UINT32_MAX;
    }
@@ -129,6 +129,8 @@ diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
 +      .msaaSamples = desc.sampleCount,
 +      .clearColorValue = {0.f, 0.f, 0.f, 0.f},
 +      .clearDepthValue = gx::UseReversedZ ? 0.f : 1.f,
++      .colorStoreOp = desc.sampleCount > 1 ? wgpu::StoreOp::Discard : wgpu::StoreOp::Store,
++      .depthStoreOp = wgpu::StoreOp::Discard,
 +      .clearColor = true,
 +      .clearDepth = true,
 +      .hasDepth = true,
@@ -180,7 +182,7 @@ diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
  }
  
  void end_frame(EndFrameCallback callback) {
-@@ -1322,6 +1392,9 @@
+@@ -1322,6 +1394,9 @@
          .stencilClearValue = passInfo.stencilClearValue,
      };
      depthStencilAttachmentPtr = &depthStencilAttachment;
@@ -194,7 +196,7 @@ diff --git a/lib/gfx/stereo.cpp b/lib/gfx/stereo.cpp
 new file mode 100644
 --- /dev/null
 +++ b/lib/gfx/stereo.cpp
-@@ -0,0 +1,411 @@
+@@ -0,0 +1,423 @@
 +#include "stereo.hpp"
 +
 +#include <aurora/stereo.h>
@@ -229,6 +231,7 @@ new file mode 100644
 +uint32_t g_width = 0;
 +uint32_t g_height = 0;
 +uint32_t g_eyeHeight = 0, g_hudWidth = 0, g_hudHeight = 0;
++constexpr uint32_t kStereoSamples = 4;
 +AuroraStereoCallback g_callback = nullptr;
 +void* g_callbackUser = nullptr;
 +
@@ -290,6 +293,14 @@ new file mode 100644
 +#endif
 +}
 +
++bool discard_world_draw() noexcept {
++#if defined(__ANDROID__)
++  return g_worldOnly && g_image < 0 && !is_offscreen() && gx::g_gxState.projType == GX_PERSPECTIVE;
++#else
++  return false;
++#endif
++}
++
 +void invalidate_world_merge() noexcept {
 +#if defined(__ANDROID__)
 +  g_worldMergeable = false;
@@ -324,13 +335,14 @@ new file mode 100644
 +  g_worldMergeable = false;
 +  if (is_offscreen()) return false;
 +  if (g_image < 0) {
-+    return g_worldOnly && gx::g_gxState.projType == GX_PERSPECTIVE;
++    return discard_world_draw();
 +  }
 +  const bool world = gx::g_gxState.projType == GX_PERSPECTIVE;
 +  if (world && !g_recording) {
 +    return false;
 +  }
 +  auto spatialConfig = config;
++  spatialConfig.msaaSamples = kStereoSamples;
 +  if (spatialConfig.colorUpdate) {
 +    spatialConfig.alphaUpdate = true; // transparent MR targets need coverage
 +  }
@@ -344,6 +356,7 @@ new file mode 100644
 +  if (!world) {
 +    // The original orthographic uniforms draw the interface once in an atlas
 +    // region. OpenXR presents it as a separate, sharp quad for both eyes.
++    draw.uniformRange = gx::build_uniform(info, vtxStart, ranges);
 +    g_hudDraws.push_back(draw);
 +    // Once this frame has a world, its screen is hidden. Avoid drawing the
 +    // same interface again into that unused screen; empty frames retain it.
@@ -391,7 +404,7 @@ new file mode 100644
 +
 +  // Same sample count and formats as the game's frame, so its pipelines draw here too.
 +  const auto& config = webgpu::g_graphicsConfig;
-+  const uint32_t samples = config.msaaSamples;
++  const uint32_t samples = kStereoSamples;
 +  if (samples > 1 && (g_color.size.width != g_width || g_color.size.height != g_height)) {
 +    g_color = create_target(config.surfaceConfiguration.format, samples, "Stereo color");
 +  }
@@ -419,7 +432,8 @@ new file mode 100644
 +  };
 +  enqueue_pass(desc);
 +  if (!g_loggedGeometry && hasWorld) {
-+    Log.info("Stereo: first perspective pass ({} world draws per eye, spatial HUD enabled)", worldDraws);
++    Log.info("Stereo: first perspective pass ({} world draws per eye, {} HUD draws once, MSAA {}x)",
++             worldDraws, g_hudDraws.size(), samples);
 +    g_loggedGeometry = true;
 +  }
 +  g_eyeDraws[0].clear();
@@ -610,7 +624,7 @@ diff --git a/lib/gfx/stereo.hpp b/lib/gfx/stereo.hpp
 new file mode 100644
 --- /dev/null
 +++ b/lib/gfx/stereo.hpp
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,56 @@
 +#pragma once
 +
 +// Stereo rendering for a VR headset (include/aurora/stereo.h).
@@ -626,6 +640,8 @@ new file mode 100644
 +// GX draws are being copied for the eyes (a perspective draw since
 +// AuroraStereoBegin). Each eye keeps its own projection uniforms.
 +bool recording() noexcept;
++// Backpressure: consume perspective vertices without uploading hidden draws.
++bool discard_world_draw() noexcept;
 +
 +// Only consecutive perspective draws in the same camera may share geometry.
 +gx::DrawData* last_world_draw() noexcept;
@@ -676,18 +692,25 @@ diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
  #include "dolphin/gx/GXAurora.h"
  #include "gx.hpp"
  #include "gx_fmt.hpp"
-@@ -1568,7 +1569,9 @@
+@@ -1568,7 +1569,16 @@
    if (pos + totalVtxBytes > size)
      UNLIKELY { handle_draw_overrun(totalVtxBytes, data, pos, size); }
  
 -  auto* lastDraw = !g_gxState.stateDirty ? gfx::get_last_draw_command<DrawData>() : nullptr;
++  if (gfx::stereo::discard_world_draw()) {
++    // Keep decoding GX state, but avoid vertex/index uploads, texture work
++    // and pipeline preparation when the compositor owns every eye buffer.
++    pos += totalVtxBytes;
++    return;
++  }
++
 +  const bool stereoRecording = gfx::stereo::recording();
 +  auto* lastDraw = !g_gxState.stateDirty
 +      ? (stereoRecording ? gfx::stereo::last_world_draw() : gfx::get_last_draw_command<DrawData>()) : nullptr;
    const bool canMerge = lastDraw != nullptr && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
                          lastDraw->instanceCount == 1;
  
-@@ -1607,6 +1610,9 @@
+@@ -1607,6 +1617,9 @@
      }
      lastDraw->vtxCount += vtxCount;
      lastDraw->indexCount += numIndices;
@@ -697,22 +720,38 @@ diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
      ++gfx::g_mergedDrawCallCount;
      return;
    }
-@@ -1671,7 +1677,7 @@
+@@ -1661,7 +1674,6 @@
+   const auto info = build_shader_info(config.shaderConfig);
+   resolve_sampled_textures(info);
+   const auto bindGroups = build_bind_groups(info);
+-  const auto pipeline = gfx::pipeline_ref(config);
+ 
+   uint32_t instanceCount = 1;
+   if (prim == GX_LINES) {
+@@ -1671,17 +1683,24 @@
    } else if (prim == GX_POINTS) {
      instanceCount = vtxCount;
    }
 -  gfx::push_draw_command(DrawData{
-+  const DrawData draw{
-       .pipeline = pipeline,
+-      .pipeline = pipeline,
++  DrawData draw{
++      .pipeline = 0,
        .vertRange = vertRange,
        .idxRange = idxRange,
-@@ -1681,7 +1687,10 @@
+-      .uniformRange = build_uniform(info, vertRange.offset, ranges),
++      .uniformRange = {},
+       .vtxCount = vtxCount,
+       .indexCount = numIndices,
        .instanceCount = instanceCount,
        .bindGroups = bindGroups,
        .dstAlpha = g_gxState.dstAlpha,
 -  });
 +  };
 +  if (!gfx::stereo::record_gx_draw(draw, config, info, vertRange.offset, ranges)) {
++    // Eye-only draws build their two projections directly. Do not generate
++    // a third unused uniform block or pipeline for the hidden flat screen.
++    draw.pipeline = gfx::pipeline_ref(config);
++    draw.uniformRange = build_uniform(info, vertRange.offset, ranges);
 +    gfx::push_draw_command(draw);
 +  }
  }
