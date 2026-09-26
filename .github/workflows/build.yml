@@ -101,6 +101,8 @@ jobs:
           git -C extern/aurora apply ../../patches/aurora-render-fixes.patch
           git -C extern/aurora apply --check ../../patches/aurora-android-surface-deadlock.patch
           git -C extern/aurora apply ../../patches/aurora-android-surface-deadlock.patch
+          git -C extern/aurora apply --check ../../patches/aurora-mobile-one-local-player.patch
+          git -C extern/aurora apply ../../patches/aurora-mobile-one-local-player.patch
 
       # Aurora drops a draw whose pipeline is still compiling instead of delaying
       # it, so a player with an empty cache sees missing geometry on every scene's
@@ -201,6 +203,8 @@ jobs:
           git -C extern/aurora apply ../../patches/aurora-render-fixes.patch
           git -C extern/aurora apply --check ../../patches/aurora-android-surface-deadlock.patch
           git -C extern/aurora apply ../../patches/aurora-android-surface-deadlock.patch
+          git -C extern/aurora apply --check ../../patches/aurora-mobile-one-local-player.patch
+          git -C extern/aurora apply ../../patches/aurora-mobile-one-local-player.patch
 
       - name: Install dependencies
         run: brew install cmake ninja
@@ -281,6 +285,8 @@ jobs:
           git -C extern/aurora apply ../../patches/aurora-render-fixes.patch
           git -C extern/aurora apply --check ../../patches/aurora-android-surface-deadlock.patch
           git -C extern/aurora apply ../../patches/aurora-android-surface-deadlock.patch
+          git -C extern/aurora apply --check ../../patches/aurora-mobile-one-local-player.patch
+          git -C extern/aurora apply ../../patches/aurora-mobile-one-local-player.patch
 
       - name: Install dependencies
         run: |
@@ -431,6 +437,8 @@ jobs:
           git -C extern/aurora apply ../../patches/aurora-render-fixes.patch
           git -C extern/aurora apply --check ../../patches/aurora-android-surface-deadlock.patch
           git -C extern/aurora apply ../../patches/aurora-android-surface-deadlock.patch
+          git -C extern/aurora apply --check ../../patches/aurora-mobile-one-local-player.patch
+          git -C extern/aurora apply ../../patches/aurora-mobile-one-local-player.patch
 
       - name: Enable Visual Studio environment
         uses: ilammy/msvc-dev-cmd@v1

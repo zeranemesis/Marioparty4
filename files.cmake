@@ -122,6 +122,7 @@ set(PORT_FILES
         src/port/stubs.c
         src/port/thp_player.cpp
         src/port/touch_controls.cpp
+        src/port/test_input.cpp
         src/port/version.cpp
 
         src/port/ui/achievements.cpp

@@ -97,6 +97,11 @@ public class PartyBoardActivity extends SDLActivity {
                 Os.unsetenv("PARTYBOARD_ONLINE_BARRIER");
                 Os.unsetenv("PARTYBOARD_ONLINE_DISC");
             }
+            // Automated tests only (src/port/test_input.cpp): never in a release build.
+            String testInput = intent == null ? null : intent.getStringExtra("partyboard_test_input");
+            if (testInput != null && (getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+                Os.setenv("PARTYBOARD_TEST_INPUT", testInput, true);
+            }
         } catch (ErrnoException e) {
             Log.w(TAG, "Unable to pass the online session to the game", e);
         }

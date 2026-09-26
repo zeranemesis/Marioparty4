@@ -40,9 +40,13 @@ namespace {
         GameLanguage value;
     };
 
+    // Every language a European disc carries (mess/*_g|f|s|i.dat); a USA disc is English only.
     constexpr std::array kLanguageChoices = {
         LanguageChoice { "English", GameLanguage::English },
         LanguageChoice { "French", GameLanguage::French },
+        LanguageChoice { "German", GameLanguage::German },
+        LanguageChoice { "Spanish", GameLanguage::Spanish },
+        LanguageChoice { "Italian", GameLanguage::Italian },
     };
 
     constexpr std::array kCardFileTypes = {
@@ -347,9 +351,10 @@ SettingsWindow::SettingsWindow(bool prelaunch)
                                           .key = "Language",
                                           .getValue =
                                               [] {
-                                                  const auto &state = prelaunch_state();
-                                                  if (getSettings().game.language.getValue() == GameLanguage::French) {
-                                                      return kLanguageChoices[1].name;
+                                                  for (const auto &choice : kLanguageChoices) {
+                                                      if (getSettings().game.language.getValue() == choice.value) {
+                                                          return choice.name;
+                                                      }
                                                   }
                                                   return kLanguageChoices[0].name;
                                               },

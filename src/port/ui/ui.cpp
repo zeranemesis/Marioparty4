@@ -26,6 +26,7 @@
 #include "window.hpp"
 
 #include <port/settings.h>
+#include <port/test_input.h>
 
 namespace partyboard::ui {
 namespace {
@@ -308,6 +309,8 @@ void update() noexcept
     }
 
     input::sync_input_block();
+    // After the screen controller, so a test script's presses win (src/port/test_input.cpp).
+    PartyBoard_TestInputFrame();
 }
 
 std::filesystem::path resource_path(const std::filesystem::path &filename) noexcept

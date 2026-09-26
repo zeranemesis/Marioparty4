@@ -227,6 +227,9 @@ if (tracy_SOURCE_DIR)
 endif()
 target_link_libraries(dol PUBLIC aurora::core aurora::card aurora::dvd aurora::gx aurora::mtx aurora::os aurora::si aurora::vi aurora::pad musyx absl::flat_hash_map nlohmann_json::nlohmann_json fmt::fmt rmlui_debugger)
 target_link_libraries(dol PRIVATE rcheevos mbedcrypto)
+if (ANDROID)
+    target_link_libraries(dol PRIVATE log)  # OSReport goes to logcat (src/port/stubs.c)
+endif ()
 # HTTPS for RetroAchievements, through each platform's own networking stack
 # (include/port/http.hpp). Only the curl backend needs anything from the system;
 # without it the feature is simply unavailable rather than breaking the build.
