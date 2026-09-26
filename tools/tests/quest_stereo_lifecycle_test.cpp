@@ -2,6 +2,7 @@
 // methods, so empty-camera transitions cannot leak or steal GPU-owned images.
 #include "stereo_view.hpp"
 #include "../../include/port/quest_scene_fit.hpp"
+#include "../../extern/aurora/lib/surface_lifecycle.hpp"
 #include <cassert>
 #include <cstdio>
 
@@ -17,6 +18,17 @@ struct StereoViewTestAccess {
 }
 
 int main() {
+  aurora::window::SurfaceLifecycle surface(true);
+  const auto previousSurface = surface.generation();
+  // Reproduce destroy/create occurring entirely between rendered frames.
+  surface.set_ready(false);
+  surface.set_ready(true);
+  assert(surface.ready() && surface.generation() != previousSurface);
+  const auto replacement = surface.generation();
+  surface.set_ready(true);
+  assert(surface.generation() == replacement);
+  surface.set_ready(false);
+  assert(!surface.ready() && surface.generation() != replacement);
   float scale = 0.0f;
   assert(partyboard::quest::scene_scale(1000.0f, 90.0f, 1.4f, scale));
   assert(std::abs(scale - 1.0f) < 0.0001f);
@@ -89,5 +101,5 @@ int main() {
   quest::StereoViewTestAccess::copied(view, frame.image);
   assert(view.game_frame(spare));
   assert(spare.tag != frame.tag);
-  std::puts("PASS: scene framing, empty cameras, ring exhaustion, GPU ownership and stale callbacks");
+  std::puts("PASS: rapid surface replacement, scene framing, empty cameras, ring exhaustion, GPU ownership and stale callbacks");
 }

@@ -107,6 +107,8 @@ jobs:
           git -C extern/aurora apply ../../patches/aurora-render-worker-idle.patch
           git -C extern/aurora apply --check ../../patches/aurora-quest-stereo.patch
           git -C extern/aurora apply ../../patches/aurora-quest-stereo.patch
+          git -C extern/aurora apply --check ../../patches/aurora-android-surface-generation.patch
+          git -C extern/aurora apply ../../patches/aurora-android-surface-generation.patch
 
       # Aurora drops a draw whose pipeline is still compiling instead of delaying
       # it, so a player with an empty cache sees missing geometry on every scene's
@@ -213,6 +215,8 @@ jobs:
           git -C extern/aurora apply ../../patches/aurora-render-worker-idle.patch
           git -C extern/aurora apply --check ../../patches/aurora-quest-stereo.patch
           git -C extern/aurora apply ../../patches/aurora-quest-stereo.patch
+          git -C extern/aurora apply --check ../../patches/aurora-android-surface-generation.patch
+          git -C extern/aurora apply ../../patches/aurora-android-surface-generation.patch
 
       - name: Install dependencies
         run: brew install cmake ninja
@@ -299,6 +303,8 @@ jobs:
           git -C extern/aurora apply ../../patches/aurora-render-worker-idle.patch
           git -C extern/aurora apply --check ../../patches/aurora-quest-stereo.patch
           git -C extern/aurora apply ../../patches/aurora-quest-stereo.patch
+          git -C extern/aurora apply --check ../../patches/aurora-android-surface-generation.patch
+          git -C extern/aurora apply ../../patches/aurora-android-surface-generation.patch
 
       - name: Install dependencies
         run: |
@@ -470,6 +476,8 @@ jobs:
           git -C extern/aurora apply ../../patches/aurora-render-worker-idle.patch
           git -C extern/aurora apply --check ../../patches/aurora-quest-stereo.patch
           git -C extern/aurora apply ../../patches/aurora-quest-stereo.patch
+          git -C extern/aurora apply --check ../../patches/aurora-android-surface-generation.patch
+          git -C extern/aurora apply ../../patches/aurora-android-surface-generation.patch
 
       - name: Enable Visual Studio environment
         uses: ilammy/msvc-dev-cmd@v1
