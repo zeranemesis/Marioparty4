@@ -11,27 +11,37 @@ réalité mixte. Chaque changement doit répondre à une mesure reproductible.
 1. Rebuilder et installer la build qui désactive temporairement le pipeline
    stéréo instancié, puis confirmer sur casque le lancement, l’entrée sur un
    plateau, un tour complet et un mini-jeu.
-2. Capturer des sessions de référence à 72, 90 et 120 Hz, avec le même plateau,
-   la même position de table et le même parcours. Répéter avec un mini-jeu
-   léger, un mini-jeu chargé et une transition plateau → mini-jeu → plateau.
-3. Conserver pour chaque session la version du commit, la fréquence, la
-   résolution, le facteur de résolution adaptative, la durée de chargement,
-   les images tardives/perdues, `ringFull`, `copyGpu`, PSS et mémoire GPU.
-   Enregistrer aussi les journaux Quest et des captures d’image aux mêmes
-   moments.
+2. Relever les fréquences réellement acceptées par le runtime (ne pas supposer
+   que 72, 90 et 120 Hz sont toutes disponibles). À chaque fréquence retenue,
+   capturer trois parcours identiques : plateau, mini-jeu léger, mini-jeu chargé
+   et transition plateau → mini-jeu → plateau. Chaque capture dure 120 s après
+   échauffement, avec la même position de table, le même itinéraire et les mêmes
+   réglages.
+3. Conserver pour chaque session le commit exact, la fréquence, la résolution,
+   le facteur adaptatif, la durée de chargement, les images tardives/perdues,
+   `ringFull`, `worldNewHz`, `copyGpuMax` et la latence. Ces compteurs sont des
+   maxima par fenêtre de deux secondes, pas des percentiles frame. Le
+   collecteur ne mesure ni PSS ni mémoire GPU : relever ceux-ci séparément avec
+   OVR Metrics et `dumpsys meminfo`, avant le plateau, après son chargement,
+   pendant un mini-jeu et après le retour. Enregistrer les journaux Quest et
+   des captures d’image aux mêmes moments.
 4. Utiliser `tools/collect_quest_performance.ps1` et
    `tools/analyze_quest_performance.py` quand leur entrée correspond à la
    session mesurée. Activer les timers GPU stéréo uniquement sur une session
    de diagnostic, car ils peuvent ajouter un coût de mesure.
 
-**Décision de sortie :** avoir une mesure stable par fréquence et par scène,
-avec les mêmes parcours et réglages. Ne pas comparer des scènes ou des
-fréquences différentes comme si elles formaient une seule référence.
+**Décision de sortie :** aucune erreur fatale ni crash et trois mesures
+comparables par fréquence et par scène. Ne traiter un défaut de performance
+que s’il apparaît dans au moins deux essais sur trois et dépasse le bruit de
+mesure. Comparer les changements A/B avec les mêmes scènes et réglages.
 
 ## Étape 1 — plafonds et pics de mémoire
 
-1. Relever l’empreinte des buffers stéréo à partir de leurs dimensions réelles
-   (`width × height × 4 × 3`) et la rapprocher des compteurs GPU du casque.
+1. Relever l’empreinte des buffers stéréo à partir de leurs dimensions réelles :
+   `max(2 × eyeWidth, hudWidth) × (eyeHeight + hudHeight) × 4 × 3` octets.
+   Le layout réserve trois images dont la largeur/hauteur combinée peut coûter
+   plus que la somme des zones utiles. Rapprocher cette estimation des compteurs
+   GPU du casque.
 2. Distinguer mémoire persistante et pic de chargement en relevant PSS/GPU
    avant le plateau, après son chargement, au début du mini-jeu, puis après le
    retour au plateau. Chercher les pics corrélés à une création de texture ou
@@ -54,20 +64,26 @@ d’artefacts alpha ou de pointe mémoire supérieure au comportement de base.
 ## Étape 2 — temps GPU et coût du rendu stéréo
 
 1. Mesurer séparément le temps de copie vers les swapchains OpenXR, le rendu du
-   monde, le HUD et les périodes sans nouveau rendu. Comparer les valeurs avec
-   les temps d’image disponibles à 72/90/120 Hz.
-2. Garder le rendu par œil comme référence de stabilité jusqu’à ce que la cause
-   de l’échec Adreno de `GX Stereo Pipeline` soit isolée. Le journal build 85
-   rapporte `CreateGraphicsPipelines failed with VK_ERROR_UNKNOWN`; la mémoire
-   GPU était également presque entièrement allouée. Ces indices ne suffisent
-   pas à conclure si le pilote refuse `clip_distances` ou si la pression
-   mémoire provoque l’échec.
+   monde, le HUD et les périodes sans nouveau rendu. Capturer une session sans
+   timers puis une session `-GpuTiming -RestartGame` pour estimer le coût de
+   l’instrumentation. Comparer les valeurs aux budgets image réellement
+   disponibles : 13,89 ms à 72 Hz, 11,11 ms à 90 Hz, 8,33 ms à 120 Hz.
+2. Garder le rendu par œil comme référence de stabilité. Le crash build 87
+   provenait d’une ancienne entrée `stereo` persistée dans le cache GX :
+   désactiver les nouvelles demandes instanciées ne supprimait pas les entrées
+   existantes, que le chargeur recréait encore. Incrémenter la version de
+   configuration GX invalide ces lignes; le test sur casque doit confirmer que
+   la mise à jour ne reproduit plus le crash. La cause initiale du rejet
+   Adreno (`Failed to link shaders`, `VK_ERROR_UNKNOWN`) reste une question
+   distincte si le rendu instancié est réessayé.
 3. Si un nouvel essai du rendu instancié est envisagé, le faire derrière une
    capacité/test de compatibilité explicite et dans une branche de test. Le
    tester avec les scènes qui ont échoué et inspecter le journal du pilote; ne
    pas réactiver globalement à partir d’un simple rendu de laboratoire.
-4. N’optimiser les copies ou le nombre de passes que si `copyGpu`, `ringFull`
-   ou les images tardives montrent que cette partie domine effectivement.
+4. N’optimiser les copies ou le nombre de passes que si `copyGpuMax` dépasse
+   régulièrement 10 % du budget image ou si `ringFull`/les images tardives
+   montrent que cette partie domine effectivement. Comparer aussi le mode
+   timers désactivés pour contrôler l’impact de mesure.
 
 ## Étape 3 — calibrer la qualité adaptative
 
@@ -77,9 +93,10 @@ d’artefacts alpha ou de pointe mémoire supérieure au comportement de base.
 2. Identifier si les baisses suivent une pression GPU, une limite CPU ou une
    saturation des images en vol. Ne pas baisser la résolution pour masquer une
    attente CPU ou une congestion causée par les buffers.
-3. Ajuster un seul seuil ou palier à la fois. Valider avec
-   `tools/test_quest_quality.ps1`, puis comparer les mêmes sessions casque à la
-   référence.
+3. Commencer par les plafonds déjà exposés (80/100/125 %) et la fréquence,
+   sans changer l’algorithme. Ajuster ensuite un seul seuil ou palier à la fois.
+   Valider avec `tools/test_quest_quality.ps1`, puis comparer les mêmes
+   sessions casque à la référence.
 4. Fixer le meilleur facteur stable par fréquence en privilégiant l’absence
    d’images tardives et une lisibilité acceptable du plateau et du texte.
 

@@ -1401,3 +1401,9 @@
  
  bool initialize(AuroraBackend backend, bool allowCpu);
  void shutdown();
+--- a/lib/gx/pipeline.hpp
++++ b/lib/gx/pipeline.hpp
+@@ -19,2 +19,2 @@
+-constexpr uint32_t GXPipelineConfigVersion = 13;
++constexpr uint32_t GXPipelineConfigVersion = 14;
+ struct PipelineConfig {
