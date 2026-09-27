@@ -774,24 +774,7 @@ Prelaunch::Prelaunch()
 
     if (update::supported()) {
         if (mUpdateDownload != nullptr) {
-            listen(mUpdateDownload, Rml::EventId::Click, [this](Rml::Event &) {
-                const auto status = update::status();
-                if (status.state == update::State::Available) {
-                    push_update_modal(*this, status);
-                }
-                else if (status.state == update::State::Downloading) {
-                    update::download();
-                }
-                else if (status.state == update::State::Failed) {
-                    // Retry whatever failed: the download when a newer build is known, else the check.
-                    if (status.manifest.versionCode > status.installedVersionCode) {
-                        update::download();
-                    }
-                    else {
-                        update::check(false);
-                    }
-                }
-            });
+            listen(mUpdateDownload, Rml::EventId::Click, [this](Rml::Event &) { press_update(); });
         }
         if (getSettings().backend.checkForUpdates.getValue()) {
             update::check(true);
@@ -1016,8 +999,54 @@ bool Prelaunch::visible() const
     return mDocument->HasAttribute("open") && mRoot->HasAttribute("open");
 }
 
+bool Prelaunch::update_shown() const
+{
+    if (mUpdateDownload == nullptr || mUpdateStatus == nullptr || !update::supported()) {
+        return false;
+    }
+    const auto state = mUpdateStatus->GetAttribute<Rml::String>("state", "");
+    return state == "available" || state == "failed";
+}
+
+bool Prelaunch::update_contains(Rml::Element *element) const
+{
+    for (const auto *node = element; node != nullptr && mUpdateDownload != nullptr; node = node->GetParentNode()) {
+        if (node == mUpdateDownload) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void Prelaunch::press_update()
+{
+    const auto status = update::status();
+    if (status.state == update::State::Available) {
+        push_update_modal(*this, status);
+    }
+    else if (status.state == update::State::Downloading) {
+        update::download();
+    }
+    else if (status.state == update::State::Failed) {
+        // Retry whatever failed: the download when a newer build is known, else the check.
+        if (status.manifest.versionCode > status.installedVersionCode) {
+            update::download();
+        }
+        else {
+            update::check(false);
+        }
+    }
+}
+
 bool Prelaunch::handle_nav_command(Rml::Event &event, NavCommand cmd)
 {
+    auto *target = event.GetTargetElement();
+    const bool onUpdate = update_shown() && update_contains(target);
+    if (cmd == NavCommand::Confirm && onUpdate) {
+        press_update();
+        event.StopPropagation();
+        return true;
+    }
     int direction = 0;
     if (cmd == NavCommand::Down) {
         direction = 1;
@@ -1028,23 +1057,26 @@ bool Prelaunch::handle_nav_command(Rml::Event &event, NavCommand cmd)
     else {
         return false;
     }
-    auto *target = event.GetTargetElement();
-    int focusedButton = -1;
-    for (int i = 0; i < mMenuButtons.size(); ++i) {
+    // The menu buttons, then the update link when it is shown: one ring.
+    const int buttons = static_cast<int>(mMenuButtons.size());
+    const int n = buttons + (update_shown() ? 1 : 0);
+    if (n == 0) {
+        return false;
+    }
+    int focused = onUpdate ? buttons : -1;
+    for (int i = 0; focused < 0 && i < buttons; ++i) {
         if (mMenuButtons[i]->contains(target)) {
-            focusedButton = i;
-            break;
+            focused = i;
         }
     }
-    const auto n = static_cast<int>(mMenuButtons.size());
-    int i = ((focusedButton + direction) % n + n) % n;
-    while (i >= 0 && i < mMenuButtons.size()) {
-        if (mMenuButtons[i]->focus()) {
+    int i = ((focused + direction) % n + n) % n;
+    for (int tries = 0; tries < n; ++tries, i = ((i + direction) % n + n) % n) {
+        const bool focusedNow = i == buttons ? mUpdateDownload->Focus(true) : mMenuButtons[i]->focus();
+        if (focusedNow) {
             // mDoAud_seStartMenu(kSoundItemFocus); // TODO
             event.StopPropagation();
             return true;
         }
-        i += direction;
     }
     return false;
 }

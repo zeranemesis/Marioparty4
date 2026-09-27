@@ -313,6 +313,13 @@ body.mirrored version-info {
     gap: 2dp;
 }
 
+/* Reached with a controller (Down past the menu): a headset has no touch. */
+#update-download:focus-visible {
+    color: #FFFFFF;
+    background-color: #D8F99933;
+    border-radius: 4dp;
+}
+
 #update-download icon {
     display: block;
     width: 18dp;
