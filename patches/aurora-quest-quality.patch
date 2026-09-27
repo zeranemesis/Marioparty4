@@ -1,6 +1,3 @@
-diff --git a/lib/gfx/rgba_mips.hpp b/lib/gfx/rgba_mips.hpp
-new file mode 100644
-index 0000000..b6f8b60
 --- /dev/null
 +++ b/lib/gfx/rgba_mips.hpp
 @@ -0,0 +1,82 @@
@@ -86,8 +83,6 @@ index 0000000..b6f8b60
 +  return out;
 +}
 +} // namespace aurora::gfx
-diff --git a/lib/gfx/texture.cpp b/lib/gfx/texture.cpp
-index 013afc0..2f046d3 100644
 --- a/lib/gfx/texture.cpp
 +++ b/lib/gfx/texture.cpp
 @@ -4,6 +4,7 @@
@@ -170,8 +165,6 @@ index 013afc0..2f046d3 100644
    uint32_t offset = 0;
    for (uint32_t mip = 0; mip < ref.mipCount; ++mip) {
      const wgpu::Extent3D mipSize{
-diff --git a/lib/gfx/texture.hpp b/lib/gfx/texture.hpp
-index c214538..db55895 100644
 --- a/lib/gfx/texture.hpp
 +++ b/lib/gfx/texture.hpp
 @@ -43,6 +43,8 @@ struct TextureRef {

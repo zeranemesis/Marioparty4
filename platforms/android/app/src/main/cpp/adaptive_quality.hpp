@@ -36,8 +36,12 @@ public:
         ((std::isfinite(sample.compositorGpuMs) && sample.compositorGpuMs >= 0) ? sample.compositorGpuMs : 0);
     const bool cpuBound = cpuKnown && sample.cpuMs >= 0.9f * budget;
     const bool congested = busy * 20ull > requests;
+    // Frames really missed while every eye image is busy: the GPU is behind,
+    // whatever its counter says (it may only see the headset's own GL work,
+    // not the game's Vulkan rendering).
+    const bool stalled = congested && sample.latePercent > 1;
     const bool pressure = gpuKnown ? (gpu >= 0.9f * budget ||
-        (sample.latePercent > 1 && gpu >= 0.85f * budget)) : (congested && !cpuBound);
+        (sample.latePercent > 1 && gpu >= 0.85f * budget) || (stalled && !cpuBound)) : (congested && !cpuBound);
     if (pressure) {
       mScale = std::max(0.65f, mScale - 0.05f);
       mCalm = 0;

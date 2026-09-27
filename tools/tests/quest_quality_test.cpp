@@ -23,6 +23,12 @@ int main() {
   sample = {40, 120, 20, 2, 1, 50};
   for (unsigned i = 40; i < 60; ++i) { sample.sequence = i; cpu.update(sample, 120, 80); }
   assert(cpu.scale() == 0.65f); // readable floor
+  quest::AdaptiveQuality blind;
+  sample = {1, 120, 2, 2, 1, 5};
+  assert(blind.update(sample, 120, 20) < 1); // late frames, full ring: lower despite a low GPU counter
+  sample = {2, 120, 2, 2, 1, 0};
+  const float held = blind.update(sample, 120, 20);
+  assert(held == blind.scale() && held < 1); // a full ring alone is not enough to lower again
   quest::AdaptiveQuality missing;
   sample = {1, 120, -1, 12, -1, 10};
   assert(missing.update(sample, 120, 80) == 1); // missing GPU, known CPU pressure
