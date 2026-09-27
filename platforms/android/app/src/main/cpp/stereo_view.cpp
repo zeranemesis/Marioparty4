@@ -17,6 +17,11 @@ namespace {
 constexpr float kNear = 0.05f;
 constexpr float kFar = 100.0f;
 
+// Dynamic resolution never draws less than half of the eyes' images.
+constexpr float kMinRenderScale = 0.5f;
+// The head is predicted at most this far ahead (nanoseconds).
+constexpr double kMaxPredictionNs = 50e6;
+
 constexpr GLenum kSrgb8Alpha8 = 0x8C43; // GL_SRGB8_ALPHA8
 constexpr GLenum kRgba8 = 0x8058;       // GL_RGBA8
 
@@ -95,6 +100,7 @@ void projection_matrix(const XrFovf& fov, float out[16]) {
 bool StereoView::init(XrInstance instance, XrSession session, XrSystemId system, EGLDisplay display, float scale) {
   mInstance = instance;
   mDisplay = display;
+  mMaxScale = scale;
   if (!g_gl.load()) {
     LOGW("Stereo: GL extensions missing");
     return false;
@@ -141,7 +147,8 @@ bool StereoView::init(XrInstance instance, XrSession session, XrSystemId system,
   xrEnumerateSwapchainImages(mSwapchain, imageCount, &imageCount,
                              reinterpret_cast<XrSwapchainImageBaseHeader*>(mSwapchainImages.data()));
 
-  mHudPixelsWidth = std::min(1280u, mEyeWidth * 2);
+  // The interface's text: 2.5 pixels per game pixel, sharp on the quad.
+  mHudPixelsWidth = std::min(1600u, mEyeWidth * 2);
   mHudPixelsHeight = mHudPixelsWidth * 3 / 4;
   info.width = mHudPixelsWidth;
   info.height = mHudPixelsHeight;
@@ -250,9 +257,15 @@ bool StereoView::game_frame(StereoFrame& out) {
   const auto free = std::ranges::find_if(mSlots, [](const Slot& slot) { return slot.state == State::Free; });
   if (free == mSlots.end()) {
     ++mRingFullCount;
+    ++mAdaptRingFull;
     return false; // the headset is behind: this frame goes to the flat screen only
   }
   ++mLeaseCount;
+  ++mAdaptLeases;
+  const auto round8 = [](float v) { return std::max(8u, static_cast<uint32_t>(std::lround(v / 8.0f)) * 8u); };
+  free->renderWidth = std::min(mEyeWidth, round8(static_cast<float>(mEyeWidth) * mRenderScale));
+  free->renderHeight = std::min(mEyeHeight, round8(static_cast<float>(mEyeHeight) * mRenderScale));
+  free->leaseTime = mFrameTime;
   free->state = State::Drawing;
   free->tag = mNextTag++;
   free->views[0] = mViews[0];
@@ -267,7 +280,58 @@ bool StereoView::game_frame(StereoFrame& out) {
   std::copy(std::begin(mWorld), std::end(mWorld), out.world);
   out.hudWidth = mHudWidth;
   out.hudHeight = mHudHeight;
+  out.eyeWidth = free->renderWidth;
+  out.eyeHeight = free->renderHeight;
   return true;
+}
+
+void StereoView::set_frame_time(XrTime time) {
+  std::lock_guard lock{mMutex};
+  mFrameTime = time;
+}
+
+XrDuration StereoView::prediction() const {
+  std::lock_guard lock{mMutex};
+  return static_cast<XrDuration>(std::clamp(mLatencyNs, 0.0, kMaxPredictionNs));
+}
+
+void StereoView::set_screen_hidden(bool hidden) {
+  std::lock_guard lock{mMutex};
+  mScreenHidden = hidden;
+}
+
+bool StereoView::screen_hidden() const {
+  std::lock_guard lock{mMutex};
+  return mScreenHidden;
+}
+
+// The GPU is behind when the game asks for an image and all of them are still
+// being drawn or shown: draw fewer pixels at once. Raised back one small step
+// after three quiet seconds, so it settles just under what 120 Hz allows.
+void StereoView::adapt_resolution() {
+  const auto now = std::chrono::steady_clock::now();
+  if (now - mAdaptAt < std::chrono::seconds(1)) {
+    return;
+  }
+  mAdaptAt = now;
+  const float before = mRenderScale;
+  const uint32_t wanted = mAdaptLeases + mAdaptRingFull;
+  if (wanted >= 30) { // the game asked for images all second long
+    if (mAdaptRingFull * 20 > wanted) { // more than 5 % found none free
+      mRenderScale = std::max(kMinRenderScale, mRenderScale - 0.1f);
+      mCalmSeconds = 0;
+    } else if (mAdaptRingFull != 0) {
+      mCalmSeconds = 0;
+    } else if (++mCalmSeconds >= 3) {
+      mRenderScale = std::min(1.0f, mRenderScale + 0.05f);
+      mCalmSeconds = 0;
+    }
+  }
+  mAdaptLeases = mAdaptRingFull = 0;
+  if (mRenderScale != before) {
+    LOGI("Stereo: resolution %.0f%% of recommended (%ux%u per eye)", mRenderScale * mMaxScale * 100.0f,
+         static_cast<unsigned>(mEyeWidth * mRenderScale), static_cast<unsigned>(mEyeHeight * mRenderScale));
+  }
 }
 
 bool StereoView::images(void** buffers, uint32_t capacity, uint32_t& count, uint32_t& width, uint32_t& height,
@@ -408,13 +472,23 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
     if (keepBoard || (XR_SUCCEEDED(xrAcquireSwapchainImage(mSwapchain, &acquire, &index)) &&
                      XR_SUCCEEDED(xrWaitSwapchainImage(mSwapchain, &wait)))) {
       if (!keepBoard) {
-        g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, 0, 0, 0, mSwapchainImages[index].image, GL_TEXTURE_2D, 0, 0,
-                       0, 0, static_cast<GLsizei>(mEyeWidth * 2), static_cast<GLsizei>(mEyeHeight), 1);
+        // Only the drawn part of each eye's half (dynamic resolution): at the
+        // left, centered vertically (Aurora's common.cpp draws it there).
+        const auto y = static_cast<GLint>((mEyeHeight - newest->renderHeight) / 2);
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+          const auto x = static_cast<GLint>(eye * mEyeWidth);
+          g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, x, y, 0, mSwapchainImages[index].image, GL_TEXTURE_2D, 0,
+                         x, y, 0, static_cast<GLsizei>(newest->renderWidth),
+                         static_cast<GLsizei>(newest->renderHeight), 1);
+        }
       }
       uint32_t hudIndex = 0;
-      mHudShown = false;
-      if (XR_SUCCEEDED(xrAcquireSwapchainImage(mHudSwapchain, &acquire, &hudIndex)) &&
+      // The interface at 30 Hz: between copies the quad shows the last one.
+      const auto hudNow = std::chrono::steady_clock::now();
+      const bool copyHud = !mHudShown || hudNow - mHudCopiedAt >= std::chrono::milliseconds(33);
+      if (copyHud && XR_SUCCEEDED(xrAcquireSwapchainImage(mHudSwapchain, &acquire, &hudIndex)) &&
           XR_SUCCEEDED(xrWaitSwapchainImage(mHudSwapchain, &wait))) {
+        mHudCopiedAt = hudNow;
         g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, 0, static_cast<GLint>(mEyeHeight), 0,
                       mHudImages[hudIndex].image, GL_TEXTURE_2D, 0, 0, 0, 0,
                       static_cast<GLsizei>(mHudPixelsWidth), static_cast<GLsizei>(mHudPixelsHeight), 1);
@@ -438,6 +512,13 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
         mShownViews[1] = newest->views[1];
         mShownHasWorld = newest->hasWorld;
         mShownIsBoard = newest->board;
+        mShownWidth = newest->renderWidth;
+        mShownHeight = newest->renderHeight;
+      }
+      // How long images take from the game's lease to the display.
+      if (newest->leaseTime > 0 && mFrameTime > newest->leaseTime) {
+        const double sample = static_cast<double>(mFrameTime - newest->leaseTime);
+        mLatencyNs = mLatencyNs == 0.0 ? sample : mLatencyNs * 0.9 + sample * 0.1;
       }
       mShown = true;
       mPresentedTag = newest->tag;
@@ -462,6 +543,7 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
   {
     std::lock_guard lock{mMutex};
     const auto now = std::chrono::steady_clock::now();
+    adapt_resolution();
     const double elapsed = std::chrono::duration<double>(now - mStatsAt).count();
     if (elapsed >= 2.0) {
       unsigned drawing = 0, ready = 0, copying = 0;
@@ -470,9 +552,10 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
         ready += slot.state == State::Ready;
         copying += slot.state == State::Copying;
       }
-      LOGI("Stereo perf: source=%.1fHz presented=%.1fHz ringFull=%u copyMax=%.2fms slots=%u/%u/%u world=%d",
+      LOGI("Stereo perf: source=%.1fHz presented=%.1fHz ringFull=%u copyMax=%.2fms slots=%u/%u/%u world=%d "
+           "res=%.0f%% latency=%.1fms screenHidden=%d",
           mLeaseCount / elapsed, mPresentedCount / elapsed, mRingFullCount, mCopyMaxMs,
-          drawing, ready, copying, mShownHasWorld);
+          drawing, ready, copying, mShownHasWorld, mRenderScale * mMaxScale * 100.0f, mLatencyNs / 1e6, mScreenHidden);
       mStatsAt = now;
       mLeaseCount = mRingFullCount = mPresentedCount = 0;
       mCopyMaxMs = 0;
@@ -487,8 +570,10 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
     view.pose = mShownViews[eye].pose;
     view.fov = mShownViews[eye].fov;
     view.subImage.swapchain = mSwapchain;
-    view.subImage.imageRect = {{static_cast<int32_t>(eye * mEyeWidth), 0},
-                               {static_cast<int32_t>(mEyeWidth), static_cast<int32_t>(mEyeHeight)}};
+    const uint32_t shownWidth = mShownWidth != 0 ? mShownWidth : mEyeWidth;
+    const uint32_t shownHeight = mShownHeight != 0 ? mShownHeight : mEyeHeight;
+    view.subImage.imageRect = {{static_cast<int32_t>(eye * mEyeWidth), static_cast<int32_t>((mEyeHeight - shownHeight) / 2)},
+                               {static_cast<int32_t>(shownWidth), static_cast<int32_t>(shownHeight)}};
   }
   mLayer = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
   mLayer.next = next;
@@ -519,6 +604,10 @@ const XrCompositionLayerBaseHeader* StereoView::hud_layer(XrSpace viewSpace, con
 
 // The game side (src/port/quest_stereo.cpp) finds these with dlsym.
 extern "C" {
+
+__attribute__((visibility("default"))) bool PartyBoardQuest_StereoScreenHidden() {
+  return quest::g_stereoView != nullptr && quest::g_stereoView->screen_hidden();
+}
 
 __attribute__((visibility("default"))) bool PartyBoardQuest_StereoWorldOnly() {
   return quest::g_stereoView != nullptr && quest::g_stereoView->world_only();

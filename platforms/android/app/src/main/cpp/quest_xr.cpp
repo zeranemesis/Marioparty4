@@ -97,6 +97,7 @@ struct Actions {
   XrAction haptic = XR_NULL_HANDLE;
   XrPath leftHand = XR_NULL_PATH, rightHand = XR_NULL_PATH;
   XrSpace rightAim = XR_NULL_HANDLE;
+  XrSpace leftAim = XR_NULL_HANDLE; // the table's height, in placement mode
 };
 
 struct Egl {
@@ -161,6 +162,7 @@ struct App {
   bool placing = false;
   bool grabbing = false;
   bool triggerHeld = false;
+  bool leftTriggerHeld = false;
   XrPosef grabOffset = identity_pose();
   int previousButtons = 0;
   int suppressedButtons = 0; // held when placement ended: the game waits for their release
@@ -442,6 +444,8 @@ bool create_actions(App& app) {
   spaceInfo.subactionPath = actions.rightHand;
   spaceInfo.poseInActionSpace = identity_pose();
   check(app.instance, xrCreateActionSpace(app.session, &spaceInfo, &actions.rightAim), "xrCreateActionSpace");
+  spaceInfo.subactionPath = actions.leftHand;
+  check(app.instance, xrCreateActionSpace(app.session, &spaceInfo, &actions.leftAim), "xrCreateActionSpace (left)");
 
   XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
   attach.countActionSets = 1;
@@ -727,6 +731,7 @@ void begin_placement(App& app, JNIEnv* env) {
   app.placing = true;
   app.grabbing = false;
   app.triggerHeld = true; // a trigger already held does not place at once
+  app.leftTriggerHeld = true;
   notify_placement(app, env);
 }
 
@@ -786,7 +791,18 @@ void finish_resolution_switch(App& app, JNIEnv* env) {
 // The controls while placing (QuestVr.drawHelp shows them). The game sees a
 // released pad meanwhile.
 void place(App& app, JNIEnv* env, const ControllerState& input, int pressed, float dt, const XrPosef* head,
-           const XrPosef* aim) {
+           const XrPosef* aim, const XrPosef* leftAim) {
+  // Left trigger, the left controller's tip on the table: the table's height
+  // only (boards and minigames stand on it), wherever the game is.
+  const bool leftTrigger = input.leftTrigger > 0.6f;
+  if (leftTrigger && !app.leftTriggerHeld && leftAim != nullptr) {
+    app.pose.position.y = leftAim->position.y;
+    app.poseKnown = true;
+    LOGI("Table height calibrated at %.3f m", app.pose.position.y);
+    tick(app);
+  }
+  app.leftTriggerHeld = input.leftTrigger > (app.leftTriggerHeld ? 0.3f : 0.6f);
+
   // Right trigger: the screen stands where the controller's tip touches the table.
   const bool trigger = input.rightTrigger > 0.6f;
   if (trigger && !app.triggerHeld && head != nullptr && aim != nullptr) {
@@ -901,6 +917,8 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   XrPosef head, aim;
   const bool haveHead = locate(app.view, app.stage, time, head);
   const bool haveAim = focused && locate(app.actions.rightAim, app.stage, time, aim);
+  XrPosef leftAim;
+  const bool haveLeftAim = focused && app.placing && locate(app.actions.leftAim, app.stage, time, leftAim);
 
   // Where the game stands: the anchor, which follows the real table, unless
   // the player is moving it.
@@ -926,7 +944,8 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
     }
     tick(app);
   } else if (app.placing) {
-    place(app, env, input, pressed, dt, haveHead ? &head : nullptr, haveAim ? &aim : nullptr);
+    place(app, env, input, pressed, dt, haveHead ? &head : nullptr, haveAim ? &aim : nullptr,
+          haveLeftAim ? &leftAim : nullptr);
   }
 
   // Sent every frame (SDL drops repeated values) so the pad is right as soon
@@ -949,10 +968,13 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   finish_resolution_switch(app, env);
 
   // The model on the table: the eyes where the game's next frame will be seen.
+  // That frame reaches the display some frames after this one (the game and
+  // the GPU draw it meanwhile): predict the head there, by the latency
+  // measured on the images already shown, so the model does not swim.
   XrView views[2]{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
   XrViewLocateInfo locateInfo{XR_TYPE_VIEW_LOCATE_INFO};
   locateInfo.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-  locateInfo.displayTime = time;
+  locateInfo.displayTime = time + app.stereo.prediction();
   locateInfo.space = app.stage;
   XrViewState viewState{XR_TYPE_VIEW_STATE};
   uint32_t viewCount = 0;
@@ -963,7 +985,9 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   // Invalid tracking must disable new game leases, rather than leave the
   // previous valid eye poses enabled while the headset cannot render.
   XrPosef modelPose = app.pose;
-  modelPose.position.y += 0.02f; // clearance above the lowest playable surface
+  // The scene's floor is measured by the game (quest_stereo.cpp) and put on
+  // the table exactly: no clearance.
+  app.stereo.set_frame_time(time);
   app.stereo.update(views, modelPose, app.table.modelScale, model, app.table.screenWidth, app.table.screenWidth * 0.75f);
   XrCompositionLayerImageLayoutFB modelFlip{XR_TYPE_COMPOSITION_LAYER_IMAGE_LAYOUT_FB};
   modelFlip.flags = XR_COMPOSITION_LAYER_IMAGE_LAYOUT_VERTICAL_FLIP_BIT_FB;
@@ -1024,9 +1048,13 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   }
   screen.pose = compose(app.pose, onTable);
   screen.size = {screenWidth, screenHeight};
-  if (app.poseKnown && (!modelLayer || !app.stereo.world_visible() || app.placing)) {
+  const bool screenShown = app.poseKnown && (!modelLayer || !app.stereo.world_visible() || app.placing);
+  if (screenShown) {
     layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&screen);
   }
+  // Hidden behind the model: the game stops presenting it (Aurora), a whole
+  // frame of GPU work and a surface's worth of bandwidth saved each frame.
+  app.stereo.set_screen_hidden(app.poseKnown && modelLayer != nullptr && !screenShown);
 
   // The images come from Aurora like the screen's, so they need the same flip.
   if (modelLayer) {
@@ -1074,8 +1102,10 @@ bool set_up(App& app, JNIEnv* env) {
   }
   create_surface_quad(app, env, kHelpWidthPixels, kHelpHeightPixels, app.help);
   create_passthrough(app);
-  // The eyes' images: 4K-class for the pair at the 4K setting.
-  const float eyeScale = 0.5f; // balanced mobile MR profile
+  // The eyes' images, at most 125% of the headset's recommended size (about
+  // the Quest 3 panel's own pixels): sharp polygons and textures on the table.
+  // Dynamic resolution (stereo_view.cpp) draws less of them when 120 Hz needs it.
+  const float eyeScale = 1.25f;
   if (!app.stereo.init(app.instance, app.session, app.system, app.egl.display, eyeScale)) {
     LOGW("No model on the table: the game stays on its screen");
   }
@@ -1098,6 +1128,9 @@ void tear_down(App& app, JNIEnv* env) {
   }
   if (app.actions.rightAim != XR_NULL_HANDLE) {
     xrDestroySpace(app.actions.rightAim);
+  }
+  if (app.actions.leftAim != XR_NULL_HANDLE) {
+    xrDestroySpace(app.actions.leftAim);
   }
   if (app.actions.set != XR_NULL_HANDLE) {
     xrDestroyActionSet(app.actions.set);

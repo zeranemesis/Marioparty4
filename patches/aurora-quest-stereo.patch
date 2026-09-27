@@ -1,4 +1,3 @@
-diff --git a/cmake/aurora_gx.cmake b/cmake/aurora_gx.cmake
 --- a/cmake/aurora_gx.cmake
 +++ b/cmake/aurora_gx.cmake
 @@ -4,6 +4,7 @@ add_library(aurora_gx STATIC
@@ -9,11 +8,9 @@ diff --git a/cmake/aurora_gx.cmake b/cmake/aurora_gx.cmake
          lib/gfx/dds_io.cpp
          lib/gfx/tex_copy_conv.cpp
          lib/gfx/tex_palette_conv.cpp
-diff --git a/include/aurora/stereo.h b/include/aurora/stereo.h
-new file mode 100644
 --- /dev/null
 +++ b/include/aurora/stereo.h
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,51 @@
 +#ifndef AURORA_STEREO_H
 +#define AURORA_STEREO_H
 +
@@ -53,13 +50,18 @@ new file mode 100644
 +// Suppress the unused screen world even when all eye buffers are busy.
 +void AuroraStereoWorldOnly(bool enabled);
 +bool AuroraStereoActive(void);
++// Dynamic resolution, before AuroraStereoBegin: the part of each eye's half
++// drawn this frame, from its top-left corner (0: all of it).
++void AuroraStereoSetEyeSize(uint32_t width, uint32_t height);
++// The headset does not show the game's own frame (the model replaces it):
++// the frame is still drawn for the eyes, but not presented to the screen.
++void AuroraStereoHideScreen(bool hidden);
 +
 +#ifdef __cplusplus
 +}
 +#endif
 +
 +#endif
-diff --git a/lib/aurora.cpp b/lib/aurora.cpp
 --- a/lib/aurora.cpp
 +++ b/lib/aurora.cpp
 @@ -2,6 +2,7 @@
@@ -70,7 +72,35 @@ diff --git a/lib/aurora.cpp b/lib/aurora.cpp
  #include "gx/fifo.hpp"
  #include "imgui.hpp"
  #include "webgpu/gpu.hpp"
-@@ -337,6 +338,8 @@ void end_frame() noexcept {
+@@ -261,13 +262,16 @@ void end_frame() noexcept {
+   }
+ #endif
+ 
+-  gfx::end_frame([rmlBindGroup = std::move(rmlBindGroup), viewport,
++  // A VR headset showing the game as a model does not show this frame: the
++  // eyes' images are still submitted, the unseen screen is not presented.
++  const bool screenHidden = gfx::stereo::screen_hidden();
++  gfx::end_frame([rmlBindGroup = std::move(rmlBindGroup), viewport, screenHidden,
+                   imguiDrawData = std::move(imguiDrawData)](wgpu::CommandEncoder& encoder) {
+     window::SurfaceLock surfaceLock;
+     wgpu::Texture currentTexture;
+     wgpu::TextureView currentView;
+     auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
+-    if (window::is_presentable() && g_surface) {
++    if (!screenHidden && window::is_presentable() && g_surface) {
+       ZoneScopedN("Acquire texture");
+       wgpu::SurfaceTexture surfaceTexture;
+       g_surface.GetCurrentTexture(&surfaceTexture);
+@@ -328,7 +332,7 @@ void end_frame() noexcept {
+         imgui::render(pass, imguiDrawData);
+         pass.End();
+       }
+-    } else {
++    } else if (!screenHidden) {
+       Log.info("Skipping present; window not presentable");
+     }
+     const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Redraw command buffer"};
+@@ -337,6 +341,8 @@ void end_frame() noexcept {
        ZoneScopedN("Queue Submit");
        g_queue.Submit(1, &buffer);
      }
@@ -79,7 +109,15 @@ diff --git a/lib/aurora.cpp b/lib/aurora.cpp
      if (canPresent && g_surface) {
        ZoneScopedN("Present");
        auto presentStatus = g_surface.Present();
-diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
+@@ -344,7 +350,7 @@ void end_frame() noexcept {
+         Log.warn("Surface present failed: {}", static_cast<int>(presentStatus));
+         webgpu::release_surface();
+       }
+-    } else if (g_surface) {
++    } else if (!screenHidden && g_surface) {
+       switch (surfaceStatus) {
+       case wgpu::SurfaceGetCurrentTextureStatus::Timeout:
+         Log.warn("Surface texture acquisition timed out");
 --- a/lib/gfx/common.cpp
 +++ b/lib/gfx/common.cpp
 @@ -11,6 +11,7 @@
@@ -90,7 +128,7 @@ diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
  #include "tex_copy_conv.hpp"
  #include "tex_palette_conv.hpp"
  #include "texture_replacement.hpp"
-@@ -182,6 +183,10 @@
+@@ -182,6 +183,10 @@ struct RenderPass {
    bool captureDepthSnapshot = false;
    bool sealed = false;
    std::vector<tex_palette_conv::ConvRequest> paletteConvs;
@@ -101,7 +139,7 @@ diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
  };
  
  struct TextureCopy {
-@@ -495,6 +500,8 @@
+@@ -495,6 +500,8 @@ void end_color_pass() {
  }
  
  static inline void push_command(CommandType type, const Command::Data& data) {
@@ -110,7 +148,7 @@ diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
    if (g_currentRenderPass == UINT32_MAX)
      UNLIKELY {
        Log.warn("Dropping command {}", magic_enum::enum_name(type));
-@@ -1132,6 +1139,71 @@
+@@ -1132,6 +1139,75 @@ void finish() {
      enqueue_pass(frame, g_recordingFrameSlot, g_currentRenderPass);
      g_currentRenderPass = UINT32_MAX;
    }
@@ -141,18 +179,22 @@ diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
 +      .stereoHasWorld = desc.hasWorld,
 +  };
 +  pass.commands.reserve(desc.eyes[0]->size() + desc.eyes[1]->size() + desc.hud->size() + 6);
++  // With dynamic resolution, each eye draws a smaller rectangle of its half:
++  // at the left, centered vertically, so the headset finds it at the same rows
++  // whichever vertical origin its compositor gives the image.
++  const uint32_t eyeTop = desc.hudTop > desc.eyeHeight ? (desc.hudTop - desc.eyeHeight) / 2 : 0;
 +  for (uint32_t eye = 0; eye < 2; ++eye) {
-+    const auto left = static_cast<float>(eye * desc.eyeWidth);
++    const auto left = static_cast<float>(eye * desc.eyeStride);
 +    const auto width = static_cast<float>(desc.eyeWidth);
 +    const auto height = static_cast<float>(desc.eyeHeight);
 +    pass.commands.push_back({
 +        .type = CommandType::SetViewport,
-+        .data = {.setViewport = {left, 0.f, width, height, 0.f, 1.f}},
++        .data = {.setViewport = {left, static_cast<float>(eyeTop), width, height, 0.f, 1.f}},
 +    });
 +    pass.commands.push_back({
 +        .type = CommandType::SetScissor,
-+        .data = {.setScissor = {static_cast<int32_t>(eye * desc.eyeWidth), 0, static_cast<int32_t>(desc.eyeWidth),
-+                                static_cast<int32_t>(desc.eyeHeight)}},
++        .data = {.setScissor = {static_cast<int32_t>(eye * desc.eyeStride), static_cast<int32_t>(eyeTop),
++                                static_cast<int32_t>(desc.eyeWidth), static_cast<int32_t>(desc.eyeHeight)}},
 +    });
 +    for (const auto& draw : *desc.eyes[eye]) {
 +      pass.commands.push_back({
@@ -163,12 +205,12 @@ diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
 +  }
 +  pass.commands.push_back({
 +      .type = CommandType::SetViewport,
-+      .data = {.setViewport = {0.f, static_cast<float>(desc.eyeHeight), static_cast<float>(desc.hudWidth),
++      .data = {.setViewport = {0.f, static_cast<float>(desc.hudTop), static_cast<float>(desc.hudWidth),
 +                              static_cast<float>(desc.hudHeight), 0.f, 1.f}},
 +  });
 +  pass.commands.push_back({
 +      .type = CommandType::SetScissor,
-+      .data = {.setScissor = {0, static_cast<int32_t>(desc.eyeHeight), static_cast<int32_t>(desc.hudWidth),
++      .data = {.setScissor = {0, static_cast<int32_t>(desc.hudTop), static_cast<int32_t>(desc.hudWidth),
 +                             static_cast<int32_t>(desc.hudHeight)}},
 +  });
 +  for (const auto& draw : *desc.hud) {
@@ -182,21 +224,19 @@ diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
  }
  
  void end_frame(EndFrameCallback callback) {
-@@ -1322,6 +1394,9 @@
-         .stencilClearValue = passInfo.stencilClearValue,
+@@ -1323,6 +1399,9 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
      };
      depthStencilAttachmentPtr = &depthStencilAttachment;
-+  }
+   }
 +  if (passInfo.stereoImage >= 0) {
 +    stereo::begin_access(passInfo.stereoImage, passInfo.stereoTag, passInfo.stereoHasWorld);
-   }
++  }
    const auto label = fmt::format("Render pass {}", passIndex);
    const wgpu::RenderPassDescriptor renderPassDescriptor{
-diff --git a/lib/gfx/stereo.cpp b/lib/gfx/stereo.cpp
-new file mode 100644
+       .label = passInfo.label.empty() ? label.c_str() : passInfo.label.c_str(),
 --- /dev/null
 +++ b/lib/gfx/stereo.cpp
-@@ -0,0 +1,423 @@
+@@ -0,0 +1,475 @@
 +#include "stereo.hpp"
 +
 +#include <aurora/stereo.h>
@@ -206,7 +246,9 @@ new file mode 100644
 +#include "../gx/shader_info.hpp"
 +#include "../gx/fifo.hpp"
 +
++#include <algorithm>
 +#include <array>
++#include <atomic>
 +#include <mutex>
 +
 +#if defined(__ANDROID__)
@@ -242,6 +284,12 @@ new file mode 100644
 +int32_t g_image = -1;
 +uint64_t g_frameTag = 0;
 +bool g_loggedGeometry = false;
++// Dynamic resolution: the part of each eye's half drawn this frame (0: all of it).
++uint32_t g_frameEyeWidth = 0, g_frameEyeHeight = 0;
++// The game's own frame is not on show in the headset (aurora.cpp skips presenting it).
++std::atomic_bool g_screenHidden = false;
++// 16x once a headset uses the eyes' images (gx.cpp's samplers read it).
++std::atomic<uint16_t> g_forcedAnisotropy{1};
 +std::array<Mat4x4<float>, 2> g_clip{};
 +std::array<std::vector<gx::DrawData>, 2> g_eyeDraws;
 +std::vector<gx::DrawData> g_hudDraws;
@@ -266,9 +314,14 @@ new file mode 100644
 +}
 +
 +webgpu::TextureWithSampler create_target(wgpu::TextureFormat format, uint32_t sampleCount, const char* label) {
++  // Multisampled color and depth are cleared, drawn and resolved within the
++  // pass and never stored: on the headset's tiled GPU, transient attachments
++  // live in tile memory only (no RAM, no bandwidth).
++  const bool transient = sampleCount > 1 && webgpu::g_device.HasFeature(wgpu::FeatureName::TransientAttachments);
 +  const wgpu::TextureDescriptor descriptor{
 +      .label = label,
-+      .usage = wgpu::TextureUsage::RenderAttachment,
++      .usage = transient ? wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TransientAttachment
++                         : wgpu::TextureUsage::RenderAttachment,
 +      .dimension = wgpu::TextureDimension::e2D,
 +      .size = {g_width, g_height, 1},
 +      .format = format,
@@ -288,6 +341,23 @@ new file mode 100644
 +bool recording() noexcept {
 +#if defined(__ANDROID__)
 +  return g_image >= 0;
++#else
++  return false;
++#endif
++}
++
++uint16_t forced_anisotropy() noexcept {
++#if defined(__ANDROID__)
++  // Set once images are registered, i.e. a headset shows the eyes' images.
++  return g_forcedAnisotropy.load(std::memory_order_relaxed);
++#else
++  return 1;
++#endif
++}
++
++bool screen_hidden() noexcept {
++#if defined(__ANDROID__)
++  return g_screenHidden.load(std::memory_order_relaxed);
 +#else
 +  return false;
 +#endif
@@ -414,14 +484,17 @@ new file mode 100644
 +
 +  const bool hasWorld = !g_eyeDraws[0].empty();
 +  const size_t worldDraws = g_eyeDraws[0].size();
++  const uint32_t eyeStride = g_width / 2;
 +  PassDesc desc{
 +      .color = samples > 1 ? g_color.view : image.view,
 +      .resolve = samples > 1 ? image.view : wgpu::TextureView{},
 +      .depth = g_depth.view,
 +      .size = {g_width, g_height, 1},
 +      .sampleCount = samples,
-+      .eyeWidth = g_width / 2,
-+      .eyeHeight = g_eyeHeight,
++      .eyeStride = eyeStride,
++      .eyeWidth = g_frameEyeWidth != 0 ? std::min(g_frameEyeWidth, eyeStride) : eyeStride,
++      .eyeHeight = g_frameEyeHeight != 0 ? std::min(g_frameEyeHeight, g_eyeHeight) : g_eyeHeight,
++      .hudTop = g_eyeHeight,
 +      .hudWidth = g_hudWidth,
 +      .hudHeight = g_hudHeight,
 +      .image = g_image,
@@ -565,6 +638,7 @@ new file mode 100644
 +  g_callback = callback;
 +  g_callbackUser = user;
 +  g_loggedGeometry = false;
++  g_forcedAnisotropy.store(16, std::memory_order_relaxed);
 +  Log.info("Stereo: {} images of {}x{}", count, width, height);
 +  return true;
 +#else
@@ -611,6 +685,24 @@ new file mode 100644
 +
 +bool AuroraStereoActive(void) { return recording(); }
 +
++void AuroraStereoSetEyeSize(uint32_t width, uint32_t height) {
++#if defined(__ANDROID__)
++  g_frameEyeWidth = width;
++  g_frameEyeHeight = height;
++#else
++  (void)width;
++  (void)height;
++#endif
++}
++
++void AuroraStereoHideScreen(bool hidden) {
++#if defined(__ANDROID__)
++  g_screenHidden.store(hidden, std::memory_order_relaxed);
++#else
++  (void)hidden;
++#endif
++}
++
 +extern "C" void AuroraStereoWorldOnly(bool enabled) {
 +#if defined(__ANDROID__)
 +  // The FIFO is deferred: process camera draws before changing the scope.
@@ -620,11 +712,9 @@ new file mode 100644
 +  (void)enabled;
 +#endif
 +}
-diff --git a/lib/gfx/stereo.hpp b/lib/gfx/stereo.hpp
-new file mode 100644
 --- /dev/null
 +++ b/lib/gfx/stereo.hpp
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,63 @@
 +#pragma once
 +
 +// Stereo rendering for a VR headset (include/aurora/stereo.h).
@@ -642,6 +732,11 @@ new file mode 100644
 +bool recording() noexcept;
 +// Backpressure: consume perspective vertices without uploading hidden draws.
 +bool discard_world_draw() noexcept;
++// The game's own frame is not on show in the headset: aurora.cpp skips presenting it.
++bool screen_hidden() noexcept;
++// Anisotropic filtering every mipmapped texture gets while a headset uses the
++// eyes' images (1: the game's own choice).
++uint16_t forced_anisotropy() noexcept;
 +
 +// Only consecutive perspective draws in the same camera may share geometry.
 +gx::DrawData* last_world_draw() noexcept;
@@ -668,8 +763,10 @@ new file mode 100644
 +  wgpu::TextureView depth;
 +  wgpu::Extent3D size;
 +  uint32_t sampleCount = 1;
-+  uint32_t eyeWidth = 0;
++  uint32_t eyeStride = 0; // an eye's half of the image
++  uint32_t eyeWidth = 0;  // the part of it drawn this frame (dynamic resolution)
 +  uint32_t eyeHeight = 0;
++  uint32_t hudTop = 0;    // the interface's region starts below the eyes' halves
 +  uint32_t hudWidth = 0;
 +  uint32_t hudHeight = 0;
 +  int32_t image = -1;
@@ -681,7 +778,6 @@ new file mode 100644
 +void enqueue_pass(const PassDesc& desc) noexcept; // common.cpp
 +
 +} // namespace aurora::gfx::stereo
-diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
 --- a/lib/gx/command_processor.cpp
 +++ b/lib/gx/command_processor.cpp
 @@ -1,6 +1,7 @@
@@ -692,7 +788,7 @@ diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
  #include "dolphin/gx/GXAurora.h"
  #include "gx.hpp"
  #include "gx_fmt.hpp"
-@@ -1568,7 +1569,16 @@
+@@ -1568,7 +1569,16 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
    if (pos + totalVtxBytes > size)
      UNLIKELY { handle_draw_overrun(totalVtxBytes, data, pos, size); }
  
@@ -710,7 +806,7 @@ diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
    const bool canMerge = lastDraw != nullptr && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
                          lastDraw->instanceCount == 1;
  
-@@ -1607,6 +1617,9 @@
+@@ -1607,6 +1617,9 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
      }
      lastDraw->vtxCount += vtxCount;
      lastDraw->indexCount += numIndices;
@@ -720,7 +816,7 @@ diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
      ++gfx::g_mergedDrawCallCount;
      return;
    }
-@@ -1661,7 +1674,6 @@
+@@ -1661,7 +1674,6 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
    const auto info = build_shader_info(config.shaderConfig);
    resolve_sampled_textures(info);
    const auto bindGroups = build_bind_groups(info);
@@ -728,7 +824,7 @@ diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
  
    uint32_t instanceCount = 1;
    if (prim == GX_LINES) {
-@@ -1671,17 +1683,24 @@
+@@ -1671,17 +1683,24 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
    } else if (prim == GX_POINTS) {
      instanceCount = vtxCount;
    }
@@ -757,17 +853,38 @@ diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
  }
  
  std::string read_string(const u8* data, u32& pos, u32 size, bool bigEndian) {
-diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
+--- a/lib/gx/gx.cpp
++++ b/lib/gx/gx.cpp
+@@ -6,6 +6,7 @@
+ #include "../webgpu/gpu.hpp"
+ #include "../internal.hpp"
+ #include "../gfx/common.hpp"
++#include "../gfx/stereo.hpp"
+ #include "../gfx/tex_palette_conv.hpp"
+ #include "../gfx/texture.hpp"
+ #include "../gfx/texture_convert.hpp"
+@@ -1098,6 +1099,10 @@ wgpu::SamplerDescriptor aurora::gfx::TextureBind::get_descriptor() const noexcep
+     minLod = 0.f;
+     maxLod = 0.f;
+   }
++  // A VR headset shows the scene as a model seen from any angle, mostly at a
++  // slant across the table, where plain mipmapping blurs the textures: the
++  // game's anisotropy request (GX_ANISO_1 nearly everywhere) is raised then.
++  maxAnisotropy = std::max<u16>(maxAnisotropy, aurora::gfx::stereo::forced_anisotropy());
+   if ((ref && ref->hasArbitraryMips) || !mipsEnabled) {
+     maxAnisotropy = 1;
+   } else if (maxAnisotropy > 1) {
 --- a/lib/webgpu/gpu.cpp
 +++ b/lib/webgpu/gpu.cpp
-@@ -826,6 +826,13 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -826,6 +826,14 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
          }
          requiredFeatures.push_back(feature);
        }
 +#if defined(__ANDROID__)
-+      // A VR headset's eye images are shared with its compositor (gfx/stereo.cpp).
++      // A VR headset's eye images are shared with its compositor (gfx/stereo.cpp),
++      // whose multisampled targets live in tile memory only (transient).
 +      if (feature == wgpu::FeatureName::SharedTextureMemoryAHardwareBuffer ||
-+          feature == wgpu::FeatureName::SharedFenceSyncFD) {
++          feature == wgpu::FeatureName::SharedFenceSyncFD || feature == wgpu::FeatureName::TransientAttachments) {
 +        requiredFeatures.push_back(feature);
 +      }
 +#endif

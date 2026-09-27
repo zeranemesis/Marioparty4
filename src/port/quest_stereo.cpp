@@ -42,6 +42,7 @@ struct QuestStereoFrame {
     float eyeProj[2][16]; // eye -> GX clip space
     float world[16];      // game world -> room
     float hudWidth, hudHeight;
+    uint32_t eyeWidth, eyeHeight; // drawn part of each eye's half (dynamic resolution)
 };
 
 using FrameFn = bool (*)(QuestStereoFrame *frame);
@@ -53,6 +54,7 @@ using WorldOnlyFn = bool (*)();
 using ScreenRequiredFn = void (*)(bool);
 using BoardModeFn = void (*)(bool);
 using CancelledFn = void (*)(uint32_t image, uint64_t tag);
+using ScreenHiddenFn = bool (*)();
 
 struct Quest {
     bool looked = false;
@@ -64,6 +66,7 @@ struct Quest {
     ScreenRequiredFn screenRequired = nullptr;
     BoardModeFn boardMode = nullptr;
     WorldOnlyFn worldOnly = nullptr;
+    ScreenHiddenFn screenHidden = nullptr; // optional: an older library has none
     uint32_t registeredGeneration = 0;
 };
 
@@ -76,10 +79,28 @@ bool sSceneFitted = false;
 float sSceneScale = 1.0f;
 float sSceneCenter[3]{};
 float sEyeClip[2][16]{};
+// Backdrops (see PartyBoard_StereoBackdrop): the eyes in the game camera's view
+// space, and the scene's size in game units.
+float sEyeInView[2][3]{};
+float sSceneExtent = 0.0f;
+// A backdrop is an object around the eyes much larger than the scene on the table.
+constexpr float kBackdropExtents = 2.5f;
+
+// The scene's floor, measured from its geometry during its first frames, is
+// what stands on the table: the bottom of the lowest large surface (ground,
+// arena floor, the sea around an island), in game units.
+constexpr int kFloorFrames = 20;
+constexpr float kFloorSpan = 0.3f; // of the scene's extent, for a surface to count
+float sFloorY = INFINITY;
+int sFloorFrames = 0;
+bool sFloorSettled = false;
 
 struct Mat4 {
     float m[4][4];
 };
+
+// The game camera's view space -> game world, for the floor measurement.
+Mat4 sViewToWorld {};
 
 Mat4 multiply(const Mat4 &a, const Mat4 &b)
 {
@@ -140,6 +161,7 @@ bool find_quest()
             sQuest.screenRequired = reinterpret_cast<ScreenRequiredFn>(dlsym(lib, "PartyBoardQuest_StereoScreenRequired"));
             sQuest.boardMode = reinterpret_cast<BoardModeFn>(dlsym(lib, "PartyBoardQuest_StereoBoardMode"));
             sQuest.cancelled = reinterpret_cast<CancelledFn>(dlsym(lib, "PartyBoardQuest_StereoCancelled"));
+            sQuest.screenHidden = reinterpret_cast<ScreenHiddenFn>(dlsym(lib, "PartyBoardQuest_StereoScreenHidden"));
             __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Stereo bridge: symbols %s",
                 sQuest.frame && sQuest.images && sQuest.submitted && sQuest.generation && sQuest.cancelled
                     ? "ready" : "missing");
@@ -190,7 +212,11 @@ extern "C" void PartyBoard_StereoBeginCamera(s16 cameraNo)
     sActive = false;
     sCameraViewSet = false;
     AuroraStereoWorldOnly(false);
-    if (cameraNo != 0 || !find_quest()) {
+    if (cameraNo != 0) {
+        return;
+    }
+    if (!find_quest()) {
+        AuroraStereoHideScreen(false);
         return;
     }
     const OMOVL scene = omCurrentOvlGet();
@@ -210,6 +236,8 @@ extern "C" void PartyBoard_StereoBeginCamera(s16 cameraNo)
     }
 #endif
     sQuest.screenRequired(screenRequired);
+    // The headset shows the model instead of the flat screen: do not present the screen.
+    AuroraStereoHideScreen(!screenRequired && sQuest.screenHidden != nullptr && sQuest.screenHidden());
     sQuest.boardMode(!screenRequired && scene >= DLL_w01Dll && scene <= DLL_w06Dll);
     if (screenRequired || !register_images()) {
         return;
@@ -229,7 +257,11 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
         sSceneFitted = false;
         sSceneScale = 1.0f;
         std::memset(sSceneCenter, 0, sizeof(sSceneCenter));
+        sFloorY = INFINITY;
+        sFloorFrames = 0;
+        sFloorSettled = false;
     }
+    sViewToWorld = inverse_affine(view);
     const bool board = scene >= DLL_w01Dll && scene <= DLL_w06Dll;
     if (board && !sSceneFitted) {
         const int count = BoardSpaceCountGet(0);
@@ -284,13 +316,38 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
     for (int axis = 0; axis < 3; ++axis) {
         sceneWorld.m[axis][3] = -sSceneCenter[axis] * sSceneScale;
     }
-    if (minigame && sSceneFitted) {
-        sceneWorld.m[1][3] += 600.0f; // arena center 15 cm above table at default scale
+    // The measured floor on the table (the table's height is the anchor's).
+    if (sFloorSettled && std::isfinite(sFloorY)) {
+        sceneWorld.m[1][3] = -sFloorY * sSceneScale;
     }
     // Cancel the game camera every frame: the tracked headset supplies the
     // viewpoint, while the board stays at its physical table anchor.
     const Mat4 world = multiply(multiply(from_rows(sFrame.world), sceneWorld),
         inverse_affine(view));
+    sSceneExtent = sSceneFitted ? 2800.0f / sSceneScale : 0.0f;
+    {
+        // Each eye's position (the room -> eye matrix's inverse translation),
+        // brought into the game camera's view space: room -> game view.
+        Mtx toView;
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                toView[r][c] = world.m[r][c];
+            }
+        }
+        const Mat4 roomToView = inverse_affine(toView);
+        for (int eye = 0; eye < 2; ++eye) {
+            const float *v = sFrame.eyeView[eye];
+            const float room[3] {
+                -(v[0] * v[3] + v[4] * v[7] + v[8] * v[11]),
+                -(v[1] * v[3] + v[5] * v[7] + v[9] * v[11]),
+                -(v[2] * v[3] + v[6] * v[7] + v[10] * v[11]),
+            };
+            for (int axis = 0; axis < 3; ++axis) {
+                sEyeInView[eye][axis] = roomToView.m[axis][0] * room[0] + roomToView.m[axis][1] * room[1]
+                    + roomToView.m[axis][2] * room[2] + roomToView.m[axis][3];
+            }
+        }
+    }
     float clip[2][16];
     for (int eye = 0; eye < 2; ++eye) {
         const Mat4 eyeClip
@@ -298,12 +355,21 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
         std::memcpy(clip[eye], eyeClip.m, sizeof(clip[eye]));
     }
     std::memcpy(sEyeClip, clip, sizeof(sEyeClip));
+    AuroraStereoSetEyeSize(sFrame.eyeWidth, sFrame.eyeHeight);
     AuroraStereoBegin(sFrame.image, clip, sFrame.tag);
     sCameraViewSet = true;
 }
 
 extern "C" void PartyBoard_StereoEndCamera(void)
 {
+    if (sActive && sCameraViewSet && sSceneFitted && !sFloorSettled && ++sFloorFrames >= kFloorFrames) {
+        sFloorSettled = true;
+#if defined(__ANDROID__)
+        __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Scene %d floor: %s %.1f (scene center %.1f)",
+            static_cast<int>(sScene), std::isfinite(sFloorY) ? "measured" : "none, keeping", sFloorY,
+            sSceneCenter[1]);
+#endif
+    }
     if (sActive) {
         if (sCameraViewSet) {
             AuroraStereoEnd();
@@ -324,6 +390,73 @@ extern "C" BOOL PartyBoard_StereoBoardPresentation(void)
 {
     const OMOVL scene = omCurrentOvlGet();
     return scene >= DLL_w01Dll && scene <= DLL_w06Dll && find_quest() && sQuest.worldOnly() ? TRUE : FALSE;
+}
+
+// The sky, a skybox or a far scenery ring: seen from the headset it would
+// surround the player and hide the room, and it fills every pixel of both
+// eyes. Recognized as an object whose bounding sphere holds an eye and is much
+// larger than the scene on the table; the table and the room replace it.
+extern "C" BOOL PartyBoard_StereoBackdrop(float x, float y, float z, float radius)
+{
+    if (!sActive || !sCameraViewSet || !(sSceneExtent > 0.0f) || !std::isfinite(radius)
+        || radius < kBackdropExtents * sSceneExtent) {
+        return FALSE;
+    }
+    const float center[3] {x, y, z};
+    for (int eye = 0; eye < 2; ++eye) {
+        float distance2 = 0.0f;
+        for (int axis = 0; axis < 3; ++axis) {
+            const float d = sEyeInView[eye][axis] - center[axis];
+            distance2 += d * d;
+        }
+        if (distance2 < radius * radius) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+// Each object drawn for the eyes while the floor is measured: its bounds,
+// from the object's model-view matrix (as hsfdraw.c draws it).
+extern "C" void PartyBoard_StereoObserveBounds(Mtx modelView, const HuVecF *min, const HuVecF *max)
+{
+    if (!sActive || !sCameraViewSet || sFloorSettled || !(sSceneExtent > 0.0f)) {
+        return;
+    }
+    float low[3] {INFINITY, INFINITY, INFINITY};
+    float high[3] {-INFINITY, -INFINITY, -INFINITY};
+    float viewLow[3] {INFINITY, INFINITY, INFINITY};
+    float viewHigh[3] {-INFINITY, -INFINITY, -INFINITY};
+    for (int corner = 0; corner < 8; ++corner) {
+        const float local[3] {(corner & 1) ? max->x : min->x, (corner & 2) ? max->y : min->y,
+            (corner & 4) ? max->z : min->z};
+        float view[3], world[3];
+        for (int r = 0; r < 3; ++r) {
+            view[r] = modelView[r][0] * local[0] + modelView[r][1] * local[1] + modelView[r][2] * local[2]
+                + modelView[r][3];
+        }
+        for (int r = 0; r < 3; ++r) {
+            world[r] = sViewToWorld.m[r][0] * view[0] + sViewToWorld.m[r][1] * view[1]
+                + sViewToWorld.m[r][2] * view[2] + sViewToWorld.m[r][3];
+            low[r] = std::min(low[r], world[r]);
+            high[r] = std::max(high[r], world[r]);
+            viewLow[r] = std::min(viewLow[r], view[r]);
+            viewHigh[r] = std::max(viewHigh[r], view[r]);
+        }
+    }
+    if (!std::isfinite(low[1]) || std::max(high[0] - low[0], high[2] - low[2]) < kFloorSpan * sSceneExtent) {
+        return; // too small to be the ground
+    }
+    float center[3], radius2 = 0.0f;
+    for (int r = 0; r < 3; ++r) {
+        center[r] = (viewLow[r] + viewHigh[r]) * 0.5f;
+        const float half = (viewHigh[r] - viewLow[r]) * 0.5f;
+        radius2 += half * half;
+    }
+    if (PartyBoard_StereoBackdrop(center[0], center[1], center[2], std::sqrt(radius2))) {
+        return; // the sky is not the floor
+    }
+    sFloorY = std::min(sFloorY, low[1]);
 }
 
 extern "C" BOOL PartyBoard_StereoSphereVisible(float x, float y, float z, float radius)

@@ -173,6 +173,29 @@ void Hu3DDraw(HU3DMODEL *modelP, Mtx mtx, HuVecF *scale)
     oneceF = 1;
 }
 
+#ifdef TARGET_PC
+// Meta Quest: a backdrop (sky, skybox) seen from the headset, which the model
+// on the table leaves out (PartyBoard_StereoBackdrop). Same bounding sphere as
+// ObjCullCheck, for models the game itself never culls.
+static BOOL ObjStereoBackdrop(HSFOBJECT *objPtr, Mtx mtx) {
+    HuVecF *min = &objPtr->mesh.mesh.min;
+    HuVecF *max = &objPtr->mesh.mesh.max;
+    Vec *scale = &scaleBuf[MTXIdx - 1];
+    float largest = scale->x;
+    float centerX = (max->x - min->x) * 0.5f;
+    float centerY = (max->y - min->y) * 0.5f;
+    float centerZ = (max->z - min->z) * 0.5f;
+    Mtx center;
+
+    if (scale->y > largest) largest = scale->y;
+    if (scale->z > largest) largest = scale->z;
+    MTXTrans(center, centerX + min->x, centerY + min->y, centerZ + min->z);
+    MTXConcat(mtx, center, center);
+    return PartyBoard_StereoBackdrop(center[0][3], center[1][3], center[2][3],
+        largest * sqrtf(centerX * centerX + centerY * centerY + centerZ * centerZ));
+}
+#endif
+
 static void objCall(HU3DMODEL *modelP, HSFOBJECT *objPtr) {
     modelObjNum++;
     switch (objPtr->type) {
@@ -306,6 +329,11 @@ static void objMesh(HU3DMODEL *modelP, HSFOBJECT *objPtr) {
             if (modelP->attr & HU3D_ATTR_NOCULL) {
                 dispF = ObjCullCheck(modelP->hsf, objPtr, drawObj->matrix);
             }
+#ifdef TARGET_PC
+            else if (PartyBoard_StereoActive()) {
+                dispF = !ObjStereoBackdrop(objPtr, drawObj->matrix);
+            }
+#endif
             else {
                 dispF = TRUE;
             }
@@ -313,6 +341,12 @@ static void objMesh(HU3DMODEL *modelP, HSFOBJECT *objPtr) {
                 dispF = FALSE;
             }
             if (dispF && (transformP->scale.x != 0.0f || transformP->scale.y != 0.0f || transformP->scale.z != 0.0f)) {
+#ifdef TARGET_PC
+                if (PartyBoard_StereoActive()) {
+                    // Meta Quest: the scene's floor is measured from what is drawn.
+                    PartyBoard_StereoObserveBounds(drawObj->matrix, &objPtr->mesh.mesh.min, &objPtr->mesh.mesh.max);
+                }
+#endif
                 drawObj->model = modelP;
                 drawObj->object = objPtr;
                 if ((constData->attr & (HU3D_CONST_NEAR|HU3D_CONST_ALTBLEND|HU3D_CONST_XLU)) && shadowModelDrawF == FALSE) {
@@ -409,7 +443,11 @@ BOOL ObjCullCheck(HSFDATA *hsf, HSFOBJECT *objPtr, Mtx mtx) {
 #ifdef TARGET_PC
     if (PartyBoard_StereoActive()) {
         // Cull against both headset eyes, rather than disabling culling for
-        // the entire map or using the original flat-screen camera.
+        // the entire map or using the original flat-screen camera, and leave
+        // out backdrops that would surround the player.
+        if (PartyBoard_StereoBackdrop(cullMtx[0][3], cullMtx[1][3], cullMtx[2][3], radius)) {
+            return 0;
+        }
         return PartyBoard_StereoSphereVisible(cullMtx[0][3], cullMtx[1][3], cullMtx[2][3], radius);
     }
 #endif

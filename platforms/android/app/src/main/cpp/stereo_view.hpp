@@ -32,6 +32,7 @@ struct StereoFrame {
   float eyeProj[2][16]; // eye -> GX clip space (z/w from -1 at near to 0 at far)
   float world[16];      // game world -> room
   float hudWidth, hudHeight;
+  uint32_t eyeWidth, eyeHeight; // drawn part of each eye's half (dynamic resolution)
 };
 
 class StereoView {
@@ -64,6 +65,15 @@ public:
   // A camera with no view never enqueues GPU work: return its lease explicitly.
   void cancelled(uint32_t image, uint64_t tag);
 
+  // XR thread, each frame before update(): the display time being prepared.
+  void set_frame_time(XrTime time);
+  // How far ahead of this frame the game's next image will be seen: measured
+  // from the images already shown, for the eye poses given to the game.
+  XrDuration prediction() const;
+  // The flat screen is not on show (the model replaces it): the game skips presenting it.
+  void set_screen_hidden(bool hidden);
+  bool screen_hidden() const;
+
 private:
   friend struct StereoViewTestAccess;
   enum class State { Free, Drawing, Ready, Copying };
@@ -78,7 +88,12 @@ private:
     bool board = false;
     GLsync copyFence = nullptr;
     XrView views[2]{};
+    uint32_t renderWidth = 0, renderHeight = 0; // drawn part of each eye's half
+    XrTime leaseTime = 0;                       // the XR frame the game took it in
   };
+
+  // Dynamic resolution, once a second (caller holds mMutex).
+  void adapt_resolution();
 
   void release_slot(Slot& slot);
   Slot* newest_completed(); // Caller holds mMutex.
@@ -88,7 +103,7 @@ private:
   XrSwapchain mSwapchain = XR_NULL_HANDLE;
   XrSwapchain mHudSwapchain = XR_NULL_HANDLE;
   std::vector<XrSwapchainImageOpenGLESKHR> mHudImages;
-  uint32_t mHudPixelsWidth = 1280, mHudPixelsHeight = 960;
+  uint32_t mHudPixelsWidth = 1600, mHudPixelsHeight = 1200;
   bool mHudShown = false;
   XrCompositionLayerQuad mHudLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
   std::vector<XrSwapchainImageOpenGLESKHR> mSwapchainImages;
@@ -110,11 +125,26 @@ private:
   XrView mViews[2]{};
   float mWorld[16]{};
 
+  // Dynamic resolution: the drawn part of the eyes' images, 0.5 to 1 of
+  // their size, lowered when the GPU falls behind 120 Hz, raised back slowly.
+  float mRenderScale = 0.8f; // of images 125% of the recommended size: 100% of it
+  float mMaxScale = 1.0f;    // the images' size, relative to the recommended one
+  uint32_t mAdaptLeases = 0, mAdaptRingFull = 0, mCalmSeconds = 0;
+  std::chrono::steady_clock::time_point mAdaptAt = std::chrono::steady_clock::now();
+  // Pose prediction: this XR frame's display time, and the measured delay
+  // between taking an image and showing it (moving average, nanoseconds).
+  XrTime mFrameTime = 0;
+  double mLatencyNs = 0;
+  bool mScreenHidden = false;
+  // The interface is copied at 30 Hz: text and scores need no more.
+  std::chrono::steady_clock::time_point mHudCopiedAt{};
+
   // The last image shown, resubmitted until the game draws the next one.
   uint64_t mPresentedTag = 0;
   bool mShown = false;
   bool mShownHasWorld = false;
   XrView mShownViews[2]{};
+  uint32_t mShownWidth = 0, mShownHeight = 0;
   XrCompositionLayerProjectionView mProjectionViews[2]{};
   XrCompositionLayerProjection mLayer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
 };

@@ -20,6 +20,10 @@ void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view);
 BOOL PartyBoard_StereoActive(void);
 // MR board presentation also remains active after the camera's draw scope.
 BOOL PartyBoard_StereoBoardPresentation(void);
+// Each object drawn for the eyes: its local bounds, while the scene's floor is measured.
+void PartyBoard_StereoObserveBounds(Mtx modelView, const HuVecF *min, const HuVecF *max);
+// An object the headset should not draw: a backdrop around the player (sky, skybox).
+BOOL PartyBoard_StereoBackdrop(float x, float y, float z, float radius);
 BOOL PartyBoard_StereoSphereVisible(float x, float y, float z, float radius);
 
 #ifdef __cplusplus

@@ -1,128 +1,6 @@
-diff --git a/lib/window.cpp b/lib/window.cpp
---- a/lib/window.cpp
-+++ b/lib/window.cpp
-@@ -1,4 +1,5 @@
- #include "window.hpp"
-+#include "surface_lifecycle.hpp"
- 
- #ifdef AURORA_ENABLE_GX
- #include "imgui.hpp"
-@@ -46,9 +47,9 @@
- std::vector<AuroraEvent> g_events;
- std::atomic_bool g_backgrounded = false;
- #if defined(SDL_PLATFORM_ANDROID)
--std::atomic_bool g_surfaceReady = false;
-+SurfaceLifecycle g_surfaceLifecycle(false);
- #else
--std::atomic_bool g_surfaceReady = true;
-+SurfaceLifecycle g_surfaceLifecycle(true);
- #endif
- bool g_lastPaused = false;
- bool g_gotFocus = false;
-@@ -88,6 +89,7 @@
-   gfx::gpu_synchronize();
-   SurfaceLock surfaceLock;
- #endif
-+  if (!is_presentable()) return;
-   const auto size = get_window_size();
-   if (size == g_windowSize) {
-     return;
-@@ -476,10 +478,11 @@
- 
- bool is_presentable() noexcept {
-   return g_window != nullptr && !g_backgrounded.load(std::memory_order_acquire) &&
--         g_surfaceReady.load(std::memory_order_acquire);
--}
--
--void set_surface_ready(bool ready) noexcept { g_surfaceReady.store(ready, std::memory_order_release); }
-+         g_surfaceLifecycle.ready();
-+}
-+
-+void set_surface_ready(bool ready) noexcept { g_surfaceLifecycle.set_ready(ready); }
-+uint64_t surface_generation() noexcept { return g_surfaceLifecycle.generation(); }
- 
- SurfaceLock::SurfaceLock() noexcept {
- #if defined(SDL_PLATFORM_ANDROID)
-diff --git a/lib/window.hpp b/lib/window.hpp
---- a/lib/window.hpp
-+++ b/lib/window.hpp
-@@ -41,6 +41,7 @@
- bool is_paused() noexcept;
- bool is_presentable() noexcept;
- void set_surface_ready(bool ready) noexcept;
-+uint64_t surface_generation() noexcept;
- void set_title(const char* title);
- void set_fullscreen(bool fullscreen);
- bool get_fullscreen();
-diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
---- a/lib/webgpu/gpu.cpp
-+++ b/lib/webgpu/gpu.cpp
-@@ -36,6 +36,7 @@
- wgpu::Device g_device;
- wgpu::Queue g_queue;
- wgpu::Surface g_surface;
-+static uint64_t g_surfaceGeneration = 0;
- wgpu::BackendType g_backendType;
- GraphicsConfig g_graphicsConfig;
- TextureWithSampler g_frameBuffer;
-@@ -687,6 +688,8 @@
-     Log.error("Failed to create surface");
-     return false;
-   }
-+  g_surfaceGeneration = window::surface_generation();
-+  Log.info("Created surface generation {}", g_surfaceGeneration);
-   return true;
- }
- 
-@@ -998,6 +1001,10 @@
-   g_surface = {};
- }
- 
-+bool surface_is_current() noexcept {
-+  return g_surface && g_surfaceGeneration == window::surface_generation();
-+}
-+
- bool refresh_surface(bool recreate) {
-   gfx::gpu_synchronize();
-   if (!g_instance || !g_device) {
-@@ -1007,7 +1014,7 @@
-     release_surface();
-     return false;
-   }
--  if ((!g_surface || recreate) && !create_surface()) {
-+  if ((!surface_is_current() || recreate) && !create_surface()) {
-     return false;
-   }
-   uint32_t width = g_graphicsConfig.surfaceConfiguration.width;
-@@ -1029,8 +1036,12 @@
- 
- void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, uint32_t native_height, bool force) {
-   gfx::gpu_synchronize();
--  if (!g_surface || !g_device || width == 0 || height == 0 || native_height == 0 || native_width == 0) {
-+  if (!window::is_presentable() || !g_device || width == 0 || height == 0 || native_height == 0 || native_width == 0) {
-     return;
-+  }
-+  if (!surface_is_current()) {
-+    if (!create_surface()) return;
-+    force = true;
-   }
-   const bool sizeChanged = g_graphicsConfig.surfaceConfiguration.width != native_width ||
-                            g_graphicsConfig.surfaceConfiguration.height != native_height ||
-diff --git a/lib/webgpu/gpu.hpp b/lib/webgpu/gpu.hpp
---- a/lib/webgpu/gpu.hpp
-+++ b/lib/webgpu/gpu.hpp
-@@ -57,6 +57,7 @@
- bool initialize(AuroraBackend backend, bool allowCpu);
- void shutdown();
- void release_surface() noexcept;
-+bool surface_is_current() noexcept;
- bool refresh_surface(bool recreate = true);
- void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, uint32_t native_height,
-                       bool force = false);
-diff --git a/lib/aurora.cpp b/lib/aurora.cpp
 --- a/lib/aurora.cpp
 +++ b/lib/aurora.cpp
-@@ -213,7 +213,7 @@
+@@ -213,7 +213,7 @@ bool begin_frame() noexcept {
      bool presentable;
      {
        window::SurfaceLock probe;
@@ -131,7 +9,7 @@ diff --git a/lib/aurora.cpp b/lib/aurora.cpp
      }
      if (!presentable) {
        gfx::gpu_synchronize();
-@@ -227,7 +227,7 @@
+@@ -227,7 +227,7 @@ bool begin_frame() noexcept {
      if (window::is_paused()) {
        return false;
      }
@@ -140,26 +18,24 @@ diff --git a/lib/aurora.cpp b/lib/aurora.cpp
        webgpu::refresh_surface(true);
        if (!g_surface) {
          return false;
-@@ -268,7 +268,7 @@
+@@ -271,7 +271,7 @@ void end_frame() noexcept {
      wgpu::Texture currentTexture;
      wgpu::TextureView currentView;
      auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
--    if (window::is_presentable() && g_surface) {
-+    if (window::is_presentable() && webgpu::surface_is_current()) {
+-    if (!screenHidden && window::is_presentable() && g_surface) {
++    if (!screenHidden && window::is_presentable() && webgpu::surface_is_current()) {
        ZoneScopedN("Acquire texture");
        wgpu::SurfaceTexture surfaceTexture;
        g_surface.GetCurrentTexture(&surfaceTexture);
-@@ -347,7 +347,7 @@
+@@ -350,7 +350,7 @@ void end_frame() noexcept {
          Log.warn("Surface present failed: {}", static_cast<int>(presentStatus));
          webgpu::release_surface();
        }
--    } else if (g_surface) {
-+    } else if (g_surface && webgpu::surface_is_current()) {
+-    } else if (!screenHidden && g_surface) {
++    } else if (!screenHidden && g_surface && webgpu::surface_is_current()) {
        switch (surfaceStatus) {
        case wgpu::SurfaceGetCurrentTextureStatus::Timeout:
          Log.warn("Surface texture acquisition timed out");
-diff --git a/lib/surface_lifecycle.hpp b/lib/surface_lifecycle.hpp
-new file mode 100644
 --- /dev/null
 +++ b/lib/surface_lifecycle.hpp
 @@ -0,0 +1,26 @@
@@ -189,3 +65,119 @@ new file mode 100644
 +  std::atomic_uint64_t mGeneration{0};
 +};
 +} // namespace aurora::window
+--- a/lib/webgpu/gpu.cpp
++++ b/lib/webgpu/gpu.cpp
+@@ -36,6 +36,7 @@ static Module Log("aurora::gpu");
+ wgpu::Device g_device;
+ wgpu::Queue g_queue;
+ wgpu::Surface g_surface;
++static uint64_t g_surfaceGeneration = 0;
+ wgpu::BackendType g_backendType;
+ GraphicsConfig g_graphicsConfig;
+ TextureWithSampler g_frameBuffer;
+@@ -687,6 +688,8 @@ static bool create_surface() {
+     Log.error("Failed to create surface");
+     return false;
+   }
++  g_surfaceGeneration = window::surface_generation();
++  Log.info("Created surface generation {}", g_surfaceGeneration);
+   return true;
+ }
+ 
+@@ -999,6 +1002,10 @@ void release_surface() noexcept {
+   g_surface = {};
+ }
+ 
++bool surface_is_current() noexcept {
++  return g_surface && g_surfaceGeneration == window::surface_generation();
++}
++
+ bool refresh_surface(bool recreate) {
+   gfx::gpu_synchronize();
+   if (!g_instance || !g_device) {
+@@ -1008,7 +1015,7 @@ bool refresh_surface(bool recreate) {
+     release_surface();
+     return false;
+   }
+-  if ((!g_surface || recreate) && !create_surface()) {
++  if ((!surface_is_current() || recreate) && !create_surface()) {
+     return false;
+   }
+   uint32_t width = g_graphicsConfig.surfaceConfiguration.width;
+@@ -1030,9 +1037,13 @@ bool refresh_surface(bool recreate) {
+ 
+ void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, uint32_t native_height, bool force) {
+   gfx::gpu_synchronize();
+-  if (!g_surface || !g_device || width == 0 || height == 0 || native_height == 0 || native_width == 0) {
++  if (!window::is_presentable() || !g_device || width == 0 || height == 0 || native_height == 0 || native_width == 0) {
+     return;
+   }
++  if (!surface_is_current()) {
++    if (!create_surface()) return;
++    force = true;
++  }
+   const bool sizeChanged = g_graphicsConfig.surfaceConfiguration.width != native_width ||
+                            g_graphicsConfig.surfaceConfiguration.height != native_height ||
+                            g_frameBuffer.size.width != width || g_frameBuffer.size.height != height;
+--- a/lib/webgpu/gpu.hpp
++++ b/lib/webgpu/gpu.hpp
+@@ -57,6 +57,7 @@ extern bool g_textureComponentSwizzleSupported;
+ bool initialize(AuroraBackend backend, bool allowCpu);
+ void shutdown();
+ void release_surface() noexcept;
++bool surface_is_current() noexcept;
+ bool refresh_surface(bool recreate = true);
+ void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, uint32_t native_height,
+                       bool force = false);
+--- a/lib/window.cpp
++++ b/lib/window.cpp
+@@ -1,4 +1,5 @@
+ #include "window.hpp"
++#include "surface_lifecycle.hpp"
+ 
+ #ifdef AURORA_ENABLE_GX
+ #include "imgui.hpp"
+@@ -46,9 +47,9 @@ AuroraWindowSize g_windowSize;
+ std::vector<AuroraEvent> g_events;
+ std::atomic_bool g_backgrounded = false;
+ #if defined(SDL_PLATFORM_ANDROID)
+-std::atomic_bool g_surfaceReady = false;
++SurfaceLifecycle g_surfaceLifecycle(false);
+ #else
+-std::atomic_bool g_surfaceReady = true;
++SurfaceLifecycle g_surfaceLifecycle(true);
+ #endif
+ bool g_lastPaused = false;
+ bool g_gotFocus = false;
+@@ -88,6 +89,7 @@ void resize_swapchain() noexcept {
+   gfx::gpu_synchronize();
+   SurfaceLock surfaceLock;
+ #endif
++  if (!is_presentable()) return;
+   const auto size = get_window_size();
+   if (size == g_windowSize) {
+     return;
+@@ -476,10 +478,11 @@ bool is_paused() noexcept {
+ 
+ bool is_presentable() noexcept {
+   return g_window != nullptr && !g_backgrounded.load(std::memory_order_acquire) &&
+-         g_surfaceReady.load(std::memory_order_acquire);
++         g_surfaceLifecycle.ready();
+ }
+ 
+-void set_surface_ready(bool ready) noexcept { g_surfaceReady.store(ready, std::memory_order_release); }
++void set_surface_ready(bool ready) noexcept { g_surfaceLifecycle.set_ready(ready); }
++uint64_t surface_generation() noexcept { return g_surfaceLifecycle.generation(); }
+ 
+ SurfaceLock::SurfaceLock() noexcept {
+ #if defined(SDL_PLATFORM_ANDROID)
+--- a/lib/window.hpp
++++ b/lib/window.hpp
+@@ -41,6 +41,7 @@ SDL_Renderer* get_sdl_renderer();
+ bool is_paused() noexcept;
+ bool is_presentable() noexcept;
+ void set_surface_ready(bool ready) noexcept;
++uint64_t surface_generation() noexcept;
+ void set_title(const char* title);
+ void set_fullscreen(bool fullscreen);
+ bool get_fullscreen();

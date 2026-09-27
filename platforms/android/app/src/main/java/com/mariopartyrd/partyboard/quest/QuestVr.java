@@ -213,7 +213,8 @@ public final class QuestVr {
         boolean french = "fr".equals(Locale.getDefault().getLanguage());
         String title = french ? "Placer le jeu" : "Place the game";
         String[] lines = french ? new String[] {
-            "Gâchette droite : poser le jeu au bout de la manette",
+            "Gâchette droite, bout de la manette sur la table : poser le jeu",
+            "Gâchette gauche, bout de la manette sur la table : hauteur",
             "Grip droit (maintenu) : déplacer",
             "Stick droit : ↕ taille de l'écran   ↔ tourner",
             "Stick gauche : ↕ hauteur   ↔ taille du plateau",
@@ -222,7 +223,8 @@ public final class QuestVr {
             "Y : résolution — " + resolutionName(resolution),
             "A, B ou \u2261 : terminer et jouer",
         } : new String[] {
-            "Right trigger: set the game at the controller's tip",
+            "Right trigger, controller tip on the table: set the game there",
+            "Left trigger, controller tip on the table: table height",
             "Right grip (hold): move",
             "Right stick: ↕ screen size   ↔ turn",
             "Left stick: ↕ height   ↔ board size",
@@ -254,11 +256,11 @@ public final class QuestVr {
 
             Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
             text.setColor(Color.rgb(225, 228, 240));
-            text.setTextSize(30 * scale);
-            float y = 175 * scale;
+            text.setTextSize(28 * scale);
+            float y = 170 * scale;
             for (String line : lines) {
                 canvas.drawText(line, 48 * scale, y, text);
-                y += 53 * scale;
+                y += 50 * scale;
             }
         } finally {
             surface.unlockCanvasAndPost(canvas);
