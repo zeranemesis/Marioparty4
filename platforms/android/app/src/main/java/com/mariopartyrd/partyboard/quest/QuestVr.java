@@ -24,8 +24,8 @@ import java.util.Locale;
  * phones ignore it and never get here. The game renders exactly as on a
  * phone, into the OpenXR surface given to SDL in place of the SurfaceView's.
  *
- * Clicking the right thumbstick opens placement mode (the first start opens
- * it by itself): the game is put on the table, moved, sized, and its
+ * The first visible game world asks for a one-time table calibration. Clicking
+ * the right thumbstick opens manual placement mode: the game can be moved, sized, and its
  * resolution (up to 4K) and the room's visibility chosen. The headset keeps
  * the place (a spatial anchor) and the choices (quest_table.txt).
  */
@@ -165,10 +165,12 @@ public final class QuestVr {
         sHelpHeight = height;
     }
 
-    private static void onPlacement(boolean placing, int resolution, boolean passthrough, boolean model) {
+    private static void onPlacement(boolean placing, int resolution, boolean passthrough, boolean model,
+                                    boolean calibrating, boolean calibrationConfirmed) {
         final Activity activity = sActivity;
         if (placing && activity != null) {
-            activity.runOnUiThread(() -> drawHelp(resolution, passthrough, model));
+            activity.runOnUiThread(() -> drawHelp(resolution, passthrough, model, calibrating,
+                                                  calibrationConfirmed));
         }
     }
 
@@ -207,34 +209,50 @@ public final class QuestVr {
 
     // The panel under the line of sight while placing: the controls, and the
     // current resolution, room visibility and model.
-    private static void drawHelp(int resolution, boolean passthrough, boolean model) {
+    private static void drawHelp(int resolution, boolean passthrough, boolean model, boolean calibrating,
+                                 boolean calibrationConfirmed) {
         Surface surface = sHelpSurface;
         if (surface == null || !surface.isValid()) {
             return;
         }
         boolean french = "fr".equals(Locale.getDefault().getLanguage());
-        String title = french ? "Placer le jeu" : "Place the game";
-        String[] lines = french ? new String[] {
-            "Gâchette droite, bout de la manette sur la table : poser le jeu",
-            "Gâchette gauche, bout de la manette sur la table : hauteur",
+        String title = calibrating ? (french ? "Calibrage de la table" : "Calibrating the table")
+                                  : (french ? "Placer le jeu" : "Place the game");
+        String[] lines = calibrating ? (french ? (calibrationConfirmed ? new String[] {
+            "Mesure en cours : gardez la manette droite immobile.",
+            "La pose se verrouille après une mesure stable.",
+        } : new String[] {
+            "Posez la manette droite à plat, au centre de la table.",
+            "Orientez l'avant vers vous, puis appuyez sur X.",
+            "Gardez-la immobile pendant la mesure.",
+        }) : (calibrationConfirmed ? new String[] {
+            "Measuring: keep the right controller still.",
+            "The placement locks after a stable reading.",
+        } : new String[] {
+            "Lay the right controller flat at the center of the table.",
+            "Point its front toward you, then press X.",
+            "Keep it still during the measurement.",
+        })) : (french ? new String[] {
+            "Gâchettes droite/gauche : poser le jeu / hauteur de table",
             "Grip droit (maintenu) : déplacer",
             "Stick droit : ↕ taille de l'écran   ↔ tourner",
             "Stick gauche : ↕ hauteur   ↔ taille du plateau",
             "Clic stick gauche : plateau 3D — " + (model ? "oui" : "non"),
             "X : pièce visible — " + (passthrough ? "oui" : "non"),
             "Y : qualité — " + resolutionName(resolution),
-            "A, B ou \u2261 : terminer et jouer",
+            "A : recalibrer avec la manette droite",
+            "B, \u2261 ou clic stick droit : terminer",
         } : new String[] {
-            "Right trigger, controller tip on the table: set the game there",
-            "Left trigger, controller tip on the table: table height",
+            "Right/left trigger: place game / adjust table height",
             "Right grip (hold): move",
             "Right stick: ↕ screen size   ↔ turn",
             "Left stick: ↕ height   ↔ board size",
             "Left stick click: 3D board — " + (model ? "yes" : "no"),
             "X: room visible — " + (passthrough ? "yes" : "no"),
             "Y: quality — " + resolutionName(resolution),
-            "A, B or \u2261: done, play",
-        };
+            "A: recalibrate with the right controller",
+            "B, \u2261 or right stick click: done, play",
+        });
 
         Canvas canvas;
         try {

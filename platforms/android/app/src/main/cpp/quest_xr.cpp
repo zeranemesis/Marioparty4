@@ -26,6 +26,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -43,6 +44,13 @@ constexpr float kDefaultDropMeters = 0.35f;
 // With the model on the table, the flat screen (text, menus, split-screen
 // minigames) stands behind it.
 constexpr float kScreenBehindModelMeters = 0.45f;
+// Approximate distance from the Touch controller's grip origin to the table
+// surface when it rests flat. The prompt asks the player to place it there.
+constexpr float kControllerGripToTableMeters = 0.035f;
+constexpr size_t kStableCalibrationSamples = 30;
+constexpr XrDuration kStableCalibrationDuration = 750'000'000;
+constexpr float kCalibrationPositionTolerance = 0.005f;
+constexpr float kCalibrationYawTolerance = 0.08f;
 // The model's scale: meters per game unit (a board is some 4000 units wide).
 constexpr float kMinModelScale = 0.00003f;
 constexpr float kMaxModelScale = 0.002f;
@@ -95,9 +103,11 @@ struct Actions {
   XrAction leftTrigger = XR_NULL_HANDLE, rightTrigger = XR_NULL_HANDLE;
   XrAction leftGrip = XR_NULL_HANDLE, rightGrip = XR_NULL_HANDLE;
   XrAction aim = XR_NULL_HANDLE;
+  XrAction rightGripPose = XR_NULL_HANDLE;
   XrAction haptic = XR_NULL_HANDLE;
   XrPath leftHand = XR_NULL_PATH, rightHand = XR_NULL_PATH;
   XrSpace rightAim = XR_NULL_HANDLE;
+  XrSpace rightGripPoseSpace = XR_NULL_HANDLE;
   XrSpace leftAim = XR_NULL_HANDLE; // the table's height, in placement mode
 };
 
@@ -160,6 +170,11 @@ struct App {
   StereoView stereo; // the game's world as a model on the table
   XrPosef pose = identity_pose(); // the anchor point, in STAGE space
   bool poseKnown = false;
+  bool calibrating = false;
+  bool calibrationConfirmed = false;
+  bool calibrationConfirmArmed = false;
+  std::deque<XrPosef> calibrationSamples;
+  XrTime calibrationStableSince = 0;
 
   bool placing = false;
   bool grabbing = false;
@@ -414,6 +429,8 @@ bool create_actions(App& app) {
   actions.leftGrip = create_action(app, XR_ACTION_TYPE_FLOAT_INPUT, "dpad_modifier", "D-pad");
   actions.rightGrip = create_action(app, XR_ACTION_TYPE_FLOAT_INPUT, "trigger_z", "Z");
   actions.aim = create_action(app, XR_ACTION_TYPE_POSE_INPUT, "aim", "Pointer", hands, 2);
+  actions.rightGripPose = create_action(app, XR_ACTION_TYPE_POSE_INPUT, "calibration_grip_pose", "Table calibration",
+                                        &actions.rightHand, 1);
   actions.haptic = create_action(app, XR_ACTION_TYPE_VIBRATION_OUTPUT, "rumble", "Rumble", hands, 2);
 
   const XrActionSuggestedBinding bindings[] = {
@@ -432,6 +449,7 @@ bool create_actions(App& app) {
       {actions.rightGrip, path(app, "/user/hand/right/input/squeeze/value")},
       {actions.aim, path(app, "/user/hand/left/input/aim/pose")},
       {actions.aim, path(app, "/user/hand/right/input/aim/pose")},
+      {actions.rightGripPose, path(app, "/user/hand/right/input/grip/pose")},
       {actions.haptic, path(app, "/user/hand/left/output/haptic")},
       {actions.haptic, path(app, "/user/hand/right/output/haptic")},
   };
@@ -452,6 +470,10 @@ bool create_actions(App& app) {
   check(app.instance, xrCreateActionSpace(app.session, &spaceInfo, &actions.rightAim), "xrCreateActionSpace");
   spaceInfo.subactionPath = actions.leftHand;
   check(app.instance, xrCreateActionSpace(app.session, &spaceInfo, &actions.leftAim), "xrCreateActionSpace (left)");
+  spaceInfo.action = actions.rightGripPose;
+  spaceInfo.subactionPath = actions.rightHand;
+  check(app.instance, xrCreateActionSpace(app.session, &spaceInfo, &actions.rightGripPoseSpace),
+        "xrCreateActionSpace (right grip)");
 
   XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
   attach.countActionSets = 1;
@@ -676,6 +698,25 @@ bool locate(XrSpace space, XrSpace base, XrTime time, XrPosef& pose) {
   return true;
 }
 
+bool locate_tracked(XrSpace space, XrSpace base, XrTime time, XrPosef& pose) {
+  if (space == XR_NULL_HANDLE) {
+    return false;
+  }
+  XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+  if (XR_FAILED(xrLocateSpace(space, base, time, &location))) {
+    return false;
+  }
+  constexpr XrSpaceLocationFlags kTracked = XR_SPACE_LOCATION_POSITION_VALID_BIT |
+                                             XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
+                                             XR_SPACE_LOCATION_POSITION_TRACKED_BIT |
+                                             XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+  if ((location.locationFlags & kTracked) != kTracked) {
+    return false;
+  }
+  pose = location.pose;
+  return true;
+}
+
 void vibrate(const App& app, XrPath hand, float amplitude, XrDuration duration) {
   XrHapticActionInfo info{XR_TYPE_HAPTIC_ACTION_INFO};
   info.action = app.actions.haptic;
@@ -716,7 +757,8 @@ void send_controllers(JNIEnv* env, const ControllerState& s) {
 
 void notify_placement(const App& app, JNIEnv* env) {
   env->CallStaticVoidMethod(g_java.questVr, g_java.onPlacement, app.placing, app.table.resolution,
-                            app.table.passthrough && passthrough_available(app), app.table.diorama);
+                            app.table.passthrough && passthrough_available(app), app.table.diorama, app.calibrating,
+                            app.calibrationConfirmed);
   clear_exception(env);
 }
 
@@ -738,6 +780,122 @@ void begin_placement(App& app, JNIEnv* env) {
   app.grabbing = false;
   app.triggerHeld = true; // a trigger already held does not place at once
   app.leftTriggerHeld = true;
+  notify_placement(app, env);
+}
+
+void begin_table_calibration(App& app, JNIEnv* env, int buttons) {
+  app.calibrating = true;
+  app.calibrationConfirmed = false;
+  app.calibrationConfirmArmed = (buttons & kButtonX) == 0;
+  app.placing = true;
+  app.grabbing = false;
+  app.triggerHeld = true;
+  app.leftTriggerHeld = true;
+  app.calibrationSamples.clear();
+  app.calibrationStableSince = 0;
+  LOGI("Automatic table calibration started");
+  notify_placement(app, env);
+}
+
+void sample_table_calibration(App& app, const XrPosef* grip, XrTime time, int pressed, int heldButtons, JNIEnv* env) {
+  if (!app.calibrationConfirmed) {
+    if ((heldButtons & kButtonX) == 0) {
+      app.calibrationConfirmArmed = true;
+    } else if (app.calibrationConfirmArmed && (pressed & kButtonX) != 0) {
+      app.calibrationConfirmed = true;
+      app.calibrationSamples.clear();
+      app.calibrationStableSince = 0;
+      LOGI("Table calibration confirmed");
+      tick(app);
+      notify_placement(app, env);
+    }
+    return;
+  }
+  if (grip == nullptr) {
+    app.calibrationSamples.clear();
+    app.calibrationStableSince = 0;
+    return;
+  }
+  const float qx = grip->orientation.x;
+  const float qy = grip->orientation.y;
+  const float qz = grip->orientation.z;
+  const float qw = grip->orientation.w;
+  const float normSquared = qx * qx + qy * qy + qz * qz + qw * qw;
+  const bool finitePose = std::isfinite(grip->position.x) && std::isfinite(grip->position.y) &&
+                          std::isfinite(grip->position.z) && std::isfinite(normSquared) && normSquared >= 0.25f &&
+                          normSquared <= 4.0f;
+  if (!finitePose) {
+    app.calibrationSamples.clear();
+    app.calibrationStableSince = 0;
+    return;
+  }
+  const float inverseNorm = 1.0f / std::sqrt(normSquared);
+  const XrQuaternionf orientation{qx * inverseNorm, qy * inverseNorm, qz * inverseNorm, qw * inverseNorm};
+  const XrVector3f forward = rotate(orientation, {0.0f, 0.0f, 1.0f});
+  const float horizontalForward = std::hypot(forward.x, forward.z);
+  if (!std::isfinite(horizontalForward) || horizontalForward < 0.25f) {
+    app.calibrationSamples.clear();
+    app.calibrationStableSince = 0;
+    return;
+  }
+  XrPosef uprightGrip{};
+  uprightGrip.position = grip->position;
+  uprightGrip.orientation = yaw_rotation(std::atan2(forward.x, forward.z));
+  if (!app.calibrationSamples.empty()) {
+    const XrPosef& first = app.calibrationSamples.front();
+    const float dx = uprightGrip.position.x - first.position.x;
+    const float dy = uprightGrip.position.y - first.position.y;
+    const float dz = uprightGrip.position.z - first.position.z;
+    const float yawDelta = std::remainder(yaw_of(uprightGrip.orientation) - yaw_of(first.orientation),
+                                          2.0f * 3.14159265358979323846f);
+    if (dx * dx + dy * dy + dz * dz > kCalibrationPositionTolerance * kCalibrationPositionTolerance ||
+        std::abs(yawDelta) > kCalibrationYawTolerance) {
+      app.calibrationSamples.clear();
+      app.calibrationStableSince = 0;
+    }
+  }
+  if (app.calibrationSamples.empty()) {
+    app.calibrationStableSince = time;
+  }
+  app.calibrationSamples.push_back(uprightGrip);
+  if (app.calibrationSamples.size() < kStableCalibrationSamples || app.calibrationStableSince == 0 ||
+      time - app.calibrationStableSince < kStableCalibrationDuration) {
+    return;
+  }
+
+  XrPosef calibrated = identity_pose();
+  float yawSin = 0.0f, yawCos = 0.0f;
+  for (const auto& sample : app.calibrationSamples) {
+    calibrated.position.x += sample.position.x / static_cast<float>(app.calibrationSamples.size());
+    calibrated.position.y += sample.position.y / static_cast<float>(app.calibrationSamples.size());
+    calibrated.position.z += sample.position.z / static_cast<float>(app.calibrationSamples.size());
+    const float yaw = yaw_of(sample.orientation);
+    yawSin += std::sin(yaw);
+    yawCos += std::cos(yaw);
+  }
+  calibrated.position.y -= kControllerGripToTableMeters;
+  calibrated.orientation = yaw_rotation(std::atan2(yawSin, yawCos));
+  app.pose = calibrated;
+  app.poseKnown = true;
+  app.table.placed = true;
+  app.table.calibrated = true;
+  app.table.pose = calibrated;
+  app.table.anchorUuid.clear();
+  if (app.extensions.anchors) {
+    app.anchor.place(calibrated, time);
+  }
+  save_settings(app);
+  app.calibrating = false;
+  app.calibrationConfirmed = false;
+  app.calibrationConfirmArmed = false;
+  app.placing = false;
+  app.grabbing = false;
+  app.suppressedButtons = heldButtons;
+  app.calibrationSamples.clear();
+  app.calibrationStableSince = 0;
+  LOGI("Automatic table calibration complete at %.3f %.3f %.3f", calibrated.position.x, calibrated.position.y,
+       calibrated.position.z);
+  tick(app);
   notify_placement(app, env);
 }
 
@@ -799,6 +957,10 @@ void finish_resolution_switch(App& app, JNIEnv* env) {
 // released pad meanwhile.
 void place(App& app, JNIEnv* env, const ControllerState& input, int pressed, float dt, const XrPosef* head,
            const XrPosef* aim, const XrPosef* leftAim) {
+  if ((pressed & kButtonA) != 0) {
+    begin_table_calibration(app, env, input.buttons);
+    return;
+  }
   // Left trigger, the left controller's tip on the table: the table's height
   // only (boards and minigames stand on it), wherever the game is.
   const bool leftTrigger = input.leftTrigger > 0.6f;
@@ -922,9 +1084,17 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   // Inputs only mean something while the game has focus: the system menu
   // takes them otherwise, and the pad reads released.
   const ControllerState input = focused ? read_controllers(app) : ControllerState{};
+  const int pressed = input.buttons & ~app.previousButtons;
+  app.previousButtons = input.buttons;
+  if (!app.table.calibrated && !app.placing && app.stereo.world_visible()) {
+    begin_table_calibration(app, env, input.buttons);
+  }
   XrPosef head, aim;
   const bool haveHead = locate(app.view, app.stage, time, head);
   const bool haveAim = focused && locate(app.actions.rightAim, app.stage, time, aim);
+  XrPosef rightGrip;
+  const bool haveRightGrip = focused && app.calibrating &&
+                             locate_tracked(app.actions.rightGripPoseSpace, app.stage, time, rightGrip);
   XrPosef leftAim;
   const bool haveLeftAim = focused && app.placing && locate(app.actions.leftAim, app.stage, time, leftAim);
 
@@ -939,12 +1109,11 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
     default_pose(app, head);
   }
 
-  const int pressed = input.buttons & ~app.previousButtons;
-  app.previousButtons = input.buttons;
-  // Placement ends with A, B, the menu button or the right stick again: any of them, so
-  // nobody stays stuck in it.
-  constexpr int kEndPlacement = kButtonA | kButtonB | kButtonMenu | kButtonRightStick;
-  if ((pressed & kButtonRightStick) != 0 || (app.placing && (pressed & kEndPlacement) != 0)) {
+  // In placement mode A starts table calibration; the other controls finish it.
+  constexpr int kEndPlacement = kButtonB | kButtonMenu | kButtonRightStick;
+  if (app.calibrating) {
+    sample_table_calibration(app, haveRightGrip ? &rightGrip : nullptr, time, pressed, input.buttons, env);
+  } else if ((pressed & kButtonRightStick) != 0 || (app.placing && (pressed & kEndPlacement) != 0)) {
     if (app.placing) {
       end_placement(app, env, time, input.buttons);
     } else if (app.poseKnown) {
@@ -1148,6 +1317,9 @@ void tear_down(App& app, JNIEnv* env) {
   if (app.actions.leftAim != XR_NULL_HANDLE) {
     xrDestroySpace(app.actions.leftAim);
   }
+  if (app.actions.rightGripPoseSpace != XR_NULL_HANDLE) {
+    xrDestroySpace(app.actions.rightGripPoseSpace);
+  }
   if (app.actions.set != XR_NULL_HANDLE) {
     xrDestroyActionSet(app.actions.set);
   }
@@ -1185,11 +1357,7 @@ void xr_thread(std::string statePath) {
   if (ok) {
     LOGI("Screen %dx%d, room %s, anchors %s", app.screen.width, app.screen.height,
          passthrough_available(app) ? "visible" : "unavailable", app.extensions.anchors ? "on" : "off");
-    // The first time, the player starts by putting the game on the table.
-    if (!app.table.placed) {
-      app.placing = true;
-      app.triggerHeld = true;
-    }
+    // An uncalibrated table is measured when the first game world is visible.
     notify_placement(app, env);
     unsigned rumbleSerial = 0;
     while (!g_stop.load(std::memory_order_acquire)) {
@@ -1243,10 +1411,10 @@ JNIEXPORT jboolean JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_native
   g_java.onSurface = static_method(env, clazz, "onSurface", "(Landroid/view/Surface;IIF)V");
   g_java.onSurfaceReplaced = static_method(env, clazz, "onSurfaceReplaced", "(Landroid/view/Surface;II)V");
   g_java.onHelpSurface = static_method(env, clazz, "onHelpSurface", "(Landroid/view/Surface;II)V");
-  g_java.onPlacement = static_method(env, clazz, "onPlacement", "(ZIZZ)V");
   g_java.onSessionState = static_method(env, clazz, "onSessionState", "(ZZ)V");
   g_java.onControllers = static_method(env, clazz, "onControllers", "(IFFFFFFFF)V");
   g_java.onExit = static_method(env, clazz, "onExit", "()V");
+  g_java.onPlacement = static_method(env, clazz, "onPlacement", "(ZIZZZZ)V");
   for (jmethodID method : {g_java.onSurface, g_java.onSurfaceReplaced, g_java.onHelpSurface, g_java.onPlacement,
                            g_java.onSessionState, g_java.onControllers, g_java.onExit}) {
     if (method == nullptr) {

@@ -17,6 +17,7 @@ namespace quest {
 // Saved with the anchor: what the player chose in placement mode.
 struct TableSettings {
   bool placed = false;
+  bool calibrated = false;
   // A point on the table, turned so +Z faces the player.
   XrPosef pose = identity_pose();
   float screenWidth = 1.0f;     // meters

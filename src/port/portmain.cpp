@@ -39,6 +39,7 @@
 #include <dolphin/pad.h>
 #include <dolphin/vi.h>
 #include <game/disp.h>
+#include <musyx/musyx.h>
 #include <port/config.hpp>
 #include <port/display_rate.hpp>
 #include <port/dolassets.h>
@@ -908,6 +909,11 @@ extern "C" int port_main(int argc, char* argv[]) {
 
     // Notifies all CVs and causes threads to exit
     OSResetSystem(OS_RESET_SHUTDOWN, 0, 0);
+    // OSResetSystem is a stub on this platform. Stop MusyX explicitly so its
+    // audio worker is joined before Aurora tears down SDL and the process exits.
+    if (sndIsInstalled()) {
+        sndQuit();
+    }
     PartyBoard_RAShutdown();
 
 #ifdef PARTY_BOARD_DISCORD

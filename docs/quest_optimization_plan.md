@@ -1,142 +1,166 @@
-# Plan d’optimisation Quest
+# Plan d’optimisation et de qualité Quest
 
-## Objectif
+## Objectif et règle de décision
 
 Améliorer la fluidité, la netteté et la stabilité mémoire de Party Board sur
-Quest 3 sans dégrader le rendu du plateau, des mini-jeux, du HUD ou de la
-réalité mixte. Chaque changement doit répondre à une mesure reproductible.
+Quest 3 sans dégrader le plateau, les mini-jeux, le HUD ni la réalité mixte.
+Chaque changement doit être isolé, relié à une mesure reproductible et
+accompagné d’un contrôle visuel. Les chiffres ci-dessous sont des références
+observées, pas des garanties ni des objectifs de gain.
 
-## Étape 0 — établir une version de référence fiable
+## Références actuelles
 
-1. Rebuilder et installer la build qui désactive temporairement le pipeline
-   stéréo instancié, puis confirmer sur casque le lancement, l’entrée sur un
-   plateau, un tour complet et un mini-jeu.
-2. Relever les fréquences réellement acceptées par le runtime (ne pas supposer
-   que 72, 90 et 120 Hz sont toutes disponibles). À chaque fréquence retenue,
-   capturer trois parcours identiques : plateau, mini-jeu léger, mini-jeu chargé
-   et transition plateau → mini-jeu → plateau. Chaque capture dure 120 s après
-   échauffement, avec la même position de table, le même itinéraire et les mêmes
-   réglages.
-3. Conserver pour chaque session le commit exact, la fréquence, la résolution,
-   le facteur adaptatif, la durée de chargement, les images tardives/perdues,
-   `ringFull`, `worldNewHz`, `copyGpuMax` et la latence. Ces compteurs sont des
-   maxima par fenêtre de deux secondes, pas des percentiles frame. Le
-   collecteur ne mesure ni PSS ni mémoire GPU : relever ceux-ci séparément avec
-   OVR Metrics et `dumpsys meminfo`, avant le plateau, après son chargement,
-   pendant un mini-jeu et après le retour. Enregistrer les journaux Quest et
-   des captures d’image aux mêmes moments.
-4. Utiliser `tools/collect_quest_performance.ps1` et
-   `tools/analyze_quest_performance.py` quand leur entrée correspond à la
-   session mesurée. Activer les timers GPU stéréo uniquement sur une session
-   de diagnostic, car ils peuvent ajouter un coût de mesure.
+| Scène / capture | Affichage | Résolution stéréo | Débit observé | Interprétation |
+| --- | ---: | ---: | ---: | --- |
+| Plateau Toad, scène 89 | 120 Hz | 65 % | 47–57 images/s | Le plateau est actuellement le cas lent. Garder séparée la cadence de rendu mesurée de la cadence d’affichage XR. |
+| Mini-jeu m428 | 120 Hz | 65 % | producteur 87–91 Hz; présentation 78–85 Hz | `source` est le débit de nouvelles images prises par le ring; `presented`/`worldNew` est le débit présenté. L’écart et 58–66 `ringFull` par fenêtre de 2 s signalent de la pression sur le ring, sans identifier sa cause. |
 
-**Décision de sortie :** aucune erreur fatale ni crash et trois mesures
-comparables par fréquence et par scène. Ne traiter un défaut de performance
-que s’il apparaît dans au moins deux essais sur trois et dépasse le bruit de
-mesure. Comparer les changements A/B avec les mêmes scènes et réglages.
+**Objectif de rendu :** obtenir d’abord 60 images/s stables sur le plateau Toad
+à 65 %, puis augmenter progressivement la résolution vers 80 %, puis 100 % si
+le budget GPU reste respecté et si chaque hausse apporte un gain visuel mesuré.
+Ne pas viser une résolution plus élevée au prix d’un débit instable.
 
-## Étape 1 — plafonds et pics de mémoire
+Pour m428, les fenêtres de la build 88 montrent peu ou pas d’images XR en retard,
+mais `copyGpuMax=-1` (`gpuSamples=0`). Certaines fenêtres ont
+`acquireCpuMax` proche de `copyMax` (maximum mural par fenêtre, jusqu’à environ
+5 ms). Ces données n’établissent ni un goulot GPU, ni que l’acquisition OpenXR
+est toujours le goulot : les compteurs sont des maxima et les timers de copie
+GPU étaient désactivés. La résolution adaptative était déjà à son plancher de
+65 %.
 
-1. Relever l’empreinte des buffers stéréo à partir de leurs dimensions réelles :
-   `max(2 × eyeWidth, hudWidth) × (eyeHeight + hudHeight) × 4 × 3` octets.
-   Le layout réserve trois images dont la largeur/hauteur combinée peut coûter
-   plus que la somme des zones utiles. Rapprocher cette estimation des compteurs
-   GPU du casque.
-2. Distinguer mémoire persistante et pic de chargement en relevant PSS/GPU
-   avant le plateau, après son chargement, au début du mini-jeu, puis après le
-   retour au plateau. Chercher les pics corrélés à une création de texture ou
-   de pipeline.
-3. Mesurer le surcoût des mipmaps générées par `aurora-quest-quality.patch`
-   sur un échantillon représentatif de textures et sur un chargement complet.
-   Le surcoût théorique de la chaîne mip complète approche un tiers du niveau
-   principal, auquel peuvent s’ajouter des copies temporaires lors de la
-   conversion.
-4. Si les buffers dominent, tester séparément une réduction de dimensions ou
-   une séparation des régions monde/HUD. Si les textures dominent, tester
-   uniquement des changements ciblés sur les formats et scènes qui dépassent
-   le budget. Conserver le rendu mipmap dans les scènes obliques comme garde de
-   qualité visuelle.
+**Protocole de comparaison :** enregistrer le commit, le casque, la fréquence
+réellement acceptée, le placement de table, la scène, la résolution, l’état du
+passthrough et les réglages. Faire au moins trois parcours identiques de 120 s
+après échauffement. Comparer une différence seulement si elle se répète au
+moins dans deux parcours sur trois et dépasse la variabilité de la référence.
+Ne pas confondre 120 Hz XR avec 120 nouvelles images du jeu par seconde.
 
-**Garde-fous :** aucun redimensionnement ne doit rogner l’image utile ni rendre
-le HUD flou; aucun changement de texture ne doit créer de scintillement,
-d’artefacts alpha ou de pointe mémoire supérieure au comportement de base.
+### Nouvelle observation de stabilité — build 88
 
-## Étape 2 — temps GPU et coût du rendu stéréo
+Le journal du 27 septembre montre à 16:50:43 un avertissement système de
+mémoire faible, suivi de `onDestroy` et de la fermeture du jeu. À 16:50:44,
+le thread `MusyX Audio` provoque un SIGABRT :
+`FORTIFY: pthread_mutex_lock called on a destroyed mutex`.
+Ce défaut survient pendant la fermeture, après l'arrêt du flux AAudio;
+ce journal n'établit pas un nouveau crash WebGPU en jeu ni la cause de
+la demande de fermeture. Le correctif local appelle `sndQuit()` si MusyX
+est installé, avant la fermeture d'Aurora. Le patch MusyX arrête et rejoint
+son thread avant de prendre le mutex de ses callbacks. Les patches passent
+le contrôle d'application et le fichier matériel MusyX passe le contrôle
+de compilation NDK. La fermeture propre reste à valider dans la nouvelle
+APK; la compilation complète du jeu n'a pas été effectuée localement.
+Mesurer les pics mémoire en priorité, avant d'augmenter la résolution.
 
-1. Mesurer séparément le temps de copie vers les swapchains OpenXR, le rendu du
-   monde, le HUD et les périodes sans nouveau rendu. Capturer une session sans
-   timers puis une session `-GpuTiming -RestartGame` pour estimer le coût de
-   l’instrumentation. Comparer les valeurs aux budgets image réellement
-   disponibles : 13,89 ms à 72 Hz, 11,11 ms à 90 Hz, 8,33 ms à 120 Hz.
-2. Garder le rendu par œil comme référence de stabilité. Le crash build 87
-   provenait d’une ancienne entrée `stereo` persistée dans le cache GX :
-   désactiver les nouvelles demandes instanciées ne supprimait pas les entrées
-   existantes, que le chargeur recréait encore. Incrémenter la version de
-   configuration GX invalide ces lignes; le test sur casque doit confirmer que
-   la mise à jour ne reproduit plus le crash. La cause initiale du rejet
-   Adreno (`Failed to link shaders`, `VK_ERROR_UNKNOWN`) reste une question
-   distincte si le rendu instancié est réessayé.
-3. Si un nouvel essai du rendu instancié est envisagé, le faire derrière une
-   capacité/test de compatibilité explicite et dans une branche de test. Le
-   tester avec les scènes qui ont échoué et inspecter le journal du pilote; ne
-   pas réactiver globalement à partir d’un simple rendu de laboratoire.
-4. N’optimiser les copies ou le nombre de passes que si `copyGpuMax` dépasse
-   régulièrement 10 % du budget image ou si `ringFull`/les images tardives
-   montrent que cette partie domine effectivement. Comparer aussi le mode
-   timers désactivés pour contrôler l’impact de mesure.
+## Étapes priorisées
 
-## Étape 3 — calibrer la qualité adaptative
+| Priorité / étape | Fichiers et zone ciblés | Mesure avant changement | Critère pour poursuivre / accepter | Régressions à contrôler |
+| --- | --- | --- | --- | --- |
+| **P0 — stabilité** | `src/port/quest_stereo.cpp`; `patches/aurora-quest-stereo.patch`; `platforms/android/app/src/main/cpp/stereo_view.cpp` | Sur le build de référence par œil, lancer le jeu, rejoindre Toad scene 89, jouer un tour, rejoindre m428 et revenir. Conserver logcat et les journaux du jeu. | Trois parcours sans crash ni `WebGPU error` fatal; confirmer à nouveau les deux débits de référence sur la même route avant toute optimisation. | Crash au chargement d’un pipeline, images noires, HUD absent, erreurs de synchronisation ou changements de cadence dus à une scène/parcours différent. |
+| **P0b — calibrage spatial automatique + fond VR** | `platforms/android/app/src/main/cpp/quest_xr.cpp` (pose, contrôleurs, première scène); `table_anchor.hpp/.cpp` (`TableSettings`, ancre et sauvegarde); `src/port/quest_stereo.cpp` et `src/game/hsfdraw.c` (fond monde/table) | Au premier plateau ou mini-jeu après placement, échantillonner la pose du contrôleur tenu immobile et la pose de l’ancre. Relever variance position/orientation et offset contrôleur-ancre; journaliser décision, rejet d’échantillons et pose finale. Capturer le fond en VR et l’écran plat. | Calibrer une seule fois au premier contenu jouable, après une fenêtre d’échantillons stables; appliquer la même pose/table aux plateaux et mini-jeux; sauvegarder avec l’ancre et restaurer après redémarrage. Offrir le recalibrage manuel. Après confirmation avec X sur la manette gauche, attendre au moins 30 échantillons suivis sur 750 ms, dans une tolérance de 5 mm et 0,08 rad (environ 4,6° de lacet); recommencer la fenêtre si le contrôleur bouge ou perd le suivi. Vérifier sur casque le décalage estimé de 3,5 cm entre la pose de prise du contrôleur et la table; conserver le réglage manuel de hauteur pour ajuster le contact physique. Ne pas limiter arbitrairement le déplacement vers une nouvelle table. Retirer la boîte/fond seulement dans le rendu Quest du monde/table. | Tester contrôleur immobile puis déplacement volontaire, mouvement de tête pendant la calibration, dérive/perte et restauration de l’ancre, recalibrage manuel, entrée directe dans mini-jeu et retour du mini-jeu au plateau. La table doit rester stable dans la pièce malgré le mouvement de tête, correspondre à la hauteur/position physique dans les limites, et ne pas sauter à la transition plateau↔mini-jeu. L’écran plat et ses fonds doivent rester inchangés; aucun ciel/décor légitime ne doit disparaître. |
+| **P1 — limites de scène et coût du fond VR** | `src/port/quest_stereo.cpp` (`PartyBoard_StereoBackdrop`, `PartyBoard_StereoSphereVisible`); `src/game/hsfdraw.c` (tests de fond et de visibilité) | Pour scene 89 et m428, relever nombre de draws par œil, temps GPU si disponible, débit source/presented et captures sous plusieurs angles de tête. Vérifier quels objets classés « backdrop » sont réellement retirés quand la stéréo est active. | Essayer une modification seulement si les draws coûteux du fond/skybox sont présents dans le chemin Quest et mesurables. Accepter si les draws ou le temps GPU baissent de manière répétée, sans baisse de worldNew/presented ni défaut visuel. La première suppression de boîte fait partie du lot P0b; tout culling additionnel reste séparé. | Fond/anneau de décor visible à travers la pièce, ciel retiré à tort, clipping en se penchant ou en tournant, comportement écran plat modifié. Le retrait doit rester actif uniquement pendant la stéréo Quest (`sActive`). |
+| **P2 — attente OpenXR / ring** | `platforms/android/app/src/main/cpp/stereo_view.cpp` (`acquireImage`, copies et transitions `Drawing/Ready/Copying`); `stereo_view.hpp` | Capturer d’abord sans timer, puis avec `tools/collect_quest_performance.ps1 -GpuTiming -RestartGame`. Distinguer durée de `xrAcquireSwapchainImage`, durée de `xrWaitSwapchainImage`, copies HUD/yeux, attente de fence, `ringFull`, slots, worldNew, presented et latence. Comparer les timers activés/désactivés. | Tester un abandon non bloquant/timeout court seulement si les attentes acquisition/wait sont reproductiblement coûteuses. Accepter si les longues attentes et ringFull baissent, sans baisse répétée de worldNew/presented ni hausse de latence ou d’images tardives. | Images périmées, HUD désynchronisé, perte de débit présenté, files de swapchain bloquées. Ne pas ajouter de slot avant d’avoir mesuré l’occupation : cela ajoute mémoire et peut augmenter la latence sans augmenter le débit. |
+| **P3 — bornes mémoire et résolution** | `platforms/android/app/src/main/cpp/stereo_view.cpp` (`allocate_images`, `eye_size`); `stereo_view.hpp`; `adaptive_quality.hpp`; `quest_xr.cpp` | Calculer les buffers AHardwareBuffer réels : `max(2 × eyeWidth, hudWidth) × (eyeHeight + hudHeight) × 4 × 3` octets. Capturer PSS et mémoire GPU avant/après chargement du plateau et pendant une transition via outils casque; le collecteur de performance ne fournit pas ces mesures. Noter les redimensionnements et les pics transitoires. | Ne tester une réduction ou séparation de régions que si les buffers dominent le pic mesuré. Accepter si le pic baisse au-delà du bruit de mesure et reste sous le budget avec marge pendant transitions; image utile et lisibilité conservées. | Mauvaise taille/stride, découpe, corruption de partage EGL/AHardwareBuffer, pic accru pendant remplacement des images, texte HUD flou. La séparation de buffers est à risque élevé côté interop Aurora/Dawn. |
+| **P4 — HUD, anticrénelage et filtrage des textures** | `platforms/android/app/src/main/cpp/stereo_view.cpp` (HUD 1280/1600/1920); `patches/aurora-quest-stereo.patch` (MSAA et anisotropie); `patches/aurora-quest-quality.patch` (mipmaps RGBA) | A/B d’un seul réglage à la fois sur scene 89 et m428; capturer gros plan du texte, bords géométriques et surfaces obliques. Relever mémoire texture, temps de chargement, FPS, scintillement et artefacts alpha. | Baisser HUD ou MSAA/anisotropie uniquement si ce coût est mesuré. Maintenir la meilleure combinaison qui respecte la lisibilité et réduit un coût constaté. Conserver des mipmaps tant que leur retrait n’a pas prouvé un bénéfice sans scintillement. | HUD flou ou mal filtré, bords crénelés, scintillement, aliasing, franges alpha, textures obliques dégradées. Les mipmaps générées ajoutent théoriquement environ un tiers du niveau principal, avec copies CPU temporaires possibles. |
 
-1. Vérifier la qualité adaptative sur les scènes les plus coûteuses, pas
-   seulement sur le menu ou le démarrage du plateau. Consigner fréquence,
-   late-percent, temps GPU/CPU, facteur choisi et temps passé à chaque facteur.
-2. Identifier si les baisses suivent une pression GPU, une limite CPU ou une
-   saturation des images en vol. Ne pas baisser la résolution pour masquer une
-   attente CPU ou une congestion causée par les buffers.
-3. Commencer par les plafonds déjà exposés (80/100/125 %) et la fréquence,
-   sans changer l’algorithme. Ajuster ensuite un seul seuil ou palier à la fois.
-   Valider avec `tools/test_quest_quality.ps1`, puis comparer les mêmes
-   sessions casque à la référence.
-4. Fixer le meilleur facteur stable par fréquence en privilégiant l’absence
-   d’images tardives et une lisibilité acceptable du plateau et du texte.
+### Notes sur les deux priorités les plus probables
 
-## Étape 4 — chargements et mini-jeux
+**Limites de scène / fond.** Le code reconnaît déjà des objets englobant les yeux
+comme des fonds et possède un test de visibilité des sphères. Commencer par
+vérifier leur efficacité réelle dans Toad scene 89 et m428; ne pas supposer que
+le skybox est le poste dominant. Les compteurs de draws et une capture RenderDoc
+peuvent établir si le fond produit encore des passes coûteuses. Toute règle de
+culling doit rester spécifique au rendu VR afin de préserver l’image écran.
 
-1. Mesurer durée et mémoire des transitions pour chaque famille de mini-jeux,
-   puis prioriser ceux qui présentent une pointe, une lenteur ou un cadrage
-   problématique.
-2. Étendre le balayage de Free Play aux sept catégories standards et traiter
-   séparément les routes d’accès qui ne figurent pas dans ces catégories.
-   Enregistrer l’overlay effectivement atteint, pas seulement la ligne choisie.
-3. Pour chaque mini-jeu atteignable, vérifier une partie complète : consignes,
-   contrôles, caméra, cadrage MR, fin, résultat et retour au plateau. Classer
-   séparément les mini-jeux sélectionnables mais non testés et ceux sans route
-   d’accès identifiée.
-4. Mesurer l’allocation des ressources pendant ces parcours avant de modifier
-   la création ou la conservation des textures/pipelines.
+Deux boîtes de fond sont identifiées dans les assets lus sélectivement depuis
+l’ISO. `src/REL/w01Dll/main.c` charge l’entrée 1 de `data/w01.bin` en modèle de
+fond; son HSF contient `bigbox` (mesh, index 18, 66 objets), absent de l’entrée
+2 de premier plan. `w02Dll/main.c` charge aussi l’entrée 1 en modèle de fond;
+son HSF contient `b02wall` (mesh, index 6), un cube dédié de 8 sommets et
+6 faces avec des bornes géométriques de -4500 à +4500 sur chaque axe. L’entrée
+2 de premier plan ne contient pas ce mesh. Le retrait Quest est limité à ces
+noms et overlays W01/W02, pendant la stéréo et la présentation MR du
+monde/table (`PartyBoard_StereoActive()` et
+`PartyBoard_StereoBoardPresentation()`).
 
-## Critères d’acceptation
+Les entrées 1 de fond W03 et W06 ne contiennent pas de mesh nommé box, wall,
+sky ou backdrop; W06 contient une chaîne `s3_w6box01`, mais pas de mesh de ce
+nom dans ces modèles. W04 contient `kabem`, `kabem1` et `syomenkabe`, qui sont
+des meshes muraux distincts, et W05 contient `waku01`, un cadre étendu sur le
+plateau; aucun n’est une boîte englobante confirmée, donc ils restent visibles.
+Aucun autre objet n’est retiré sans preuve. Le bénéfice FPS demeure à mesurer
+sur casque.
 
-- Le lancement, le plateau et les mini-jeux ne produisent ni crash ni erreur
-  WebGPU fatale.
-- Les sessions répétées à chaque fréquence gardent leur qualité cible sans
-  images tardives récurrentes ni `ringFull` prolongé.
-- Le pic de mémoire reste sous le budget observé avec une marge mesurable, y
-  compris pendant les transitions.
-- Le plateau, les consignes et le HUD restent lisibles; pas de nouveau
-  scintillement, clipping stéréo ou artefact alpha.
-- Chaque optimisation est isolée, documentée par ses mesures avant/après et
-  accompagnée des tests pertinents (`test_quest_quality.ps1`,
-  `test_quest_stereo_render.ps1` et `test_submodule_patches.ps1` selon le
-  composant touché).
+**Attentes OpenXR.** `copyMax` comprend plus que le coût de copie GPU; il mesure
+une durée murale de transaction, et `acquireCpuMax` est également un maximum.
+Leur proximité sur certaines fenêtres motive une mesure séparée, pas une
+conclusion. Garder le rendu courant par œil et les trois slots comme référence
+tant que les nouvelles mesures ne démontrent pas quel wait est responsable.
 
-## Ordre de travail recommandé
+### Mesures mémoire à effectuer avant la hausse de qualité
 
-1. Stabiliser et vérifier le contournement du pipeline stéréo instancié.
-2. Établir les références de performance et de mémoire sur Quest.
-3. Traiter d’abord le poste dominant mesuré : pics mémoire, copies stéréo ou
-   facteur de résolution.
-4. Étendre la couverture des mini-jeux et refaire les mesures sur les scènes
-   corrigées.
-5. Réévaluer le rendu instancié uniquement après diagnostic Adreno et avec un
-   test de compatibilité explicite.
+À 65 %, les yeux mesurent 1096 × 1144. Avec un HUD de 1280 × 960,
+les trois images partagées occupent environ 52,8 Mio; les swapchains OpenXR
+ajoutent environ 121,5 Mio, soit environ 174 Mio pour ces allocations.
+Le HUD à 1920 × 1440 porte cet ensemble vers 200 Mio. Ces chiffres excluent
+les textures, pipelines, cibles intermédiaires et chevauchements de remplacement.
+Ne pas compter deux fois un même AHardwareBuffer importé par Dawn et EGL.
+
+La session observée passe d'environ 719 Mio de PSS au lancement à un palier
+d'environ 1174–1176 Mio après les changements de scène et de HUD.
+Cela ne localise pas les allocations responsables. Le `dumpsys meminfo`
+du redémarrage donne environ 1149 Mio de PSS et 983,5 Mio de Graphics;
+ce relevé appartient à une autre phase et ses compteurs ne doivent pas être
+additionnés au compteur GPU du runtime.
+
+1. Mesurer le menu stabilisé, le plateau, puis le mini-jeu sur un lancement
+   neuf, à résolution 65 % et HUD 1280 fixe; noter les notifications mémoire.
+2. Comparer séparément HUD 1280, 1600 et 1920, avec yeux et parcours identiques;
+   relever les pics pendant le remplacement des images, puis le palier final.
+3. Inventorier textures/mipmaps et pipelines par scène si le palier continue
+   de monter après échauffement. Un nombre de pipelines ne donne pas leur
+   coût mémoire en octets.
+4. Comparer taille fixe et qualité adaptative pour chercher un chevauchement
+   prolongé entre anciennes et nouvelles images. N'augmenter la résolution
+   qu'après avoir vérifié la marge pendant les transitions.
+
+## Calibration qualité adaptative
+
+Le contrôleur de `adaptive_quality.hpp` baisse la résolution par pas de 5 %,
+remonte après cinq fenêtres calmes et a un plancher de 65 %. Il prend déjà en
+compte pression GPU, CPU et congestion des images en vol. Pour les références
+actuelles à 65 %, baisser encore un seuil n’est pas un levier disponible. Avant
+de modifier l’algorithme, déterminer si Toad scene 89 et m428 sont limités par
+le GPU, le CPU, les acquisitions OpenXR ou le ring. Le jalon est Toad stable à
+60 images/s à 65 %; ensuite tester 80 % puis 100 %, un palier à la fois. Garder
+le palier supérieur seulement si le budget GPU laisse une marge reproductible
+et le débit reste stable. Valider avec `tools/test_quest_quality.ps1` et les
+mêmes parcours casque.
+
+## Vérification et acceptation globale
+
+- Pas de crash, `FATAL` ni erreur WebGPU non capturée sur les parcours retenus.
+- Consigner séparément, pour chaque scène, source, presented/worldNew, late%,
+  `ringFull`, slots, durée d’acquisition, `copyGpuMax`, latence et facteur de
+  résolution. Les compteurs par fenêtres ne sont pas des percentiles frame.
+- Relever séparément PSS et mémoire GPU; conserver assez de marge pour le pic de
+  transition, pas uniquement le plateau stable.
+- Comparer à fréquence, table, itinéraire, options, échauffement et commit
+  identiques. Aucun gain numérique n’est attendu ou promis avant mesure.
+- Refaire les contrôles visuels : cadrage stéréo, salle visible, plateau,
+  consignes, HUD, transparences, textures obliques et retour au plateau.
+- Après changement du contrôleur, exécuter `tools/test_quest_quality.ps1`.
+  Après changement rendu/pipeline, utiliser `tools/test_quest_stereo_render.ps1`
+  avec Visual Studio et GPU; après modification d’un patch Aurora, exécuter
+  `tools/test_submodule_patches.ps1`. Les parcours Quest restent requis pour
+  les critères de performance et de qualité visuelle.
+
+## Ordre de travail
+
+1. Confirmer le build stable et refaire les baselines Toad scene 89 et m428.
+2. Instrumenter les limites de scène et les waits OpenXR avant de toucher au
+   rendu ou d’ajouter des buffers.
+3. Traiter le poste dominant mesuré : bornes/fond, attente d’acquisition ou
+   budget mémoire; mesurer chaque modification séparément.
+4. A/B HUD, MSAA, anisotropie et mipmaps seulement selon le coût constaté.
+5. Répéter les mesures sur d’autres scènes et mini-jeux atteignables, dont les
+   routes complètes consignes → partie → résultat → retour au plateau.

@@ -144,6 +144,8 @@ private:
   float mWorldRate = 0;
   double mCopyMaxMs = 0;
   double mAcquireMaxMs = 0;
+  std::array<double, 2> mDestinationAcquireMaxMs{}; // world, HUD; XR calls only
+  std::array<double, 2> mDestinationWaitMaxMs{};
   struct CopyTimer { GLuint queries[2]{}; bool pending = false; };
   std::array<CopyTimer, 4> mCopyTimers;
   bool mGpuTiming = false;

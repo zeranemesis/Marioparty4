@@ -621,19 +621,27 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
     XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
     wait.timeout = XR_INFINITE_DURATION;
     const bool keepBoard = mShown && newest->board && !newest->hasWorld && mShownHasWorld && mShownIsBoard;
-    const auto acquireImage = [&](XrSwapchain swapchain, uint32_t& image) {
+    const auto acquireImage = [&](XrSwapchain swapchain, uint32_t& image, size_t destination) {
       const auto start = std::chrono::steady_clock::now();
-      const bool ready = XR_SUCCEEDED(xrAcquireSwapchainImage(swapchain, &acquire, &image)) &&
-                         XR_SUCCEEDED(xrWaitSwapchainImage(swapchain, &wait));
+      const bool acquired = XR_SUCCEEDED(xrAcquireSwapchainImage(swapchain, &acquire, &image));
+      const auto waitStart = std::chrono::steady_clock::now();
+      const bool ready = acquired && XR_SUCCEEDED(xrWaitSwapchainImage(swapchain, &wait));
+      const auto end = std::chrono::steady_clock::now();
+      mDestinationAcquireMaxMs[destination] = std::max(mDestinationAcquireMaxMs[destination],
+          std::chrono::duration<double, std::milli>(waitStart - start).count());
+      if (acquired) {
+        mDestinationWaitMaxMs[destination] = std::max(mDestinationWaitMaxMs[destination],
+            std::chrono::duration<double, std::milli>(end - waitStart).count());
+      }
       mAcquireMaxMs = std::max(mAcquireMaxMs,
-          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+          std::chrono::duration<double, std::milli>(end - start).count());
       return ready;
     };
-    if (keepBoard || acquireImage(mSwapchain, index)) {
+    if (keepBoard || acquireImage(mSwapchain, index, 0)) {
       uint32_t hudIndex = 0;
       const auto hudNow = std::chrono::steady_clock::now();
       const bool copyHud = !mHudShown || hudNow - mHudCopiedAt >= std::chrono::milliseconds(33);
-      const bool hudReady = copyHud && acquireImage(mHudSwapchain, hudIndex);
+      const bool hudReady = copyHud && acquireImage(mHudSwapchain, hudIndex, 1);
       // Acquire both destinations before queuing copies, then flush once.
       if (copyTimer) g_gl.queryCounter(copyTimer->queries[0], GL_TIMESTAMP_EXT);
 
@@ -725,14 +733,18 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
         copying += slot.state == State::Copying;
       }
       LOGI("Stereo perf: source=%.1fHz presented=%.1fHz ringFull=%u copyMax=%.2fms slots=%u/%u/%u world=%d "
-           "res=%.0f%% latency=%.1fms screenHidden=%d acquireCpuMax=%.2fms worldNew=%.1fHz hudNew=%.1fHz copyGpuMax=%.3fms gpuSamples=%u eye=%ux%u",
+           "res=%.0f%% latency=%.1fms screenHidden=%d acquireCpuMax=%.2fms worldNew=%.1fHz hudNew=%.1fHz copyGpuMax=%.3fms gpuSamples=%u eye=%ux%u "
+           "worldAcquireMax=%.3fms worldWaitMax=%.3fms hudAcquireMax=%.3fms hudWaitMax=%.3fms",
           mLeaseCount / elapsed, mPresentedCount / elapsed, mRingFullCount, mCopyMaxMs,
           drawing, ready, copying, mShownHasWorld, mRenderScale * mMaxScale * 100.0f, mLatencyNs / 1e6, mScreenHidden, mAcquireMaxMs, mNewWorldCount / elapsed, mNewHudCount / elapsed, mCopyGpuMaxMs, mCopyGpuSamples,
-          mShownWidth, mShownHeight);
+          mShownWidth, mShownHeight, mDestinationAcquireMaxMs[0], mDestinationWaitMaxMs[0],
+          mDestinationAcquireMaxMs[1], mDestinationWaitMaxMs[1]);
       mWorldRate = static_cast<float>(mNewWorldCount / elapsed);
       mStatsAt = now;
       mLeaseCount = mRingFullCount = mPresentedCount = 0;
       mCopyMaxMs = mAcquireMaxMs = 0;
+      mDestinationAcquireMaxMs.fill(0);
+      mDestinationWaitMaxMs.fill(0);
       mNewWorldCount = mNewHudCount = 0;
       mCopyGpuMaxMs = -1; mCopyGpuSamples = 0;
     }

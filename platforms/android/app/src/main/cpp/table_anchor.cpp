@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include <fstream>
 #include <sstream>
 #include <vector>
@@ -56,6 +57,10 @@ bool TableSettings::load(const std::string& path) {
       XrPosef& p = pose;
       placed = static_cast<bool>(fields >> p.position.x >> p.position.y >> p.position.z >> p.orientation.x >>
                                  p.orientation.y >> p.orientation.z >> p.orientation.w);
+    } else if (key == "calibrated") {
+      int done = 0;
+      fields >> done;
+      calibrated = done != 0;
     } else if (key == "width") {
       fields >> screenWidth;
     } else if (key == "resolution") {
@@ -83,6 +88,23 @@ bool TableSettings::load(const std::string& path) {
   if (!(modelScale >= 0.00003f && modelScale <= 0.002f)) {
     modelScale = 0.00025f;
   }
+  const float qx = pose.orientation.x;
+  const float qy = pose.orientation.y;
+  const float qz = pose.orientation.z;
+  const float qw = pose.orientation.w;
+  const float normSquared = qx * qx + qy * qy + qz * qz + qw * qw;
+  const bool validPose = std::isfinite(pose.position.x) && std::isfinite(pose.position.y) &&
+                         std::isfinite(pose.position.z) && std::isfinite(normSquared) && normSquared >= 0.25f &&
+                         normSquared <= 4.0f;
+  if (!validPose) {
+    placed = false;
+  } else {
+    const float inverseNorm = 1.0f / std::sqrt(normSquared);
+    pose.orientation = {qx * inverseNorm, qy * inverseNorm, qz * inverseNorm, qw * inverseNorm};
+  }
+  if (!placed) {
+    calibrated = false;
+  }
   return true;
 }
 
@@ -100,6 +122,7 @@ void TableSettings::save(const std::string& path) const {
       out << "pose " << p.position.x << ' ' << p.position.y << ' ' << p.position.z << ' ' << p.orientation.x << ' '
           << p.orientation.y << ' ' << p.orientation.z << ' ' << p.orientation.w << '\n';
     }
+    out << "calibrated " << (calibrated ? 1 : 0) << '\n';
     out << "width " << screenWidth << '\n';
     out << "resolution " << resolution << '\n';
     out << "passthrough " << (passthrough ? 1 : 0) << '\n';
@@ -160,6 +183,11 @@ void TableAnchor::load(const std::string& uuidHex) {
 }
 
 void TableAnchor::place(const XrPosef& pose, XrTime time) {
+  // A pending load or saved UUID belongs to the previous placement.
+  // It must not replace the pose selected by a new calibration.
+  mQueryRequest = 0;
+  mSavedPending = false;
+  mSavedUuid.clear();
   if (mCreate == nullptr) {
     return;
   }

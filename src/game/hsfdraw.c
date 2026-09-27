@@ -9,6 +9,7 @@
 #include "ext_math.h"
 #include <string.h>
 #ifdef TARGET_PC
+#include "game/object.h"
 #include "port/crash_report.h"
 #include "port/netplay_runtime.h"
 #include "port/quest_stereo.h"
@@ -174,10 +175,25 @@ void Hu3DDraw(HU3DMODEL *modelP, Mtx mtx, HuVecF *scale)
 }
 
 #ifdef TARGET_PC
+// These background meshes enclose the board and would cover the real room in
+// Quest passthrough. Match only assets verified in each board's HSF archive.
+static BOOL ObjStereoTableBox(HSFOBJECT *objPtr) {
+    if (!PartyBoard_StereoActive() || !PartyBoard_StereoBoardPresentation()
+        || objPtr->name == NULL) {
+        return FALSE;
+    }
+    const OMOVL scene = omCurrentOvlGet();
+    return (scene == DLL_w01Dll && strcmp(objPtr->name, "bigbox") == 0)
+        || (scene == DLL_w02Dll && strcmp(objPtr->name, "b02wall") == 0);
+}
+
 // Meta Quest: a backdrop (sky, skybox) seen from the headset, which the model
 // on the table leaves out (PartyBoard_StereoBackdrop). Same bounding sphere as
 // ObjCullCheck, for models the game itself never culls.
 static BOOL ObjStereoBackdrop(HSFOBJECT *objPtr, Mtx mtx) {
+    if (ObjStereoTableBox(objPtr)) {
+        return TRUE;
+    }
     HuVecF *min = &objPtr->mesh.mesh.min;
     HuVecF *max = &objPtr->mesh.mesh.max;
     Vec *scale = &scaleBuf[MTXIdx - 1];
@@ -442,6 +458,9 @@ BOOL ObjCullCheck(HSFDATA *hsf, HSFOBJECT *objPtr, Mtx mtx) {
     radius = scale * sqrtf(centerX * centerX + centerY * centerY + centerZ * centerZ);
 #ifdef TARGET_PC
     if (PartyBoard_StereoActive()) {
+        if (ObjStereoTableBox(objPtr)) {
+            return 0;
+        }
         // Cull against both headset eyes, rather than disabling culling for
         // the entire map or using the original flat-screen camera, and leave
         // out backdrops that would surround the player.
