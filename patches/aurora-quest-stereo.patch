@@ -272,7 +272,7 @@
        .label = passInfo.label.empty() ? label.c_str() : passInfo.label.c_str(),
 --- /dev/null
 +++ b/lib/gfx/stereo.cpp
-@@ -0,0 +1,559 @@
+@@ -0,0 +1,563 @@
 +#include "stereo.hpp"
 +
 +#include <aurora/stereo.h>
@@ -313,6 +313,9 @@
 +uint32_t g_height = 0;
 +uint32_t g_eyeHeight = 0, g_hudWidth = 0, g_hudHeight = 0;
 +constexpr uint32_t kStereoSamples = 4;
++// Quest Vulkan fails to create the clip-distance pipeline (VK_ERROR_UNKNOWN);
++// keep the proven per-eye path until that driver path is validated.
++constexpr bool kUseInstancedStereo = false;
 +AuroraStereoCallback g_callback = nullptr;
 +void* g_callbackUser = nullptr;
 +
@@ -486,7 +489,8 @@
 +  // Both eyes in one instanced draw once its pipeline is built (the first
 +  // request queues it); until then, and for lines and points, which already
 +  // use instances, one draw per eye.
-+  if (webgpu::g_clipDistancesSupported && !g_instancedDisabled.load(std::memory_order_relaxed) &&
++  if (kUseInstancedStereo && webgpu::g_clipDistancesSupported &&
++      !g_instancedDisabled.load(std::memory_order_relaxed) &&
 +      info.lineMode == 0 && draw.instanceCount == 1 && gx::stereo_instanced_fits(info)) {
 +    auto instancedConfig = spatialConfig;
 +    instancedConfig.shaderConfig.stereo = 1;
