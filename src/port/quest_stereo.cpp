@@ -43,6 +43,7 @@ struct QuestStereoFrame {
     float world[16];      // game world -> room
     float hudWidth, hudHeight;
     uint32_t eyeWidth, eyeHeight; // drawn part of each eye's half (dynamic resolution)
+    uint32_t generation;          // of the images the lease is in
 };
 
 using FrameFn = bool (*)(QuestStereoFrame *frame);
@@ -244,6 +245,12 @@ extern "C" void PartyBoard_StereoBeginCamera(s16 cameraNo)
     }
     AuroraStereoWorldOnly(sQuest.worldOnly());
     sActive = sQuest.frame(&sFrame);
+    if (sActive && sFrame.generation != sQuest.registeredGeneration) {
+        // New images since they were imported (resolution change): this frame
+        // stays flat, the next one imports them.
+        sQuest.cancelled(sFrame.image, sFrame.tag);
+        sActive = false;
+    }
 }
 
 extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)

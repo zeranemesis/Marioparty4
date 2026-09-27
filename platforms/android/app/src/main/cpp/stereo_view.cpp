@@ -161,35 +161,77 @@ bool StereoView::init(XrInstance instance, XrSession session, XrSystemId system,
   xrEnumerateSwapchainImages(mHudSwapchain, imageCount, &imageCount,
                             reinterpret_cast<XrSwapchainImageBaseHeader*>(mHudImages.data()));
 
-  // The images the game draws into, seen here as GL textures.
+  // The images the game draws into, exactly the size it draws.
+  const auto [width, height] = eye_size(mRenderScale);
+  if (!allocate_images(width, height)) {
+    destroy();
+    return false;
+  }
+  g_stereoView = this;
+  LOGI("Stereo: eyes %ux%u, swapchain format 0x%llx", mEyeWidth, mEyeHeight, static_cast<unsigned long long>(format));
+  return true;
+}
+
+std::pair<uint32_t, uint32_t> StereoView::eye_size(float renderScale) const {
+  const auto round8 = [](float v) { return std::max(8u, static_cast<uint32_t>(std::lround(v / 8.0f)) * 8u); };
+  return {std::min(mEyeWidth, round8(static_cast<float>(mEyeWidth) * renderScale)),
+          std::min(mEyeHeight, round8(static_cast<float>(mEyeHeight) * renderScale))};
+}
+
+// The ring's images at exactly the size the game draws (the eyes side by
+// side, the interface below): the GPU writes whole images out at the end of
+// its pass, so a larger image would cost bandwidth for pixels nobody drew.
+// XR thread, GL context current, every slot free.
+bool StereoView::allocate_images(uint32_t eyeWidth, uint32_t eyeHeight) {
+  free_images();
   for (auto& slot : mSlots) {
     AHardwareBuffer_Desc desc{};
-    desc.width = mEyeWidth * 2;
-    desc.height = mEyeHeight + mHudPixelsHeight;
+    desc.width = std::max(eyeWidth * 2, mHudPixelsWidth);
+    desc.height = eyeHeight + mHudPixelsHeight;
     desc.layers = 1;
     desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
     desc.usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
     if (AHardwareBuffer_allocate(&desc, &slot.buffer) != 0) {
       LOGW("Stereo: image allocation failed");
-      destroy();
+      free_images();
       return false;
     }
     const EGLint attributes[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
-    slot.eglImage = g_gl.createImage(display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID,
+    slot.eglImage = g_gl.createImage(mDisplay, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID,
                                      g_gl.getNativeClientBuffer(slot.buffer), attributes);
     glGenTextures(1, &slot.texture);
     glBindTexture(GL_TEXTURE_2D, slot.texture);
     g_gl.imageTargetTexture(GL_TEXTURE_2D, static_cast<GLeglImageOES>(slot.eglImage));
     glBindTexture(GL_TEXTURE_2D, 0);
   }
-
-  {
-    std::lock_guard lock{mMutex};
-    ++mGeneration;
-  }
-  g_stereoView = this;
-  LOGI("Stereo: eyes %ux%u, swapchain format 0x%llx", mEyeWidth, mEyeHeight, static_cast<unsigned long long>(format));
+  std::lock_guard lock{mMutex};
+  mImageEyeWidth = eyeWidth;
+  mImageEyeHeight = eyeHeight;
+  ++mGeneration; // the game imports the new images (quest_stereo.cpp)
   return true;
+}
+
+void StereoView::free_images() {
+  for (auto& slot : mSlots) {
+    if (slot.texture != 0) {
+      glDeleteTextures(1, &slot.texture);
+      slot.texture = 0;
+    }
+    if (slot.eglImage != EGL_NO_IMAGE_KHR) {
+      g_gl.destroyImage(mDisplay, slot.eglImage);
+      slot.eglImage = EGL_NO_IMAGE_KHR;
+    }
+    if (slot.buffer != nullptr) {
+      AHardwareBuffer_release(slot.buffer); // Dawn keeps its own reference while it uses it
+      slot.buffer = nullptr;
+    }
+  }
+}
+
+// A resize waits for every image to be free: none drawn, shown or copied.
+bool StereoView::resize_ready() {
+  std::lock_guard lock{mMutex};
+  return mResizePending && std::ranges::all_of(mSlots, [](const Slot& slot) { return slot.state == State::Free; });
 }
 
 void StereoView::release_slot(Slot& slot) {
@@ -211,19 +253,8 @@ void StereoView::destroy() {
       slot.copyFence = nullptr;
     }
     release_slot(slot);
-    if (slot.texture != 0) {
-      glDeleteTextures(1, &slot.texture);
-      slot.texture = 0;
-    }
-    if (slot.eglImage != EGL_NO_IMAGE_KHR) {
-      g_gl.destroyImage(mDisplay, slot.eglImage);
-      slot.eglImage = EGL_NO_IMAGE_KHR;
-    }
-    if (slot.buffer != nullptr) {
-      AHardwareBuffer_release(slot.buffer);
-      slot.buffer = nullptr;
-    }
   }
+  free_images();
   if (mSwapchain != XR_NULL_HANDLE) {
     xrDestroySwapchain(mSwapchain);
     mSwapchain = XR_NULL_HANDLE;
@@ -249,8 +280,8 @@ void StereoView::update(const XrView (&views)[2], const XrPosef& world, float sc
 
 bool StereoView::game_frame(StereoFrame& out) {
   std::lock_guard lock{mMutex};
-  if (!mEnabled || mScreenRequired) {
-    return false;
+  if (!mEnabled || mScreenRequired || mResizePending) {
+    return false; // resizing: the ring drains, then new images come (layer())
   }
   // Never reclaim Drawing by age: a queued GPU frame can still own it.
   // Cameras without a view cancel explicitly; empty eye passes clear and submit.
@@ -262,10 +293,10 @@ bool StereoView::game_frame(StereoFrame& out) {
   }
   ++mLeaseCount;
   ++mAdaptLeases;
-  const auto round8 = [](float v) { return std::max(8u, static_cast<uint32_t>(std::lround(v / 8.0f)) * 8u); };
-  free->renderWidth = std::min(mEyeWidth, round8(static_cast<float>(mEyeWidth) * mRenderScale));
-  free->renderHeight = std::min(mEyeHeight, round8(static_cast<float>(mEyeHeight) * mRenderScale));
+  free->renderWidth = mImageEyeWidth;
+  free->renderHeight = mImageEyeHeight;
   free->leaseTime = mFrameTime;
+  out.generation = mGeneration;
   free->state = State::Drawing;
   free->tag = mNextTag++;
   free->views[0] = mViews[0];
@@ -328,6 +359,9 @@ void StereoView::adapt_resolution() {
     }
   }
   mAdaptLeases = mAdaptRingFull = 0;
+  if (mRenderScale != before && eye_size(mRenderScale) != std::make_pair(mImageEyeWidth, mImageEyeHeight)) {
+    mResizePending = true; // layer() reallocates once the ring is empty
+  }
   if (mRenderScale != before) {
     LOGI("Stereo: resolution %.0f%% of recommended (%ux%u per eye)", mRenderScale * mMaxScale * 100.0f,
          static_cast<unsigned>(mEyeWidth * mRenderScale), static_cast<unsigned>(mEyeHeight * mRenderScale));
@@ -344,9 +378,9 @@ bool StereoView::images(void** buffers, uint32_t capacity, uint32_t& count, uint
     buffers[i] = mSlots[i].buffer;
   }
   count = static_cast<uint32_t>(mSlots.size());
-  width = mEyeWidth * 2;
-  height = mEyeHeight + mHudPixelsHeight;
-  eyeHeight = mEyeHeight;
+  width = std::max(mImageEyeWidth * 2, mHudPixelsWidth);
+  height = mImageEyeHeight + mHudPixelsHeight;
+  eyeHeight = mImageEyeHeight;
   hudWidth = mHudPixelsWidth;
   hudHeight = mHudPixelsHeight;
   generation = mGeneration;
@@ -450,6 +484,17 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
     }
   }
 
+  // Dynamic resolution changed: new images at the new size, once every image
+  // is back (game_frame() gives no lease meanwhile).
+  if (newest == nullptr && resize_ready()) {
+    const auto [width, height] = eye_size(mRenderScale);
+    if (allocate_images(width, height)) {
+      LOGI("Stereo: images now %ux%u per eye", width, height);
+    }
+    std::lock_guard lock{mMutex};
+    mResizePending = false;
+  }
+
   if (newest != nullptr) {
     const auto copyStart = std::chrono::steady_clock::now();
     GLsync copyFence = nullptr;
@@ -474,12 +519,14 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
       if (!keepBoard) {
         // Only the drawn part of each eye's half (dynamic resolution): at the
         // left, centered vertically (Aurora's common.cpp draws it there).
+        // The image holds just what was drawn (Aurora puts each eye at the
+        // left of its half, a half being the image's width / 2).
         const auto y = static_cast<GLint>((mEyeHeight - newest->renderHeight) / 2);
+        const uint32_t srcStride = std::max(newest->renderWidth * 2, mHudPixelsWidth) / 2;
         for (uint32_t eye = 0; eye < 2; ++eye) {
-          const auto x = static_cast<GLint>(eye * mEyeWidth);
-          g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, x, y, 0, mSwapchainImages[index].image, GL_TEXTURE_2D, 0,
-                         x, y, 0, static_cast<GLsizei>(newest->renderWidth),
-                         static_cast<GLsizei>(newest->renderHeight), 1);
+          g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, static_cast<GLint>(eye * srcStride), 0, 0,
+                         mSwapchainImages[index].image, GL_TEXTURE_2D, 0, static_cast<GLint>(eye * mEyeWidth), y, 0,
+                         static_cast<GLsizei>(newest->renderWidth), static_cast<GLsizei>(newest->renderHeight), 1);
         }
       }
       uint32_t hudIndex = 0;
@@ -489,7 +536,7 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
       if (copyHud && XR_SUCCEEDED(xrAcquireSwapchainImage(mHudSwapchain, &acquire, &hudIndex)) &&
           XR_SUCCEEDED(xrWaitSwapchainImage(mHudSwapchain, &wait))) {
         mHudCopiedAt = hudNow;
-        g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, 0, static_cast<GLint>(mEyeHeight), 0,
+        g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, 0, static_cast<GLint>(newest->renderHeight), 0,
                       mHudImages[hudIndex].image, GL_TEXTURE_2D, 0, 0, 0, 0,
                       static_cast<GLsizei>(mHudPixelsWidth), static_cast<GLsizei>(mHudPixelsHeight), 1);
         glFlush();

@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <chrono>
 #include <mutex>
+#include <utility>
 #include <vector>
 
 namespace quest {
@@ -33,6 +34,7 @@ struct StereoFrame {
   float world[16];      // game world -> room
   float hudWidth, hudHeight;
   uint32_t eyeWidth, eyeHeight; // drawn part of each eye's half (dynamic resolution)
+  uint32_t generation;          // of the images the lease is in
 };
 
 class StereoView {
@@ -94,6 +96,12 @@ private:
 
   // Dynamic resolution, once a second (caller holds mMutex).
   void adapt_resolution();
+  // The drawn eye size for a render scale, and the ring's images at a size
+  // (XR thread, GL context current, every image free).
+  std::pair<uint32_t, uint32_t> eye_size(float renderScale) const;
+  bool allocate_images(uint32_t eyeWidth, uint32_t eyeHeight);
+  void free_images();
+  bool resize_ready();
 
   void release_slot(Slot& slot);
   Slot* newest_completed(); // Caller holds mMutex.
@@ -107,8 +115,10 @@ private:
   bool mHudShown = false;
   XrCompositionLayerQuad mHudLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
   std::vector<XrSwapchainImageOpenGLESKHR> mSwapchainImages;
-  uint32_t mEyeWidth = 0;
+  uint32_t mEyeWidth = 0; // an eye's half of the swapchain: the largest drawn size
   uint32_t mEyeHeight = 0;
+  uint32_t mImageEyeWidth = 0, mImageEyeHeight = 0; // the ring's images: the drawn size
+  bool mResizePending = false;
 
   mutable std::mutex mMutex;
   std::array<Slot, 3> mSlots;
@@ -127,7 +137,7 @@ private:
 
   // Dynamic resolution: the drawn part of the eyes' images, 0.5 to 1 of
   // their size, lowered when the GPU falls behind 120 Hz, raised back slowly.
-  float mRenderScale = 0.8f; // of images 125% of the recommended size: 100% of it
+  float mRenderScale = 0.8f; // of 125% of the recommended size: 100% of it, then up as the GPU allows
   float mMaxScale = 1.0f;    // the images' size, relative to the recommended one
   uint32_t mAdaptLeases = 0, mAdaptRingFull = 0, mCalmSeconds = 0;
   std::chrono::steady_clock::time_point mAdaptAt = std::chrono::steady_clock::now();

@@ -236,7 +236,7 @@
        .label = passInfo.label.empty() ? label.c_str() : passInfo.label.c_str(),
 --- /dev/null
 +++ b/lib/gfx/stereo.cpp
-@@ -0,0 +1,475 @@
+@@ -0,0 +1,473 @@
 +#include "stereo.hpp"
 +
 +#include <aurora/stereo.h>
@@ -432,14 +432,12 @@
 +    // same interface again into that unused screen; empty frames retain it.
 +    return !g_eyeDraws[0].empty();
 +  }
-+  const auto gameProj = gx::g_gxState.proj;
++  // One uniform build for both eyes: only the projection differs.
++  const auto uniforms = gx::build_uniform_stereo(info, vtxStart, ranges, g_clip[0], g_clip[1]);
 +  for (size_t eye = 0; eye < 2; ++eye) {
-+    // Mat4x4 stores GX rows; its multiplication composes in reversed order.
-+    gx::g_gxState.proj = g_clip[eye];
-+    draw.uniformRange = gx::build_uniform(info, vtxStart, ranges);
++    draw.uniformRange = uniforms[eye];
 +    g_eyeDraws[eye].push_back(draw);
 +  }
-+  gx::g_gxState.proj = gameProj;
 +  g_worldMergeable = world;
 +  // The eye passes own these world draws; avoid rendering the same scene a
 +  // third time into the flat game screen. Offscreen/shadow draws stay intact.
@@ -874,6 +872,82 @@
    if ((ref && ref->hasArbitraryMips) || !mipsEnabled) {
      maxAnisotropy = 1;
    } else if (maxAnisotropy > 1) {
+--- a/lib/gx/shader_info.cpp
++++ b/lib/gx/shader_info.cpp
+@@ -1,7 +1,9 @@
+ #include "shader_info.hpp"
+ 
++#include <array>
+ #include <cmath>
+ #include <cstdlib>
++#include <cstring>
+ 
+ #include <tracy/Tracy.hpp>
+ 
+@@ -383,7 +385,10 @@ static u32 line_texcoord_mask() noexcept {
+   return mask;
+ }
+ 
+-gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges) noexcept {
++// The draw's uniform block, in a buffer reused by every draw; projOffset,
++// when given, receives where the projection matrix sits in it.
++static ByteBuffer& build_uniform_bytes(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges,
++                                       size_t* projOffset) noexcept {
+   ZoneScoped;
+ 
+   static ByteBuffer buf;
+@@ -413,6 +418,9 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
+       buf.append<u32>(line_texcoord_mask());
+     }
+   }
++  if (projOffset != nullptr) {
++    *projOffset = buf.size();
++  }
+   buf.append(g_gxState.proj);
+ 
+   for (int i = 0; i < MaxPnMtx; i++) {
+@@ -502,6 +510,25 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
+     buf.append(Vec4{static_cast<f32>(g_gxState.ztexBias), 0.f, 0.f, 0.f});
+   }
+   g_gxState.stateDirty = false;
++  return buf;
++}
++
++gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges) noexcept {
++  const auto& buf = build_uniform_bytes(info, vtxStart, ranges, nullptr);
+   return gfx::push_uniform(buf.data(), buf.size());
+ }
++
++// A VR headset's eyes (gfx/stereo.cpp): the same block for both, built once,
++// each copy with its eye's projection written over the game's.
++std::array<gfx::Range, 2> build_uniform_stereo(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges,
++                                               const Mat4x4<float>& left, const Mat4x4<float>& right) noexcept {
++  size_t projOffset = 0;
++  auto& buf = build_uniform_bytes(info, vtxStart, ranges, &projOffset);
++  std::array<gfx::Range, 2> out;
++  std::memcpy(buf.data() + projOffset, &left, sizeof(left));
++  out[0] = gfx::push_uniform(buf.data(), buf.size());
++  std::memcpy(buf.data() + projOffset, &right, sizeof(right));
++  out[1] = gfx::push_uniform(buf.data(), buf.size());
++  return out;
++}
+ } // namespace aurora::gx
+--- a/lib/gx/shader_info.hpp
++++ b/lib/gx/shader_info.hpp
+@@ -2,8 +2,13 @@
+ 
+ #include "gx.hpp"
+ 
++#include <array>
++
+ namespace aurora::gx {
+ ShaderInfo build_shader_info(const ShaderConfig& config) noexcept;
+ gfx::Range build_uniform(const ShaderInfo& info, uint32_t vtxStart, const BindGroupRanges& ranges) noexcept;
++// Both eyes' blocks from one build, each with its own projection (gfx/stereo.cpp).
++std::array<gfx::Range, 2> build_uniform_stereo(const ShaderInfo& info, uint32_t vtxStart, const BindGroupRanges& ranges,
++                                               const Mat4x4<float>& left, const Mat4x4<float>& right) noexcept;
+ u8 color_channel(GXChannelID id) noexcept;
+ }; // namespace aurora::gx
 --- a/lib/webgpu/gpu.cpp
 +++ b/lib/webgpu/gpu.cpp
 @@ -826,6 +826,14 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
