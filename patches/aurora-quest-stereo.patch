@@ -272,7 +272,7 @@
        .label = passInfo.label.empty() ? label.c_str() : passInfo.label.c_str(),
 --- /dev/null
 +++ b/lib/gfx/stereo.cpp
-@@ -0,0 +1,551 @@
+@@ -0,0 +1,559 @@
 +#include "stereo.hpp"
 +
 +#include <aurora/stereo.h>
@@ -288,6 +288,7 @@
 +#include <atomic>
 +#include <chrono>
 +#include <mutex>
++#include <unordered_set>
 +
 +#if defined(__ANDROID__)
 +#include <android/hardware_buffer.h>
@@ -339,6 +340,9 @@
 +// An instanced pipeline failed to build: every eye drawn on its own from then on.
 +std::atomic_bool g_instancedDisabled = false;
 +uint64_t g_statInstanced = 0, g_statPerEye = 0;
++// Instanced pipelines seen built (game thread): asking the cache again would
++// take its lock on every draw.
++std::unordered_set<PipelineRef> g_readyInstanced;
 +std::vector<gx::DrawData> g_hudDraws;
 +webgpu::TextureWithSampler g_color; // multisampled, when the game's frame is
 +webgpu::TextureWithSampler g_depth;
@@ -469,8 +473,8 @@
 +    spatialConfig.dstAlpha = UINT32_MAX;
 +    draw.dstAlpha = UINT32_MAX;
 +  }
-+  draw.pipeline = pipeline_ref(spatialConfig);
 +  if (!world) {
++    draw.pipeline = pipeline_ref(spatialConfig);
 +    // The original orthographic uniforms draw the interface once in an atlas
 +    // region. OpenXR presents it as a separate, sharp quad for both eyes.
 +    draw.uniformRange = gx::build_uniform(info, vtxStart, ranges);
@@ -486,9 +490,18 @@
 +      info.lineMode == 0 && draw.instanceCount == 1 && gx::stereo_instanced_fits(info)) {
 +    auto instancedConfig = spatialConfig;
 +    instancedConfig.shaderConfig.stereo = 1;
++    // One pipeline request per draw: pipeline_ref skips the cache's lock when
++    // a draw asks for the same pipeline as the one before, the usual case.
 +    const auto instancedRef = pipeline_ref(instancedConfig);
-+    wgpu::RenderPipeline instancedPipeline;
-+    if (get_pipeline(instancedRef, instancedPipeline) && instancedPipeline) {
++    bool ready = g_readyInstanced.contains(instancedRef);
++    if (!ready) {
++      wgpu::RenderPipeline instancedPipeline;
++      ready = get_pipeline(instancedRef, instancedPipeline) && instancedPipeline;
++      if (ready) {
++        g_readyInstanced.insert(instancedRef);
++      }
++    }
++    if (ready) {
 +      draw.pipeline = instancedRef;
 +      draw.uniformRange =
 +          gx::build_uniform_stereo_instanced(info, vtxStart, ranges, g_clip[0], g_clip[1], g_eyeX, g_eyeClip);
@@ -502,6 +515,7 @@
 +  }
 +  ++g_statPerEye;
 +  g_eyeInstanced.push_back(0);
++  draw.pipeline = pipeline_ref(spatialConfig);
 +  // One uniform build for both eyes: only the projection differs.
 +  const auto uniforms = gx::build_uniform_stereo(info, vtxStart, ranges, g_clip[0], g_clip[1]);
 +  for (size_t eye = 0; eye < 2; ++eye) {
@@ -764,17 +778,11 @@
 +  g_clip[0] = to_mat(clip[0]);
 +  g_clip[1] = to_mat(clip[1]);
 +  g_image = static_cast<int32_t>(image);
-+  // Instanced draws: a viewport over both eyes' rectangles (common.cpp),
-+  // each instance's clip x squeezed into its own: the left eye's pixels
-+  // [0, w), the right eye's [stride, stride + w) of the viewport's
-+  // stride + w; and cut at the edges 2w/V - 1 and 2*stride/V - 1 (NDC).
++  // Instanced draws: a viewport over both eyes' rectangles (common.cpp).
 +  {
 +    const float stride = static_cast<float>(g_width / 2);
 +    const float width = g_frameEyeWidth != 0 ? std::min(static_cast<float>(g_frameEyeWidth), stride) : stride;
-+    const float span = stride + width;
-+    const float scale = width / span;
-+    g_eyeX = {scale, scale - 1.f, scale, (width + 2.f * stride) / span - 1.f};
-+    g_eyeClip = {2.f * width / span - 1.f, 2.f * stride / span - 1.f, 0.f, 0.f};
++    instanced_placement(stride, width, g_eyeX, g_eyeClip);
 +  }
 +  g_frameTag = frameTag;
 +  g_recording = true;
@@ -826,7 +834,7 @@
 +}
 --- /dev/null
 +++ b/lib/gfx/stereo.hpp
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,82 @@
 +#pragma once
 +
 +// Stereo rendering for a VR headset (include/aurora/stereo.h).
@@ -855,6 +863,18 @@
 +gx::DrawData* last_world_draw() noexcept;
 +void mirror_merged_world_draw() noexcept;
 +void invalidate_world_merge() noexcept;
++
++// Where each instance of a both-eyes draw goes (shader.cpp's stereo_x and
++// stereo_clip). The viewport spans both eyes' rectangles, stride + width
++// pixels: the left eye's are [0, width), the right eye's [stride, stride +
++// width). Each instance's clip x is squeezed into its own, and cut at its
++// edge: x/w <= 2 width/V - 1 for the left eye, >= 2 stride/V - 1 for the right.
++inline void instanced_placement(float stride, float width, Vec4<float>& eyeX, Vec4<float>& eyeClip) noexcept {
++  const float span = stride + width;
++  const float scale = width / span;
++  eyeX = {scale, scale - 1.f, scale, (width + 2.f * stride) / span - 1.f};
++  eyeClip = {2.f * width / span - 1.f, 2.f * stride / span - 1.f, 0.f, 0.f};
++}
 +
 +// A GX draw just pushed to the game's frame: its eye copies, each with the
 +// eye's projection in its own uniforms (command_processor.cpp).
@@ -1178,24 +1198,30 @@
      vtxXfrAttrsPre += fmt::format(
          "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
          "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;",
-@@ -1632,7 +1670,15 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
-     fragmentFn += "\n    prev = vec4f(in.nrm, prev.a);";
+@@ -1051,6 +1089,13 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
    }
  
--  const auto shaderSource = fmt::format(R"""(
+   uniBufAttrs += "\n    proj: mat4x4f,";
 +  if (config.stereo) {
-+    // After every other member: build_uniform_stereo_instanced appends them.
++    // Right after proj (build_uniform_stereo_instanced writes them there).
 +    uniBufAttrs +=
 +        "\n    stereo_proj: mat4x4f,"  // the right eye's projection
 +        "\n    stereo_x: vec4f,"       // clip x scale and offset (times w): left eye xy, right eye zw
 +        "\n    stereo_clip: vec4f,";   // x: the left eye's right edge, y: the right eye's left edge (NDC)
 +  }
-+
+   uniBufAttrs += fmt::format("\n    postex_mtx: array<mat3x4f, {}>,", MaxPnMtx + MaxTexMtx);
+   uniBufAttrs += fmt::format("\n    nrm_mtx: array<mat3x4f, {}>,", MaxPnMtx);
+   std::string fragmentFnPre;
+@@ -1632,7 +1677,7 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+     fragmentFn += "\n    prev = vec4f(in.nrm, prev.a);";
+   }
+ 
+-  const auto shaderSource = fmt::format(R"""(
 +  auto shaderSource = fmt::format(R"""(
  fn bswap32(v: u32, le: bool) -> u32 {{
    if (le) {{
      return v;
-@@ -1997,6 +2043,9 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
+@@ -1997,6 +2042,9 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
                                          uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn,
                                          fragmentFnPre, vtxXfrAttrsPre, uniformPre, fragOutStruct, fragRetType,
                                          fragRetStmt);
@@ -1217,29 +1243,47 @@
  
  #include <tracy/Tracy.hpp>
  
-@@ -383,7 +385,10 @@ static u32 line_texcoord_mask() noexcept {
+@@ -383,7 +385,19 @@ static u32 line_texcoord_mask() noexcept {
    return mask;
  }
  
 -gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges) noexcept {
++// A both-eyes draw's projections and placement (shader.cpp's stereo members,
++// declared right after proj: the one place both layouts are known to agree).
++struct InstancedEyes {
++  const Mat4x4<float>& left;
++  const Mat4x4<float>& right;
++  const Vec4<float>& x;
++  const Vec4<float>& clip;
++};
++
 +// The draw's uniform block, in a buffer reused by every draw; projOffset,
 +// when given, receives where the projection matrix sits in it.
 +static ByteBuffer& build_uniform_bytes(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges,
-+                                       size_t* projOffset) noexcept {
++                                       size_t* projOffset, const InstancedEyes* eyes = nullptr) noexcept {
    ZoneScoped;
  
    static ByteBuffer buf;
-@@ -413,6 +418,9 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
+@@ -413,7 +427,17 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
        buf.append<u32>(line_texcoord_mask());
      }
    }
+-  buf.append(g_gxState.proj);
 +  if (projOffset != nullptr) {
 +    *projOffset = buf.size();
 +  }
-   buf.append(g_gxState.proj);
++  if (eyes != nullptr) {
++    buf.append(eyes->left);
++    buf.append(eyes->right);
++    buf.append(eyes->x);
++    buf.append(eyes->clip);
++  } else {
++    buf.append(g_gxState.proj);
++  }
  
    for (int i = 0; i < MaxPnMtx; i++) {
-@@ -502,6 +510,45 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
+     buf.append(g_gxState.pnMtx[i].pos);
+@@ -502,6 +526,39 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
      buf.append(Vec4{static_cast<f32>(g_gxState.ztexBias), 0.f, 0.f, 0.f});
    }
    g_gxState.stateDirty = false;
@@ -1267,19 +1311,13 @@
 +}
 +
 +// Both eyes in one instanced draw (a ShaderConfig with stereo set): the left
-+// eye's projection where the game's sits, then after the whole block the
-+// right eye's and where each eye goes (shader.cpp's stereo_* members).
++// eye's projection where the game's sits, then the right eye's and where each
++// eye goes (shader.cpp's stereo_* members, right after proj).
 +gfx::Range build_uniform_stereo_instanced(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges,
 +                                          const Mat4x4<float>& left, const Mat4x4<float>& right,
 +                                          const Vec4<float>& eyeX, const Vec4<float>& eyeClip) noexcept {
-+  size_t projOffset = 0;
-+  auto& buf = build_uniform_bytes(info, vtxStart, ranges, &projOffset);
-+  std::memcpy(buf.data() + projOffset, &left, sizeof(left));
-+  const size_t stereoOffset = (buf.size() + 15) & ~size_t{15}; // mat4x4f: 16-byte aligned
-+  buf.append_zeroes(stereoOffset - buf.size());
-+  buf.append(right);
-+  buf.append(eyeX);
-+  buf.append(eyeClip);
++  const InstancedEyes eyes{left, right, eyeX, eyeClip};
++  const auto& buf = build_uniform_bytes(info, vtxStart, ranges, nullptr, &eyes);
 +  return gfx::push_uniform(buf.data(), buf.size());
 +}
 +
