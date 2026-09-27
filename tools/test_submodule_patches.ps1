@@ -46,7 +46,8 @@ $pairs = @(
                                                 'patches/aurora-mobile-one-local-player.patch',
                                                 'patches/aurora-render-worker-idle.patch',
                                                 'patches/aurora-quest-stereo.patch',
-                                                'patches/aurora-android-surface-generation.patch') }
+                                                'patches/aurora-android-surface-generation.patch',
+                                                'patches/aurora-quest-quality.patch') }
 )
 
 $failures = New-Object Collections.Generic.List[string]

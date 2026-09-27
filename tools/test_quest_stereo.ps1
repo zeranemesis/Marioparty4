@@ -1,17 +1,20 @@
-param([string]$Serial, [string]$Sdk = "$env:LOCALAPPDATA/Android/Sdk")
+param([switch]$CompileOnly, [string]$Abi = "arm64-v8a", [string]$Serial, [string]$Sdk = "$env:LOCALAPPDATA/Android/Sdk")
 $ErrorActionPreference = 'Stop'
 $taskRepo = Split-Path $PSScriptRoot -Parent
 $taskAdb = Join-Path $Sdk 'platform-tools/adb.exe'
 function Check-Exit([string]$step) {
     if ($LASTEXITCODE -ne 0) { throw "$step failed ($LASTEXITCODE)" }
 }
-if (-not $Serial) {
+if (-not $CompileOnly -and -not $Serial) {
     $taskDevices = @(& $taskAdb devices | Where-Object { $_ -match '^([^\s]+)\s+device$' })
     if ($taskDevices.Count -ne 1) { throw 'Specify -Serial when no device or several devices are connected.' }
     $Serial = ($taskDevices[0] -split '\s+')[0]
 }
-$taskAbi = (& $taskAdb -s $Serial shell getprop ro.product.cpu.abi).Trim()
-Check-Exit 'Device ABI query'
+$taskAbi = $Abi
+if (-not $CompileOnly) {
+    $taskAbi = (& $taskAdb -s $Serial shell getprop ro.product.cpu.abi).Trim()
+    Check-Exit 'Device ABI query'
+}
 $taskTriple = switch ($taskAbi) {
     'arm64-v8a' { 'aarch64-linux-android28' }
     'x86_64' { 'x86_64-linux-android28' }
@@ -31,6 +34,7 @@ New-Item -ItemType Directory -Force $taskOutput | Out-Null
 $taskExecutable = Join-Path $taskOutput "stereo-lifecycle-$taskAbi"
 & $taskCompiler -std=c++20 -ffunction-sections -fdata-sections '-Wl,--gc-sections' -I $taskHeaders -I (Join-Path $taskRepo 'platforms/android/app/src/main/cpp') (Join-Path $taskRepo 'tools/tests/quest_stereo_lifecycle_test.cpp') (Join-Path $taskRepo 'platforms/android/app/src/main/cpp/stereo_view.cpp') -o $taskExecutable -llog -lEGL -lGLESv3 -landroid -static-libstdc++
 Check-Exit 'Native test build'
+if ($CompileOnly) { Write-Output 'Native lifecycle test compiled; execution requires an Android device.'; exit 0 }
 & $taskAdb -s $Serial push $taskExecutable /data/local/tmp/partyboard-stereo-test
 Check-Exit 'Native test upload'
 & $taskAdb -s $Serial shell chmod 700 /data/local/tmp/partyboard-stereo-test

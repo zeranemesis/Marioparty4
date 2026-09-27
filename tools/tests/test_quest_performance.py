@@ -1,0 +1,32 @@
+import importlib.util
+from pathlib import Path
+import unittest
+
+spec = importlib.util.spec_from_file_location("quest_analysis", Path(__file__).parents[1] / "analyze_quest_performance.py")
+analysis = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(analysis)
+
+
+class PerformanceLogTests(unittest.TestCase):
+    def test_distinguishes_refresh_from_new_world_frames(self):
+        text = """09-27 12:00:00.000 I Perf: 120Hz display, xr=120Hz
+09-27 12:00:02.000 I Stereo perf: source=110.0Hz presented=100.0Hz worldNew=88.0Hz hudNew=30.0Hz ringFull=12 copyMax=4.1ms acquireCpuMax=2.0ms copyGpuMax=-1.0ms gpuSamples=0 world=1 res=80% latency=25ms eye=1344x1408
+09-27 12:00:04.000 I Stereo perf: source=0.0Hz presented=0.0Hz world=0
+"""
+        rows = analysis.read_samples(text)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["target_hz"], 120)
+        self.assertEqual(rows[0]["world_new_hz"], 88)
+        self.assertEqual(rows[0]["eye_height"], 1408)
+        summary = analysis.summarize(rows)
+        self.assertNotIn("copy_gpu_window_max_ms", summary["metrics"])
+
+    def test_legacy_logs_and_missing_data(self):
+        rows = analysis.read_samples("Stereo perf: source=60Hz presented=59Hz copyMax=1.0ms world=1")
+        self.assertEqual(rows[0]["world_new_hz"], 59)
+        self.assertIsNone(rows[0]["target_hz"])
+        self.assertEqual(analysis.summarize([])["world_windows"], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

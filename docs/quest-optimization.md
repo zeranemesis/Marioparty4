@@ -1,0 +1,61 @@
+# Optimisation Quest : implementation et validation
+
+## Lot implemente
+
+- La frequence XR reste la plus haute annoncee par le runtime. La simulation reste a 60 Hz ; le rendu hors ligne peut interpoler les images intermediaires. Le rendu en ligne conserve son rythme de securite.
+- La resolution 3D suit les compteurs OpenXR CPU/GPU et le budget de la frequence effective. Baisse par pas de 5 %, remontage apres cinq mesures calmes, plancher 65 %. Une saturation CPU connue seule ne provoque pas de baisse de resolution. Sans compteurs GPU, la saturation du ring sert de secours borne.
+- Y selectionne une limite de qualite : economie 80 %, equilibre 100 %, nettete 125 % de la recommandation OpenXR par oeil. Le HUD utilise respectivement 1280, 1600 et 1920 pixels de largeur. Les resolutions classiques sont conservees pour l'ecran du jeu.
+- Le redimensionnement attend la liberation des images. Les buffers et le HUD sont remplaces ensemble seulement apres allocation reussie ; un echec conserve les buffers precedents.
+- Les textures RGBA/RGB compatibles sans mipmaps recoivent une chaine calculee a leur chargement ou mise a jour lorsqu'elles servent au monde 3D. Moyenne en lumiere lineaire, ponderation alpha, tailles impaires et couverture des decoupes sont gerees. Le niveau zero reste exact. Les copies EFB, textures de remplacement, textures incompatibles et chaines existantes gardent leur traitement.
+- Le filtrage anisotrope force a 8x concerne la scene 3D. Les messages et menus conservent leur selection du niveau original. MSAA 4x reste actif. Le mode de super-resolution accentue est reserve aux images sous la resolution recommandee ; au-dessus, le mode normal evite une accentuation excessive.
+- Les copies des yeux et du HUD partagent un flush et une barriere de fin. Les mesures separent attente CPU d'acquisition, transfert CPU, copie GPU facultative, cadence XR et nouvelles images du monde.
+
+La super-resolution du compositeur est spatiale. Ce lot n'ajoute pas de modele IA ni de reconstruction temporelle.
+
+## Mesurer sur Quest 2 et 3
+
+Installer l'APK Quest, conserver le meme plateau, placement et profil, puis laisser chauffer le jeu. Mesurer au moins deux minutes sur plateau, transitions et chaque minijeu concerne. Comparer les memes parcours avant/apres ; ajouter une session longue pour la chauffe.
+
+```powershell
+./tools/collect_quest_performance.ps1 -DurationSeconds 120
+# Mesure GPU facultative : redemarre le jeu pour activer les requetes GL.
+./tools/collect_quest_performance.ps1 -DurationSeconds 120 -GpuTiming -RestartGame
+```
+
+Le script conserve logcat, summary.json et world-windows.csv. Il ne vide pas les logs. Il restaure la propriete de diagnostic apres capture ; redemarrer ensuite le jeu desactive aussi les requetes dans le processus existant. Les statistiques sont des fenetres de mesure, pas des percentiles de frames individuelles. Une frequence XR de 120 Hz ne prouve pas 120 nouvelles images 3D/s. Les compteurs absents restent inconnus.
+
+Dans le menu de placement : frequence XR, resolution effective par oeil, nouvelles images 3D/s, CPU/GPU et images en retard. OVR Metrics Tool et RenderDoc restent necessaires pour localiser les passes couteuses et mesurer la consommation memoire.
+
+## Verification locale
+
+```powershell
+./tools/test_quest_quality.ps1
+py -3 tools/tests/test_quest_performance.py
+./tools/test_quest_stereo.ps1 -CompileOnly
+# Avec casque : execute aussi les tests de cycle de vie.
+./tools/test_quest_stereo.ps1
+```
+
+Le moteur Android ARM64 compile, l'APK Quest assemble et les tests JVM passent. Les decisions GPU/CPU, bornes, fraicheur des mesures et mipmaps passent les tests locaux. La pile de patches Aurora est appliquee dans l'ordre par CI, avec aurora-quest-quality.patch apres aurora-android-surface-generation.patch. Les modifications du sous-module sont distribuees par ces patches.
+
+Aucun casque n'etait connecte pour cette validation : fluidite, absence de scintillement, consommation et comportement des redimensionnements doivent encore etre verifies sur appareil. Aucune amelioration chiffree n'est revendiquee.
+
+## Etapes restantes du plan
+
+1. Capturer les profils Quest 2/3, identifier CPU, GPU, bande passante et cout des copies, puis regler les marges avec ces mesures.
+2. Valider la stereo instanciee presente dans le moteur et ses shaders sur appareil, y compris fallback. Ce chemin ne constitue pas le multiview natif OpenXR.
+3. Construire une integration Dawn/Vulkan capable de cibler les images OpenXR directement, puis remplacer la liaison par buffers Android partages et les copies GL. La bibliotheque Dawn precompilee actuelle ne fournit pas le chemin d'import/export requis pour cette integration. C'est un changement de backend, pas un reglage.
+4. Integrer le vrai multiview et la foveation dans ce backend, avec detection des capacites et fallback Quest 2/3. La foveation doit affecter la passe 3D couteuse, pas seulement une copie de presentation.
+5. Etudier resolution variable par zone, projection symetrique et profondeur du compositeur seulement apres les profils. Tester transparences, particules, interfaces et geometrie proche.
+6. Traiter les minijeux au cas par cas avec captures reproductibles ; eviter de modifier le temps de simulation pour obtenir une frequence d'affichage plus haute.
+7. Evaluer une reconstruction temporelle uniquement avec vecteurs de mouvement et historique coherents. Pas de promesse d'upscaling IA sans implementation et mesures de cout.
+
+## Sources Meta du plan
+
+- [OVR Metrics Tool](https://developers.meta.com/horizon/documentation/native/android/ts-ovrmetricstool/)
+- [RenderDoc et Render Stage](https://developers.meta.com/horizon/documentation/native/android/ts-renderdoc-renderstage/)
+- [Analyse MSAA](https://developers.meta.com/horizon/documentation/native/android/mobile-msaa-analysis/)
+- [Super-resolution et qualite](https://developers.meta.com/horizon/blog/vr-image-quality-meta-quest-super-resolution/)
+- [Multiview](https://developers.meta.com/horizon/documentation/unity/enable-multiview/)
+- [Foveation fixe native](https://developers.meta.com/horizon/documentation/native/android/os-fixed-foveated-rendering/)
+- [Projection symetrique](https://developers.meta.com/horizon/documentation/native/android/os-symmetric-projection/)
