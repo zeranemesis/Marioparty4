@@ -31,6 +31,17 @@ const char* unit_suffix(XrPerformanceMetricsCounterUnitMETA unit) {
 } // namespace
 
 void PerfMetrics::init(XrInstance instance, XrSession session, bool available) {
+  mCounters.clear();
+  mQuery = nullptr;
+  mFrames = mLateFrames = mWorstSkip = mQualityFrames = mQualityLate = 0;
+  mTotalFrames = mTotalLate = 0;
+  mLastDisplayTime = 0;
+  mThreadSumMs = mThreadMaxMs = mRefreshRate = 0;
+  {
+    std::lock_guard lock{mNumbersMutex};
+    mQuality = {};
+    mNumbers.fill(-1);
+  }
   mInstance = instance;
   mSession = session;
   mWindowStart = mSampledAt = std::chrono::steady_clock::now();
@@ -74,6 +85,8 @@ void PerfMetrics::init(XrInstance instance, XrSession session, bool available) {
 }
 
 void PerfMetrics::sample_counters() {
+  std::lock_guard lock{mNumbersMutex};
+  mQuality.gpuMs = mQuality.cpuMs = mQuality.compositorGpuMs = -1;
   if (mQuery == nullptr) {
     return;
   }
@@ -90,6 +103,11 @@ void PerfMetrics::sample_counters() {
     counter.sum += number;
     counter.max = counter.samples == 0 ? number : std::max(counter.max, number);
     ++counter.samples;
+    if (value.counterUnit == XR_PERFORMANCE_METRICS_COUNTER_UNIT_MILLISECONDS_META && std::isfinite(number)) {
+      if (counter.name == "app/gpu_frametime") mQuality.gpuMs = static_cast<float>(number);
+      if (counter.name == "app/cpu_frametime") mQuality.cpuMs = static_cast<float>(number);
+      if (counter.name == "compositor/gpu_frametime") mQuality.compositorGpuMs = static_cast<float>(number);
+    }
   }
 }
 
@@ -98,7 +116,9 @@ const PerfMetrics::Counter* PerfMetrics::find(const char* name) const {
   return it != mCounters.end() && it->samples != 0 ? &*it : nullptr;
 }
 
-void PerfMetrics::frame(const XrFrameState& state, std::chrono::nanoseconds threadTime, float resolutionPercent) {
+void PerfMetrics::frame(const XrFrameState& state, std::chrono::nanoseconds threadTime, float resolutionPercent,
+                        const std::array<float, 3>& renderInfo) {
+  mRenderInfo = renderInfo;
   const auto now = std::chrono::steady_clock::now();
   // Display times the loop skipped: its frame came after the next vsync.
   if (mLastDisplayTime != 0 && state.predictedDisplayPeriod > 0) {
@@ -107,6 +127,7 @@ void PerfMetrics::frame(const XrFrameState& state, std::chrono::nanoseconds thre
       const auto skipped = static_cast<uint32_t>(
           std::max<long long>(0, std::llround(static_cast<double>(delta) / state.predictedDisplayPeriod) - 1));
       mLateFrames += skipped;
+      mQualityLate += skipped;
       mWorstSkip = std::max(mWorstSkip, skipped);
     }
   }
@@ -115,6 +136,7 @@ void PerfMetrics::frame(const XrFrameState& state, std::chrono::nanoseconds thre
   }
   mLastDisplayTime = state.predictedDisplayTime;
   ++mFrames;
+  ++mQualityFrames;
   const double threadMs = std::chrono::duration<double, std::milli>(threadTime).count();
   mThreadSumMs += threadMs;
   mThreadMaxMs = std::max(mThreadMaxMs, threadMs);
@@ -122,6 +144,12 @@ void PerfMetrics::frame(const XrFrameState& state, std::chrono::nanoseconds thre
   if (now - mSampledAt >= kSampleEvery) {
     mSampledAt = now;
     sample_counters();
+    std::lock_guard lock{mNumbersMutex};
+    mQuality.refreshHz = static_cast<float>(mRefreshRate);
+    const uint32_t attempts = mQualityFrames + mQualityLate;
+    mQuality.latePercent = attempts ? 100.0f * mQualityLate / attempts : 0.0f;
+    ++mQuality.sequence;
+    mQualityFrames = mQualityLate = 0;
   }
   const double seconds = std::chrono::duration<double>(now - mWindowStart).count();
   if (now - mWindowStart >= kReportEvery) {
@@ -166,6 +194,9 @@ void PerfMetrics::report(double seconds, float resolutionPercent) {
   numbers[LateFrames] = static_cast<float>(latePercent);
   numbers[AppGpuMs] = average("app/gpu_frametime");
   numbers[AppCpuMs] = average("app/cpu_frametime");
+  numbers[EyeWidth] = mRenderInfo[0];
+  numbers[EyeHeight] = mRenderInfo[1];
+  numbers[WorldRate] = mRenderInfo[2];
   {
     std::lock_guard lock{mNumbersMutex};
     mNumbers = numbers;
@@ -182,6 +213,11 @@ void PerfMetrics::report(double seconds, float resolutionPercent) {
 std::array<float, PerfMetrics::Count> PerfMetrics::numbers() const {
   std::lock_guard lock{mNumbersMutex};
   return mNumbers;
+}
+
+QualitySample PerfMetrics::quality_sample() const {
+  std::lock_guard lock{mNumbersMutex};
+  return mQuality;
 }
 
 } // namespace quest

@@ -12,6 +12,7 @@
 // correct the head's movement since then, so the model stays put on the table.
 
 #include "xr_util.hpp"
+#include "adaptive_quality.hpp"
 
 #include <EGL/eglext.h>
 #include <android/hardware_buffer.h>
@@ -75,6 +76,8 @@ public:
   // The flat screen is not on show (the model replaces it): the game skips presenting it.
   void set_screen_hidden(bool hidden);
   bool screen_hidden() const;
+  void set_quality_sample(const QualitySample& sample);
+  void set_quality_cap(float recommendedScale);
 
 private:
   friend struct StereoViewTestAccess;
@@ -99,13 +102,15 @@ private:
   // The drawn eye size for a render scale, and the ring's images at a size
   // (XR thread, GL context current, every image free).
   std::pair<uint32_t, uint32_t> eye_size(float renderScale) const;
-  bool allocate_images(uint32_t eyeWidth, uint32_t eyeHeight);
+  bool allocate_images(uint32_t eyeWidth, uint32_t eyeHeight, uint32_t hudWidth = 0);
   void free_images();
   bool resize_ready();
+  void free_images(std::array<Slot, 3>& slots);
 
 public:
   // The eyes' resolution, in % of the headset's recommended size.
   float resolution_percent() const;
+  std::array<float, 3> render_info() const; // actual eye width/height, fresh world Hz
 
 private:
 
@@ -114,6 +119,7 @@ private:
 
   EGLDisplay mDisplay = EGL_NO_DISPLAY;
   XrInstance mInstance = XR_NULL_HANDLE;
+  XrSession mSession = XR_NULL_HANDLE;
   XrSwapchain mSwapchain = XR_NULL_HANDLE;
   XrSwapchain mHudSwapchain = XR_NULL_HANDLE;
   std::vector<XrSwapchainImageOpenGLESKHR> mHudImages;
@@ -123,15 +129,26 @@ private:
   std::vector<XrSwapchainImageOpenGLESKHR> mSwapchainImages;
   uint32_t mEyeWidth = 0; // an eye's half of the swapchain: the largest drawn size
   uint32_t mEyeHeight = 0;
+  uint32_t mRecommendedEyeWidth = 0;
   uint32_t mImageEyeWidth = 0, mImageEyeHeight = 0; // the ring's images: the drawn size
   bool mResizePending = false;
+  uint32_t mDesiredHudWidth = 1600;
+  int64_t mSwapchainFormat = 0;
 
   mutable std::mutex mMutex;
   std::array<Slot, 3> mSlots;
   uint32_t mGeneration = 0;
   uint64_t mNextTag = 1;
   uint32_t mLeaseCount = 0, mRingFullCount = 0, mPresentedCount = 0;
+  uint32_t mNewWorldCount = 0, mNewHudCount = 0;
+  float mWorldRate = 0;
   double mCopyMaxMs = 0;
+  double mAcquireMaxMs = 0;
+  struct CopyTimer { GLuint queries[2]{}; bool pending = false; };
+  std::array<CopyTimer, 4> mCopyTimers;
+  bool mGpuTiming = false;
+  double mCopyGpuMaxMs = -1;
+  uint32_t mCopyGpuSamples = 0;
   std::chrono::steady_clock::time_point mStatsAt = std::chrono::steady_clock::now();
   bool mEnabled = false;
   bool mScreenRequired = false;
@@ -145,6 +162,8 @@ private:
   // their size, lowered when the GPU falls behind 120 Hz, raised back slowly.
   float mRenderScale = 0.8f; // of 125% of the recommended size: 100% of it, then up as the GPU allows
   float mMaxScale = 1.0f;    // the images' size, relative to the recommended one
+  AdaptiveQuality mQuality;
+  QualitySample mQualitySample;
   uint32_t mAdaptLeases = 0, mAdaptRingFull = 0, mCalmSeconds = 0;
   std::chrono::steady_clock::time_point mAdaptAt = std::chrono::steady_clock::now();
   // Pose prediction: this XR frame's display time, and the measured delay

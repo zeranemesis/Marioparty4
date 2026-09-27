@@ -194,13 +194,14 @@ public final class QuestVr {
     // --- Placement help ---
 
     private static String resolutionName(int height) {
+        boolean french = "fr".equals(Locale.getDefault().getLanguage());
         switch (height) {
             case 2160:
-                return "4K (3840×2160)";
+                return french ? "Nettet\u00e9 : 125% 3D, \u00e9cran 4K" : "Sharp: 125% 3D, 4K screen";
             case 1440:
-                return "1440p (2560×1440)";
+                return french ? "\u00c9quilibr\u00e9 : 100% 3D, \u00e9cran 1440p" : "Balanced: 100% 3D, 1440p screen";
             default:
-                return "1080p (1920×1080)";
+                return french ? "\u00c9conomie : 80% 3D, \u00e9cran 1080p" : "Economy: 80% 3D, 1080p screen";
         }
     }
 
@@ -221,7 +222,7 @@ public final class QuestVr {
             "Stick gauche : ↕ hauteur   ↔ taille du plateau",
             "Clic stick gauche : plateau 3D — " + (model ? "oui" : "non"),
             "X : pièce visible — " + (passthrough ? "oui" : "non"),
-            "Y : résolution — " + resolutionName(resolution),
+            "Y : qualité — " + resolutionName(resolution),
             "A, B ou \u2261 : terminer et jouer",
         } : new String[] {
             "Right trigger, controller tip on the table: set the game there",
@@ -231,7 +232,7 @@ public final class QuestVr {
             "Left stick: ↕ height   ↔ board size",
             "Left stick click: 3D board — " + (model ? "yes" : "no"),
             "X: room visible — " + (passthrough ? "yes" : "no"),
-            "Y: resolution — " + resolutionName(resolution),
+            "Y: quality — " + resolutionName(resolution),
             "A, B or \u2261: done, play",
         };
 
@@ -270,8 +271,9 @@ public final class QuestVr {
             small.setTextSize(22 * scale);
             y += 6 * scale;
             canvas.drawText(perfLine(french), 48 * scale, y, small);
+            canvas.drawText(perfDetails(french), 48 * scale, y + 28 * scale, small);
             canvas.drawText(french ? "Journal : Téléchargements › PartyBoard (appli Fichiers)"
-                                   : "Log: Downloads › PartyBoard (Files app)", 48 * scale, y + 32 * scale, small);
+                                   : "Log: Downloads › PartyBoard (Files app)", 48 * scale, y + 56 * scale, small);
         } finally {
             surface.unlockCanvasAndPost(canvas);
         }
@@ -287,6 +289,16 @@ public final class QuestVr {
         StringBuilder line = new StringBuilder(french ? "Performances : " : "Performance: ");
         line.append(String.format(Locale.getDefault(), "%.0f Hz · ", n[0]));
         line.append(String.format(Locale.getDefault(), french ? "résolution %.0f %%" : "resolution %.0f%%", n[1]));
+        if (n.length >= 10) {
+            line.append(String.format(Locale.getDefault(), " \u00b7 %.0f\u00d7%.0f \u00b7 3D %.0f FPS", n[7], n[8], n[9]));
+        }
+        return line.toString();
+    }
+
+    private static String perfDetails(boolean french) {
+        float[] n = sStarted ? nativePerfNumbers() : new float[0];
+        if (n.length < 7 || n[0] <= 0) return "";
+        StringBuilder line = new StringBuilder();
         if (n[2] >= 0) line.append(String.format(Locale.getDefault(), french ? " · GPU %.0f %%" : " · GPU %.0f%%", n[2]));
         if (n[3] >= 0) line.append(String.format(Locale.getDefault(), french ? " · CPU %.0f %%" : " · CPU %.0f%%", n[3]));
         line.append(String.format(Locale.getDefault(), french ? " · images en retard %.1f %%" : " · late frames %.1f%%", n[4]));

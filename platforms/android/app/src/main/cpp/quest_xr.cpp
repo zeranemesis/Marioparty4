@@ -769,6 +769,7 @@ void switch_resolution(App& app, JNIEnv* env) {
     return;
   }
   app.table.resolution = resolution;
+  app.stereo.set_quality_cap(quality_cap(resolution));
   g_surfaceSwitched.store(false);
   LOGI("Screen resolution %dx%d", app.next.width, app.next.height);
   env->CallStaticVoidMethod(g_java.questVr, g_java.onSurfaceReplaced, app.next.surface, app.next.width,
@@ -994,12 +995,16 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   XrPosef modelPose = app.pose;
   // The scene's floor is measured by the game (quest_stereo.cpp) and put on
   // the table exactly: no clearance.
+  app.stereo.set_quality_sample(g_perf.quality_sample());
   app.stereo.set_frame_time(time);
   app.stereo.update(views, modelPose, app.table.modelScale, model, app.table.screenWidth, app.table.screenWidth * 0.75f);
   XrCompositionLayerImageLayoutFB modelFlip{XR_TYPE_COMPOSITION_LAYER_IMAGE_LAYOUT_FB};
   modelFlip.flags = XR_COMPOSITION_LAYER_IMAGE_LAYOUT_VERTICAL_FLIP_BIT_FB;
   XrCompositionLayerSettingsFB modelSettings{XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB};
-  modelSettings.layerFlags = XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SHARPENING_BIT_FB;
+  // Near display resolution, aggressive spatial sharpening can flicker.
+  modelSettings.layerFlags = app.stereo.resolution_percent() < 100.0f
+      ? XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SHARPENING_BIT_FB
+      : XR_COMPOSITION_LAYER_SETTINGS_NORMAL_SHARPENING_BIT_FB;
   modelSettings.next = app.extensions.imageLayout ? &modelFlip : nullptr;
   const void* modelChain = app.extensions.layerSettings ? static_cast<const void*>(&modelSettings)
                                                        : modelSettings.next;
@@ -1092,7 +1097,8 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   end.layerCount = frame.shouldRender ? layerCount : 0;
   end.layers = layers.data();
   check(app.instance, xrEndFrame(app.session, &end), "xrEndFrame");
-  g_perf.frame(frame, std::chrono::steady_clock::now() - frameStart, app.stereo.resolution_percent());
+  g_perf.frame(frame, std::chrono::steady_clock::now() - frameStart, app.stereo.resolution_percent(),
+               app.stereo.render_info());
 }
 
 bool set_up(App& app, JNIEnv* env) {
@@ -1118,6 +1124,7 @@ bool set_up(App& app, JNIEnv* env) {
   if (!app.stereo.init(app.instance, app.session, app.system, app.egl.display, eyeScale)) {
     LOGW("No model on the table: the game stays on its screen");
   }
+  app.stereo.set_quality_cap(quality_cap(app.table.resolution));
   query_refresh_rates(app);
   if (app.extensions.anchors) {
     app.anchor.init(app.instance, app.session, app.stage);

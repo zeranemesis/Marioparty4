@@ -10,6 +10,7 @@
 // runtime lists is logged, so a later build can steer by whichever proves useful.
 
 #include "xr_util.hpp"
+#include "adaptive_quality.hpp"
 
 #include <array>
 #include <chrono>
@@ -24,15 +25,18 @@ public:
   static constexpr const char* kExtension = XR_META_PERFORMANCE_METRICS_EXTENSION_NAME;
 
   // The numbers the placement panel shows (QuestVr.nativePerfNumbers); < 0: unknown.
-  enum Number { RefreshRate, Resolution, GpuUtilization, CpuUtilization, LateFrames, AppGpuMs, AppCpuMs, Count };
+  enum Number { RefreshRate, Resolution, GpuUtilization, CpuUtilization, LateFrames, AppGpuMs, AppCpuMs,
+                EyeWidth, EyeHeight, WorldRate, Count };
 
   // XR thread, once the session exists; `available`: the extension is enabled.
   void init(XrInstance instance, XrSession session, bool available);
   // XR thread, once per frame after xrEndFrame: the frame's timing, how long
   // the XR thread spent on it, and the eyes' resolution (% of recommended).
-  void frame(const XrFrameState& state, std::chrono::nanoseconds threadTime, float resolutionPercent);
+  void frame(const XrFrameState& state, std::chrono::nanoseconds threadTime, float resolutionPercent,
+             const std::array<float, 3>& renderInfo);
   // Any thread: the last window's summary.
   std::array<float, Count> numbers() const;
+  QualitySample quality_sample() const;
 
 private:
   struct Counter {
@@ -62,6 +66,9 @@ private:
 
   mutable std::mutex mNumbersMutex;
   std::array<float, Count> mNumbers{-1, -1, -1, -1, -1, -1, -1};
+  QualitySample mQuality;
+  uint32_t mQualityFrames = 0, mQualityLate = 0;
+  std::array<float, 3> mRenderInfo{};
 };
 
 } // namespace quest

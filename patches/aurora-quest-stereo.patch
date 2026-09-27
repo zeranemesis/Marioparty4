@@ -148,7 +148,7 @@
    if (g_currentRenderPass == UINT32_MAX)
      UNLIKELY {
        Log.warn("Dropping command {}", magic_enum::enum_name(type));
-@@ -1132,6 +1139,75 @@ void finish() {
+@@ -1132,6 +1139,111 @@ void finish() {
      enqueue_pass(frame, g_recordingFrameSlot, g_currentRenderPass);
      g_currentRenderPass = UINT32_MAX;
    }
@@ -183,25 +183,61 @@
 +  // at the left, centered vertically, so the headset finds it at the same rows
 +  // whichever vertical origin its compositor gives the image.
 +  const uint32_t eyeTop = desc.hudTop > desc.eyeHeight ? (desc.hudTop - desc.eyeHeight) / 2 : 0;
-+  for (uint32_t eye = 0; eye < 2; ++eye) {
-+    const auto left = static_cast<float>(eye * desc.eyeStride);
-+    const auto width = static_cast<float>(desc.eyeWidth);
-+    const auto height = static_cast<float>(desc.eyeHeight);
++  // Viewport and scissor: 0 the left eye's rectangle, 1 the right eye's,
++  // 2 both (instanced draws: stereo.cpp squeezes each instance into its own).
++  int view = -1;
++  const auto set_view = [&](int wanted) {
++    if (view == wanted) {
++      return;
++    }
++    view = wanted;
++    const uint32_t left = wanted == 1 ? desc.eyeStride : 0;
++    const uint32_t width = wanted == 2 ? desc.eyeStride + desc.eyeWidth : desc.eyeWidth;
 +    pass.commands.push_back({
 +        .type = CommandType::SetViewport,
-+        .data = {.setViewport = {left, static_cast<float>(eyeTop), width, height, 0.f, 1.f}},
++        .data = {.setViewport = {static_cast<float>(left), static_cast<float>(eyeTop), static_cast<float>(width),
++                                 static_cast<float>(desc.eyeHeight), 0.f, 1.f}},
 +    });
 +    pass.commands.push_back({
 +        .type = CommandType::SetScissor,
-+        .data = {.setScissor = {static_cast<int32_t>(eye * desc.eyeStride), static_cast<int32_t>(eyeTop),
-+                                static_cast<int32_t>(desc.eyeWidth), static_cast<int32_t>(desc.eyeHeight)}},
++        .data = {.setScissor = {static_cast<int32_t>(left), static_cast<int32_t>(eyeTop), static_cast<int32_t>(width),
++                                static_cast<int32_t>(desc.eyeHeight)}},
 +    });
-+    for (const auto& draw : *desc.eyes[eye]) {
-+      pass.commands.push_back({
-+          .type = CommandType::Draw,
-+          .data = {.draw = ShaderDrawCommand{.type = ShaderType::GX, .gx = draw}},
-+      });
++  };
++  const auto push_gx = [&](const gx::DrawData& draw) {
++    pass.commands.push_back({
++        .type = CommandType::Draw,
++        .data = {.draw = ShaderDrawCommand{.type = ShaderType::GX, .gx = draw}},
++    });
++  };
++  // In recording order. A run of per-eye draws goes to the left eye, then the
++  // same run to the right eye, so the viewport changes per run, not per draw.
++  const auto& leftDraws = *desc.eyes[0];
++  const auto& rightDraws = *desc.eyes[1];
++  const auto instanced = [&](size_t i) {
++    return desc.instanced != nullptr && i < desc.instanced->size() && (*desc.instanced)[i] != 0;
++  };
++  for (size_t i = 0; i < leftDraws.size();) {
++    if (instanced(i)) {
++      set_view(2);
++      auto draw = leftDraws[i++];
++      draw.instanceCount = 2;
++      push_gx(draw);
++      continue;
 +    }
++    size_t end = i;
++    while (end < leftDraws.size() && !instanced(end)) {
++      ++end;
++    }
++    set_view(0);
++    for (size_t j = i; j < end; ++j) {
++      push_gx(leftDraws[j]);
++    }
++    set_view(1);
++    for (size_t j = i; j < end && j < rightDraws.size(); ++j) {
++      push_gx(rightDraws[j]);
++    }
++    i = end;
 +  }
 +  pass.commands.push_back({
 +      .type = CommandType::SetViewport,
@@ -224,7 +260,7 @@
  }
  
  void end_frame(EndFrameCallback callback) {
-@@ -1323,6 +1399,9 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+@@ -1323,6 +1435,9 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
      };
      depthStencilAttachmentPtr = &depthStencilAttachment;
    }
@@ -236,7 +272,7 @@
        .label = passInfo.label.empty() ? label.c_str() : passInfo.label.c_str(),
 --- /dev/null
 +++ b/lib/gfx/stereo.cpp
-@@ -0,0 +1,490 @@
+@@ -0,0 +1,551 @@
 +#include "stereo.hpp"
 +
 +#include <aurora/stereo.h>
@@ -245,6 +281,7 @@
 +#include "../webgpu/gpu.hpp"
 +#include "../gx/shader_info.hpp"
 +#include "../gx/fifo.hpp"
++#include "pipeline_cache.hpp"
 +
 +#include <algorithm>
 +#include <array>
@@ -289,10 +326,19 @@
 +uint32_t g_frameEyeWidth = 0, g_frameEyeHeight = 0;
 +// The game's own frame is not on show in the headset (aurora.cpp skips presenting it).
 +std::atomic_bool g_screenHidden = false;
-+// 16x once a headset uses the eyes' images (gx.cpp's samplers read it).
++// 8x once a headset uses the eyes' images (gx.cpp's samplers read it).
 +std::atomic<uint16_t> g_forcedAnisotropy{1};
 +std::array<Mat4x4<float>, 2> g_clip{};
 +std::array<std::vector<gx::DrawData>, 2> g_eyeDraws;
++// Per world draw: 1 when both eyes are one instanced draw (g_eyeDraws[0]
++// holds it, g_eyeDraws[1] a copy that is not drawn), 0 when drawn per eye.
++std::vector<uint8_t> g_eyeInstanced;
++// Where each instance goes, for the instanced shaders (shader.cpp's stereo_x
++// and stereo_clip), from the image's and this frame's eye sizes.
++Vec4<float> g_eyeX{}, g_eyeClip{};
++// An instanced pipeline failed to build: every eye drawn on its own from then on.
++std::atomic_bool g_instancedDisabled = false;
++uint64_t g_statInstanced = 0, g_statPerEye = 0;
 +std::vector<gx::DrawData> g_hudDraws;
 +webgpu::TextureWithSampler g_color; // multisampled, when the game's frame is
 +webgpu::TextureWithSampler g_depth;
@@ -433,6 +479,29 @@
 +    // same interface again into that unused screen; empty frames retain it.
 +    return !g_eyeDraws[0].empty();
 +  }
++  // Both eyes in one instanced draw once its pipeline is built (the first
++  // request queues it); until then, and for lines and points, which already
++  // use instances, one draw per eye.
++  if (webgpu::g_clipDistancesSupported && !g_instancedDisabled.load(std::memory_order_relaxed) &&
++      info.lineMode == 0 && draw.instanceCount == 1 && gx::stereo_instanced_fits(info)) {
++    auto instancedConfig = spatialConfig;
++    instancedConfig.shaderConfig.stereo = 1;
++    const auto instancedRef = pipeline_ref(instancedConfig);
++    wgpu::RenderPipeline instancedPipeline;
++    if (get_pipeline(instancedRef, instancedPipeline) && instancedPipeline) {
++      draw.pipeline = instancedRef;
++      draw.uniformRange =
++          gx::build_uniform_stereo_instanced(info, vtxStart, ranges, g_clip[0], g_clip[1], g_eyeX, g_eyeClip);
++      g_eyeDraws[0].push_back(draw);
++      g_eyeDraws[1].push_back(draw);
++      g_eyeInstanced.push_back(1);
++      ++g_statInstanced;
++      g_worldMergeable = true;
++      return true;
++    }
++  }
++  ++g_statPerEye;
++  g_eyeInstanced.push_back(0);
 +  // One uniform build for both eyes: only the projection differs.
 +  const auto uniforms = gx::build_uniform_stereo(info, vtxStart, ranges, g_clip[0], g_clip[1]);
 +  for (size_t eye = 0; eye < 2; ++eye) {
@@ -445,6 +514,16 @@
 +  return world;
 +#else
 +  return false;
++#endif
++}
++
++void instanced_failed(const std::string& message) noexcept {
++#if defined(__ANDROID__)
++  if (!g_instancedDisabled.exchange(true)) {
++    Log.error("Stereo: both-eyes pipeline failed, drawing each eye on its own: {}", message);
++  }
++#else
++  (void)message;
 +#endif
 +}
 +
@@ -465,6 +544,7 @@
 +      g_image = -1;
 +      g_eyeDraws[0].clear();
 +      g_eyeDraws[1].clear();
++      g_eyeInstanced.clear();
 +      g_hudDraws.clear();
 +      return;
 +    }
@@ -500,6 +580,7 @@
 +      .tag = g_frameTag,
 +      .hasWorld = hasWorld,
 +      .eyes = {&g_eyeDraws[0], &g_eyeDraws[1]},
++      .instanced = &g_eyeInstanced,
 +      .hud = &g_hudDraws,
 +  };
 +  enqueue_pass(desc);
@@ -518,14 +599,18 @@
 +  statHud += g_hudDraws.size();
 +  statWorldMax = std::max(statWorldMax, worldDraws);
 +  if (const auto now = std::chrono::steady_clock::now(); now - statsAt >= std::chrono::seconds(5)) {
-+    Log.info("Stereo draws: {} frames, world {} avg / {} max per eye, HUD {} avg, {}x{} image", statFrames,
-+             statWorld / statFrames, statWorldMax, statHud / statFrames, g_width, g_height);
++    Log.info("Stereo draws: {} frames, world {} avg / {} max per eye ({}% both eyes at once), HUD {} avg, {}x{} image",
++             statFrames, statWorld / statFrames, statWorldMax,
++             g_statInstanced + g_statPerEye != 0 ? g_statInstanced * 100 / (g_statInstanced + g_statPerEye) : 0,
++             statHud / statFrames, g_width, g_height);
++    g_statInstanced = g_statPerEye = 0;
 +    statsAt = now;
 +    statFrames = statWorld = statHud = 0;
 +    statWorldMax = 0;
 +  }
 +  g_eyeDraws[0].clear();
 +  g_eyeDraws[1].clear();
++  g_eyeInstanced.clear();
 +  g_hudDraws.clear();
 +  g_image = -1;
 +#endif
@@ -653,7 +738,7 @@
 +  g_callback = callback;
 +  g_callbackUser = user;
 +  g_loggedGeometry = false;
-+  g_forcedAnisotropy.store(16, std::memory_order_relaxed);
++  g_forcedAnisotropy.store(8, std::memory_order_relaxed);
 +  Log.info("Stereo: {} images of {}x{}", count, width, height);
 +  return true;
 +#else
@@ -679,6 +764,18 @@
 +  g_clip[0] = to_mat(clip[0]);
 +  g_clip[1] = to_mat(clip[1]);
 +  g_image = static_cast<int32_t>(image);
++  // Instanced draws: a viewport over both eyes' rectangles (common.cpp),
++  // each instance's clip x squeezed into its own: the left eye's pixels
++  // [0, w), the right eye's [stride, stride + w) of the viewport's
++  // stride + w; and cut at the edges 2w/V - 1 and 2*stride/V - 1 (NDC).
++  {
++    const float stride = static_cast<float>(g_width / 2);
++    const float width = g_frameEyeWidth != 0 ? std::min(static_cast<float>(g_frameEyeWidth), stride) : stride;
++    const float span = stride + width;
++    const float scale = width / span;
++    g_eyeX = {scale, scale - 1.f, scale, (width + 2.f * stride) / span - 1.f};
++    g_eyeClip = {2.f * width / span - 1.f, 2.f * stride / span - 1.f, 0.f, 0.f};
++  }
 +  g_frameTag = frameTag;
 +  g_recording = true;
 +#else
@@ -729,7 +826,7 @@
 +}
 --- /dev/null
 +++ b/lib/gfx/stereo.hpp
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,70 @@
 +#pragma once
 +
 +// Stereo rendering for a VR headset (include/aurora/stereo.h).
@@ -738,6 +835,7 @@
 +#include "../gx/gx.hpp"
 +#include "../gx/pipeline.hpp"
 +
++#include <string>
 +#include <vector>
 +
 +namespace aurora::gfx::stereo {
@@ -766,6 +864,10 @@
 +// At the end of the frame's recording (gfx::finish): the eyes' render pass.
 +void end_frame() noexcept;
 +
++// An instanced (both eyes) pipeline did not build (gx/pipeline.cpp): each eye
++// is drawn on its own from then on.
++void instanced_failed(const std::string& message) noexcept;
++
 +// On the render thread: the image is about to be drawn (render pass encode),
 +// and the frame using it was just submitted (aurora.cpp).
 +void begin_access(int32_t image, uint64_t tag, bool hasWorld) noexcept;
@@ -788,6 +890,8 @@
 +  uint64_t tag = 0;
 +  bool hasWorld = false;
 +  const std::vector<gx::DrawData>* eyes[2]{};
++  // Per world draw: 1 when eyes[0]'s draw covers both eyes (two instances).
++  const std::vector<uint8_t>* instanced = nullptr;
 +  const std::vector<gx::DrawData>* hud = nullptr;
 +};
 +void enqueue_pass(const PassDesc& desc) noexcept; // common.cpp
@@ -878,17 +982,229 @@
  #include "../gfx/tex_palette_conv.hpp"
  #include "../gfx/texture.hpp"
  #include "../gfx/texture_convert.hpp"
-@@ -1098,6 +1099,10 @@ wgpu::SamplerDescriptor aurora::gfx::TextureBind::get_descriptor() const noexcep
+@@ -158,6 +159,11 @@ gfx::TextureHandle get_tlut_texture(const GXTlutObj_& tlut) {
+   return handle;
+ }
+ 
++bool wants_world_mips(const GXTexObj_& obj) {
++  return gfx::stereo::recording() && g_gxState.projType == GX_PERSPECTIVE && !gfx::is_offscreen() &&
++      obj.min_filter() != GX_NEAR && obj.width() >= 16 && obj.height() >= 16;
++}
++
+ gfx::TextureHandle resolve_static_texture(const GXTexObj_& obj) {
+   ZoneScoped;
+   if (s_staticTextureCacheClearPending.exchange(false, std::memory_order_acq_rel)) {
+@@ -167,7 +173,8 @@ gfx::TextureHandle resolve_static_texture(const GXTexObj_& obj) {
+   if (obj.texObjId != 0) {
+     if (const auto it = s_textureObjectCaches.find(obj.texObjId); it != s_textureObjectCaches.end()) {
+       const auto& entry = it->second;
+-      if (entry.handle && entry.texDataVersion == obj.texDataVersion && entry.tlutObjId == 0) {
++      if (entry.handle && entry.texDataVersion == obj.texDataVersion && entry.tlutObjId == 0 &&
++          (!wants_world_mips(obj) || entry.handle->worldMipsPrepared || entry.handle->isReplacement)) {
+         return entry.handle;
+       }
+     }
+@@ -184,7 +191,7 @@ gfx::TextureHandle resolve_static_texture(const GXTexObj_& obj) {
+     const auto nameStr = "GX Static Texture";
+ #endif
+     handle = gfx::new_static_texture_2d(obj.width(), obj.height(), obj.mip_count(), obj.format(),
+-                                        {static_cast<const uint8_t*>(obj.data), UINT32_MAX}, false, nameStr);
++                                        {static_cast<const uint8_t*>(obj.data), UINT32_MAX}, false, nameStr, wants_world_mips(obj));
+   }
+   if (!obj.no_cache()) {
+     store_cached_texture(obj, handle);
+@@ -202,7 +209,8 @@ gfx::TextureHandle resolve_static_palette_texture(const GXTexObj_& obj, const GX
+     if (const auto it = s_textureObjectCaches.find(obj.texObjId); it != s_textureObjectCaches.end()) {
+       const auto& entry = it->second;
+       if (entry.handle && entry.texDataVersion == obj.texDataVersion && entry.tlutObjId == tlut.tlutObjId &&
+-          entry.tlutDataVersion == tlut.tlutDataVersion) {
++          entry.tlutDataVersion == tlut.tlutDataVersion &&
++          (!wants_world_mips(obj) || entry.handle->worldMipsPrepared || entry.handle->isReplacement)) {
+         return entry.handle;
+       }
+     }
+@@ -220,7 +228,7 @@ gfx::TextureHandle resolve_static_palette_texture(const GXTexObj_& obj, const GX
+     }
+     handle =
+         gfx::new_static_texture_2d(obj.width(), obj.height(), obj.mip_count(), GX_TF_RGBA8_PC,
+-                                   {converted.data.data(), converted.data.size()}, false, "GX Static Palette Texture");
++                                   {converted.data.data(), converted.data.size()}, false, "GX Static Palette Texture", wants_world_mips(obj));
+     handle->hasArbitraryMips = converted.hasArbitraryMips;
+   }
+   if (!obj.no_cache() && !tlut.no_cache()) {
+@@ -473,7 +481,9 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
+ 
+     if (obj.texObjId != 0 && obj.texObjId == textureBind.texObj.texObjId &&
+         obj.texDataVersion == textureBind.texObj.texDataVersion && tlutObjId == textureBind.tlutObjId &&
+-        tlutDataVersion == textureBind.tlutDataVersion && copyRevision == textureBind.copyRevision) {
++        tlutDataVersion == textureBind.tlutDataVersion && copyRevision == textureBind.copyRevision &&
++        (copyRef != nullptr || !wants_world_mips(obj) ||
++         (textureBind.ref && (textureBind.ref->worldMipsPrepared || textureBind.ref->isReplacement)))) {
+       // Texture bind unchanged
+       continue;
+     }
+@@ -1084,10 +1094,15 @@ static u16 wgpu_aniso(GXAnisotropy aniso) {
+ wgpu::SamplerDescriptor aurora::gfx::TextureBind::get_descriptor() const noexcept {
+   auto [minFilter, mipFilter] = wgpu_filter_mode(texObj.min_filter());
+   auto [magFilter, _] = wgpu_filter_mode(texObj.mag_filter());
++  const bool spatial = aurora::gfx::stereo::recording() && aurora::gx::g_gxState.projType == GX_PERSPECTIVE &&
++      !aurora::gfx::is_offscreen();
++  const bool generated = spatial && ref && ref->generatedWorldMips;
++  if (generated) mipFilter = wgpu::MipmapFilterMode::Linear;
+   const bool mipsEnabled = mipFilter != wgpu::MipmapFilterMode::Undefined;
+   float minLod = texObj.min_lod();
+   float maxLod = texObj.max_lod();
+   u16 maxAnisotropy = wgpu_aniso(texObj.max_aniso());
++  if (generated) { minLod = 0; maxLod = static_cast<float>(ref->mipCount - 1); }
+   if (ref && ref->isReplacement) {
+     minLod = 0.f;
+     maxLod = 1000.f;
+@@ -1098,6 +1113,10 @@ wgpu::SamplerDescriptor aurora::gfx::TextureBind::get_descriptor() const noexcep
      minLod = 0.f;
      maxLod = 0.f;
    }
 +  // A VR headset shows the scene as a model seen from any angle, mostly at a
 +  // slant across the table, where plain mipmapping blurs the textures: the
 +  // game's anisotropy request (GX_ANISO_1 nearly everywhere) is raised then.
-+  maxAnisotropy = std::max<u16>(maxAnisotropy, aurora::gfx::stereo::forced_anisotropy());
++  if (spatial) maxAnisotropy = std::max<u16>(maxAnisotropy, aurora::gfx::stereo::forced_anisotropy());
    if ((ref && ref->hasArbitraryMips) || !mipsEnabled) {
      maxAnisotropy = 1;
    } else if (maxAnisotropy > 1) {
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -465,7 +465,11 @@ struct ShaderConfig {
+   // recorded before this stay valid and the shipped cache seed is unaffected.
+   u8 ztexOp : 2 = 0;
+   u8 ztexFmt : 2 = 0;
+-  u8 pad1 : 2 = 0;
++  // Both of a headset's eyes in one instanced draw (gfx/stereo.cpp): instance 1
++  // takes the right eye's projection and half of the image. Also from pad1's
++  // spare bits: 0 everywhere else, so other pipelines keep their hash.
++  u8 stereo : 1 = 0;
++  u8 pad1 : 1 = 0;
+   u8 pad2 = 0;
+   std::array<AttrConfig, MaxVtxAttr> attrs;
+   std::array<TevSwap, MaxTevSwap> tevSwapTable;
+--- a/lib/gx/pipeline.cpp
++++ b/lib/gx/pipeline.cpp
+@@ -1,5 +1,6 @@
+ #include "pipeline.hpp"
+ 
++#include "../gfx/stereo.hpp"
+ #include "../webgpu/gpu.hpp"
+ #include "gx_fmt.hpp"
+ #include "shader_info.hpp"
+@@ -10,7 +11,26 @@ static Module Log("aurora::gx");
+ 
+ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+   ZoneScoped;
+-  const auto shader = build_shader(config.shaderConfig);
++  if (config.shaderConfig.stereo) {
++    // A headset's eyes in one instanced draw. Any uncaptured WebGPU error is
++    // fatal, so this is built in an error scope: should it fail, there is no
++    // pipeline, and stereo.cpp goes back to drawing each eye on its own.
++    webgpu::g_device.PushErrorScope(wgpu::ErrorFilter::Validation);
++    auto pipeline = build_pipeline(config, {}, build_shader(config.shaderConfig), "GX Stereo Pipeline");
++    bool failed = true;
++    std::string message = "no answer";
++    const auto future = webgpu::g_device.PopErrorScope(
++        wgpu::CallbackMode::WaitAnyOnly,
++        [&](wgpu::PopErrorScopeStatus status, wgpu::ErrorType type, wgpu::StringView text) {
++          failed = status != wgpu::PopErrorScopeStatus::Success || type != wgpu::ErrorType::NoError;
++          message = std::string{text.data != nullptr ? std::string_view{text} : std::string_view{}};
++        });
++    if (webgpu::g_instance.WaitAny(future, UINT64_MAX) != wgpu::WaitStatus::Success || failed) {
++      gfx::stereo::instanced_failed(message);
++      return {};
++    }
++    return pipeline;
++  }  const auto shader = build_shader(config.shaderConfig);
+   return build_pipeline(config, {}, shader, "GX Pipeline");
+ }
+ 
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -851,6 +851,28 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8
+                      alpha ? "a"sv : ""sv);
+ }
+ 
++// Instanced stereo cuts each eye at its edge with a clip distance, a vertex
++// output only: the fragment stage reads a copy of VertexOutput without it.
++static void add_stereo_clip_distance(std::string& source) noexcept {
++  constexpr std::string_view vertexStruct = "struct VertexOutput {";
++  const auto begin = source.find(vertexStruct);
++  const auto end = begin != std::string::npos ? source.find("};", begin) : std::string::npos;
++  if (end == std::string::npos) {
++    FATAL("stereo shader: VertexOutput not found");
++  }
++  std::string fragmentInput = source.substr(begin, end + 2 - begin);
++  fragmentInput.replace(0, vertexStruct.size(), "struct FragmentInput {");
++  source.insert(end, "    @builtin(clip_distances) stereo_clip: array<f32, 1>,\n");
++  source.insert(source.find("};", begin) + 2, "\n\n" + fragmentInput);
++  constexpr std::string_view fragmentMain = "fn fs_main(in: VertexOutput)";
++  const auto main = source.find(fragmentMain);
++  if (main == std::string::npos) {
++    FATAL("stereo shader: fs_main not found");
++  }
++  source.replace(main, fragmentMain.size(), "fn fs_main(in: FragmentInput)");
++  source.insert(0, "enable clip_distances;\n");
++}
++
+ std::string build_shader_source(const ShaderConfig& config) noexcept {
+   ZoneScoped;
+   const auto hash = xxh3_hash(config);
+@@ -1003,7 +1025,23 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+                                   attr_load_nbt_slice(config, NbtSlice::T, vidxAttr));
+   }
+ 
+-  if (config.lineMode == 0) {
++  if (config.lineMode == 0 && config.stereo) {
++    // Both eyes in one draw: instance 1 is the right eye. The viewport spans
++    // both eyes' rectangles; each instance is squeezed into its own and cut
++    // at its edge (clip distance), so nothing spills into the other eye.
++    vtxInAttrs += ",\n    @builtin(instance_index) iidx: u32";
++    vtxXfrAttrsPre += fmt::format(
++        "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
++        "\n    let right_eye = iidx != 0u;"
++        "\n    var eye_proj = ubuf.proj;"
++        "\n    if (right_eye) {{ eye_proj = ubuf.stereo_proj; }}"
++        "\n    out.pos = vec4f(mv_pos, 1.0) * eye_proj;"
++        "\n    let eye_x = select(ubuf.stereo_x.xy, ubuf.stereo_x.zw, right_eye);"
++        "\n    out.pos.x = out.pos.x * eye_x.x + eye_x.y * out.pos.w;"
++        "\n    out.stereo_clip[0] = select(ubuf.stereo_clip.x * out.pos.w - out.pos.x,"
++        "\n                                out.pos.x - ubuf.stereo_clip.y * out.pos.w, right_eye);",
++        vtx_attr(config, GX_VA_POS));
++  } else if (config.lineMode == 0) {
+     vtxXfrAttrsPre += fmt::format(
+         "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
+         "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;",
+@@ -1632,7 +1670,15 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+     fragmentFn += "\n    prev = vec4f(in.nrm, prev.a);";
+   }
+ 
+-  const auto shaderSource = fmt::format(R"""(
++  if (config.stereo) {
++    // After every other member: build_uniform_stereo_instanced appends them.
++    uniBufAttrs +=
++        "\n    stereo_proj: mat4x4f,"  // the right eye's projection
++        "\n    stereo_x: vec4f,"       // clip x scale and offset (times w): left eye xy, right eye zw
++        "\n    stereo_clip: vec4f,";   // x: the left eye's right edge, y: the right eye's left edge (NDC)
++  }
++
++  auto shaderSource = fmt::format(R"""(
+ fn bswap32(v: u32, le: bool) -> u32 {{
+   if (le) {{
+     return v;
+@@ -1997,6 +2043,9 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
+                                         uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn,
+                                         fragmentFnPre, vtxXfrAttrsPre, uniformPre, fragOutStruct, fragRetType,
+                                         fragRetStmt);
++  if (config.stereo) {
++    add_stereo_clip_distance(shaderSource);
++  }
+   if (EnableDebugPrints) {
+     Log.info("Generated shader: {}", shaderSource);
+   }
 --- a/lib/gx/shader_info.cpp
 +++ b/lib/gx/shader_info.cpp
 @@ -1,7 +1,9 @@
@@ -923,7 +1239,7 @@
    buf.append(g_gxState.proj);
  
    for (int i = 0; i < MaxPnMtx; i++) {
-@@ -502,6 +510,25 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
+@@ -502,6 +510,45 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
      buf.append(Vec4{static_cast<f32>(g_gxState.ztexBias), 0.f, 0.f, 0.f});
    }
    g_gxState.stateDirty = false;
@@ -934,6 +1250,7 @@
 +  const auto& buf = build_uniform_bytes(info, vtxStart, ranges, nullptr);
    return gfx::push_uniform(buf.data(), buf.size());
  }
+-} // namespace aurora::gx
 +
 +// A VR headset's eyes (gfx/stereo.cpp): the same block for both, built once,
 +// each copy with its eye's projection written over the game's.
@@ -948,10 +1265,30 @@
 +  out[1] = gfx::push_uniform(buf.data(), buf.size());
 +  return out;
 +}
- } // namespace aurora::gx
++
++// Both eyes in one instanced draw (a ShaderConfig with stereo set): the left
++// eye's projection where the game's sits, then after the whole block the
++// right eye's and where each eye goes (shader.cpp's stereo_* members).
++gfx::Range build_uniform_stereo_instanced(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges,
++                                          const Mat4x4<float>& left, const Mat4x4<float>& right,
++                                          const Vec4<float>& eyeX, const Vec4<float>& eyeClip) noexcept {
++  size_t projOffset = 0;
++  auto& buf = build_uniform_bytes(info, vtxStart, ranges, &projOffset);
++  std::memcpy(buf.data() + projOffset, &left, sizeof(left));
++  const size_t stereoOffset = (buf.size() + 15) & ~size_t{15}; // mat4x4f: 16-byte aligned
++  buf.append_zeroes(stereoOffset - buf.size());
++  buf.append(right);
++  buf.append(eyeX);
++  buf.append(eyeClip);
++  return gfx::push_uniform(buf.data(), buf.size());
++}
++
++bool stereo_instanced_fits(const ShaderInfo& info) noexcept {
++  return info.uniformSize + kStereoInstancedUniformSize <= MaxUniformSize;
++}} // namespace aurora::gx
 --- a/lib/gx/shader_info.hpp
 +++ b/lib/gx/shader_info.hpp
-@@ -2,8 +2,13 @@
+@@ -2,8 +2,21 @@
  
  #include "gx.hpp"
  
@@ -963,11 +1300,35 @@
 +// Both eyes' blocks from one build, each with its own projection (gfx/stereo.cpp).
 +std::array<gfx::Range, 2> build_uniform_stereo(const ShaderInfo& info, uint32_t vtxStart, const BindGroupRanges& ranges,
 +                                               const Mat4x4<float>& left, const Mat4x4<float>& right) noexcept;
++// Both eyes in one instanced draw (gfx/stereo.cpp): one block holding both
++// projections and where each eye goes in the image. stereo_instanced_fits
++// says whether the extra members fit the uniform binding.
++constexpr u32 kStereoInstancedUniformSize = sizeof(Mat4x4<float>) + 2 * sizeof(Vec4<float>);
++bool stereo_instanced_fits(const ShaderInfo& info) noexcept;
++gfx::Range build_uniform_stereo_instanced(const ShaderInfo& info, uint32_t vtxStart, const BindGroupRanges& ranges,
++                                          const Mat4x4<float>& left, const Mat4x4<float>& right,
++                                          const Vec4<float>& eyeX, const Vec4<float>& eyeClip) noexcept;
  u8 color_channel(GXChannelID id) noexcept;
  }; // namespace aurora::gx
 --- a/lib/webgpu/gpu.cpp
 +++ b/lib/webgpu/gpu.cpp
-@@ -826,6 +826,14 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -59,6 +59,7 @@ static wgpu::SurfaceCapabilities g_surfaceCapabilities;
+ bool g_bcTexturesSupported = false;
+ bool g_astcTexturesSupported = false;
+ bool g_textureComponentSwizzleSupported = false;
++bool g_clipDistancesSupported = false;
+ static std::atomic_bool g_shuttingDown = false;
+ 
+ namespace {
+@@ -811,6 +812,7 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+     g_bcTexturesSupported = false;
+     g_astcTexturesSupported = false;
+     g_textureComponentSwizzleSupported = false;
++    g_clipDistancesSupported = false;
+     wgpu::SupportedFeatures supportedFeatures;
+     g_adapter.GetFeatures(&supportedFeatures);
+     for (size_t i = 0; i < supportedFeatures.featureCount; ++i) {
+@@ -826,6 +828,19 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
          }
          requiredFeatures.push_back(feature);
        }
@@ -978,7 +1339,23 @@
 +          feature == wgpu::FeatureName::SharedFenceSyncFD || feature == wgpu::FeatureName::TransientAttachments) {
 +        requiredFeatures.push_back(feature);
 +      }
++      // Both eyes in one instanced draw, each cut at its edge.
++      if (feature == wgpu::FeatureName::ClipDistances) {
++        requiredFeatures.push_back(feature);
++        g_clipDistancesSupported = true;
++      }
 +#endif
      }
  #ifdef WEBGPU_DAWN
      wgpu::DawnCacheDeviceDescriptor cacheDescriptor({
+--- a/lib/webgpu/gpu.hpp
++++ b/lib/webgpu/gpu.hpp
+@@ -53,6 +53,8 @@ extern wgpu::Instance g_instance;
+ extern bool g_bcTexturesSupported;
+ extern bool g_astcTexturesSupported;
+ extern bool g_textureComponentSwizzleSupported;
++// Clip distances: a headset's two eyes drawn in one instanced draw (gfx/stereo.cpp).
++extern bool g_clipDistancesSupported;
+ 
+ bool initialize(AuroraBackend backend, bool allowCpu);
+ void shutdown();

@@ -75,7 +75,7 @@
  wgpu::BackendType g_backendType;
  GraphicsConfig g_graphicsConfig;
  TextureWithSampler g_frameBuffer;
-@@ -687,6 +688,8 @@ static bool create_surface() {
+@@ -688,6 +689,8 @@ static bool create_surface() {
      Log.error("Failed to create surface");
      return false;
    }
@@ -84,7 +84,7 @@
    return true;
  }
  
-@@ -999,6 +1002,10 @@ void release_surface() noexcept {
+@@ -1006,6 +1009,10 @@ void release_surface() noexcept {
    g_surface = {};
  }
  
@@ -95,7 +95,7 @@
  bool refresh_surface(bool recreate) {
    gfx::gpu_synchronize();
    if (!g_instance || !g_device) {
-@@ -1008,7 +1015,7 @@ bool refresh_surface(bool recreate) {
+@@ -1015,7 +1022,7 @@ bool refresh_surface(bool recreate) {
      release_surface();
      return false;
    }
@@ -104,7 +104,7 @@
      return false;
    }
    uint32_t width = g_graphicsConfig.surfaceConfiguration.width;
-@@ -1030,9 +1037,13 @@ bool refresh_surface(bool recreate) {
+@@ -1037,9 +1044,13 @@ bool refresh_surface(bool recreate) {
  
  void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, uint32_t native_height, bool force) {
    gfx::gpu_synchronize();
@@ -121,7 +121,7 @@
                             g_frameBuffer.size.width != width || g_frameBuffer.size.height != height;
 --- a/lib/webgpu/gpu.hpp
 +++ b/lib/webgpu/gpu.hpp
-@@ -57,6 +57,7 @@ extern bool g_textureComponentSwizzleSupported;
+@@ -59,6 +59,7 @@ extern bool g_clipDistancesSupported;
  bool initialize(AuroraBackend backend, bool allowCpu);
  void shutdown();
  void release_surface() noexcept;

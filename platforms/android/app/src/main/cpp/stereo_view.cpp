@@ -3,9 +3,11 @@
 #include <GLES2/gl2ext.h>
 #include <unistd.h>
 #include <poll.h>
+#include <sys/system_properties.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace quest {
 
@@ -18,7 +20,7 @@ constexpr float kNear = 0.05f;
 constexpr float kFar = 100.0f;
 
 // Dynamic resolution never draws less than half of the eyes' images.
-constexpr float kMinRenderScale = 0.5f;
+
 // The head is predicted at most this far ahead (nanoseconds).
 constexpr double kMaxPredictionNs = 50e6;
 
@@ -37,6 +39,8 @@ struct Gl {
   PFNEGLDESTROYSYNCKHRPROC destroySync = nullptr;
   PFNEGLWAITSYNCKHRPROC waitSync = nullptr;
   CopyImageSubData copyImage = nullptr;
+  PFNGLGETQUERYOBJECTUI64VEXTPROC queryResult64 = nullptr;
+  PFNGLQUERYCOUNTEREXTPROC queryCounter = nullptr;
 
   bool load() {
     getNativeClientBuffer =
@@ -49,6 +53,8 @@ struct Gl {
     destroySync = reinterpret_cast<PFNEGLDESTROYSYNCKHRPROC>(eglGetProcAddress("eglDestroySyncKHR"));
     waitSync = reinterpret_cast<PFNEGLWAITSYNCKHRPROC>(eglGetProcAddress("eglWaitSyncKHR"));
     copyImage = reinterpret_cast<CopyImageSubData>(eglGetProcAddress("glCopyImageSubData"));
+    queryResult64 = reinterpret_cast<PFNGLGETQUERYOBJECTUI64VEXTPROC>(eglGetProcAddress("glGetQueryObjectui64vEXT"));
+    queryCounter = reinterpret_cast<PFNGLQUERYCOUNTEREXTPROC>(eglGetProcAddress("glQueryCounterEXT"));
     return getNativeClientBuffer && createImage && destroyImage && imageTargetTexture && createSync && destroySync &&
            waitSync && copyImage;
   }
@@ -99,12 +105,20 @@ void projection_matrix(const XrFovf& fov, float out[16]) {
 
 bool StereoView::init(XrInstance instance, XrSession session, XrSystemId system, EGLDisplay display, float scale) {
   mInstance = instance;
+  mSession = session;
   mDisplay = display;
   mMaxScale = scale;
   if (!g_gl.load()) {
     LOGW("Stereo: GL extensions missing");
     return false;
   }
+
+  char timerProperty[PROP_VALUE_MAX]{};
+  __system_property_get("debug.partyboard.gpu_timing", timerProperty);
+  const auto* extensions = reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
+  mGpuTiming = timerProperty[0] == '1' && g_gl.queryResult64 && g_gl.queryCounter && extensions &&
+      std::strstr(extensions, "GL_EXT_disjoint_timer_query");
+  if (mGpuTiming) for (auto& timer : mCopyTimers) glGenQueries(2, timer.queries);
 
   uint32_t viewCount = 0;
   XrViewConfigurationView configViews[2]{{XR_TYPE_VIEW_CONFIGURATION_VIEW}, {XR_TYPE_VIEW_CONFIGURATION_VIEW}};
@@ -116,6 +130,7 @@ bool StereoView::init(XrInstance instance, XrSession session, XrSystemId system,
     return false;
   }
   const auto round8 = [](float v) { return static_cast<uint32_t>(std::lround(v / 8.0f)) * 8u; };
+  mRecommendedEyeWidth = configViews[0].recommendedImageRectWidth;
   mEyeWidth = std::min(round8(configViews[0].recommendedImageRectWidth * scale),
                        configViews[0].maxImageRectWidth / 8u * 8u);
   mEyeHeight = std::min(round8(configViews[0].recommendedImageRectHeight * scale),
@@ -129,6 +144,7 @@ bool StereoView::init(XrInstance instance, XrSession session, XrSystemId system,
   xrEnumerateSwapchainFormats(session, formatCount, &formatCount, formats.data());
   const int64_t format =
       std::ranges::find(formats, kSrgb8Alpha8) != formats.end() ? kSrgb8Alpha8 : static_cast<int64_t>(kRgba8);
+  mSwapchainFormat = format;
   XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
   info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
   info.format = format;
@@ -182,37 +198,78 @@ std::pair<uint32_t, uint32_t> StereoView::eye_size(float renderScale) const {
 // side, the interface below): the GPU writes whole images out at the end of
 // its pass, so a larger image would cost bandwidth for pixels nobody drew.
 // XR thread, GL context current, every slot free.
-bool StereoView::allocate_images(uint32_t eyeWidth, uint32_t eyeHeight) {
-  free_images();
-  for (auto& slot : mSlots) {
+bool StereoView::allocate_images(uint32_t eyeWidth, uint32_t eyeHeight, uint32_t hudWidth) {
+  if (!hudWidth) hudWidth = mHudPixelsWidth;
+  XrSwapchain hudReplacement = XR_NULL_HANDLE;
+  std::vector<XrSwapchainImageOpenGLESKHR> hudImages;
+  if (hudWidth != mHudPixelsWidth) {
+    XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+    info.format = mSwapchainFormat;
+    info.sampleCount = info.faceCount = info.arraySize = info.mipCount = 1;
+    info.width = hudWidth;
+    info.height = hudWidth * 3 / 4;
+    if (XR_FAILED(xrCreateSwapchain(mSession, &info, &hudReplacement))) return false;
+    uint32_t count = 0;
+    if (XR_FAILED(xrEnumerateSwapchainImages(hudReplacement, 0, &count, nullptr)) || count == 0) {
+      xrDestroySwapchain(hudReplacement);
+      return false;
+    }
+    hudImages.assign(count, {XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR});
+    if (XR_FAILED(xrEnumerateSwapchainImages(hudReplacement, count, &count,
+        reinterpret_cast<XrSwapchainImageBaseHeader*>(hudImages.data())))) {
+      xrDestroySwapchain(hudReplacement);
+      return false;
+    }
+  }
+  std::array<Slot, 3> replacement;
+  for (auto& slot : replacement) {
     AHardwareBuffer_Desc desc{};
-    desc.width = std::max(eyeWidth * 2, mHudPixelsWidth);
-    desc.height = eyeHeight + mHudPixelsHeight;
+    desc.width = std::max(eyeWidth * 2, hudWidth);
+    desc.height = eyeHeight + hudWidth * 3 / 4;
     desc.layers = 1;
     desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
     desc.usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
     if (AHardwareBuffer_allocate(&desc, &slot.buffer) != 0) {
       LOGW("Stereo: image allocation failed");
-      free_images();
+      free_images(replacement);
+      if (hudReplacement != XR_NULL_HANDLE) xrDestroySwapchain(hudReplacement);
       return false;
     }
     const EGLint attributes[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
     slot.eglImage = g_gl.createImage(mDisplay, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID,
                                      g_gl.getNativeClientBuffer(slot.buffer), attributes);
+    if (slot.eglImage == EGL_NO_IMAGE_KHR) {
+      free_images(replacement);
+      if (hudReplacement != XR_NULL_HANDLE) xrDestroySwapchain(hudReplacement);
+      return false;
+    }
     glGenTextures(1, &slot.texture);
     glBindTexture(GL_TEXTURE_2D, slot.texture);
     g_gl.imageTargetTexture(GL_TEXTURE_2D, static_cast<GLeglImageOES>(slot.eglImage));
     glBindTexture(GL_TEXTURE_2D, 0);
   }
   std::lock_guard lock{mMutex};
+  free_images();
+  mSlots = std::move(replacement);
+  if (hudReplacement != XR_NULL_HANDLE) {
+    xrDestroySwapchain(mHudSwapchain);
+    mHudSwapchain = hudReplacement;
+    mHudImages = std::move(hudImages);
+    mHudPixelsWidth = hudWidth;
+    mHudPixelsHeight = hudWidth * 3 / 4;
+    mHudShown = false;
+  }
   mImageEyeWidth = eyeWidth;
   mImageEyeHeight = eyeHeight;
   ++mGeneration; // the game imports the new images (quest_stereo.cpp)
   return true;
 }
 
-void StereoView::free_images() {
-  for (auto& slot : mSlots) {
+void StereoView::free_images() { free_images(mSlots); }
+
+void StereoView::free_images(std::array<Slot, 3>& slots) {
+  for (auto& slot : slots) {
     if (slot.texture != 0) {
       glDeleteTextures(1, &slot.texture);
       slot.texture = 0;
@@ -246,6 +303,11 @@ void StereoView::destroy() {
   g_stereoView = nullptr;
   // Session shutdown may wait; the frame loop must not wait for copies.
   glFinish();
+  for (auto& timer : mCopyTimers) {
+    if (timer.queries[0]) glDeleteQueries(2, timer.queries);
+    timer = {};
+  }
+  mGpuTiming = false;
   std::lock_guard lock{mMutex};
   for (auto& slot : mSlots) {
     if (slot.copyFence != nullptr) {
@@ -336,9 +398,22 @@ bool StereoView::screen_hidden() const {
   return mScreenHidden;
 }
 
-// The GPU is behind when the game asks for an image and all of them are still
-// being drawn or shown: draw fewer pixels at once. Raised back one small step
-// after three quiet seconds, so it settles just under what 120 Hz allows.
+void StereoView::set_quality_sample(const QualitySample& sample) {
+  std::lock_guard lock{mMutex};
+  mQualitySample = sample;
+}
+
+void StereoView::set_quality_cap(float recommendedScale) {
+  std::lock_guard lock{mMutex};
+  mQuality.set_cap(recommendedScale);
+  mDesiredHudWidth = recommendedScale <= 0.8f ? 1280 : recommendedScale <= 1.0f ? 1600 : 1920;
+  mRenderScale = std::min(1.0f, mQuality.scale() / mMaxScale);
+  if (eye_size(mRenderScale) != std::make_pair(mImageEyeWidth, mImageEyeHeight) ||
+      mDesiredHudWidth != mHudPixelsWidth) mResizePending = true;
+}
+
+// One decision per fresh one-second metric window; do not lower resolution
+// merely because the CPU or the image bridge is late while the GPU has headroom.
 void StereoView::adapt_resolution() {
   const auto now = std::chrono::steady_clock::now();
   if (now - mAdaptAt < std::chrono::seconds(1)) {
@@ -347,17 +422,8 @@ void StereoView::adapt_resolution() {
   mAdaptAt = now;
   const float before = mRenderScale;
   const uint32_t wanted = mAdaptLeases + mAdaptRingFull;
-  if (wanted >= 30) { // the game asked for images all second long
-    if (mAdaptRingFull * 20 > wanted) { // more than 5 % found none free
-      mRenderScale = std::max(kMinRenderScale, mRenderScale - 0.1f);
-      mCalmSeconds = 0;
-    } else if (mAdaptRingFull != 0) {
-      mCalmSeconds = 0;
-    } else if (++mCalmSeconds >= 3) {
-      mRenderScale = std::min(1.0f, mRenderScale + 0.05f);
-      mCalmSeconds = 0;
-    }
-  }
+  const float measuredScale = mQuality.update(mQualitySample, wanted, mAdaptRingFull);
+  mRenderScale = std::min(1.0f, measuredScale / mMaxScale);
   mAdaptLeases = mAdaptRingFull = 0;
   if (mRenderScale != before && eye_size(mRenderScale) != std::make_pair(mImageEyeWidth, mImageEyeHeight)) {
     mResizePending = true; // layer() reallocates once the ring is empty
@@ -389,7 +455,8 @@ bool StereoView::images(void** buffers, uint32_t capacity, uint32_t& count, uint
 
 float StereoView::resolution_percent() const {
   std::lock_guard lock{mMutex};
-  return mRenderScale * mMaxScale * 100.0f;
+  const auto width = mShownHasWorld && mShownWidth ? mShownWidth : mImageEyeWidth;
+  return mRecommendedEyeWidth ? 100.0f * width / mRecommendedEyeWidth : 0;
 }
 
 uint32_t StereoView::generation() const {
@@ -437,6 +504,13 @@ void StereoView::cancelled(uint32_t image, uint64_t tag) {
   }
 }
 
+std::array<float, 3> StereoView::render_info() const {
+  std::lock_guard lock{mMutex};
+  return {static_cast<float>(mShownHasWorld && mShownWidth ? mShownWidth : mImageEyeWidth),
+          static_cast<float>(mShownHasWorld && mShownHeight ? mShownHeight : mImageEyeHeight),
+          mEnabled ? mWorldRate : 0};
+}
+
 StereoView::Slot* StereoView::newest_completed() {
   Slot* newest = nullptr;
   for (auto& slot : mSlots) {
@@ -452,6 +526,29 @@ StereoView::Slot* StereoView::newest_completed() {
 const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void* next) {
   if (mSwapchain == XR_NULL_HANDLE) {
     return nullptr;
+  }
+  CopyTimer* copyTimer = nullptr;
+  if (mGpuTiming) {
+    GLint disjoint = 0;
+    glGetIntegerv(GL_GPU_DISJOINT_EXT, &disjoint);
+    for (auto& timer : mCopyTimers) {
+      if (timer.pending) {
+        GLuint available = 0;
+        glGetQueryObjectuiv(timer.queries[1], GL_QUERY_RESULT_AVAILABLE, &available);
+        if (available) {
+          GLuint64 start = 0, end = 0;
+          g_gl.queryResult64(timer.queries[0], GL_QUERY_RESULT, &start);
+          g_gl.queryResult64(timer.queries[1], GL_QUERY_RESULT, &end);
+          if (!disjoint && end >= start) {
+            mCopyGpuMaxMs = std::max(mCopyGpuMaxMs, (end - start) / 1e6);
+            ++mCopyGpuSamples;
+          }
+          timer.pending = false;
+        }
+      }
+      if (!timer.pending && !copyTimer) copyTimer = &timer;
+    }
+    if (disjoint) { mCopyGpuMaxMs = -1; mCopyGpuSamples = 0; }
   }
   Slot* newest = nullptr;
   int fence = -1;
@@ -493,8 +590,12 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
   // is back (game_frame() gives no lease meanwhile).
   if (newest == nullptr && resize_ready()) {
     const auto [width, height] = eye_size(mRenderScale);
-    if (allocate_images(width, height)) {
-      LOGI("Stereo: images now %ux%u per eye", width, height);
+    if (allocate_images(width, height, mDesiredHudWidth)) {
+      LOGI("Stereo: images now %ux%u per eye, HUD %ux%u", width, height, mHudPixelsWidth, mHudPixelsHeight);
+    } else {
+      // Retain the previous valid allocation instead of leaving a dead ring.
+      mRenderScale = static_cast<float>(mImageEyeWidth) / mEyeWidth;
+      LOGW("Stereo: resize failed; retaining previous eye images");
     }
     std::lock_guard lock{mMutex};
     mResizePending = false;
@@ -503,6 +604,7 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
   if (newest != nullptr) {
     const auto copyStart = std::chrono::steady_clock::now();
     GLsync copyFence = nullptr;
+    bool accepted = false;
     // The GPU waits for Aurora's drawing; no CPU stall here.
     if (fence >= 0) {
       const EGLint attributes[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, fence, EGL_NONE};
@@ -519,8 +621,22 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
     XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
     wait.timeout = XR_INFINITE_DURATION;
     const bool keepBoard = mShown && newest->board && !newest->hasWorld && mShownHasWorld && mShownIsBoard;
-    if (keepBoard || (XR_SUCCEEDED(xrAcquireSwapchainImage(mSwapchain, &acquire, &index)) &&
-                     XR_SUCCEEDED(xrWaitSwapchainImage(mSwapchain, &wait)))) {
+    const auto acquireImage = [&](XrSwapchain swapchain, uint32_t& image) {
+      const auto start = std::chrono::steady_clock::now();
+      const bool ready = XR_SUCCEEDED(xrAcquireSwapchainImage(swapchain, &acquire, &image)) &&
+                         XR_SUCCEEDED(xrWaitSwapchainImage(swapchain, &wait));
+      mAcquireMaxMs = std::max(mAcquireMaxMs,
+          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+      return ready;
+    };
+    if (keepBoard || acquireImage(mSwapchain, index)) {
+      uint32_t hudIndex = 0;
+      const auto hudNow = std::chrono::steady_clock::now();
+      const bool copyHud = !mHudShown || hudNow - mHudCopiedAt >= std::chrono::milliseconds(33);
+      const bool hudReady = copyHud && acquireImage(mHudSwapchain, hudIndex);
+      // Acquire both destinations before queuing copies, then flush once.
+      if (copyTimer) g_gl.queryCounter(copyTimer->queries[0], GL_TIMESTAMP_EXT);
+
       if (!keepBoard) {
         // Only the drawn part of each eye's half (dynamic resolution): at the
         // left, centered vertically (Aurora's common.cpp draws it there).
@@ -534,22 +650,19 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
                          static_cast<GLsizei>(newest->renderWidth), static_cast<GLsizei>(newest->renderHeight), 1);
         }
       }
-      uint32_t hudIndex = 0;
-      // The interface at 30 Hz: between copies the quad shows the last one.
-      const auto hudNow = std::chrono::steady_clock::now();
-      const bool copyHud = !mHudShown || hudNow - mHudCopiedAt >= std::chrono::milliseconds(33);
-      if (copyHud && XR_SUCCEEDED(xrAcquireSwapchainImage(mHudSwapchain, &acquire, &hudIndex)) &&
-          XR_SUCCEEDED(xrWaitSwapchainImage(mHudSwapchain, &wait))) {
+      if (hudReady) {
         mHudCopiedAt = hudNow;
         g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, 0, static_cast<GLint>(newest->renderHeight), 0,
                       mHudImages[hudIndex].image, GL_TEXTURE_2D, 0, 0, 0, 0,
                       static_cast<GLsizei>(mHudPixelsWidth), static_cast<GLsizei>(mHudPixelsHeight), 1);
-        glFlush();
-        XrSwapchainImageReleaseInfo hudRelease{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        mHudShown = XR_SUCCEEDED(xrReleaseSwapchainImage(mHudSwapchain, &hudRelease));
+
       }
       // Keep the source lease until this GPU copy completes. The compositor
       // synchronizes the released destination; the game must not reuse its source.
+      if (copyTimer) {
+        g_gl.queryCounter(copyTimer->queries[1], GL_TIMESTAMP_EXT);
+        copyTimer->pending = true;
+      }
       copyFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
       if (copyFence != nullptr) {
         glFlush();
@@ -558,8 +671,13 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
         glFinish();
       }
       XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-      if (!keepBoard) xrReleaseSwapchainImage(mSwapchain, &release);
-      if (!keepBoard) {
+      if (hudReady) {
+        mHudShown = XR_SUCCEEDED(xrReleaseSwapchainImage(mHudSwapchain, &release));
+        if (mHudShown) ++mNewHudCount;
+      }
+      accepted = keepBoard || XR_SUCCEEDED(xrReleaseSwapchainImage(mSwapchain, &release));
+      if (accepted && !keepBoard) {
+        ++mNewWorldCount;
         mShownViews[0] = newest->views[0];
         mShownViews[1] = newest->views[1];
         mShownHasWorld = newest->hasWorld;
@@ -572,8 +690,10 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
         const double sample = static_cast<double>(mFrameTime - newest->leaseTime);
         mLatencyNs = mLatencyNs == 0.0 ? sample : mLatencyNs * 0.9 + sample * 0.1;
       }
-      mShown = true;
-      mPresentedTag = newest->tag;
+      if (accepted) {
+        mShown = true;
+        mPresentedTag = newest->tag;
+      }
       static bool loggedFirstImage = false;
       if (!loggedFirstImage) {
         LOGI("Stereo: first eye image copied to OpenXR (tag %llu)", static_cast<unsigned long long>(newest->tag));
@@ -589,7 +709,7 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
     } else {
       release_slot(*newest);
     }
-    ++mPresentedCount;
+    if (accepted) ++mPresentedCount;
   }
 
   {
@@ -605,12 +725,16 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
         copying += slot.state == State::Copying;
       }
       LOGI("Stereo perf: source=%.1fHz presented=%.1fHz ringFull=%u copyMax=%.2fms slots=%u/%u/%u world=%d "
-           "res=%.0f%% latency=%.1fms screenHidden=%d",
+           "res=%.0f%% latency=%.1fms screenHidden=%d acquireCpuMax=%.2fms worldNew=%.1fHz hudNew=%.1fHz copyGpuMax=%.3fms gpuSamples=%u eye=%ux%u",
           mLeaseCount / elapsed, mPresentedCount / elapsed, mRingFullCount, mCopyMaxMs,
-          drawing, ready, copying, mShownHasWorld, mRenderScale * mMaxScale * 100.0f, mLatencyNs / 1e6, mScreenHidden);
+          drawing, ready, copying, mShownHasWorld, mRenderScale * mMaxScale * 100.0f, mLatencyNs / 1e6, mScreenHidden, mAcquireMaxMs, mNewWorldCount / elapsed, mNewHudCount / elapsed, mCopyGpuMaxMs, mCopyGpuSamples,
+          mShownWidth, mShownHeight);
+      mWorldRate = static_cast<float>(mNewWorldCount / elapsed);
       mStatsAt = now;
       mLeaseCount = mRingFullCount = mPresentedCount = 0;
-      mCopyMaxMs = 0;
+      mCopyMaxMs = mAcquireMaxMs = 0;
+      mNewWorldCount = mNewHudCount = 0;
+      mCopyGpuMaxMs = -1; mCopyGpuSamples = 0;
     }
   }
   if (!mShown) {
