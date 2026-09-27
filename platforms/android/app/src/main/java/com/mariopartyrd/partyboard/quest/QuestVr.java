@@ -70,6 +70,7 @@ public final class QuestVr {
         }
         sActivity = activity;
         sSurface = surface;
+        QuestLog.start(activity);
         surface.useExternalSurface();
         QuestControllers.install(QuestVr::rumble);
         QuestUpdater.install(activity);
@@ -257,14 +258,39 @@ public final class QuestVr {
             Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
             text.setColor(Color.rgb(225, 228, 240));
             text.setTextSize(28 * scale);
-            float y = 170 * scale;
+            float y = 160 * scale;
             for (String line : lines) {
                 canvas.drawText(line, 48 * scale, y, text);
-                y += 50 * scale;
+                y += 44 * scale;
             }
+
+            // How the headset keeps up (the last 5 seconds), and where the log is.
+            Paint small = new Paint(Paint.ANTI_ALIAS_FLAG);
+            small.setColor(Color.rgb(150, 160, 185));
+            small.setTextSize(22 * scale);
+            y += 6 * scale;
+            canvas.drawText(perfLine(french), 48 * scale, y, small);
+            canvas.drawText(french ? "Journal : Téléchargements › PartyBoard (appli Fichiers)"
+                                   : "Log: Downloads › PartyBoard (Files app)", 48 * scale, y + 32 * scale, small);
         } finally {
             surface.unlockCanvasAndPost(canvas);
         }
+    }
+
+    // perf_metrics.cpp's numbers: refresh rate, resolution %, GPU %, CPU %,
+    // late frames %, app GPU ms, app CPU ms; negative when unknown.
+    private static String perfLine(boolean french) {
+        float[] n = sStarted ? nativePerfNumbers() : new float[0];
+        if (n.length < 7 || n[0] <= 0) {
+            return french ? "Performances : mesure en cours…" : "Performance: measuring…";
+        }
+        StringBuilder line = new StringBuilder(french ? "Performances : " : "Performance: ");
+        line.append(String.format(Locale.getDefault(), "%.0f Hz · ", n[0]));
+        line.append(String.format(Locale.getDefault(), french ? "résolution %.0f %%" : "resolution %.0f%%", n[1]));
+        if (n[2] >= 0) line.append(String.format(Locale.getDefault(), french ? " · GPU %.0f %%" : " · GPU %.0f%%", n[2]));
+        if (n[3] >= 0) line.append(String.format(Locale.getDefault(), french ? " · CPU %.0f %%" : " · CPU %.0f%%", n[3]));
+        line.append(String.format(Locale.getDefault(), french ? " · images en retard %.1f %%" : " · late frames %.1f%%", n[4]));
+        return line.toString();
     }
 
     private static native boolean nativeStart(Activity activity, String statePath);
@@ -273,4 +299,5 @@ public final class QuestVr {
     private static native void nativeRumble(float amplitude, int durationMs);
     private static native float[] nativeRefreshRates();
     private static native void nativeRequestRefreshRate(float rate);
+    private static native float[] nativePerfNumbers();
 }

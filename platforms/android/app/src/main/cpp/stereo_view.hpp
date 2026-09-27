@@ -103,6 +103,12 @@ private:
   void free_images();
   bool resize_ready();
 
+public:
+  // The eyes' resolution, in % of the headset's recommended size.
+  float resolution_percent() const;
+
+private:
+
   void release_slot(Slot& slot);
   Slot* newest_completed(); // Caller holds mMutex.
 

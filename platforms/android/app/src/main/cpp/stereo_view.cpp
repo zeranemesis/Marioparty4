@@ -387,6 +387,11 @@ bool StereoView::images(void** buffers, uint32_t capacity, uint32_t& count, uint
   return true;
 }
 
+float StereoView::resolution_percent() const {
+  std::lock_guard lock{mMutex};
+  return mRenderScale * mMaxScale * 100.0f;
+}
+
 uint32_t StereoView::generation() const {
   std::lock_guard lock{mMutex};
   return mGeneration;

@@ -16,6 +16,7 @@
 // frame loop and tear-down. The controllers go to Java (QuestVr.onControllers),
 // which presents them to SDL as a gamepad.
 
+#include "perf_metrics.hpp"
 #include "stereo_view.hpp"
 #include "table_anchor.hpp"
 #include "xr_util.hpp"
@@ -130,6 +131,7 @@ struct Extensions {
   bool performance = false;
   bool imageLayout = false;
   bool anchors = false;
+  bool perfMetrics = false;
 };
 
 struct App {
@@ -182,6 +184,9 @@ std::atomic<float> g_requestedRefreshRate = 0.0f;
 std::atomic<float> g_rumbleAmplitude = 0.0f;
 std::atomic_int g_rumbleDurationMs = 0;
 std::atomic_uint g_rumbleSerial = 0;
+
+// Frame pacing and the headset's counters: logged, and read by the placement panel.
+PerfMetrics g_perf;
 
 void clear_exception(JNIEnv* env) {
   if (env->ExceptionCheck()) {
@@ -246,6 +251,7 @@ bool create_instance(App& app) {
   ext.colorScale = optional(XR_KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME);
   ext.performance = optional(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
   ext.imageLayout = optional(XR_FB_COMPOSITION_LAYER_IMAGE_LAYOUT_EXTENSION_NAME);
+  ext.perfMetrics = optional(PerfMetrics::kExtension);
   ext.anchors = std::ranges::all_of(TableAnchor::kExtensions,
                                     [&](const char* name) { return has_extension(available, name); });
   if (ext.anchors) {
@@ -906,6 +912,7 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   if (!check(app.instance, xrWaitFrame(app.session, nullptr, &frame), "xrWaitFrame")) {
     return;
   }
+  const auto frameStart = std::chrono::steady_clock::now();
   xrBeginFrame(app.session, nullptr);
   const XrTime time = frame.predictedDisplayTime;
   const float dt = std::clamp(static_cast<float>(frame.predictedDisplayPeriod) * 1e-9f, 0.004f, 0.05f);
@@ -1085,6 +1092,7 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   end.layerCount = frame.shouldRender ? layerCount : 0;
   end.layers = layers.data();
   check(app.instance, xrEndFrame(app.session, &end), "xrEndFrame");
+  g_perf.frame(frame, std::chrono::steady_clock::now() - frameStart, app.stereo.resolution_percent());
 }
 
 bool set_up(App& app, JNIEnv* env) {
@@ -1102,6 +1110,7 @@ bool set_up(App& app, JNIEnv* env) {
   }
   create_surface_quad(app, env, kHelpWidthPixels, kHelpHeightPixels, app.help);
   create_passthrough(app);
+  g_perf.init(app.instance, app.session, app.extensions.perfMetrics);
   // The eyes' images, at most 125% of the headset's recommended size (about
   // the Quest 3 panel's own pixels): sharp polygons and textures on the table.
   // Dynamic resolution (stereo_view.cpp) draws less of them when 120 Hz needs it.
@@ -1276,6 +1285,13 @@ JNIEXPORT jfloatArray JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_nat
   std::lock_guard lock{g_ratesMutex};
   jfloatArray out = env->NewFloatArray(static_cast<jsize>(g_refreshRates.size()));
   env->SetFloatArrayRegion(out, 0, static_cast<jsize>(g_refreshRates.size()), g_refreshRates.data());
+  return out;
+}
+
+JNIEXPORT jfloatArray JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_nativePerfNumbers(JNIEnv* env, jclass) {
+  const auto numbers = g_perf.numbers();
+  jfloatArray out = env->NewFloatArray(static_cast<jsize>(numbers.size()));
+  env->SetFloatArrayRegion(out, 0, static_cast<jsize>(numbers.size()), numbers.data());
   return out;
 }
 

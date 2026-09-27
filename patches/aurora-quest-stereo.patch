@@ -236,7 +236,7 @@
        .label = passInfo.label.empty() ? label.c_str() : passInfo.label.c_str(),
 --- /dev/null
 +++ b/lib/gfx/stereo.cpp
-@@ -0,0 +1,473 @@
+@@ -0,0 +1,490 @@
 +#include "stereo.hpp"
 +
 +#include <aurora/stereo.h>
@@ -249,6 +249,7 @@
 +#include <algorithm>
 +#include <array>
 +#include <atomic>
++#include <chrono>
 +#include <mutex>
 +
 +#if defined(__ANDROID__)
@@ -506,6 +507,22 @@
 +    Log.info("Stereo: first perspective pass ({} world draws per eye, {} HUD draws once, MSAA {}x)",
 +             worldDraws, g_hudDraws.size(), samples);
 +    g_loggedGeometry = true;
++  }
++  // Every 5 seconds: what the eyes cost in draws (each world draw is encoded
++  // once per eye, the interface's once).
++  static auto statsAt = std::chrono::steady_clock::now();
++  static uint64_t statFrames = 0, statWorld = 0, statHud = 0;
++  static size_t statWorldMax = 0;
++  ++statFrames;
++  statWorld += worldDraws;
++  statHud += g_hudDraws.size();
++  statWorldMax = std::max(statWorldMax, worldDraws);
++  if (const auto now = std::chrono::steady_clock::now(); now - statsAt >= std::chrono::seconds(5)) {
++    Log.info("Stereo draws: {} frames, world {} avg / {} max per eye, HUD {} avg, {}x{} image", statFrames,
++             statWorld / statFrames, statWorldMax, statHud / statFrames, g_width, g_height);
++    statsAt = now;
++    statFrames = statWorld = statHud = 0;
++    statWorldMax = 0;
 +  }
 +  g_eyeDraws[0].clear();
 +  g_eyeDraws[1].clear();

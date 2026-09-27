@@ -24,6 +24,7 @@ extern "C" {
 
 #include <aurora/stereo.h>
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 
@@ -206,6 +207,57 @@ bool register_images()
     return true;
 }
 
+// The game's pace in the headset, logged every 5 seconds ("Game perf"): the time
+// between frames drawn for the eyes, and the part of it spent recording their
+// draws (camera 0's 3D layers).
+struct GamePerf {
+    using Clock = std::chrono::steady_clock;
+    Clock::time_point windowStart {}, lastFrame {}, recordStart {};
+    uint32_t frames = 0, slow = 0;
+    double intervalSum = 0, intervalMax = 0, recordSum = 0, recordMax = 0;
+
+    void begin()
+    {
+        const auto now = Clock::now();
+        recordStart = now;
+        if (lastFrame != Clock::time_point {}) {
+            const double ms = std::chrono::duration<double, std::milli>(now - lastFrame).count();
+            if (ms < 1000.0) { // longer: paused
+                intervalSum += ms;
+                intervalMax = ms > intervalMax ? ms : intervalMax;
+                slow += ms > 25.0; // a visible stutter at the game's 60 Hz
+                ++frames;
+            }
+        }
+        lastFrame = now;
+        if (windowStart == Clock::time_point {}) {
+            windowStart = now;
+        }
+    }
+
+    void end(int scene)
+    {
+        const auto now = Clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(now - recordStart).count();
+        recordSum += ms;
+        recordMax = ms > recordMax ? ms : recordMax;
+        const double seconds = std::chrono::duration<double>(now - windowStart).count();
+        if (seconds < 5.0 || frames == 0) {
+            return;
+        }
+#if defined(__ANDROID__)
+        __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest",
+            "Game perf: scene=%d %.1f frames/s interval avg=%.2fms max=%.2fms stutters=%u record avg=%.2fms max=%.2fms",
+            scene, frames / seconds, intervalSum / frames, intervalMax, slow, recordSum / frames, recordMax);
+#endif
+        *this = {};
+        lastFrame = now;
+        windowStart = now;
+    }
+};
+
+GamePerf sGamePerf;
+
 } // namespace
 
 extern "C" void PartyBoard_StereoBeginCamera(s16 cameraNo)
@@ -250,6 +302,9 @@ extern "C" void PartyBoard_StereoBeginCamera(s16 cameraNo)
         // stays flat, the next one imports them.
         sQuest.cancelled(sFrame.image, sFrame.tag);
         sActive = false;
+    }
+    if (sActive) {
+        sGamePerf.begin();
     }
 }
 
@@ -380,6 +435,7 @@ extern "C" void PartyBoard_StereoEndCamera(void)
     if (sActive) {
         if (sCameraViewSet) {
             AuroraStereoEnd();
+            sGamePerf.end(static_cast<int>(omCurrentOvlGet()));
         } else {
             sQuest.cancelled(sFrame.image, sFrame.tag);
         }
