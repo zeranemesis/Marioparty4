@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <unistd.h>
 
 namespace quest {
 
@@ -26,6 +27,30 @@ const char* unit_suffix(XrPerformanceMetricsCounterUnitMETA unit) {
   default:
     return "";
   }
+}
+
+// The game's resident memory and what the system still has, with the report:
+// a climb across scenes, or a transition's peak, shows here before the
+// low-memory killer acts. statm and meminfo are cheap to read, unlike smaps
+// (a walk of every mapping), so the XR thread can afford them.
+void log_memory() {
+  long residentPages = -1;
+  if (FILE* file = std::fopen("/proc/self/statm", "r")) {
+    long sizePages = 0;
+    if (std::fscanf(file, "%ld %ld", &sizePages, &residentPages) != 2) residentPages = -1;
+    std::fclose(file);
+  }
+  long availableKb = -1;
+  if (FILE* file = std::fopen("/proc/meminfo", "r")) {
+    char line[128];
+    while (std::fgets(line, sizeof(line), file)) {
+      if (std::sscanf(line, "MemAvailable: %ld kB", &availableKb) == 1) break;
+    }
+    std::fclose(file);
+  }
+  const long pageKb = sysconf(_SC_PAGESIZE) / 1024;
+  LOGI("Memory: rss=%ldMB available=%ldMB", residentPages >= 0 ? residentPages * pageKb / 1024 : -1,
+       availableKb >= 0 ? availableKb / 1024 : -1);
 }
 
 } // namespace
@@ -168,6 +193,7 @@ void PerfMetrics::report(double seconds, float resolutionPercent) {
        mRefreshRate, mFrames / seconds, mLateFrames, latePercent, mWorstSkip,
        mTotalFrames != 0 ? 100.0 * mTotalLate / mTotalFrames : 0.0, mFrames != 0 ? mThreadSumMs / mFrames : 0.0,
        mThreadMaxMs, resolutionPercent);
+  log_memory();
   if (!mCounters.empty()) {
     std::string line;
     char item[160];

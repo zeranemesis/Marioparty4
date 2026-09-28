@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 #include <cstdio>
@@ -68,11 +69,13 @@ static int render_scene(const std::string& dir) {
   config.vtxStride = 16;
   config.colorChannels[0].matSrc = GX_SRC_VTX;
   config.colorChannels[1].matSrc = GX_SRC_VTX;
-  for (int stereo = 0; stereo < 2; ++stereo) {
-    config.stereo = stereo;
-    write(dir + (stereo ? "/scene-stereo.wgsl" : "/scene.wgsl"), build_shader_source(config));
-  }
-  config.stereo = 0;
+  config.stereo = StereoOff;
+  write(dir + "/scene.wgsl", build_shader_source(config));
+  config.stereo = StereoClipDistance;
+  write(dir + "/scene-stereo.wgsl", build_shader_source(config));
+  config.stereo = StereoDiscard;
+  write(dir + "/scene-stereo-discard.wgsl", build_shader_source(config));
+  config.stereo = StereoOff;
 
   // The grid: x in [-1.8, 1.8], y in [-0.95, 0.95], depth 0..2 across x.
   std::vector<uint8_t> verts;
@@ -145,9 +148,10 @@ int main(int argc, char** argv) {
   }
   int written = 0;
   const auto emit = [&](const char* name, ShaderConfig config) {
-    for (int stereo = 0; stereo < 2; ++stereo) {
+    for (const auto [stereo, suffix] : {std::pair{StereoOff, ".wgsl"}, std::pair{StereoClipDistance, "-stereo.wgsl"},
+                                        std::pair{StereoDiscard, "-stereo-discard.wgsl"}}) {
       config.stereo = stereo;
-      write(dir + "/" + name + (stereo ? "-stereo.wgsl" : ".wgsl"), build_shader_source(config));
+      write(dir + "/" + name + suffix, build_shader_source(config));
       ++written;
     }
   };

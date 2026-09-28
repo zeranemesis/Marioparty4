@@ -272,7 +272,7 @@
        .label = passInfo.label.empty() ? label.c_str() : passInfo.label.c_str(),
 --- /dev/null
 +++ b/lib/gfx/stereo.cpp
-@@ -0,0 +1,563 @@
+@@ -0,0 +1,601 @@
 +#include "stereo.hpp"
 +
 +#include <aurora/stereo.h>
@@ -292,6 +292,7 @@
 +
 +#if defined(__ANDROID__)
 +#include <android/hardware_buffer.h>
++#include <sys/system_properties.h>
 +#include <unistd.h>
 +#endif
 +
@@ -312,10 +313,47 @@
 +uint32_t g_width = 0;
 +uint32_t g_height = 0;
 +uint32_t g_eyeHeight = 0, g_hudWidth = 0, g_hudHeight = 0;
-+constexpr uint32_t kStereoSamples = 4;
-+// Quest Vulkan fails to create the clip-distance pipeline (VK_ERROR_UNKNOWN);
-+// keep the proven per-eye path until that driver path is validated.
-+constexpr bool kUseInstancedStereo = false;
++// The eyes' multisampling. On the headset's tiled GPU (Adreno 740) 4x takes
++// four times the tile memory per pixel: smaller bins, and every draw is
++// processed again in each bin it touches. For a headset A/B, before starting
++// the game: `adb shell setprop debug.partyboard.stereo_msaa 2` (1, 2 or 4;
++// 4 when unset).
++uint32_t stereo_samples() {
++  static const uint32_t samples = [] {
++    char value[PROP_VALUE_MAX] = {};
++    __system_property_get("debug.partyboard.stereo_msaa", value);
++    const uint32_t chosen = value[0] == '1' ? 1u : value[0] == '2' ? 2u : 4u;
++    Log.info("Stereo: MSAA {}x (debug.partyboard.stereo_msaa={})", chosen, value[0] != '\0' ? value : "unset");
++    return chosen;
++  }();
++  return samples;
++}
++// Both eyes in one draw halve the draws the board is limited by (414 per eye
++// kept the Toad board at 43-45 images/s whatever the resolution, 2026-09-28).
++// Quest Vulkan fails to create the clip-distance pipeline (VK_ERROR_UNKNOWN,
++// build 88), so each instance is cut at its eye's edge by a fragment test by
++// default, which needs no device feature. Before starting the game:
++//   adb shell setprop debug.partyboard.instanced_stereo 0   one draw per eye
++//   adb shell setprop debug.partyboard.instanced_stereo 1   clip distances
++//   adb shell setprop debug.partyboard.instanced_stereo 2   fragment test (default)
++// A pipeline that fails validation falls back to one draw per eye (gx/pipeline.cpp).
++uint8_t instanced_stereo_mode() {
++  static const uint8_t mode = []() -> uint8_t {
++    char value[PROP_VALUE_MAX] = {};
++    __system_property_get("debug.partyboard.instanced_stereo", value);
++    const uint8_t chosen = value[0] == '0' ? gx::StereoOff : value[0] == '1' ? gx::StereoClipDistance : gx::StereoDiscard;
++    if (chosen == gx::StereoClipDistance && !webgpu::g_clipDistancesSupported) {
++      Log.warn("Stereo: clip distances unsupported, instanced drawing stays off");
++      return gx::StereoOff;
++    }
++    Log.info("Stereo: {} (debug.partyboard.instanced_stereo={})",
++             chosen == gx::StereoOff ? "one draw per eye" : chosen == gx::StereoClipDistance
++                 ? "both eyes in one draw, cut by clip distances" : "both eyes in one draw, cut by a fragment test",
++             value[0] != '\0' ? value : "unset");
++    return chosen;
++  }();
++  return mode;
++}
 +AuroraStereoCallback g_callback = nullptr;
 +void* g_callbackUser = nullptr;
 +
@@ -466,7 +504,7 @@
 +    return false;
 +  }
 +  auto spatialConfig = config;
-+  spatialConfig.msaaSamples = kStereoSamples;
++  spatialConfig.msaaSamples = stereo_samples();
 +  if (spatialConfig.colorUpdate) {
 +    spatialConfig.alphaUpdate = true; // transparent MR targets need coverage
 +  }
@@ -489,11 +527,11 @@
 +  // Both eyes in one instanced draw once its pipeline is built (the first
 +  // request queues it); until then, and for lines and points, which already
 +  // use instances, one draw per eye.
-+  if (kUseInstancedStereo && webgpu::g_clipDistancesSupported &&
++  if (const uint8_t mode = instanced_stereo_mode(); mode != gx::StereoOff &&
 +      !g_instancedDisabled.load(std::memory_order_relaxed) &&
 +      info.lineMode == 0 && draw.instanceCount == 1 && gx::stereo_instanced_fits(info)) {
 +    auto instancedConfig = spatialConfig;
-+    instancedConfig.shaderConfig.stereo = 1;
++    instancedConfig.shaderConfig.stereo = mode;
 +    // One pipeline request per draw: pipeline_ref skips the cache's lock when
 +    // a draw asks for the same pipeline as the one before, the usual case.
 +    const auto instancedRef = pipeline_ref(instancedConfig);
@@ -571,7 +609,7 @@
 +
 +  // Same sample count and formats as the game's frame, so its pipelines draw here too.
 +  const auto& config = webgpu::g_graphicsConfig;
-+  const uint32_t samples = kStereoSamples;
++  const uint32_t samples = stereo_samples();
 +  if (samples > 1 && (g_color.size.width != g_width || g_color.size.height != g_height)) {
 +    g_color = create_target(config.surfaceConfiguration.format, samples, "Stereo color");
 +  }
@@ -1096,7 +1134,16 @@
    } else if (maxAnisotropy > 1) {
 --- a/lib/gx/gx.hpp
 +++ b/lib/gx/gx.hpp
-@@ -465,7 +465,11 @@ struct ShaderConfig {
+@@ -456,6 +456,8 @@
+   bool le = true;
+   bool nbt3 = false;     // GX_NRM_NBT3
+ };
++enum : u8 { StereoOff = 0, StereoClipDistance = 1, StereoDiscard = 2 };
++
+ struct ShaderConfig {
+   u8 fogType = GX_FOG_NONE;
+   u8 vtxStride = 0;
+@@ -465,7 +467,13 @@
    // recorded before this stay valid and the shipped cache seed is unaffected.
    u8 ztexOp : 2 = 0;
    u8 ztexFmt : 2 = 0;
@@ -1104,8 +1151,10 @@
 +  // Both of a headset's eyes in one instanced draw (gfx/stereo.cpp): instance 1
 +  // takes the right eye's projection and half of the image. Also from pad1's
 +  // spare bits: 0 everywhere else, so other pipelines keep their hash.
-+  u8 stereo : 1 = 0;
-+  u8 pad1 : 1 = 0;
++  // StereoClipDistance cuts each eye at its edge with a clip distance;
++  // StereoDiscard, for drivers that fail those pipelines (Adreno), with a
++  // fragment test instead.
++  u8 stereo : 2 = 0;
    u8 pad2 = 0;
    std::array<AttrConfig, MaxVtxAttr> attrs;
    std::array<TevSwap, MaxTevSwap> tevSwapTable;
@@ -1118,26 +1167,38 @@
  #include "../webgpu/gpu.hpp"
  #include "gx_fmt.hpp"
  #include "shader_info.hpp"
-@@ -10,7 +11,26 @@ static Module Log("aurora::gx");
+@@ -10,7 +11,38 @@ static Module Log("aurora::gx");
  
  wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    ZoneScoped;
 -  const auto shader = build_shader(config.shaderConfig);
 +  if (config.shaderConfig.stereo) {
 +    // A headset's eyes in one instanced draw. Any uncaptured WebGPU error is
-+    // fatal, so this is built in an error scope: should it fail, there is no
-+    // pipeline, and stereo.cpp goes back to drawing each eye on its own.
-+    webgpu::g_device.PushErrorScope(wgpu::ErrorFilter::Validation);
++    // fatal, so this is built in error scopes: should it fail, there is no
++    // pipeline, and stereo.cpp goes back to drawing each eye on its own. A
++    // driver's own failure (Adreno's VK_ERROR_UNKNOWN) is an Internal error,
++    // not a Validation one, so every filter gets a scope.
++    constexpr wgpu::ErrorFilter kFilters[]{wgpu::ErrorFilter::Validation, wgpu::ErrorFilter::OutOfMemory,
++                                           wgpu::ErrorFilter::Internal};
++    for (const auto filter : kFilters) webgpu::g_device.PushErrorScope(filter);
 +    auto pipeline = build_pipeline(config, {}, build_shader(config.shaderConfig), "GX Stereo Pipeline");
-+    bool failed = true;
-+    std::string message = "no answer";
-+    const auto future = webgpu::g_device.PopErrorScope(
-+        wgpu::CallbackMode::WaitAnyOnly,
-+        [&](wgpu::PopErrorScopeStatus status, wgpu::ErrorType type, wgpu::StringView text) {
-+          failed = status != wgpu::PopErrorScopeStatus::Success || type != wgpu::ErrorType::NoError;
-+          message = std::string{text.data != nullptr ? std::string_view{text} : std::string_view{}};
-+        });
-+    if (webgpu::g_instance.WaitAny(future, UINT64_MAX) != wgpu::WaitStatus::Success || failed) {
++    bool failed = false;
++    std::string message;
++    for (size_t i = 0; i < std::size(kFilters); ++i) {
++      bool scopeFailed = true;
++      std::string scopeMessage = "no answer";
++      const auto future = webgpu::g_device.PopErrorScope(
++          wgpu::CallbackMode::WaitAnyOnly,
++          [&](wgpu::PopErrorScopeStatus status, wgpu::ErrorType type, wgpu::StringView text) {
++            scopeFailed = status != wgpu::PopErrorScopeStatus::Success || type != wgpu::ErrorType::NoError;
++            scopeMessage = std::string{text.data != nullptr ? std::string_view{text} : std::string_view{}};
++          });
++      if (webgpu::g_instance.WaitAny(future, UINT64_MAX) != wgpu::WaitStatus::Success || scopeFailed) {
++        failed = true;
++        if (message.empty()) message = scopeMessage;
++      }
++    }
++    if (failed) {
 +      gfx::stereo::instanced_failed(message);
 +      return {};
 +    }
@@ -1148,7 +1209,7 @@
  
 --- a/lib/gx/shader.cpp
 +++ b/lib/gx/shader.cpp
-@@ -851,6 +851,28 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8
+@@ -851,6 +851,40 @@
                       alpha ? "a"sv : ""sv);
  }
  
@@ -1174,10 +1235,22 @@
 +  source.insert(0, "enable clip_distances;\n");
 +}
 +
++// StereoDiscard: the fragments of an eye's instance beyond its edge (the
++// varying's sign) are dropped first thing, before any texture or colour work.
++static void add_stereo_discard(std::string& source) noexcept {
++  constexpr std::string_view fragmentMain = "fn fs_main(in: VertexOutput)";
++  const auto main = source.find(fragmentMain);
++  const auto body = main != std::string::npos ? source.find('{', main) : std::string::npos;
++  if (body == std::string::npos) {
++    FATAL("stereo shader: fs_main not found");
++  }
++  source.insert(body + 1, "\n    if (in.stereo_side < 0.0) { discard; }");
++}
++
  std::string build_shader_source(const ShaderConfig& config) noexcept {
    ZoneScoped;
    const auto hash = xxh3_hash(config);
-@@ -1003,7 +1025,23 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+@@ -1003,7 +1037,28 @@
                                    attr_load_nbt_slice(config, NbtSlice::T, vidxAttr));
    }
  
@@ -1185,8 +1258,13 @@
 +  if (config.lineMode == 0 && config.stereo) {
 +    // Both eyes in one draw: instance 1 is the right eye. The viewport spans
 +    // both eyes' rectangles; each instance is squeezed into its own and cut
-+    // at its edge (clip distance), so nothing spills into the other eye.
++    // at its edge, so nothing spills into the other eye: by a clip distance,
++    // or (StereoDiscard) by the same signed distance as a varying, tested in
++    // the fragment stage. Linear in clip space, it interpolates exactly.
 +    vtxInAttrs += ",\n    @builtin(instance_index) iidx: u32";
++    if (config.stereo == StereoDiscard) {
++      vtxOutAttrs += fmt::format("\n    @location({}) stereo_side: f32,", vtxOutIdx++);
++    }
 +    vtxXfrAttrsPre += fmt::format(
 +        "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
 +        "\n    let right_eye = iidx != 0u;"
@@ -1195,14 +1273,14 @@
 +        "\n    out.pos = vec4f(mv_pos, 1.0) * eye_proj;"
 +        "\n    let eye_x = select(ubuf.stereo_x.xy, ubuf.stereo_x.zw, right_eye);"
 +        "\n    out.pos.x = out.pos.x * eye_x.x + eye_x.y * out.pos.w;"
-+        "\n    out.stereo_clip[0] = select(ubuf.stereo_clip.x * out.pos.w - out.pos.x,"
++        "\n    {} = select(ubuf.stereo_clip.x * out.pos.w - out.pos.x,"
 +        "\n                                out.pos.x - ubuf.stereo_clip.y * out.pos.w, right_eye);",
-+        vtx_attr(config, GX_VA_POS));
++        vtx_attr(config, GX_VA_POS), config.stereo == StereoDiscard ? "out.stereo_side" : "out.stereo_clip[0]");
 +  } else if (config.lineMode == 0) {
      vtxXfrAttrsPre += fmt::format(
          "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
          "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;",
-@@ -1051,6 +1089,13 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+@@ -1051,6 +1106,13 @@
    }
  
    uniBufAttrs += "\n    proj: mat4x4f,";
@@ -1216,7 +1294,7 @@
    uniBufAttrs += fmt::format("\n    postex_mtx: array<mat3x4f, {}>,", MaxPnMtx + MaxTexMtx);
    uniBufAttrs += fmt::format("\n    nrm_mtx: array<mat3x4f, {}>,", MaxPnMtx);
    std::string fragmentFnPre;
-@@ -1632,7 +1677,7 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+@@ -1632,7 +1694,7 @@
      fragmentFn += "\n    prev = vec4f(in.nrm, prev.a);";
    }
  
@@ -1225,12 +1303,14 @@
  fn bswap32(v: u32, le: bool) -> u32 {{
    if (le) {{
      return v;
-@@ -1997,6 +2042,9 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
+@@ -1997,6 +2059,11 @@
                                          uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn,
                                          fragmentFnPre, vtxXfrAttrsPre, uniformPre, fragOutStruct, fragRetType,
                                          fragRetStmt);
-+  if (config.stereo) {
++  if (config.stereo == StereoClipDistance) {
 +    add_stereo_clip_distance(shaderSource);
++  } else if (config.stereo == StereoDiscard) {
++    add_stereo_discard(shaderSource);
 +  }
    if (EnableDebugPrints) {
      Log.info("Generated shader: {}", shaderSource);
@@ -1407,3 +1487,18 @@
 -constexpr uint32_t GXPipelineConfigVersion = 13;
 +constexpr uint32_t GXPipelineConfigVersion = 14;
  struct PipelineConfig {
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -1017,7 +1017,11 @@
+ 
+ template <>
+ PipelineRef find_pipeline(ShaderType type, const gx::PipelineConfig& config, NewPipelineCallback&& cb) {
+-  return find_pipeline_impl(type, config, std::move(cb), true, std::nullopt);
++  // A headset's both-eyes pipelines are built when first drawn, never at
++  // startup from the cache: one a driver cannot build (Adreno lost the device
++  // on a clip-distance pipeline) must not be retried on every launch.
++  const bool persist = config.shaderConfig.stereo == gx::StereoOff;
++  return find_pipeline_impl(type, config, std::move(cb), persist, std::nullopt);
+ }
+ 
+ #ifdef AURORA_ENABLE_RMLUI

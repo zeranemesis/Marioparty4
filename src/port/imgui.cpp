@@ -21,6 +21,10 @@
 #if _WIN32
 #include "Windows.h"
 #endif
+#ifdef __ANDROID__
+#include <cstdlib>
+#include <sys/system_properties.h>
+#endif
 
 static bool m_frameRate = true;
 static bool m_pipelineInfo = false;
@@ -310,13 +314,38 @@ extern "C" int PartyBoard_TargetFrameRateFor(bool netplayEnabled, int configured
 
 namespace {
 
+// Headset A/B only: `adb shell setprop debug.partyboard.render_hz 72` draws new
+// images at most that often while the XR display keeps its own rate and shows
+// the last image again (with its poses, so the compositor corrects the head).
+// Unset or 0: the display rate. Read every two seconds, not every frame.
+int headset_render_cap()
+{
+#ifdef __ANDROID__
+    static int cap = 0;
+    static FramePacerClock::time_point checkedAt{};
+    const auto now = FramePacerClock::now();
+    if (now - checkedAt >= std::chrono::seconds(2)) {
+        checkedAt = now;
+        char value[PROP_VALUE_MAX] = {};
+        __system_property_get("debug.partyboard.render_hz", value);
+        cap = (std::max)(0, std::atoi(value));
+    }
+    return cap;
+#else
+    return 0;
+#endif
+}
+
 int target_frame_rate()
 {
-    const int headsetRate = partyboard::display::headset_frame_rate();
+    int headsetRate = partyboard::display::headset_frame_rate();
+    const int cap = headsetRate > 0 ? headset_render_cap() : 0;
+    if (cap > 0 && cap < headsetRate) headsetRate = (std::max)(cap, kOriginalSimulationRate);
     static int lastHeadsetRate = 0;
     if (headsetRate != lastHeadsetRate) {
-        SDL_Log("Quest render target: %d FPS (simulation 60 Hz, netplay %s)",
-            headsetRate, PartyBoard_NetplayEnabled() ? "60 FPS" : "display rate");
+        SDL_Log("Quest render target: %d FPS (simulation 60 Hz, netplay %s%s)",
+            headsetRate, PartyBoard_NetplayEnabled() ? "60 FPS" : "display rate",
+            cap > 0 ? ", capped by debug.partyboard.render_hz" : "");
         lastHeadsetRate = headsetRate;
     }
     return PartyBoard_TargetFrameRateFor(PartyBoard_NetplayEnabled(),

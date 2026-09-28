@@ -36,7 +36,7 @@ inline bool board_fit(const float minimum[3], const float maximum[3], float& sca
     for (int axis = 0; axis < 3; ++axis) {
         if (!std::isfinite(minimum[axis]) || !std::isfinite(maximum[axis]) || maximum[axis] < minimum[axis]) return false;
     }
-    const float extent = std::max(maximum[0] - minimum[0], maximum[2] - minimum[2]);
+    const float extent = (std::max)(maximum[0] - minimum[0], maximum[2] - minimum[2]);
     if (!std::isfinite(extent) || extent < 100.0f) return false;
     scale = std::clamp(2800.0f / extent, 0.05f, 16.0f);
     center[0] = minimum[0] + (maximum[0] - minimum[0]) * 0.5f;
