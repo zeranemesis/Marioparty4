@@ -96,8 +96,28 @@ Le moteur Android ARM64 compile, l'APK Quest assemble et les tests JVM passent. 
 
 Les mesures sur casque sont dans les sections plus haut (builds 100 et 112, Quest 3). La liste suivante dit ce qui reste a verifier ou a faire.
 
-## Ce qui reste a faire
+## Lot 1 : alleger les fragments (branche `quest/gpu-lot1`)
 
+Ajoute sans casque, verifie sur PC. Rien n'a encore tourne sur le casque.
+
+- **Moins de calcul par pixel, image identique.** Le generateur GX n'emule plus le debordement 8 bits (`tev_overflow_*`) que sur les operandes lus dans un registre TEV (`prev`, `tevreg0-2`). Textures, couleurs rasterisees et constantes sont deja des valeurs 8 bits dans [0, 1], ou l'emulation ne change rien. L'emulation finale de `prev` est omise quand les derniers etages qui l'ecrivent bornent leur resultat. Une texture lue aux memes coordonnees par un etage precedent n'est pas relue. Retour a l'ancien comportement : `debug.partyboard.tev_overflow=all` (lu au premier shader, donc au demarrage). `tools/test_quest_stereo_render.ps1` compare l'ancien et le nouveau shader sur une scene ou la couleur de sommet passe par l'emulation : 0 pixel different.
+- **Tri avant vers arriere des draws opaques** (`debug.partyboard.sort_opaque 1`, relu toutes les 2 s). Chaque objet de `ObjDraw` donne sa distance au milieu des yeux (`AuroraStereoSetSortKey`). Une suite de draws opaques, testes et ecrits en profondeur, est envoyee de l'avant vers l'arriere, pour le rejet precoce d'Adreno (LRZ). Les draws d'un objet restent groupes et dans l'ordre ; les draws melanges, hors objet, et la passe arriere-avant du jeu ne bougent pas. Le tri se fait sur les draws enregistres, dont sommets et uniformes sont deja figes. Risque a verifier a l'oeil : un decor coplanaire dessine par un autre objet (marquage au sol) pourrait passer sous le sol.
+- **Objets a cheval sur les deux yeux dessines par oeil** (`debug.partyboard.stereo_crossing 1`, relu toutes les 2 s) au lieu d'un draw instancie coupe par `discard`, qui prive l'Adreno du LRZ.
+- **Filtre du compositeur** (`debug.partyboard.layer_filter`) relu toutes les 2 s.
+- **Campagne en une session** : `tools/quest_campaign.ps1`, le jeu sur la vue a mesurer, sept phases de 45 s sans redemarrer (reference, tri, cheval, les deux, filtre normal, filtre aucun, reference). Tableau par phase dans `build/quest-campaign/<date>/campaign.csv`.
+
+Session casque proposee :
+
+```powershell
+# Le jeu sur le plateau Toad, immobile, meme vue ; environ 6 minutes :
+./tools/quest_campaign.ps1
+# Puis la trace GPU (5) sur la meilleure combinaison, et l'A/B de l'emulation TEV
+# (redemarrage : adb shell setprop debug.partyboard.tev_overflow all).
+```
+
+Repousses tant que la trace GPU ne les justifie pas : demi-precision (A) et textures ETC2/ASTC (B). La recompression baisse la nettete de textures deja compressees une fois ; a ne faire que si la trace montre que la bande passante des textures limite.
+
+## Ce qui reste a faire
 Etat au 28/09/2026, apres le build 112 (branche `quest/lrz-uncut`). Chaque point se mesure seul, sur le meme parcours (plateau Toad, scene 89), avec `tools/collect_quest_performance.ps1`.
 
 ### 1. A valider sur casque
