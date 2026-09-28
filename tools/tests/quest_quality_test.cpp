@@ -25,8 +25,41 @@ int main() {
   for (unsigned i = 7; i < 40; ++i) { sample.sequence = i; cpu.update(sample, 72, 0); }
   assert(cpu.scale() == 0.8f); // profile ceiling
   sample = {40, 120, 20, 2, 1, 50};
-  for (unsigned i = 40; i < 60; ++i) { sample.sequence = i; cpu.update(sample, 120, 80); }
+  // Limited by its pixels: each lowering brings more images, down to the floor.
+  for (unsigned i = 40; i < 60; ++i) {
+    sample.sequence = i;
+    cpu.update(sample, 120, i - 40 < 26 ? 80 - 3 * (i - 40) : 2);
+  }
   assert(cpu.scale() == 0.65f); // readable floor
+
+  // Not limited by its pixels (the Toad board, 414 draws per eye): the
+  // counters say pressure, but lowering brings no more images. The pixels
+  // come back and stay while the hold lasts; then one new trial.
+  quest::AdaptiveQuality draws;
+  draws.set_cap(0.8f);
+  sample = {100, 72, 9, 2, 3.5f, 0};
+  using D = quest::AdaptiveQuality::Decision;
+  assert(draws.update(sample, 72, 28) == 0.75f && draws.last_decision() == D::Lowered);
+  sample.sequence = 101;
+  assert(draws.update(sample, 72, 28) == 0.75f); // the resize window, skipped
+  sample.sequence = 102;
+  assert(draws.update(sample, 72, 27) == 0.8f && draws.last_decision() == D::Restored && draws.holding());
+  for (unsigned i = 0; i < quest::AdaptiveQuality::kHoldWindows - 1; ++i) {
+    sample.sequence = 103 + i;
+    assert(draws.update(sample, 72, 28) == 0.8f);
+  }
+  sample.sequence = 200;
+  assert(draws.update(sample, 72, 28) == 0.75f && !draws.holding()); // a new trial after the hold
+  // A lowering that does help is kept.
+  quest::AdaptiveQuality pixels;
+  pixels.set_cap(0.8f);
+  sample = {300, 72, 9, 2, 3.5f, 0};
+  pixels.update(sample, 72, 28);
+  sample.sequence = 301;
+  pixels.update(sample, 72, 20);
+  sample.sequence = 302;
+  pixels.update(sample, 72, 12); // 44 -> 60 images: helped, and still under pressure
+  assert(pixels.scale() == 0.7f && pixels.last_decision() == D::Lowered);
   quest::AdaptiveQuality blind;
   sample = {1, 120, 2, 2, 1, 5};
   assert(blind.update(sample, 120, 20) < 1); // late frames, full ring: lower despite a low GPU counter

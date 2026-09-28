@@ -429,8 +429,10 @@ void StereoView::adapt_resolution() {
     mResizePending = true; // layer() reallocates once the ring is empty
   }
   if (mRenderScale != before) {
-    LOGI("Stereo: resolution %.0f%% of recommended (%ux%u per eye)", mRenderScale * mMaxScale * 100.0f,
-         static_cast<unsigned>(mEyeWidth * mRenderScale), static_cast<unsigned>(mEyeHeight * mRenderScale));
+    const auto decision = mQuality.last_decision();
+    LOGI("Stereo: resolution %.0f%% of recommended (%ux%u per eye)%s", mRenderScale * mMaxScale * 100.0f,
+         static_cast<unsigned>(mEyeWidth * mRenderScale), static_cast<unsigned>(mEyeHeight * mRenderScale),
+         decision == AdaptiveQuality::Decision::Restored ? ", restored: fewer pixels brought no more images" : "");
   }
 }
 
