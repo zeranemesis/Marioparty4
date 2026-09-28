@@ -1482,7 +1482,7 @@
    uint32_t msaaSamples = 1;
 --- a/lib/gx/shader.cpp
 +++ b/lib/gx/shader.cpp
-@@ -9,6 +9,10 @@
+@@ -9,9 +9,15 @@
  #include <dolphin/gx/GXEnum.h>
  
  #include <absl/container/flat_hash_set.h>
@@ -1490,10 +1490,15 @@
 +#if defined(__ANDROID__)
 +#include <sys/system_properties.h>
 +#endif
++#include <algorithm>
  #include <mutex>
  #include <string_view>
  #include <utility>
-@@ -388,9 +392,36 @@ static std::string tev_op(GXTevOp op, std::string_view bias, std::string_view sc
++#include <vector>
+ 
+ #include "tracy/Tracy.hpp"
+ 
+@@ -388,9 +394,36 @@ static std::string tev_op(GXTevOp op, std::string_view bias, std::string_view sc
    }
  }
  
@@ -1531,7 +1536,7 @@
    std::string expr = tev_op(op, bias, scale, overflow(a), overflow(b), overflow(c), d, "vec3(0)"sv);
    return clamp ? fmt::format("clamp({}, vec3f(0.0), vec3f(1.0))", expr)
                 : fmt::format("clamp({}, vec3f(-4.0), vec3f(4.0))", expr);
-@@ -398,7 +429,9 @@ static std::string tev_color_op(GXTevOp op, std::string_view bias, std::string_v
+@@ -398,7 +431,9 @@ static std::string tev_color_op(GXTevOp op, std::string_view bias, std::string_v
  
  static std::string tev_alpha_op(GXTevOp op, std::string_view bias, std::string_view scale, bool clamp,
                                  std::string_view a, std::string_view b, std::string_view c, std::string_view d) {
@@ -1542,7 +1547,7 @@
    std::string expr = tev_op(op, bias, scale, overflow(a), overflow(b), overflow(c), d, "0.0"sv);
    return clamp ? fmt::format("clamp({}, 0.0, 1.0)", expr) : fmt::format("clamp({}, -4.0, 4.0)", expr);
  }
-@@ -851,6 +884,40 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8
+@@ -851,6 +886,40 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8
                       alpha ? "a"sv : ""sv);
  }
  
@@ -1583,7 +1588,7 @@
  std::string build_shader_source(const ShaderConfig& config) noexcept {
    ZoneScoped;
    const auto hash = xxh3_hash(config);
-@@ -1003,7 +1070,29 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+@@ -1003,7 +1072,29 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
                                    attr_load_nbt_slice(config, NbtSlice::T, vidxAttr));
    }
  
@@ -1614,7 +1619,7 @@
      vtxXfrAttrsPre += fmt::format(
          "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
          "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;",
-@@ -1051,6 +1140,13 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+@@ -1051,6 +1142,13 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
    }
  
    uniBufAttrs += "\n    proj: mat4x4f,";
@@ -1628,7 +1633,64 @@
    uniBufAttrs += fmt::format("\n    postex_mtx: array<mat3x4f, {}>,", MaxPnMtx + MaxTexMtx);
    uniBufAttrs += fmt::format("\n    nrm_mtx: array<mat3x4f, {}>,", MaxPnMtx);
    std::string fragmentFnPre;
-@@ -1632,7 +1728,7 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+@@ -1313,6 +1411,10 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+   }
+   const int zTexStage = ztex_source_stage(config);
+   int lastSampledStage = -1;
++  // A texture already sampled at the same coordinates by an earlier stage is
++  // not sampled again: the same texture, sampler, coordinates and bias give
++  // the same value.
++  std::vector<std::pair<std::string, int>> sampledAt;
+   for (int i = 0; i < config.tevStageCount; ++i) {
+     const auto& stage = config.tevStages[i];
+     const bool needsIndirectCoord = stage.indTexMtxId != GX_ITM_OFF;
+@@ -1486,9 +1588,16 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+       // No indirect texturing
+       uvIn = fmt::format("tex{0}_uv", underlying(stage.texCoordId));
+     }
+-    fragmentFnPre +=
+-        fmt::format("\n    var sampled{0} = textureSampleBias(tex{1}, tex{1}_samp, {2}, ubuf.tex{1}_size_bias.z);", i,
+-                    underlying(stage.texMapId), uvIn);
++    const auto sampleKey = fmt::format("{}|{}", underlying(stage.texMapId), uvIn);
++    const auto earlier = std::ranges::find(sampledAt, sampleKey, &std::pair<std::string, int>::first);
++    if (!tev_overflow_all() && uvIn.starts_with("tex") && earlier != sampledAt.end()) {
++      fragmentFnPre += fmt::format("\n    var sampled{0} = sampled{1};", i, earlier->second);
++    } else {
++      fragmentFnPre +=
++          fmt::format("\n    var sampled{0} = textureSampleBias(tex{1}, tex{1}_samp, {2}, ubuf.tex{1}_size_bias.z);", i,
++                      underlying(stage.texMapId), uvIn);
++      sampledAt.emplace_back(sampleKey, i);
++    }
+     // GX takes the z texture from the last stage that sampled one.
+     lastSampledStage = i;
+   }
+@@ -1598,7 +1707,24 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+         "var tex{0}_samp: sampler;",
+         i, i * 2, i * 2 + 1);
+   }
+-  fragmentFn += "\n    prev = tev_overflow_vec4f(prev);";
++  // prev's final 8 bits. When the last stages writing it clamp their color and
++  // alpha, prev is in [0, 1] already (fog mixes it with a color in [0, 1]),
++  // where the wrap changes nothing.
++  bool prevClamped = true;
++  for (int i = static_cast<int>(config.tevStageCount) - 1, color = 0, alpha = 0; i >= 0 && (!color || !alpha); --i) {
++    const auto& stage = config.tevStages[i];
++    if (!color && stage.colorOp.outReg == GX_TEVPREV) {
++      color = 1;
++      prevClamped = prevClamped && stage.colorOp.clamp;
++    }
++    if (!alpha && stage.alphaOp.outReg == GX_TEVPREV) {
++      alpha = 1;
++      prevClamped = prevClamped && stage.alphaOp.clamp;
++    }
++  }
++  if (!prevClamped || tev_overflow_all()) {
++    fragmentFn += "\n    prev = tev_overflow_vec4f(prev);";
++  }
+   if (config.alphaCompare) {
+     const auto comp0 = alpha_compare(config.alphaCompare.comp0, config.alphaCompare.ref0);
+     const auto comp1 = alpha_compare(config.alphaCompare.comp1, config.alphaCompare.ref1);
+@@ -1632,7 +1758,7 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
      fragmentFn += "\n    prev = vec4f(in.nrm, prev.a);";
    }
  
@@ -1637,7 +1699,7 @@
  fn bswap32(v: u32, le: bool) -> u32 {{
    if (le) {{
      return v;
-@@ -1997,6 +2093,11 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
+@@ -1997,6 +2123,11 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
                                          uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn,
                                          fragmentFnPre, vtxXfrAttrsPre, uniformPre, fragOutStruct, fragRetType,
                                          fragRetStmt);

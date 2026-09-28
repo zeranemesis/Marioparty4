@@ -203,6 +203,15 @@ int main(int argc, char** argv) {
     config.fogType = GX_FOG_PERSP_EXP;
     config.alphaCompare = {GX_GREATER, 0, GX_AOP_AND, GX_ALWAYS, 0};
     emit("textured-fog-alpha", config);
+
+    // Two stages reading the same texture at the same coordinates: the second
+    // reuses the first sample (shader.cpp).
+    config.tevStageCount = 2;
+    auto& second = config.tevStages[1];
+    second = config.tevStages[0];
+    second.colorPass = {GX_CC_CPREV, GX_CC_TEXC, GX_CC_HALF, GX_CC_ZERO};
+    second.alphaPass = {GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV};
+    emit("textured-two-stages", config);
   }
 
   {
