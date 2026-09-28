@@ -343,8 +343,18 @@ void StereoView::update(const XrView (&views)[2], const XrPosef& world, float sc
 bool StereoView::game_frame(StereoFrame& out) {
   std::lock_guard lock{mMutex};
   if (!mEnabled || mScreenRequired || mResizePending) {
+    mLastRequestAt = {}; // not a hitch of the board: the ring drains, or no world
     return false; // resizing: the ring drains, then new images come (layer())
   }
+  // The time between the game's requests: its hitches, for adapt_resolution().
+  const auto requestAt = std::chrono::steady_clock::now();
+  if (mLastRequestAt != std::chrono::steady_clock::time_point{}) {
+    const float ms = std::chrono::duration<float, std::milli>(requestAt - mLastRequestAt).count();
+    if (ms < 250.0f) { // longer: loading or paused
+      mRequestIntervals.push_back(ms);
+    }
+  }
+  mLastRequestAt = requestAt;
   // Never reclaim Drawing by age: a queued GPU frame can still own it.
   // Cameras without a view cancel explicitly; empty eye passes clear and submit.
   const auto free = std::ranges::find_if(mSlots, [](const Slot& slot) { return slot.state == State::Free; });
@@ -422,7 +432,20 @@ void StereoView::adapt_resolution() {
   mAdaptAt = now;
   const float before = mRenderScale;
   const uint32_t wanted = mAdaptLeases + mAdaptRingFull;
-  const float measuredScale = mQuality.update(mQualitySample, wanted, mAdaptRingFull);
+  // A hitch: an image that came more than 1.5 times the usual interval (the
+  // window's quarter-lowest, whatever the render rate) and 4 ms after it.
+  uint32_t slow = 0;
+  if (mRequestIntervals.size() >= 10) {
+    auto sorted = mRequestIntervals;
+    std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 4, sorted.end());
+    const float usual = sorted[sorted.size() / 4];
+    for (const float ms : mRequestIntervals) {
+      slow += ms > 1.5f * usual && ms > usual + 4.0f;
+    }
+  }
+  mRequestIntervals.clear();
+  mLastSlow = slow;
+  const float measuredScale = mQuality.update(mQualitySample, wanted, mAdaptRingFull, slow);
   mRenderScale = std::min(1.0f, measuredScale / mMaxScale);
   mAdaptLeases = mAdaptRingFull = 0;
   if (mRenderScale != before && eye_size(mRenderScale) != std::make_pair(mImageEyeWidth, mImageEyeHeight)) {
@@ -430,9 +453,12 @@ void StereoView::adapt_resolution() {
   }
   if (mRenderScale != before) {
     const auto decision = mQuality.last_decision();
-    LOGI("Stereo: resolution %.0f%% of recommended (%ux%u per eye)%s", mRenderScale * mMaxScale * 100.0f,
-         static_cast<unsigned>(mEyeWidth * mRenderScale), static_cast<unsigned>(mEyeHeight * mRenderScale),
-         decision == AdaptiveQuality::Decision::Restored ? ", restored: fewer pixels brought no more images" : "");
+    LOGI("Stereo: resolution %.0f%% of recommended (%ux%u per eye)%s, %u hitches in the last second",
+         mRenderScale * mMaxScale * 100.0f, static_cast<unsigned>(mEyeWidth * mRenderScale),
+         static_cast<unsigned>(mEyeHeight * mRenderScale),
+         decision == AdaptiveQuality::Decision::Restored ? ", restored: fewer pixels brought no more images or hitches"
+                                                          : "",
+         mLastSlow);
   }
 }
 

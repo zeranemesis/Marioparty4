@@ -32,8 +32,9 @@ public:
   bool holding() const { return mHold != 0; }
 
   // `requests`: images the game asked for in the window; `busy`: those
-  // refused because every eye image was in use.
-  float update(const QualitySample& sample, unsigned requests, unsigned busy) {
+  // refused because every eye image was in use; `slow`: the game's images
+  // that came late, a visible hitch of the board (stereo_view.cpp).
+  float update(const QualitySample& sample, unsigned requests, unsigned busy, unsigned slow = 0) {
     mDecision = Decision::Kept;
     if (sample.sequence == 0 || sample.sequence == mSequence) return mScale;
     mSequence = sample.sequence;
@@ -42,6 +43,10 @@ public:
       return mScale;
     }
     const unsigned delivered = requests - std::min(busy, requests);
+    const unsigned previousSlow = mLastSlow;
+    const bool hadWindow = mHadWindow;
+    mLastSlow = slow;
+    mHadWindow = true;
     if (mHold != 0) --mHold;
     const float budget = 1000.0f / sample.refreshHz;
     const bool gpuKnown = std::isfinite(sample.gpuMs) && sample.gpuMs >= 0;
@@ -54,8 +59,13 @@ public:
     // whatever its counter says (it may only see the headset's own GL work,
     // not the game's Vulkan rendering).
     const bool stalled = congested && sample.latePercent > 1;
-    const bool pressure = gpuKnown ? (gpu >= 0.9f * budget ||
-        (sample.latePercent > 1 && gpu >= 0.85f * budget) || (stalled && !cpuBound)) : (congested && !cpuBound);
+    // Hitches: more than 2% of the game's images late. At 60 images a second
+    // on 120 Hz the counters cannot see them and more images cannot be
+    // delivered, so this is the pressure that matters: at 100% the board
+    // hitched twice a second, at 80% not at all (Quest 3, 2026-09-28).
+    const bool hitching = slow * 50ull > requests;
+    const bool pressure = hitching || (gpuKnown ? (gpu >= 0.9f * budget ||
+        (sample.latePercent > 1 && gpu >= 0.85f * budget) || (stalled && !cpuBound)) : (congested && !cpuBound));
     // Fewer pixels only help a frame limited by its pixels. The headset's
     // counters cannot tell (they miss the game's Vulkan work): on the Toad
     // board, 414 draws per eye kept 43-45 images/s from 80% down to 70%.
@@ -72,9 +82,12 @@ public:
       ++mTrial.windows;
       if (mTrial.windows < 2) return mScale;
       mTrial.deliveredAfter += delivered;
+      mTrial.slowAfter += slow;
       if (mTrial.windows < 3) return mScale;
       const float after = static_cast<float>(mTrial.deliveredAfter) / 2.0f;
-      const bool helped = after >= 1.08f * mTrial.deliveredBefore + 1.0f;
+      // More images, or (at a capped rate) half the hitches or fewer.
+      const bool helped = after >= 1.08f * mTrial.deliveredBefore + 1.0f ||
+          (mTrial.slowBefore >= 1.0f && mTrial.slowAfter / 2.0f <= 0.5f * mTrial.slowBefore);
       mTrial.active = false;
       if (pressure && !helped) {
         mScale = mTrial.scaleBefore;
@@ -87,13 +100,14 @@ public:
     if (pressure && mHold == 0 && mScale > 0.65f) {
       const float before = previousDelivered != 0 ? (delivered + previousDelivered) / 2.0f
                                                   : static_cast<float>(delivered);
-      mTrial = {true, mScale, before, 0, 0};
+      const float slowBefore = hadWindow ? (slow + previousSlow) / 2.0f : static_cast<float>(slow);
+      mTrial = {true, mScale, before, 0, 0, slowBefore, 0};
       mScale = std::max(0.65f, mScale - 0.05f);
       mCalm = 0;
       mDecision = Decision::Lowered;
     } else if (pressure) {
       mCalm = 0;
-    } else if (!cpuBound && busy == 0 && sample.latePercent < 1 &&
+    } else if (!cpuBound && busy == 0 && slow == 0 && sample.latePercent < 1 &&
                (!gpuKnown || gpu < 0.85f * budget) &&
                (!cpuKnown || sample.cpuMs < 0.85f * budget)) {
       if (++mCalm >= 5) {
@@ -115,12 +129,16 @@ private:
     float deliveredBefore = 0;  // average of the two windows before lowering
     unsigned windows = 0;
     unsigned deliveredAfter = 0; // sum of the two judged windows
+    float slowBefore = 0;        // hitches, average of the two windows before
+    unsigned slowAfter = 0;      // hitches, sum of the two judged windows
   };
   float mScale = 1.0f, mCap = 1.25f;
   uint64_t mSequence = 0;
   unsigned mCalm = 0;
   unsigned mHold = 0;
   unsigned mLastDelivered = 0;
+  unsigned mLastSlow = 0;
+  bool mHadWindow = false;
   Trial mTrial;
   Decision mDecision = Decision::Kept;
 };

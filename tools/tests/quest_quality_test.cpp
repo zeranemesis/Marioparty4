@@ -157,6 +157,37 @@ int main() {
   const double before = time([&] { (void)reference::rgba_mip_chain(big.data(), 512, 512); });
   const double after = time([&] { (void)aurora::gfx::rgba_mip_chain(big.data(), 512, 512); });
   std::printf("512x512 mip chain: %.2f ms with pow per texel, %.2f ms with the lookup\n", before, after);
+  // Hitches at a capped 60 images/s on 120 Hz: the counters look calm and no
+  // more images can come, so the late images decide.
+  {
+    using D2 = quest::AdaptiveQuality::Decision;
+    quest::AdaptiveQuality hitch;
+    hitch.set_cap(1.0f);
+    quest::QualitySample calm{500, 120, 2, 2, 1, 0};
+    assert(hitch.update(calm, 60, 0, 3) == 0.95f && hitch.last_decision() == D2::Lowered); // 5% late
+    calm.sequence = 501;
+    assert(hitch.update(calm, 60, 0, 2) == 0.95f); // the resize window, skipped
+    calm.sequence = 502;
+    assert(hitch.update(calm, 60, 0, 0) == 0.95f);
+    calm.sequence = 503;
+    assert(hitch.update(calm, 60, 0, 0) == 0.95f && hitch.last_decision() != D2::Restored); // hitches gone: kept
+    for (unsigned i = 504; i < 508; ++i) { calm.sequence = i; hitch.update(calm, 60, 0, 0); }
+    assert(hitch.scale() == 1.0f); // five calm windows: back up
+    // Hitches the pixels do not cause: the lowering is undone.
+    quest::AdaptiveQuality cpuHitch;
+    cpuHitch.set_cap(1.0f);
+    calm.sequence = 600;
+    assert(cpuHitch.update(calm, 60, 0, 4) == 0.95f);
+    for (unsigned i = 601; i < 603; ++i) { calm.sequence = i; cpuHitch.update(calm, 60, 0, 4); }
+    calm.sequence = 603;
+    assert(cpuHitch.update(calm, 60, 0, 4) == 1.0f && cpuHitch.last_decision() == D2::Restored);
+    // One late image a second (under 2%): no lowering, but no raising either.
+    quest::AdaptiveQuality edge;
+    edge.set_cap(1.0f);
+    for (unsigned i = 700; i < 710; ++i) { calm.sequence = i; edge.update(calm, 60, 0, 1); }
+    assert(edge.scale() == 1.0f && edge.last_decision() == D2::Kept);
+  }
+
   // Instanced stereo without the cut: only a sphere wholly inside both eyes'
   // sides (identity clip: w = 1, sides at x = -1 and x = 1).
   float eyes[2][16]{};
