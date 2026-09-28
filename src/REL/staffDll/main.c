@@ -17,6 +17,7 @@
 #include "game/wipe.h"
 
 #include "math.h"
+#include "port/version_runtime.h"
 
 typedef struct StaffData {
     /* 0x00 */ u32 unk_00;
@@ -35,218 +36,34 @@ static s32 staffSide;
 static s32 currImg;
 static omObjData *multiViewObj;
 
+#ifdef TARGET_PC
+// The PC port keeps both credit lists: the messages of a PAL disc have the localization staff.
+// STAFF_DATA is the one matching the loaded disc.
+#define STAFF_DATA_PAL 0
 static StaffData staffData[] = {
-    { 0x00340001, 0, 0.0f, 0, 0, 0 },
-    { 0x00350000, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 72.0f, 0, 0, 0 },
-    { 0x00340002, 0, 0.0f, 0, 0, 0 },
-    { 0x00350001, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 48.0f, 0, 0, 0 },
-    { 0x00340003, 0, 0.0f, 0, 0, 0 },
-    { 0x00350002, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 48.0f, 0, 0, 0 },
-    { 0x00340004, 0, 0.0f, 0, 0, 0 },
-    { 0x00350003, 2, 0.0f, 0, 0, 0 },
-    { 0x00350004, 2, 0.0f, 0, 0, 0 },
-    { 0x00350005, 2, 0.0f, 0, 0, 0 },
-    { 0x00350006, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 24.0f, 0, 0, 0 },
-    { 0x00350007, 2, 0.0f, 0, 0, 0 },
-    { 0x00350008, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 48.0f, 0, 0, 0 },
-    { 0x00340005, 0, 0.0f, 0, 0, 0 },
-    { 0x00350009, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 48.0f, 0, 0, 0 },
-    { 0x00340006, 0, 0.0f, 0, 0, 0 },
-    { 0x0035000A, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 48.0f, 0, 0, 0 },
-    { 0x00340007, 0, 0.0f, 0, 0, 0 },
-    { 0x0034001C, 1, 0.0f, 0, 0, 0 },
-    { 0x0035000B, 2, 0.0f, 0, 0, 0 },
-    { 0x0035000C, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 24.0f, 0, 0, 0 },
-    { 0x0034001D, 1, 0.0f, 0, 0, 0 },
-    { 0x0035000D, 2, 0.0f, 0, 0, 0 },
-    { 0x0035000E, 2, 0.0f, 0, 0, 0 },
-    { 0x0035000F, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 24.0f, 0, 0, 0 },
-    { 0x00350010, 2, 0.0f, 0, 0, 0 },
-    { 0x00350011, 2, 0.0f, 0, 0, 0 },
-    { 0x00350012, 2, 0.0f, 0, 0, 0 },
-    { 0x00350013, 2, 0.0f, 0, 0, 0 },
-    { 0x00350014, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 24.0f, 0, 0, 0 },
-    { 0x0034001E, 1, 0.0f, 0, 0, 0 },
-    { 0x00350015, 2, 0.0f, 0, 0, 0 },
-    { 0x00350016, 2, 0.0f, 0, 0, 0 },
-    { 0x00350017, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 48.0f, 0, 0, 0 },
-    { 0x00340008, 0, 0.0f, 0, 0, 0 },
-    { 0x00350018, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 48.0f, 0, 0, 0 },
-    { 0x00340009, 0, 0.0f, 0, 0, 0 },
-    { 0x00350019, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 48.0f, 0, 0, 0 },
-    { 0x0034000A, 0, 0.0f, 0, 0, 0 },
-    { 0x0034001C, 1, 0.0f, 0, 0, 0 },
-    { 0x0035001A, 2, 0.0f, 0, 0, 0 },
-    { 0x0035001B, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 24.0f, 0, 0, 0 },
-    { 0x0034001D, 1, 0.0f, 0, 0, 0 },
-    { 0x0035001C, 2, 0.0f, 0, 0, 0 },
-    { 0x0035001D, 2, 0.0f, 0, 0, 0 },
-    { 0x0035001E, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 24.0f, 0, 0, 0 },
-    { 0x0034001E, 1, 0.0f, 0, 0, 0 },
-    { 0x0035001F, 2, 0.0f, 0, 0, 0 },
-    { 0x00350020, 2, 0.0f, 0, 0, 0 },
-    { 0x00350021, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 48.0f, 0, 0, 0 },
-    { 0x0034000B, 0, 0.0f, 0, 0, 0 },
-    { 0x0034001F, 1, 0.0f, 0, 0, 0 },
-    { 0x00350022, 2, 0.0f, 0, 0, 0 },
-    { 0x00350023, 2, 0.0f, 0, 0, 0 },
-    { 0x00350024, 2, 0.0f, 0, 0, 0 },
-    { 0x00350025, 2, 0.0f, 0, 0, 0 },
-    { 0x00350026, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 24.0f, 0, 0, 0 },
-    { 0x00350027, 2, 0.0f, 0, 0, 0 },
-    { 0x00350028, 2, 0.0f, 0, 0, 0 },
-    { 0x00350029, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 24.0f, 0, 0, 0 },
-    { 0x0034001C, 1, 0.0f, 0, 0, 0 },
-    { 0x0035002A, 2, 0.0f, 0, 0, 0 },
-    { 0x0035002B, 2, 0.0f, 0, 0, 0 },
-    { 0x0035002C, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 24.0f, 0, 0, 0 },
-    { 0x0034001D, 1, 0.0f, 0, 0, 0 },
-    { 0x0035002D, 2, 0.0f, 0, 0, 0 },
-    { 0x0035002E, 2, 0.0f, 0, 0, 0 },
-    { 0x0035002F, 2, 0.0f, 0, 0, 0 },
-    { 0x00350030, 2, 0.0f, 0, 0, 0 },
-    { 0x00350031, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 24.0f, 0, 0, 0 },
-    { 0x00350032, 2, 0.0f, 0, 0, 0 },
-    { 0x00350033, 2, 0.0f, 0, 0, 0 },
-    { 0x00350034, 2, 0.0f, 0, 0, 0 },
-    { 0x00350035, 2, 0.0f, 0, 0, 0 },
-    { 0x00350036, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 48.0f, 0, 0, 0 },
-    { 0x0034000C, 0, 0.0f, 0, 0, 0 },
-    { 0x00350037, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 48.0f, 0, 0, 0 },
-    { 0x0034000D, 0, 0.0f, 0, 0, 0 },
-    { 0x00350038, 2, 0.0f, 0, 0, 0 },
-    { 0x00350039, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 48.0f, 0, 0, 0 },
-    { 0x0034000E, 0, 0.0f, 0, 0, 0 },
-    { 0x0035003A, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 48.0f, 0, 0, 0 },
-    { 0x0034000F, 0, 0.0f, 0, 0, 0 },
-    { 0x0035003B, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 48.0f, 0, 0, 0 },
-    { 0x00340010, 0, 0.0f, 0, 0, 0 },
-    { 0x0035003C, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 24.0f, 0, 0, 0 },
-    { 0x00340011, 0, 0.0f, 0, 0, 0 },
-    { 0x0035003B, 2, 0.0f, 0, 0, 0 },
-    { 0x0035003C, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 24.0f, 0, 0, 0 },
-    { 0x00340012, 0, 0.0f, 0, 0, 0 },
-    { 0x0035003D, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 24.0f, 0, 0, 0 },
-    { 0x00340013, 0, 0.0f, 0, 0, 0 },
-    { 0x0035003E, 2, 0.0f, 0, 0, 0 },
-    { 0x0035003F, 2, 0.0f, 0, 0, 0 },
-    { 0x00350040, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 48.0f, 0, 0, 0 },
-    { 0x00340014, 0, 0.0f, 0, 0, 0 },
-    { 0x00350041, 2, 0.0f, 0, 0, 0 },
-    { 0x00350042, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 48.0f, 0, 0, 0 },
-    { 0x00340015, 0, 0.0f, 0, 0, 0 },
-    { 0x00350043, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 48.0f, 0, 0, 0 },
-    { 0x00340022, 0, 0.0f, 0, 0, 0 },
-    { 0x00340024, 1, 0.0f, 0, 0, 0 },
-    { 0x00350056, 2, 0.0f, 0, 0, 0 },
-    { 0x00350057, 2, 0.0f, 0, 0, 0 },
-    { 0x00350058, 2, 0.0f, 0, 0, 0 },
-    { 0x00350059, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 24.0f, 0, 0, 0 },
-    { 0x00340025, 1, 0.0f, 0, 0, 0 },
-    { 0x0035005A, 2, 0.0f, 0, 0, 0 },
-    { 0x0035005B, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 48.0f, 0, 0, 0 },
-    { 0x00340023, 0, 0.0f, 0, 0, 0 },
-    { 0x0035005C, 2, 0.0f, 0, 0, 0 },
-    { 0x0035005D, 2, 0.0f, 0, 0, 0 },
-    { 0x0035005E, 2, 0.0f, 0, 0, 0 },
-    { 0x0035005F, 2, 0.0f, 0, 0, 0 },
-    { 0x00350060, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 48.0f, 0, 0, 0 },
-    #if VERSION_PAL
-    { 0x00340026, 0, 0.0f, 0, 0, 0 },
-    { -3, 0, 24.0f, 0, 0, 0 },
-    { 0x00340027, 1, 0.0f, 0, 0, 0 },
-    { -3, 0, 24.0f, 0, 0, 0 },
-    { 0x00340028, 1, 0.0f, 0, 0, 0 },
-    { 0x00350061, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 24.0f, 0, 0, 0 },
-    { 0x00340029, 1, 0.0f, 0, 0, 0 },
-    { 0x0034002A, 1, 0.0f, 0, 0, 0 },
-    { 0x00350062, 2, 0.0f, 0, 0, 0 },
-    { 0x0034002B, 1, 0.0f, 0, 0, 0 },
-    { 0x00350063, 2, 0.0f, 0, 0, 0 },
-    { 0x0034002C, 1, 0.0f, 0, 0, 0 },
-    { 0x00350064, 2, 0.0f, 0, 0, 0 },
-    { 0x0034002D, 1, 0.0f, 0, 0, 0 },
-    { 0x00350065, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 24.0f, 0, 0, 0 },
-    { 0x0034002E, 1, 0.0f, 0, 0, 0 },
-    { -3, 0, 72.0f, 0, 0, 0 },
-    #endif
-    { 0x00340016, 0, 0.0f, 0, 0, 0 },
-    { 0x00350044, 2, 0.0f, 0, 0, 0 },
-    #if VERSION_NTSC
-    { 0x00350045, 2, 0.0f, 0, 0, 0 },
-    #endif
-    { -3, 0, 24.0f, 0, 0, 0 },
-    { 0x00350046, 2, 0.0f, 0, 0, 0 },
-    { 0x00350047, 2, 0.0f, 0, 0, 0 },
-    { 0x00350048, 2, 0.0f, 0, 0, 0 },
-    { 0x00350049, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 24.0f, 0, 0, 0 },
-    { 0x0035004A, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 48.0f, 0, 0, 0 },
-    { 0x0035004B, 2, 0.0f, 0, 0, 0 },
-    { 0x0035004C, 2, 0.0f, 0, 0, 0 },
-    { 0x0035004D, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 48.0f, 0, 0, 0 },
-    { 0x00340017, 0, 0.0f, 0, 0, 0 },
-    { 0x0035004E, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 48.0f, 0, 0, 0 },
-    { 0x00340018, 0, 0.0f, 0, 0, 0 },
-    { 0x0035004F, 2, 0.0f, 0, 0, 0 },
-    { 0x00350050, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 72.0f, 0, 0, 0 },
-    { 0x00340019, 0, 0.0f, 0, 0, 0 },
-    { 0x00350038, 2, 0.0f, 0, 0, 0 },
-    { 0x00350051, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 72.0f, 0, 0, 0 },
-    { 0x0034001A, 0, 0.0f, 0, 0, 0 },
-    { 0x00350052, 2, 0.0f, 0, 0, 0 },
-    { 0x00350053, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 72.0f, 0, 0, 0 },
-    { 0x0034001B, 0, 0.0f, 0, 0, 0 },
-    { 0x00350054, 2, 0.0f, 0, 0, 0 },
-    { 0x00350055, 2, 0.0f, 0, 0, 0 },
-    { -3, 0, 74.0f, 0, 0, 0 },
-    { -2, 0, 0.0f, 0, 0, 0 },
-    { -1, 0, 0.0f, 0, 0, 0 },
+#include "REL/staffDll/staff_tbl.inc"
 };
+#undef STAFF_DATA_PAL
+#define STAFF_DATA_PAL 1
+static StaffData staffDataPal[] = {
+#include "REL/staffDll/staff_tbl.inc"
+};
+#undef STAFF_DATA_PAL
+#define STAFF_DATA (VERSION_RT_PAL ? staffDataPal : staffData)
+#else
+#define STAFF_DATA_PAL VERSION_PAL
+static StaffData staffData[] = {
+#include "REL/staffDll/staff_tbl.inc"
+};
+#define STAFF_DATA staffData
+#endif
 
-#if VERSION_NTSC
+#ifdef TARGET_PC
+// The logos differ on a PAL disc: positions of both, picked by the loaded disc
+static float staffLogoPosTblNtsc[] = { 460.0f, 293.0f, 293.0f };
+static float staffLogoPosTblPal[] = { 460.0f, 290.0f, 293.0f };
+#define staffLogoPosTbl (VERSION_RT_PAL ? staffLogoPosTblPal : staffLogoPosTblNtsc)
+#elif VERSION_NTSC
 static float staffLogoPosTbl[] = { 460.0f, 293.0f, 293.0f };
 #else
 static float staffLogoPosTbl[] = { 460.0f, 290.0f, 293.0f };
@@ -340,7 +157,31 @@ static void CreateStaff(void)
 
     for (var_r31 = 0; var_r31 < 3; var_r31++) {
         int languageNo;
-        #if VERSION_NTSC
+        #ifdef TARGET_PC
+        // A PAL disc has one logo per language, the files after them are shifted
+        if (VERSION_RT_PAL && var_r31 == 2) {
+            switch(GWGameStat.language) {
+                case 1:
+                    languageNo = 0;
+                    break;
+
+                case 2:
+                    languageNo = 1;
+                    break;
+
+                case 4:
+                    languageNo = 3;
+                    break;
+
+                default:
+                    languageNo = 2;
+                    break;
+            }
+            var_r29 = HuDataSelHeapReadNum(var_r31 + DATA_MAKE_NUM(DATADIR_STAFF, 0x1A) + languageNo, MEMORY_DEFAULT_NUM, HEAP_DATA);
+        } else {
+            var_r29 = HuDataSelHeapReadNum(var_r31 + DATA_MAKE_NUM(DATADIR_STAFF, 0x1A), MEMORY_DEFAULT_NUM, HEAP_DATA);
+        }
+        #elif VERSION_NTSC
         var_r29 = HuDataSelHeapReadNum(var_r31 + DATA_MAKE_NUM(DATADIR_STAFF, 0x1A), MEMORY_DEFAULT_NUM, HEAP_DATA);
         #else
         if(var_r31 == 2) {
@@ -382,7 +223,9 @@ static void CreateStaff(void)
     HuSprGrpPosSet(thpGroup, 280.0f, 200.0f);
     HuSprAttrSet(thpGroup, 0, HUSPR_ATTR_DISPOFF);
     HuTHPStop();
-    #if VERSION_NTSC
+    #ifdef TARGET_PC
+    var_r29 = HuDataSelHeapReadNum(VERSION_RT_PAL ? DATA_MAKE_NUM(DATADIR_STAFF, 0x20) : DATA_MAKE_NUM(DATADIR_STAFF, 0x1D), MEMORY_DEFAULT_NUM, HEAP_DATA);
+    #elif VERSION_NTSC
     var_r29 = HuDataSelHeapReadNum(DATA_MAKE_NUM(DATADIR_STAFF, 0x1D), MEMORY_DEFAULT_NUM, HEAP_DATA);
     #else
     var_r29 = HuDataSelHeapReadNum(DATA_MAKE_NUM(DATADIR_STAFF, 0x20), MEMORY_DEFAULT_NUM, HEAP_DATA);
@@ -575,7 +418,7 @@ static void MainProc(void)
     var_r27 = HuAudSStreamPlay(22);
 
     for (var_r31 = 0;; var_r31++) {
-        var_r30 = &staffData[var_r31];
+        var_r30 = &STAFF_DATA[var_r31];
         if (var_r30->unk_00 == -1) {
             break;
         }
@@ -598,7 +441,7 @@ static void MainProc(void)
                 break;
         }
     }
-    var_r30 = &staffData[var_r31 - 1];
+    var_r30 = &STAFF_DATA[var_r31 - 1];
 
     while (var_r30->unk_14 == 0) {
         HuPrcVSleep();
@@ -657,7 +500,9 @@ static void MainProc(void)
     HuSprAttrSet(staffLogoGroup[1], 0, HUSPR_ATTR_DISPOFF);
     HuPrcSleep(120);
     HuSprAttrReset(staffLogoGroup[2], 0, HUSPR_ATTR_DISPOFF);
-    #if VERSION_NTSC
+    #ifdef TARGET_PC
+    HuSprGrpPosSet(staffLogoGroup[2], VERSION_RT_PAL ? 275.0f : 280.0f, 240.0f);
+    #elif VERSION_NTSC
     HuSprGrpPosSet(staffLogoGroup[2], 280.0f, 240.0f);
     #else
     HuSprGrpPosSet(staffLogoGroup[2], 275.0f, 240.0f);

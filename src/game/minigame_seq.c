@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include "stdarg.h"
 #include "version.h"
+#include "port/version_runtime.h"
 
 #undef abs
 
@@ -2723,6 +2724,20 @@ static s16 winnerNameW[8];
 #define GET_LANG_IDX() ((seqLanguage == 0) ? 0 : 1)
 #define GET_WIN_KANAF() ((seqLanguage == 0) ? 1 : 0)
 
+#ifdef TARGET_PC
+// Koopa Kid is called "MINI BOWSER" on a PAL disc: the name follows the loaded disc.
+static char *SeqWinCharNameGet(s32 idx)
+{
+    if (idx == 27 && VERSION_RT_PAL) {
+        return "MINI BOWSER";
+    }
+    return winCharNameTbl[idx];
+}
+#define WIN_CHAR_NAME(idx) SeqWinCharNameGet(idx)
+#else
+#define WIN_CHAR_NAME(idx) winCharNameTbl[idx]
+#endif
+
 s32 MGSeqInitWin(SeqWork *work, va_list params)
 {
     int win_type = va_arg(params, int);
@@ -2765,10 +2780,30 @@ s32 MGSeqInitWin(SeqWork *work, va_list params)
         if (winner < 0) {
             continue;
         }
-        word_grp = SeqMakeWord(work, winCharNameTbl[(winner * 2) + GET_LANG_IDX()], 0);
+        word_grp = SeqMakeWord(work, WIN_CHAR_NAME((winner * 2) + GET_LANG_IDX()), 0);
 #if VERSION_ENG
+#ifdef TARGET_PC
+        // PAL layout (all names spaced by 50) when a PAL disc is loaded
+        if (VERSION_RT_PAL) {
+            for (i = 0; i < work->word_len; i++) {
+                HuSprPosSet(work->spr_grp[word_grp], i, 25.0f + ((i * 50) - (0.5f * (work->word_len * 50))), 0.0f);
+                HuSprAttrSet(work->spr_grp[word_grp], i, HUSPR_ATTR_LINEAR);
+            }
+            if ((work->win_scale == 0.5f) || (winner == 13)) {
+                work->win_scale = 0.5f;
+            }
+            else if ((work->win_scale == 0.6f) || (winner == 7) || (winner == 10)) {
+                work->win_scale = 0.6f;
+            }
+            else {
+                work->win_scale = 0.75f;
+            }
+            winnerNameW[num_winners + 1] = work->word_len * 50;
+        }
+        else
+#endif
         if (seqLanguage != 0) {
-            char *name = winCharNameTbl[(winner * 2) + GET_LANG_IDX()];
+            char *name = WIN_CHAR_NAME((winner * 2) + GET_LANG_IDX());
             word_w = 0.0f;
             for (i = word_w; i < work->word_len; i++, name++) {
                 if (*name == ' ') {
@@ -2778,7 +2813,7 @@ s32 MGSeqInitWin(SeqWork *work, va_list params)
                     word_w += 50.0f;
                 }
             }
-            name = winCharNameTbl[(winner * 2) + GET_LANG_IDX()];
+            name = WIN_CHAR_NAME((winner * 2) + GET_LANG_IDX());
             word_x = 0.0f;
             for (i = word_x; i < work->word_len; i++, name++) {
                 HuSprPosSet(work->spr_grp[word_grp], i, 25.0 + (word_x - (0.5 * word_w)), 0.0f);
@@ -2873,6 +2908,20 @@ s32 MGSeqInitWin(SeqWork *work, va_list params)
         else {
             if (abs(winPosOfs[num_winners - 1][j][0]) == 144.0f) {
 #if VERSION_ENG
+#ifdef TARGET_PC
+                if (VERSION_RT_PAL) {
+                    if (32.0f + (work->win_scale * winnerNameW[j]) < HU_DISP_CENTERX) {
+                        word_x = 32.0f + ((winnerNameW[j] * work->win_scale) / 2.0f);
+                    }
+                    else {
+                        word_x = 120.0f;
+                    }
+                    if (winPosOfs[num_winners - 1][j][0] < 0) {
+                        word_x = -word_x;
+                    }
+                }
+                else {
+#endif
                 if (winnerNameW[j] + 32 < HU_DISP_CENTERX) {
                     word_x = 176.0f;
                 }
@@ -2885,6 +2934,9 @@ s32 MGSeqInitWin(SeqWork *work, va_list params)
                 else {
                     word_x = (HU_DISP_WIDTH - word_x) - HU_DISP_CENTERX;
                 }
+#ifdef TARGET_PC
+                }
+#endif
 #elif VERSION_PAL
                 if (32.0f + (work->win_scale * winnerNameW[j]) < HU_DISP_CENTERX) {
                     word_x = 32.0f + ((winnerNameW[j] * work->win_scale) / 2.0f);
@@ -3003,15 +3055,19 @@ s32 MGSeqUpdateWin(SeqWork *work)
                         else {
                             if (abs(winPosOfs[work->word_len - 2][idx][0]) == 144.0f) {
                                 if (winnerNameW[idx] + 32 < HU_DISP_CENTERX) {
-                                    pos_x = VERSION_ENG ? 176.0f : winnerNameW[idx] / 2 + 32;
+                                    pos_x = VERSION_RT_ENG ? 176.0f : winnerNameW[idx] / 2 + 32;
                                 }
                                 else {
-                                    pos_x = VERSION_ENG ? 32.0f + ((winnerNameW[idx] * work->win_scale) / 2.0f) : 128.0f;
+                                    pos_x = VERSION_RT_ENG ? 32.0f + ((winnerNameW[idx] * work->win_scale) / 2.0f) : 128.0f;
                                 }
                                 if (winPosOfs[work->word_len - 2][idx][0] < 0) {
-                                    pos_x = VERSION_ENG ? -(HU_DISP_CENTERX - pos_x) : -pos_x;
+                                    pos_x = VERSION_RT_ENG ? -(HU_DISP_CENTERX - pos_x) : -pos_x;
                                 }
-#if VERSION_ENG
+#if VERSION_ENG && defined(TARGET_PC)
+                                else if (VERSION_RT_ENG) {
+                                    pos_x = (HU_DISP_WIDTH - pos_x) - HU_DISP_CENTERX;
+                                }
+#elif VERSION_ENG
                                 else {
                                     pos_x = (HU_DISP_WIDTH - pos_x) - HU_DISP_CENTERX;
                                 }

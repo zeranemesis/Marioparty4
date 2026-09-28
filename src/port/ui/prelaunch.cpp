@@ -2,6 +2,7 @@
 
 #include "prelaunch.hpp"
 
+#include "port/app_update.hpp"
 #include "port/config.hpp"
 #include "../file_select.hpp"
 #include "../iso_validate.hpp"
@@ -9,6 +10,7 @@
 #include "port/settings.h"
 #include "port/netplay_runtime.h"
 #include "modal.hpp"
+#include "online.hpp"
 #include "preset.hpp"
 #include "settings.hpp"
 #include "partyboard_version.h"
@@ -65,6 +67,10 @@ namespace {
         </disc-info>
         <version-info class="intro-item delay-5">
             <div class="version">Version <span id="version-text"></span></div>
+            <div id="update" class="update">
+                <span id="update-message" />
+                <button id="update-download"><span id="update-download-label" /><icon /></button>
+            </div>
         </version-info>
     </content>
 </body>
@@ -207,7 +213,7 @@ namespace {
         return result;
     }
 
-    std::string get_error_msg(iso::ValidationError error)
+    std::string get_error_msg(iso::ValidationError error, const iso::DiscInfo &info)
     {
         switch (error) {
             default:
@@ -217,9 +223,14 @@ namespace {
             case iso::ValidationError::InvalidImage:
                 return "The selected file is not a valid disc image.";
             case iso::ValidationError::WrongGame:
-                return "The selected game is not supported by Party Board.";
+                return "The selected game is not supported by Party Board. Choose a USA or European Mario Party 4 "
+                       "GameCube disc image.";
             case iso::ValidationError::WrongVersion:
-                return "Party Board currently supports GameCube USA Rev 0 disc images only.";
+                if (info.known && info.region == version::DiscRegion::Japan) {
+                    return "The Japanese version of Mario Party 4 is not supported yet. Please use the USA or "
+                           "European version.";
+                }
+                return "This version of Mario Party 4 is not supported yet. Please use the USA or European version.";
             case iso::ValidationError::Canceled:
                 return "Disc verification was canceled. Party Board cannot guarantee the selected disc image "
                        "is compatible.";
@@ -268,7 +279,7 @@ namespace {
             state.pendingDiscPath = result.path;
             state.pendingDiscInfo = result.info;
             state.pendingDiscValidation = result.validation;
-            state.errorString = escape(get_error_msg(result.validation));
+            state.errorString = escape(get_error_msg(result.validation, result.info));
             return;
         }
 
@@ -284,7 +295,7 @@ namespace {
         state.pendingDiscPath.clear();
         state.pendingDiscInfo = {};
         state.pendingDiscValidation = iso::ValidationError::Unknown;
-        state.errorString = escape(get_error_msg(result.validation));
+        state.errorString = escape(get_error_msg(result.validation, result.info));
     }
 
     class DiscVerificationModal : public WindowSmall {
@@ -605,6 +616,61 @@ bool is_restart_pending() noexcept
     return false;
 }
 
+namespace {
+
+    // Changes past this many lines are left to the GitHub release page.
+    constexpr std::size_t kMaxNoteLines = 12;
+
+    Rml::String update_notes_rml(const std::string &notes)
+    {
+        Rml::String rml;
+        std::size_t lines = 0;
+        std::size_t start = 0;
+        while (start < notes.size()) {
+            std::size_t end = notes.find('\n', start);
+            if (end == std::string::npos) {
+                end = notes.size();
+            }
+            const auto line = notes.substr(start, end - start);
+            start = end + 1;
+            if (line.empty()) {
+                continue;
+            }
+            if (lines == kMaxNoteLines) {
+                rml += "<br/>...";
+                break;
+            }
+            rml += "<br/>" + escape(line);
+            ++lines;
+        }
+        return rml;
+    }
+
+    // Asks before downloading: the player sees which build it is and what changed.
+    void push_update_modal(Document &host, const update::Status &status)
+    {
+        Rml::String body = escape(fmt::format(fmt::runtime(ui_translate("Party Board build {} is available. This phone has build {}.")),
+            status.manifest.versionCode, status.installedVersionCode));
+        if (!status.manifest.notes.empty()) {
+            body += "<br/><br/>" + escape(ui_translate("What changed:")) + update_notes_rml(status.manifest.notes);
+        }
+        body += "<br/><br/>" + escape(ui_translate("The download opens in your browser: open the file once it is downloaded to install the update. Your saves and settings are kept."));
+        host.push(std::make_unique<Modal>(Modal::Props {
+            .title = "Update Available",
+            .bodyRml = body,
+            .actions = {
+                ModalAction { .label = "Later", .onPressed = [](Modal &modal) { modal.pop(); } },
+                ModalAction { .label = "Download", .onPressed = [](Modal &modal) {
+                                 update::download();
+                                 modal.pop();
+                             } },
+            },
+            .onDismiss = [](Modal &modal) { modal.pop(); },
+        }));
+    }
+
+} // namespace
+
 void apply_intro_animation(Rml::Element *element, const char *delay_class)
 {
     if (element == nullptr || delay_class == nullptr) {
@@ -673,6 +739,24 @@ Prelaunch::Prelaunch()
             });
             apply_intro_animation(mMenuButtons.back()->root(), "delay-2");
         }
+#elif defined(__ANDROID__)
+        if (!PartyBoard_NetplayEnabled()) {
+            mMenuButtons.push_back(std::make_unique<Button>(menuList, "Play Online"));
+            mMenuButtons.back()->on_pressed([] {
+                if (open_android_lobby()) {
+                    PartyBoard_IsRunning = false;
+                } else {
+                    prelaunch_state().errorString = "The online lobby could not be opened.";
+                }
+            });
+            apply_intro_animation(mMenuButtons.back()->root(), "delay-2");
+        }
+#else
+        if (!PartyBoard_NetplayEnabled()) {
+            mMenuButtons.push_back(std::make_unique<Button>(menuList, "Play Online"));
+            mMenuButtons.back()->on_pressed([this] { push(std::make_unique<OnlineWindow>()); });
+            apply_intro_animation(mMenuButtons.back()->root(), "delay-2");
+        }
 #endif
 
         mMenuButtons.push_back(std::make_unique<Button>(menuList, "Quit"));
@@ -683,6 +767,19 @@ Prelaunch::Prelaunch()
     mDiscStatus = mDocument->GetElementById("disc-status");
     mDiscDetail = mDocument->GetElementById("disc-version");
     mVersion = mDocument->GetElementById("version-text");
+    mUpdateStatus = mDocument->GetElementById("update");
+    mUpdateMessage = mDocument->GetElementById("update-message");
+    mUpdateDownload = mDocument->GetElementById("update-download");
+    mUpdateDownloadLabel = mDocument->GetElementById("update-download-label");
+
+    if (update::supported()) {
+        if (mUpdateDownload != nullptr) {
+            listen(mUpdateDownload, Rml::EventId::Click, [this](Rml::Event &) { press_update(); });
+        }
+        if (getSettings().backend.checkForUpdates.getValue()) {
+            update::check(true);
+        }
+    }
 
     listen(mDocument, Rml::EventId::Transitionend, [this](Rml::Event &event) {
         auto *target = event.GetTargetElement();
@@ -813,8 +910,11 @@ void Prelaunch::update()
     if (mDiscDetail != nullptr) {
         if (activeDiscLoaded) {
             mDiscDetail->SetProperty(Rml::PropertyId::Display, Rml::Style::Display::Block);
-            Rml::String innerRML = "GameCube • ";
-            innerRML += state.activeDiscInfo.isPal ? "EUR" : "USA";
+            Rml::String innerRML = "GameCube";
+            if (state.activeDiscInfo.known) {
+                innerRML += " • "
+                    + version::describe(state.activeDiscInfo.region, state.activeDiscInfo.revision, ui_translate("Rev"));
+            }
             mDiscDetail->SetInnerRML(innerRML);
         }
         else {
@@ -827,6 +927,60 @@ void Prelaunch::update()
             versionStr = versionStr.substr(1);
         }
         mVersion->SetInnerRML(escape(versionStr));
+    }
+    if (mUpdateStatus != nullptr && update::supported()) {
+        const auto status = update::status();
+        const char *state = nullptr;
+        std::string message;
+        const char *action = nullptr;
+        switch (status.state) {
+            case update::State::Checking:
+                if (!status.quiet) {
+                    state = "checking";
+                    message = ui_translate("Checking GitHub for an update...");
+                }
+                break;
+            case update::State::UpToDate:
+                if (!status.quiet) {
+                    state = "checking";
+                    message = fmt::format(fmt::runtime(ui_translate("Party Board is up to date (build {}).")),
+                        status.installedVersionCode);
+                }
+                break;
+            case update::State::Available:
+                state = "available";
+                message = fmt::format(fmt::runtime(ui_translate("Build {} is available.")), status.manifest.versionCode);
+                action = "Update";
+                break;
+            case update::State::Downloading:
+                // The download may not have finished or been opened: the button stays to start it again.
+                state = "available";
+                message = ui_translate("Open the downloaded file to install the update.");
+                action = "Download";
+                break;
+            case update::State::Failed:
+                state = "failed";
+                message = ui_translate(status.error);
+                if (!status.detail.empty()) {
+                    message += " (" + status.detail + ")";
+                }
+                action = "Retry";
+                break;
+            case update::State::Idle:
+                break;
+        }
+        if (state != nullptr) {
+            mUpdateStatus->SetAttribute("state", state);
+        }
+        else {
+            mUpdateStatus->RemoveAttribute("state");
+        }
+        if (mUpdateMessage != nullptr) {
+            mUpdateMessage->SetInnerRML(escape(message));
+        }
+        if (mUpdateDownloadLabel != nullptr && action != nullptr) {
+            mUpdateDownloadLabel->SetInnerRML(escape(ui_translate(action)));
+        }
     }
 
     Document::update();
@@ -845,8 +999,54 @@ bool Prelaunch::visible() const
     return mDocument->HasAttribute("open") && mRoot->HasAttribute("open");
 }
 
+bool Prelaunch::update_shown() const
+{
+    if (mUpdateDownload == nullptr || mUpdateStatus == nullptr || !update::supported()) {
+        return false;
+    }
+    const auto state = mUpdateStatus->GetAttribute<Rml::String>("state", "");
+    return state == "available" || state == "failed";
+}
+
+bool Prelaunch::update_contains(Rml::Element *element) const
+{
+    for (const auto *node = element; node != nullptr && mUpdateDownload != nullptr; node = node->GetParentNode()) {
+        if (node == mUpdateDownload) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void Prelaunch::press_update()
+{
+    const auto status = update::status();
+    if (status.state == update::State::Available) {
+        push_update_modal(*this, status);
+    }
+    else if (status.state == update::State::Downloading) {
+        update::download();
+    }
+    else if (status.state == update::State::Failed) {
+        // Retry whatever failed: the download when a newer build is known, else the check.
+        if (status.manifest.versionCode > status.installedVersionCode) {
+            update::download();
+        }
+        else {
+            update::check(false);
+        }
+    }
+}
+
 bool Prelaunch::handle_nav_command(Rml::Event &event, NavCommand cmd)
 {
+    auto *target = event.GetTargetElement();
+    const bool onUpdate = update_shown() && update_contains(target);
+    if (cmd == NavCommand::Confirm && onUpdate) {
+        press_update();
+        event.StopPropagation();
+        return true;
+    }
     int direction = 0;
     if (cmd == NavCommand::Down) {
         direction = 1;
@@ -857,23 +1057,26 @@ bool Prelaunch::handle_nav_command(Rml::Event &event, NavCommand cmd)
     else {
         return false;
     }
-    auto *target = event.GetTargetElement();
-    int focusedButton = -1;
-    for (int i = 0; i < mMenuButtons.size(); ++i) {
+    // The menu buttons, then the update link when it is shown: one ring.
+    const int buttons = static_cast<int>(mMenuButtons.size());
+    const int n = buttons + (update_shown() ? 1 : 0);
+    if (n == 0) {
+        return false;
+    }
+    int focused = onUpdate ? buttons : -1;
+    for (int i = 0; focused < 0 && i < buttons; ++i) {
         if (mMenuButtons[i]->contains(target)) {
-            focusedButton = i;
-            break;
+            focused = i;
         }
     }
-    const auto n = static_cast<int>(mMenuButtons.size());
-    int i = ((focusedButton + direction) % n + n) % n;
-    while (i >= 0 && i < mMenuButtons.size()) {
-        if (mMenuButtons[i]->focus()) {
+    int i = ((focused + direction) % n + n) % n;
+    for (int tries = 0; tries < n; ++tries, i = ((i + direction) % n + n) % n) {
+        const bool focusedNow = i == buttons ? mUpdateDownload->Focus(true) : mMenuButtons[i]->focus();
+        if (focusedNow) {
             // mDoAud_seStartMenu(kSoundItemFocus); // TODO
             event.StopPropagation();
             return true;
         }
-        i += direction;
     }
     return false;
 }

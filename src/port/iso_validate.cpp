@@ -98,6 +98,8 @@ struct KnownDisc {
 const auto KNOWN_DISCS = std::to_array<KnownDisc>({
     {"GMPE01", Platform::GameCube, Region::NorthAmerica, {"5eda4b612c9d04d16f95b2643ae9faa2", "0f45c2365f5812d970188b7df0b1e2ff"}},
     {"GMPP01", Platform::GameCube, Region::Europe, {"7c8d20f1032f0025b4a681d23b421078", "ce3f0e8150d6c49093db11875e827023"}},
+    // Recognised so the player is told it is not supported yet rather than that it is the wrong game.
+    {"GMPJ01", Platform::GameCube, Region::Japan},
 });
 
 constexpr const KnownDisc* find_disc(std::string_view id) {
@@ -107,6 +109,16 @@ constexpr const KnownDisc* find_disc(std::string_view id) {
         }
     }
     return nullptr;
+}
+
+static void fill_disc_info(const NodDiscHeader& header, DiscInfo& info) {
+    const auto identity = version::identify_disc(std::string_view(header.game_id, 6), header.disc_version);
+    info.known = identity.has_value();
+    if (identity) {
+        info.region = identity->region;
+        info.revision = identity->revision;
+    }
+    info.isPal = info.known && info.region == version::DiscRegion::Europe;
 }
 
 struct NodHandleWrapper {
@@ -223,7 +235,7 @@ ValidationError validate(const char* path, VerificationStatus& status, DiscInfo&
         return ValidationError::WrongGame;
     }
     status.knownDisc = knownDisc;
-    info.isPal = knownDisc->region == Region::Europe;
+    fill_disc_info(header, info);
     if (!knownDisc->supported) {
         return ValidationError::WrongVersion;
     }
@@ -258,7 +270,7 @@ ValidationError inspect(const char* path, DiscInfo& info) {
     if (!knownDisc) {
         return ValidationError::WrongGame;
     }
-    info.isPal = knownDisc->region == Region::Europe;
+    fill_disc_info(header, info);
     if (!knownDisc->supported) {
         return ValidationError::WrongVersion;
     }

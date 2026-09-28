@@ -87,7 +87,13 @@ set(PORT_FILES
         src/port/coroutine_stack.cpp
         src/port/crash_manifest.cpp
         src/port/crash_uploader.cpp
+        src/port/http.cpp
+        src/port/retroachievements.cpp
+        src/port/retroachievements_badges.cpp
+        src/port/retroachievements_memory.cpp
         src/port/board_coverage.cpp
+        src/port/app_update.cpp
+        src/port/app_update_manifest.cpp
         src/port/crash_report.cpp
         src/port/dolassets.cpp
         #        src/port/dvd.c
@@ -102,6 +108,9 @@ set(PORT_FILES
         src/port/mods_test.inc
         src/port/netplay_transport.cpp
         src/port/netplay_runtime.cpp
+        src/port/online/cubeshelf_friends.cpp
+        src/port/online/cubeshelf_social.cpp
+        src/port/online/invitation.cpp
         src/port/OS.c
         src/port/portmain.cpp
         src/port/rollback.cpp
@@ -112,6 +121,12 @@ set(PORT_FILES
         src/port/settings.cpp
         src/port/stubs.c
         src/port/thp_player.cpp
+        src/port/touch_controls.cpp
+        src/port/test_input.cpp
+        src/port/display_rate.cpp
+        src/port/gamepad_priority.cpp
+        src/port/perf_hint.cpp
+        src/port/quest_stereo.cpp
         src/port/version.cpp
 
         src/port/ui/achievements.cpp
@@ -124,6 +139,8 @@ set(PORT_FILES
         src/port/ui/component.hpp
         src/port/ui/controller_config.cpp
         src/port/ui/controller_config.hpp
+        src/port/ui/cubeshelf.cpp
+        src/port/ui/cubeshelf.hpp
         src/port/ui/document.cpp
         src/port/ui/document.hpp
         src/port/ui/event.cpp
@@ -137,12 +154,18 @@ set(PORT_FILES
         src/port/ui/nav_types.hpp
         src/port/ui/number_button.cpp
         src/port/ui/number_button.hpp
+        src/port/ui/online.cpp
+        src/port/ui/online.hpp
         src/port/ui/overlay.cpp
         src/port/ui/overlay.hpp
+        src/port/ui/touch_overlay.cpp
+        src/port/ui/touch_overlay.hpp
         src/port/ui/pane.cpp
         src/port/ui/pane.hpp
         src/port/ui/menu_bar.cpp
         src/port/ui/menu_bar.hpp
+        src/port/ui/precompile.cpp
+        src/port/ui/precompile.hpp
         src/port/ui/prelaunch.cpp
         src/port/ui/prelaunch.hpp
         src/port/ui/preset.cpp

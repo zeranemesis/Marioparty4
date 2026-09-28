@@ -280,13 +280,17 @@ body.mirrored version-info {
     font-size: 20dp;
 }
 
-.update[state=checking],
-.update[state=failed] {
+.update[state=checking] {
     display: block;
 }
 
-.update[state=available] {
+.update[state=available],
+.update[state=failed] {
     display: flex;
+}
+
+.update[state=failed] {
+    color: #FFC9C9;
 }
 
 #update-download {
@@ -302,10 +306,18 @@ body.mirrored version-info {
     decorator: horizontal-gradient(#00000000 #00000000);
 }
 
-.update[state=available] #update-download {
+.update[state=available] #update-download,
+.update[state=failed] #update-download {
     display: flex;
     align-items: center;
     gap: 2dp;
+}
+
+/* Reached with a controller (Down past the menu): a headset has no touch. */
+#update-download:focus-visible {
+    color: #FFFFFF;
+    background-color: #D8F99933;
+    border-radius: 4dp;
 }
 
 #update-download icon {

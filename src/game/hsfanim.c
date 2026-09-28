@@ -1,3 +1,5 @@
+#include <stdio.h>
+#include <stdlib.h>
 #include "game/hu3d.h"
 #include "dolphin/gx/GXStruct.h"
 #include "dolphin/gx/GXVert.h"

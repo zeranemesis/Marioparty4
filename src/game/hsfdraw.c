@@ -1,3 +1,5 @@
+#include <stdio.h>
+#include <stdlib.h>
 #include "game/disp.h"
 #include "game/hu3d.h"
 #include "game/hsfformat.h"
@@ -7,8 +9,10 @@
 #include "ext_math.h"
 #include <string.h>
 #ifdef TARGET_PC
+#include "game/object.h"
 #include "port/crash_report.h"
 #include "port/netplay_runtime.h"
+#include "port/quest_stereo.h"
 #include <stdbool.h>
 #include <stdlib.h>
 extern bool PartyBoard_IsSimulationTick;
@@ -170,6 +174,44 @@ void Hu3DDraw(HU3DMODEL *modelP, Mtx mtx, HuVecF *scale)
     oneceF = 1;
 }
 
+#ifdef TARGET_PC
+// These background meshes enclose the board and would cover the real room in
+// Quest passthrough. Match only assets verified in each board's HSF archive.
+static BOOL ObjStereoTableBox(HSFOBJECT *objPtr) {
+    if (!PartyBoard_StereoActive() || !PartyBoard_StereoBoardPresentation()
+        || objPtr->name == NULL) {
+        return FALSE;
+    }
+    const OMOVL scene = omCurrentOvlGet();
+    return (scene == DLL_w01Dll && strcmp(objPtr->name, "bigbox") == 0)
+        || (scene == DLL_w02Dll && strcmp(objPtr->name, "b02wall") == 0);
+}
+
+// Meta Quest: a backdrop (sky, skybox) seen from the headset, which the model
+// on the table leaves out (PartyBoard_StereoBackdrop). Same bounding sphere as
+// ObjCullCheck, for models the game itself never culls.
+static BOOL ObjStereoBackdrop(HSFOBJECT *objPtr, Mtx mtx) {
+    if (ObjStereoTableBox(objPtr)) {
+        return TRUE;
+    }
+    HuVecF *min = &objPtr->mesh.mesh.min;
+    HuVecF *max = &objPtr->mesh.mesh.max;
+    Vec *scale = &scaleBuf[MTXIdx - 1];
+    float largest = scale->x;
+    float centerX = (max->x - min->x) * 0.5f;
+    float centerY = (max->y - min->y) * 0.5f;
+    float centerZ = (max->z - min->z) * 0.5f;
+    Mtx center;
+
+    if (scale->y > largest) largest = scale->y;
+    if (scale->z > largest) largest = scale->z;
+    MTXTrans(center, centerX + min->x, centerY + min->y, centerZ + min->z);
+    MTXConcat(mtx, center, center);
+    return PartyBoard_StereoBackdrop(center[0][3], center[1][3], center[2][3],
+        largest * sqrtf(centerX * centerX + centerY * centerY + centerZ * centerZ));
+}
+#endif
+
 static void objCall(HU3DMODEL *modelP, HSFOBJECT *objPtr) {
     modelObjNum++;
     switch (objPtr->type) {
@@ -303,6 +345,11 @@ static void objMesh(HU3DMODEL *modelP, HSFOBJECT *objPtr) {
             if (modelP->attr & HU3D_ATTR_NOCULL) {
                 dispF = ObjCullCheck(modelP->hsf, objPtr, drawObj->matrix);
             }
+#ifdef TARGET_PC
+            else if (PartyBoard_StereoActive()) {
+                dispF = !ObjStereoBackdrop(objPtr, drawObj->matrix);
+            }
+#endif
             else {
                 dispF = TRUE;
             }
@@ -310,6 +357,12 @@ static void objMesh(HU3DMODEL *modelP, HSFOBJECT *objPtr) {
                 dispF = FALSE;
             }
             if (dispF && (transformP->scale.x != 0.0f || transformP->scale.y != 0.0f || transformP->scale.z != 0.0f)) {
+#ifdef TARGET_PC
+                if (PartyBoard_StereoActive()) {
+                    // Meta Quest: the scene's floor is measured from what is drawn.
+                    PartyBoard_StereoObserveBounds(drawObj->matrix, &objPtr->mesh.mesh.min, &objPtr->mesh.mesh.max);
+                }
+#endif
                 drawObj->model = modelP;
                 drawObj->object = objPtr;
                 if ((constData->attr & (HU3D_CONST_NEAR|HU3D_CONST_ALTBLEND|HU3D_CONST_XLU)) && shadowModelDrawF == FALSE) {
@@ -403,6 +456,20 @@ BOOL ObjCullCheck(HSFDATA *hsf, HSFOBJECT *objPtr, Mtx mtx) {
     MTXTrans(cullMtx, centerX + min->x, centerY + min->y, centerZ + min->z);
     MTXConcat(mtx, cullMtx, cullMtx);
     radius = scale * sqrtf(centerX * centerX + centerY * centerY + centerZ * centerZ);
+#ifdef TARGET_PC
+    if (PartyBoard_StereoActive()) {
+        if (ObjStereoTableBox(objPtr)) {
+            return 0;
+        }
+        // Cull against both headset eyes, rather than disabling culling for
+        // the entire map or using the original flat-screen camera, and leave
+        // out backdrops that would surround the player.
+        if (PartyBoard_StereoBackdrop(cullMtx[0][3], cullMtx[1][3], cullMtx[2][3], radius)) {
+            return 0;
+        }
+        return PartyBoard_StereoSphereVisible(cullMtx[0][3], cullMtx[1][3], cullMtx[2][3], radius);
+    }
+#endif
     x = cullMtx[0][3];
     y = cullMtx[1][3];
     z = -cullMtx[2][3];
@@ -1758,6 +1825,63 @@ static void FaceDrawShadow(HU3DDRAWOBJ *drawObj, HSFFACE *face) {
     drawCnt++;
 }
 
+#ifdef OPTIMIZED_TEXTURE_LOADING
+// The cached GXTexObj/GXTlutObj pair lives on the attribute, but an animated material
+// walks through several bitmap frames while reusing that one attribute -- which is why
+// LoadTexture refreshes the texture data pointer at the end. The palette was never
+// refreshed the same way, so every frame after the first was decoded through frame 0's
+// TLUT: an indexed animation kept its opening colours for its whole run. Reload the
+// palette whenever the bitmap moves to a different one.
+static void LoadTlutCached(GXTlutObj *tlutObj, bool *initialized, const u16 **loadedPal, s16 *loadedSize,
+                           const u16 *palData, GXTlutFmt fmt, s16 palSize, u32 texId)
+{
+    if (!*initialized || *loadedSize != palSize) {
+        GXInitTlutObj(tlutObj, palData, fmt, palSize);
+        *initialized = TRUE;
+    } else if (*loadedPal != palData) {
+        // Same entry count, so only the contents moved: keep the object identity and let
+        // the renderer invalidate the decoded texture through the TLUT's data version.
+        GXInitTlutObjData(tlutObj, palData);
+    }
+    *loadedPal = palData;
+    *loadedSize = palSize;
+    GXLoadTlut(tlutObj, texId);
+}
+#endif
+
+#ifdef OPTIMIZED_TEXTURE_LOADING
+/* The GX format LoadTexture below builds for an HSF bitmap format. */
+static GXTexFmt HsfBitmapTexFmt(const HSFBITMAP *bmpPtr)
+{
+    switch (bmpPtr->dataFmt) {
+        case 6: return GX_TF_RGBA8;
+        case 4: return GX_TF_RGB565;
+        case 5: return GX_TF_RGB5A3;
+        case 0: return GX_TF_I4;
+        case 1: return GX_TF_I8;
+        case 2: return GX_TF_IA4;
+        case 3: return GX_TF_IA8;
+        case 7: return GX_TF_CMPR;
+        default: return (GXTexFmt)(bmpPtr->pixSize < 8 ? GX_TF_C4 : GX_TF_C8);
+    }
+}
+
+/* Whether a cached texture object still describes this bitmap.
+ *
+ * An animated attribute steps through a list of bitmaps with one cached
+ * GXTexObj, and only the data pointer is refreshed per frame. That is enough
+ * while every frame shares one size and format, and wrong as soon as they do
+ * not: the new pixels are then decoded with the first frame's layout. Slime
+ * Time's landing effect starts on a C4 bitmap and continues on RGB5A3 ones,
+ * which came out as solid white squares. The console builds a fresh object on
+ * every call, so it never had the problem. */
+static BOOL HsfTexObjMatches(GXTexObj *texObj, const HSFBITMAP *bmpPtr)
+{
+    return GXGetTexObjWidth(texObj) == (u16)bmpPtr->sizeX && GXGetTexObjHeight(texObj) == (u16)bmpPtr->sizeY
+        && GXGetTexObjFmt(texObj) == HsfBitmapTexFmt(bmpPtr);
+}
+#endif
+
 static void LoadTexture(HU3DMODEL *modelP, HSFBITMAP *bmpPtr, HSFATTRIBUTE *attrP, s16 texId)
 #ifdef OPTIMIZED_TEXTURE_LOADING
 {
@@ -1782,6 +1906,12 @@ static void LoadTexture(HU3DMODEL *modelP, HSFBITMAP *bmpPtr, HSFATTRIBUTE *attr
     var_r22 = (attrP->wrapS == 1) ? GX_REPEAT : GX_CLAMP;
     var_r21 = (attrP->wrapT == 1) ? GX_REPEAT : GX_CLAMP;
     var_r20 = (attrP->flag & 0x80) ? GX_TRUE : GX_FALSE;
+    if (attrP->tex_initialized && !HsfTexObjMatches(&attrP->tex_obj, bmpPtr)) {
+        attrP->tex_initialized = FALSE;
+    }
+    if (attrP->tex8000_initialized && (texId & 0x8000) && !HsfTexObjMatches(&attrP->tex8000_obj, bmpPtr)) {
+        attrP->tex8000_initialized = FALSE;
+    }
     switch (bmpPtr->dataFmt) {
         case 6:
             if (!attrP->tex_initialized) {
@@ -1800,22 +1930,16 @@ static void LoadTexture(HU3DMODEL *modelP, HSFBITMAP *bmpPtr, HSFATTRIBUTE *attr
             break;
         case 9:
             fmt = bmpPtr->pixSize < 8 ? GX_TF_C4 : GX_TF_C8;
-            if (!attrP->tlut_initialized) {
-                GXInitTlutObj(tlut_obj, bmpPtr->palData, GX_TL_RGB565, bmpPtr->palSize);
-                attrP->tlut_initialized = TRUE;
-            }
-            GXLoadTlut(tlut_obj, texId);
+            LoadTlutCached(tlut_obj, &attrP->tlut_initialized, &attrP->tlut_palData, &attrP->tlut_palSize,
+                           bmpPtr->palData, GX_TL_RGB565, bmpPtr->palSize, texId);
             if (!attrP->tex_initialized) {
                 GXInitTexObjCI(tex_obj, bmpPtr->data, var_r27, var_r26, fmt, var_r22, var_r21, var_r20, texId);
             }
             break;
         case 10:
             fmt = bmpPtr->pixSize < 8 ? GX_TF_C4 : GX_TF_C8;
-            if (!attrP->tlut_initialized) {
-                GXInitTlutObj(tlut_obj, bmpPtr->palData, GX_TL_RGB5A3, bmpPtr->palSize);
-                attrP->tlut_initialized = TRUE;
-            }
-            GXLoadTlut(tlut_obj, texId);
+            LoadTlutCached(tlut_obj, &attrP->tlut_initialized, &attrP->tlut_palData, &attrP->tlut_palSize,
+                           bmpPtr->palData, GX_TL_RGB5A3, bmpPtr->palSize, texId);
             if (!attrP->tex_initialized) {
                 GXInitTexObjCI(tex_obj, bmpPtr->data, var_r27, var_r26, fmt, var_r22, var_r21, var_r20, texId);
             }
@@ -1870,22 +1994,18 @@ static void LoadTexture(HU3DMODEL *modelP, HSFBITMAP *bmpPtr, HSFATTRIBUTE *attr
             if (texId & 0x8000) {
                 tlut_obj = &attrP->tlut8000_obj;
                 tex_obj = &attrP->tex8000_obj;
-                if (!attrP->tlut8000_initialized) {
-                    GXInitTlutObj(tlut_obj, &((s16 *)bmpPtr->palData)[(bmpPtr->palSize + 0xF) & 0xFFF0], GX_TL_IA8, bmpPtr->palSize);
-                    attrP->tlut8000_initialized = TRUE;
-                }
-                GXLoadTlut(tlut_obj, texId & 0x7FFF);
+                LoadTlutCached(tlut_obj, &attrP->tlut8000_initialized, &attrP->tlut8000_palData,
+                               &attrP->tlut8000_palSize,
+                               (const u16 *)&((s16 *)bmpPtr->palData)[(bmpPtr->palSize + 0xF) & 0xFFF0], GX_TL_IA8,
+                               bmpPtr->palSize, texId & 0x7FFF);
                 if (!attrP->tex8000_initialized) {
                     GXInitTexObjCI(tex_obj, bmpPtr->data, var_r27, var_r26, fmt, var_r22, var_r21, var_r20, texId & 0x7FFF);
                     attrP->tex8000_initialized = TRUE;
                 }
             }
             else {
-                if (!attrP->tlut_initialized) {
-                    GXInitTlutObj(tlut_obj, bmpPtr->palData, GX_TL_IA8, bmpPtr->palSize);
-                    attrP->tlut_initialized = TRUE;
-                }
-                GXLoadTlut(tlut_obj, texId);
+                LoadTlutCached(tlut_obj, &attrP->tlut_initialized, &attrP->tlut_palData, &attrP->tlut_palSize,
+                               bmpPtr->palData, GX_TL_IA8, bmpPtr->palSize, texId);
                 if (!attrP->tex_initialized) {
                     GXInitTexObjCI(tex_obj, bmpPtr->data, var_r27, var_r26, fmt, var_r22, var_r21, var_r20, texId);
                     attrP->tex_initialized = TRUE;

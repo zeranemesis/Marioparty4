@@ -15,6 +15,7 @@
 #ifdef TARGET_PC
 #include <port/byteswap.h>
 #endif
+#include "port/version_runtime.h"
 
 #if VERSION_ENG
 #define SAVE_WRITE_BEGIN _SetFlag(FLAG_ID_MAKE(3, 0));
@@ -306,6 +307,32 @@ void SLSaveDataInfoSet(OSTime *time)
 
     OSTicksToCalendarTime(*time, &sp8);
 #if VERSION_ENG
+#ifdef TARGET_PC
+    // PAL discs write the date as DD/MM/YYYY in the memory card comment
+    if (VERSION_RT_PAL) {
+        saveBuf.data.comment[37] = curBoxNo + '1';
+        digit = sp8.mday / 10;
+        saveBuf.data.comment[40] = digit + '0';
+        digit = sp8.mday % 10;
+        saveBuf.data.comment[41] = digit + '0';
+        digit = (sp8.mon + 1) / 10;
+        saveBuf.data.comment[43] = digit + '0';
+        digit = (sp8.mon + 1) % 10;
+        saveBuf.data.comment[44] = digit + '0';
+        year = sp8.year;
+        digit = year / 1000;
+        saveBuf.data.comment[46] = digit + '0';
+        year -= digit * 1000;
+        digit = year / 100;
+        saveBuf.data.comment[47] = digit + '0';
+        year -= digit * 100;
+        digit = year / 10;
+        saveBuf.data.comment[48] = digit + '0';
+        year -= digit * 10;
+        saveBuf.data.comment[49] = year + '0';
+    }
+    else {
+#endif
     saveBuf.data.comment[37] = curBoxNo + '1';
     digit = (sp8.mon + 1) / 10;
     saveBuf.data.comment[40] = digit + '0';
@@ -326,6 +353,9 @@ void SLSaveDataInfoSet(OSTime *time)
     saveBuf.data.comment[48] = digit + '0';
     year -= digit * 10;
     saveBuf.data.comment[49] = year + '0';
+#ifdef TARGET_PC
+    }
+#endif
 #elif VERSION_PAL
     saveBuf.data.comment[37] = curBoxNo + '1';
     digit = sp8.mday / 10;
@@ -512,7 +542,10 @@ s32 SLSave(void)
     return 0;
 }
 
-#if VERSION_NTSC
+#ifdef TARGET_PC
+// PAL messages are taller: the window position follows the loaded disc
+#define SAVEWIN_POS (VERSION_RT_PAL ? 120 : 150)
+#elif VERSION_NTSC
 #define SAVEWIN_POS 150
 #else
 #define SAVEWIN_POS 120
@@ -870,7 +903,10 @@ s16 SLMessOut(s16 mess)
         case 2:
             HU_WIN_INSERT_MES_SIZE_GET_PTR(MAKE_MESSID_PTR(SlotNameTbl[curSlotNo]), 0);
             slot_mess = MAKE_MESSID_PTR(SlotNameTbl[curSlotNo]);
-#if VERSION_ENG
+#ifdef TARGET_PC
+            // Message numbers of the loaded disc's message file
+            save_mess = VERSION_RT_PAL ? MAKE_MESSID(16, 72) : MAKE_MESSID(16, 74);
+#elif VERSION_ENG
             save_mess = MAKE_MESSID(16, 74);
 #elif VERSION_PAL
             save_mess = MAKE_MESSID(16, 72);
@@ -880,7 +916,9 @@ s16 SLMessOut(s16 mess)
             break;
 
         case 3:
-#if VERSION_ENG
+#ifdef TARGET_PC
+            save_mess = VERSION_RT_PAL ? MAKE_MESSID(16, 72) : MAKE_MESSID(16, 74);
+#elif VERSION_ENG
             save_mess = MAKE_MESSID(16, 74);
 #elif VERSION_PAL
             save_mess = MAKE_MESSID(16, 72);
@@ -933,7 +971,9 @@ s16 SLMessOut(s16 mess)
         case 11:
             HU_WIN_INSERT_MES_SIZE_GET_PTR(MAKE_MESSID_PTR(SlotNameTbl[curSlotNo]), 0);
             slot_mess = MAKE_MESSID_PTR(SlotNameTbl[curSlotNo]);
-#if VERSION_ENG
+#ifdef TARGET_PC
+            save_mess = VERSION_RT_ENG ? MAKE_MESSID(16, 72) : MAKE_MESSID(16, 76);
+#elif VERSION_ENG
             save_mess = MAKE_MESSID(16, 72);
 #else
             save_mess = MAKE_MESSID(16, 76);

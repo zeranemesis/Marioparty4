@@ -21,6 +21,7 @@
 #include "math.h"
 
 #include "REL/instDll.h"
+#include "port/version_runtime.h"
 
 static s16 instMode = 1;
 
@@ -691,7 +692,10 @@ static void InstWinMain(void)
             HuWinMesPalSet(winId, 7, 0, 0, 192);
             HuWinPosSet(win2Id, 142.0f, 320.0f);
             for (i = 0; i <= 10; i++) {
-                #if VERSION_NTSC
+                #ifdef TARGET_PC
+                // Layout of the loaded disc: PAL windows are taller
+                HuWinPosSet(win2Id, 30.0 * sind(i * 9.0f) + 142.0, (VERSION_RT_NTSC ? 160.0 : 180.0) * (1.0 - cosd(i * 9.0f)) + 320.0);
+                #elif VERSION_NTSC
                 HuWinPosSet(win2Id, 30.0 * sind(i * 9.0f) + 142.0, 160.0 * (1.0 - cosd(i * 9.0f)) + 320.0);
                 #else
                 HuWinPosSet(win2Id, 30.0 * sind(i * 9.0f) + 142.0, 180.0 * (1.0 - cosd(i * 9.0f)) + 320.0);
@@ -717,7 +721,10 @@ static void InstWinMain(void)
 
 static float instNamePosTbl[] = { 420, 70, 488, 186, 476, 242, 400, 292 };
 
-#if VERSION_NTSC
+#ifdef TARGET_PC
+// PAL rules windows are wider: the layout follows the loaded disc
+#define WIN_ANIM_OFS (VERSION_RT_NTSC ? 201 : 219)
+#elif VERSION_NTSC
 #define WIN_ANIM_OFS 201
 #else
 #define WIN_ANIM_OFS 219
@@ -775,7 +782,23 @@ static void InstNameMain(void)
 
         mes++;
     }
-    #if VERSION_NTSC
+    #ifdef TARGET_PC
+    if (mesSpaceNum == 1) {
+        nameW = spC[0];
+        nameAnim = HuSprAnimReadFile(DATA_MAKE_NUM(DATADIR_INST, 18));
+        nameX = ((576.0f - nameW) - 24.0f) - 16.0f + (VERSION_RT_NTSC ? 227 : 235);
+        nameY = 78;
+        nameScaleY = 0.5f;
+    }
+    else {
+        nameW = (spC[0] > spC[1]) ? spC[0] : spC[1];
+        nameAnim = HuSprAnimReadFile(DATA_MAKE_NUM(DATADIR_INST, 15));
+
+        nameX = ((576.0f - nameW) - 24.0f) - 16.0f + (VERSION_RT_NTSC ? 172.0f : 235);
+        nameY = 84;
+        nameScaleY = 1.0f;
+    }
+    #elif VERSION_NTSC
     if (mesSpaceNum == 1) {
         nameW = spC[0];
         nameAnim = HuSprAnimReadFile(DATA_MAKE_NUM(DATADIR_INST, 18));
@@ -855,7 +878,14 @@ static void InstNameMain(void)
     for (i = 0; i < 36; i++) {
         t = i;
         if (t <= 20.0f) {
-            #if VERSION_NTSC
+            #ifdef TARGET_PC
+            posX = (VERSION_RT_NTSC ? 300.0 : 500.0) * cosd(4.5f * t) + nameX;
+            HuSprGrpPosSet(nameGrpId, posX, nameY);
+            posX = (VERSION_RT_NTSC ? 300.0 : 500.0) * cosd(4.5f * t) + (576.0f - (nameW / 2) - 24.0f);
+            for (j = 0; j < mesSpaceNum; j++) {
+                HuSprGrpPosSet(work.spr_grp[j], posX, (j * 28) + 70);
+            }
+            #elif VERSION_NTSC
             posX = 300.0 * cosd(4.5f * t) + nameX;
             HuSprGrpPosSet(nameGrpId, posX, nameY);
             posX = 300.0 * cosd(4.5f * t) + (576.0f - (nameW / 2) - 24.0f);
@@ -877,7 +907,9 @@ static void InstNameMain(void)
                 posX = 300.0 * cosd(4.5f * t) + instNamePosTbl[2];
                 HuSprGrpPosSet(startGrpId, posX, 186.0f);
                 posX = 300.0 * cosd(4.5f * t) + (instNamePosTbl[2] - 88.0f);
-                #if VERSION_NTSC
+                #ifdef TARGET_PC
+                HuWinPosSet(sp10[0], (VERSION_RT_NTSC ? 16.0f : 8.0f) + posX, 168.0f);
+                #elif VERSION_NTSC
                 HuWinPosSet(sp10[0], 16.0f + posX, 168.0f);
                 #else
                 HuWinPosSet(sp10[0], 8.0f + posX, 168.0f);
@@ -890,7 +922,9 @@ static void InstNameMain(void)
                 posX = 300.0 * cosd(4.5f * t) + instNamePosTbl[4];
                 HuSprGrpPosSet(practiceGrpId, posX, 242.0f);
                 posX = 300.0 * cosd(4.5f * t) + (instNamePosTbl[4] - 100.0f);
-                #if VERSION_NTSC
+                #ifdef TARGET_PC
+                HuWinPosSet(sp10[1], (VERSION_RT_NTSC ? 16.0f : 8.0f) + posX, 224.0f);
+                #elif VERSION_NTSC
                 HuWinPosSet(sp10[1], 16.0f + posX, 224.0f);
                 #else
                 HuWinPosSet(sp10[1], 8.0f + posX, 224.0f);
@@ -923,7 +957,9 @@ static void InstNameMain(void)
                 HuWinMesSet(sp10[2], MAKE_MESSID(0x24, 0x02) + instMesOfs + instPage);
             }
             for (i = 0; i <= 10; i++) {
-                #if VERSION_NTSC
+                #ifdef TARGET_PC
+                HuWinPosSet(rulesWinId, 30.0 * sind(i * 9.0f) + posX, (VERSION_RT_NTSC ? 200.0 : 220.0) * (1.0 - cosd(i * 9.0f)) + 274.0);
+                #elif VERSION_NTSC
                 HuWinPosSet(rulesWinId, 30.0 * sind(i * 9.0f) + posX, 200.0 * (1.0 - cosd(i * 9.0f)) + 274.0);
                 #else
                 HuWinPosSet(rulesWinId, 30.0 * sind(i * 9.0f) + posX, 220.0 * (1.0 - cosd(i * 9.0f)) + 274.0);
@@ -949,7 +985,9 @@ static void InstNameMain(void)
         HuSprGrpPosSet(practiceGrpId, posX, 242.0f);
         posX = (instNamePosTbl[4] - 100.0f) + (300.0f * t);
         HuWinPosSet(sp10[1], 16.0f + posX, 224);
-        #if VERSION_NTSC
+        #ifdef TARGET_PC
+        posX = (instNamePosTbl[6] - (VERSION_RT_NTSC ? 184.0f : 235.0f)) + (400.0f * t);
+        #elif VERSION_NTSC
         posX = (instNamePosTbl[6] - 184.0f) + (400.0f * t);
         #else
         posX = (instNamePosTbl[6] - 235.0f) + (400.0f * t);

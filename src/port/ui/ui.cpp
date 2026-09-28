@@ -8,17 +8,26 @@
 #include <aurora/rmlui.hpp>
 #include <fmt/format.h>
 
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <ranges>
 
 #include "RmlUi/Debugger/Debugger.h"
 #include "aurora/lib/window.hpp"
+#include "cubeshelf.hpp"
 #include "input.hpp"
 #include "prelaunch.hpp"
+#include "touch_overlay.hpp"
 #include "window.hpp"
 
 #include <port/settings.h>
+#include <port/test_input.h>
+#include <port/gamepad_priority.hpp>
 
 namespace partyboard::ui {
 namespace {
@@ -61,6 +70,8 @@ bool initialize() noexcept
     // Rml::Debugger::Initialise(aurora::rmlui::get_context());
     // Rml::Debugger::SetVisible(true);
 
+    // Gamepads connected before the game started never sent an event the UI saw.
+    ::partyboard::input::apply_gamepad_priority();
     sInitialized = true;
     return true;
 }
@@ -134,6 +145,14 @@ void handle_event(const SDL_Event &event) noexcept
         return;
     }
 
+    // In game, a thumb on the screen controller is the controller's alone.
+    if (TouchOverlay::handle_event(event)) {
+        return;
+    }
+
+    if (event.type == SDL_EVENT_GAMEPAD_ADDED || event.type == SDL_EVENT_GAMEPAD_REMOVED) {
+        ::partyboard::input::apply_gamepad_priority();
+    }
     if (event.type == SDL_EVENT_GAMEPAD_ADDED) {
         auto *gamepad = SDL_GetGamepadFromID(event.gdevice.which);
         if (SDL_GamepadConnected(gamepad)) {
@@ -226,13 +245,43 @@ Document *top_document() noexcept
     return nullptr;
 }
 
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
+// A phone reports about 2.5 to 3 pixels per dp, which leaves the UI only 360
+// to 440 dp of height: every menu here is laid out for a PC window (720 to
+// 960 dp tall), and the prelaunch list and the settings panes overlap. Keep
+// at least 720 dp of height, as a 1280x720 window has. The screen controls are
+// placed in pixels (touch_overlay.cpp), so they keep their physical size.
+static void fit_ui_to_small_screens() noexcept
+{
+    constexpr float kMinimumHeightDp = 720.0f;
+    auto *context = aurora::rmlui::get_context();
+    if (context == nullptr) {
+        return;
+    }
+    const float density = aurora::window::get_window_size().scale;
+    const float height = static_cast<float>(context->GetDimensions().y);
+    if (density <= 0.0f || height <= 0.0f) {
+        return;
+    }
+    const float scale = std::min(density, height / kMinimumHeightDp);
+    if (std::abs(aurora::rmlui::get_ui_scale() - scale) > 0.001f) {
+        aurora::rmlui::set_ui_scale(scale);
+    }
+}
+#endif
+
 void update() noexcept
 {
     if (!aurora::rmlui::is_initialized()) {
         return;
     }
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
+    fit_ui_to_small_screens();
+#endif
 
     input::update_input();
+    // A friend's invitation becomes a toast whichever screen the player is on, menu open or not.
+    cubeshelf::tick();
     const auto update_documents = [](auto &documents) {
         const std::size_t count = documents.size();
         for (std::size_t i = 0; i < count && i < documents.size(); ++i) {
@@ -266,6 +315,8 @@ void update() noexcept
     }
 
     input::sync_input_block();
+    // After the screen controller, so a test script's presses win (src/port/test_input.cpp).
+    PartyBoard_TestInputFrame();
 }
 
 std::filesystem::path resource_path(const std::filesystem::path &filename) noexcept

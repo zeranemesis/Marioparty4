@@ -1,0 +1,18 @@
+--- a/lib/dolphin/pad/pad.cpp
++++ b/lib/dolphin/pad/pad.cpp
+@@ -434,7 +434,15 @@
+   g_keyboardBindingsLoaded = true;
+   // Keep the keyboard available as a local test controller even when a
+   // stale controller_ports.dat marks every port as unassigned.
++#if defined(SDL_PLATFORM_ANDROID) || defined(SDL_PLATFORM_IOS)
++  // A phone has one local player, on port 1 (the screen controller or a
++  // paired gamepad). Marking every port as having a keyboard made the game see
++  // four controllers, so party mode and the minigame modes started with four
++  // human players and nobody to play three of them.
++  g_keyboardBindings[0].m_mappingsSet = true;
++#else
+   std::ranges::for_each(g_keyboardBindings, [](auto& state) { state.m_mappingsSet = true; });
++#endif
+   SDL_AddEventWatch(keyboard_event_watch, nullptr);
+ 
+   return true;

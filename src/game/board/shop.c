@@ -27,6 +27,7 @@
 
 #include "game/hsfex.h"
 #include "port/board_coverage.h"
+#include "port/version_runtime.h"
 
 typedef struct {
     struct {
@@ -983,7 +984,15 @@ static void CreateShopItemChoice(s32 arg0, s32 arg1)
     omObjData *temp_r30;
     ItemChoiceWork *var_r31;
     s16 spC;
-#if VERSION_PAL
+#ifdef TARGET_PC
+    s16 i;
+    // The cursor layout follows the loaded disc: on PAL it follows the window, placed after the text width
+    if (VERSION_RT_PAL) {
+        for (i = 0; i < 6; i++) {
+            cursorPosTbl[i][0] = 190;
+        }
+    }
+#elif VERSION_PAL
     s16 i;
     for (i = 0; i < 6; i++) {
         cursorPosTbl[i][0] = 190;
@@ -1000,7 +1009,33 @@ static void CreateShopItemChoice(s32 arg0, s32 arg1)
     var_r31->unk02 = 0;
     var_r31->unk03 = arg1;
     var_r31->unk06 = HuSprGrpCreate(1);
-#if VERSION_PAL
+#ifdef TARGET_PC
+    if (VERSION_RT_PAL) {
+        if (GWLanguageGet() != 0) {
+            s16 winId = BoardWinIDGet();
+            if (winId != -1) {
+                WindowData *winP = &winData[winId];
+                for (i = 0; i < 6; i++) {
+                    cursorPosTbl[i][0] = winP->pos_x + 96;
+                }
+            }
+            else {
+                for (i = 0; i < 6; i++) {
+                    cursorPosTbl[i][0] = 166;
+                }
+            }
+        }
+        temp_r30->trans.x = cursorPosTbl[0][0];
+        temp_r30->trans.y = cursorPosTbl[0][1];
+    }
+    else {
+        temp_r30->trans.x = cursorPosTbl[0][0];
+        temp_r30->trans.y = cursorPosTbl[0][1];
+        if (GWLanguageGet() != 0) {
+            temp_r30->trans.x -= 24.0f;
+        }
+    }
+#elif VERSION_PAL
     if (GWLanguageGet() != 0) {
         s16 winId = BoardWinIDGet();
         if (winId != -1) {
@@ -1058,7 +1093,11 @@ static void MoveShopItemChoice(omObjData *arg0, ItemChoiceWork *arg1)
     temp_r28 = arg1->unk02;
     arg0->trans.x = cursorPosTbl[arg1->unk02][0];
     arg0->trans.y = cursorPosTbl[arg1->unk02][1];
-#if VERSION_NTSC
+#ifdef TARGET_PC
+    if (VERSION_RT_NTSC && GWLanguageGet() != 0) {
+        arg0->trans.x -= 24.0f;
+    }
+#elif VERSION_NTSC
     if (GWLanguageGet() != 0) {
         arg0->trans.x -= 24.0f;
     }

@@ -299,7 +299,17 @@ void HuSprTexLoad(ANIMDATA *anim, short bmp, short slot, GXTexWrapMode wrap_s, G
             break;
 
         default:
-            break;
+            return;
+    }
+    // The wrap mode above is only consulted when the object is first built, but the
+    // cache is keyed on (bitmap, slot) and callers do change the mode on a bitmap they
+    // share: hsfanim.c takes it from the model's own attributes, and m415Dll/map.c picks
+    // REPEAT or CLAMP per object. Without this, whichever call arrived first decided the
+    // mode for every later one.
+    if (tex_data->wrap_s != wrap_s || tex_data->wrap_t != wrap_t) {
+        GXInitTexObjWrapMode(tex_obj, wrap_s, wrap_t);
+        tex_data->wrap_s = wrap_s;
+        tex_data->wrap_t = wrap_t;
     }
     GXInitTexObjLOD(tex_obj, filter, filter, 0, 0, 0, GX_FALSE, GX_FALSE, GX_ANISO_1);
     GXLoadTexObj(tex_obj, slot);

@@ -924,6 +924,10 @@ static void AttributeLoad(void)
             memset(&new_attr->tex8000_obj, 0, sizeof(new_attr->tex8000_obj));
             memset(&new_attr->tlut_obj, 0, sizeof(new_attr->tlut_obj));
             memset(&new_attr->tlut8000_obj, 0, sizeof(new_attr->tlut8000_obj));
+            new_attr->tlut_palData = NULL;
+            new_attr->tlut8000_palData = NULL;
+            new_attr->tlut_palSize = 0;
+            new_attr->tlut8000_palSize = 0;
 #endif
         }
     }
@@ -2673,6 +2677,10 @@ void KillHSF(HSFDATA *data)
         attr->tex8000_initialized = FALSE;
         attr->tlut_initialized = FALSE;
         attr->tlut8000_initialized = FALSE;
+        attr->tlut_palData = NULL;
+        attr->tlut8000_palData = NULL;
+        attr->tlut_palSize = 0;
+        attr->tlut8000_palSize = 0;
     }
 #endif
 }

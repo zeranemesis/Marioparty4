@@ -54,12 +54,21 @@ public:
         std::function<Rml::String()> getValue;
         std::function<void(Rml::String)> setValue;
         int maxLength = -1;
+        // "password" masks the text while it is typed.
+        Rml::String type = "text";
+        // Shows the value as asterisks when not editing (for a password).
+        bool secret = false;
     };
 
     StringButton(Rml::Element *parent, Props props);
 
 protected:
     Rml::String format_value() override
+    {
+        Rml::String value = mGetValue();
+        return mSecret ? Rml::String(value.size(), '*') : value;
+    }
+    Rml::String input_value() override
     {
         return mGetValue();
     }
@@ -73,6 +82,7 @@ protected:
 private:
     std::function<Rml::String()> mGetValue;
     std::function<void(Rml::String)> mSetValue;
+    bool mSecret = false;
 };
 
 } // namespace partyboard::ui

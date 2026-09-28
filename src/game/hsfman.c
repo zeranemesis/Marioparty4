@@ -11,6 +11,9 @@
 #include "game/disp.h"
 #include "port/rollback_animation.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+
 #include "dolphin/gx/GXVert.h"
 
 #include "ext_math.h"
@@ -18,6 +21,7 @@
 #ifdef TARGET_PC
 #include <assert.h>
 #include "port/frame_interpolation.h"
+#include "port/quest_stereo.h"
 #include "port/widescreen.h"
 extern bool PartyBoard_IsSimulationTick;
 #define PARTYBOARD_ADVANCE_FRAME PartyBoard_IsSimulationTick
@@ -36,6 +40,13 @@ SHARED_SYM HU3DCAMERA Hu3DCamera[HU3D_CAM_MAX];
 static s16 layerNum[8];
 static void (*layerHook[8])(s16);
 ANIMDATA *reflectAnim[5];
+#ifdef BYTESWAPPING
+/* The reflection map installed at start-up. Hu3DReflectMapSet() may replace
+ * reflectAnim[0] for one scene; keeping the original lets Hu3DAllKill() put it
+ * back without re-reading refMapData0, which on this build would parse a second
+ * ANIMDATA out of the same source and leak the first. */
+static ANIMDATA *reflectAnimBase0;
+#endif
 SHARED_SYM ANIMDATA *hiliteAnim[4];
 HU3DPROJECTION Hu3DProjection[4];
 SHARED_SYM HU3DSHADOW Hu3DShadowData;
@@ -144,6 +155,9 @@ void Hu3DInit(void) {
         hiliteAnim[3] = HuSprAnimRead(dvd_data);
     }
 #endif
+#ifdef BYTESWAPPING
+    reflectAnimBase0 = reflectAnim[0];
+#endif
     Hu3DFogClear();
     Hu3DAnimInit();
     Hu3DParManInit();
@@ -235,6 +249,10 @@ void Hu3DExec(void) {
                 HuSprDispInit();
                 HuSprExec(0x7F);
             }
+#ifdef TARGET_PC
+            // Meta Quest: this camera's 3D layers are also drawn for the headset's eyes.
+            PartyBoard_StereoBeginCamera(Hu3DCameraNo);
+#endif
             if (FogData.fogType != GX_FOG_NONE) {
 #ifdef TARGET_PC
                 renderCamera = *camera;
@@ -341,6 +359,9 @@ void Hu3DExec(void) {
                     Hu3DDrawPost();
                 }
             }
+#ifdef TARGET_PC
+            PartyBoard_StereoEndCamera();
+#endif
         }
     }
     HuSprDispInit();
@@ -383,6 +404,15 @@ void Hu3DAllKill(void) {
 #else
     reflectAnim[0] = HuSprAnimRead(refMapData0);
 #endif
+#else
+    /* Same intent as the branch above -- a scene must not inherit the previous
+     * one's reflection map -- reached by restoring the start-up map instead of
+     * parsing refMapData0 again, which would build a second ANIMDATA from the
+     * same source and leak the first. */
+    if (reflectAnim[0] != reflectAnimBase0) {
+        HuSprAnimKill(reflectAnim[0]);
+        reflectAnim[0] = reflectAnimBase0;
+    }
 #endif
     if(Hu3DShadowData.buf) {
         HuMemDirectFree(Hu3DShadowData.buf);
@@ -999,8 +1029,27 @@ void Hu3DModelShadowReset(s16 arg0) {
 
     temp_r31 = &Hu3DData[(s16) arg0];
     temp_r30 = temp_r31->hsf;
+#ifdef TARGET_PC
+    /* Hu3DModelShadowSet only increments when the flag was clear, and the kill
+     * path only decrements when it was set. This one decremented every time it
+     * was called, so a caller that resets the same model on consecutive frames
+     * drove the counter down without end. m415Dll/main.c:438 does exactly that:
+     * fn_1_1960 case 2 resets two models, and the case runs once per frame.
+     *
+     * Measured with a probe: the count went 10, 8, 6, 4, 2, 0, -2, -4 ... at two
+     * per frame, and Hu3DExec gates Hu3DShadowExec on Hu3DShadowCamBit != 0, so
+     * the whole scene loses its shadows the moment it passes zero. With the guard
+     * the same run holds at 8 and the shadow pass keeps running.
+     *
+     * The flag has to be tested before it is cleared. */
+    if ((temp_r31->attr & HU3D_ATTR_SHADOW) != 0) {
+        Hu3DShadowCamBit -= 1;
+    }
+    temp_r31->attr &= ~HU3D_ATTR_SHADOW;
+#else
     temp_r31->attr &= ~HU3D_ATTR_SHADOW;
     Hu3DShadowCamBit -= 1;
+#endif
     var_r27 = temp_r30->object;
     for (var_r28 = 0; var_r28 < temp_r30->objectNum; var_r28++, var_r27++) {
         constDataFlagReset(var_r27, 0x400);
@@ -1384,6 +1433,9 @@ void Hu3DCameraSet(s32 arg0, Mtx arg1) {
     }
     GXSetScissor(temp_r31->scissorX, temp_r31->scissorY, temp_r31->scissorW, temp_r31->scissorH);
     C_MTXLookAt(arg1, &temp_r31->pos, &temp_r31->up, &temp_r31->target);
+#ifdef TARGET_PC
+    PartyBoard_StereoCameraView(arg0, arg1);
+#endif
 }
 
 BOOL Hu3DModelCameraInfoSet(s16 arg0, u16 arg1) {
@@ -1993,8 +2045,20 @@ void Hu3DReflectMapSet(ANIMDATA* arg0) {
     reflectAnim[0] = HuSprAnimRead(arg0);
 #endif
 #else
-    assert(0 == 1);
-    OSReport("PC TODO: Hu3DReflectMapSet ran which tries to reallocate an anim\n");
+    /* HuSprAnimRead() allocates a fresh ANIMDATA here and leaves the source
+     * untouched, so installing a map is safe; what the old code could not do
+     * was release the previous one, because freeing the ANIMDATA alone leaks
+     * the bank/pat/bmp arrays allocated beside it. HuSprAnimKill() frees all
+     * of them and honours useNum, so it is the right destructor. The start-up
+     * map is never killed: Hu3DAllKill() restores it. */
+    {
+        ANIMDATA *prev = reflectAnim[0];
+        ANIMDATA *next = HuSprAnimRead(arg0);
+        if (prev != next && prev != reflectAnimBase0) {
+            HuSprAnimKill(prev);
+        }
+        reflectAnim[0] = next;
+    }
 #endif
     reflectMapNo = 0;
 }

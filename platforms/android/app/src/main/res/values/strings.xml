@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Party Board</string>
+    <string name="online_lobby">Party Board online</string>
+    <string name="online_join">Join the Party Board lobby</string>
 </resources>

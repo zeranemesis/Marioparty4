@@ -430,8 +430,22 @@ void fn_1_1960(omObjData *object)
             GXDrawDone();
             temp_r3 = fn_1_9734(object->model[2]);
             temp_r29 = Hu3DShadowData.size * Hu3DShadowData.size;
+#ifdef TARGET_PC
+            // Same fix as fn_1_66AC's PC branch further down this file: Aurora's
+            // GXCopyTex never writes real pixels into Hu3DShadowData.buf, it only
+            // uses that pointer as a lookup key into its own GPU-resident copy
+            // (see GXFrameBuffer.cpp's copyTextureCache, keyed by the dest
+            // pointer). A memcpy from it here read whatever unrelated bytes sat
+            // in that buffer and stomped the correct alias fn_1_66AC had set up
+            // at startup -- which is exactly why the shadow disappeared the
+            // first time this branch ran. Sharing the pointer instead of
+            // copying through it keeps object->model[2] resolving to the same
+            // GPU texture GXCopyTex actually rendered.
+            (*temp_r3)->bmp->data = Hu3DShadowData.buf;
+#else
             memcpy((*temp_r3)->bmp->data, OSCachedToUncached(Hu3DShadowData.buf), temp_r29);
             DCStoreRangeNoSync((*temp_r3)->bmp->data, temp_r29);
+#endif
             break;
         case 2:
             Hu3DModelShadowMapObjSet(object->model[0], "kyanbasu");

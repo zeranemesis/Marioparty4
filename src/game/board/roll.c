@@ -186,7 +186,8 @@ static void RollWinCreate(s32 playerNo)
             var_r29 = MAKE_MESSID(0x30, 0x25);
         }
         HuWinMesMaxSizeGet(1, sp8, var_r29);
-#if VERSION_PAL
+#if VERSION_PAL || defined(TARGET_PC)
+        // PC: the PAL layout handles every language and gives the NTSC result for 0 and 1
         posY = HU_DISP_HEIGHT - 176;
         switch (GWGameStat.language) {
             case 0:

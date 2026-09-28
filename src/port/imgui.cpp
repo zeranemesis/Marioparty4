@@ -1,4 +1,5 @@
 #include "port/imgui.h"
+#include "port/display_rate.hpp"
 #include "port/frame_interpolation.h"
 #include "port/settings.h"
 #include "port/netplay_runtime.h"
@@ -192,7 +193,18 @@ class Limiter
                 m_overheadTimeIdx = (m_overheadTimeIdx + 1) % m_overheadTimes.size();
             }
         }
-        Reset();
+        // Frames are due on a fixed schedule, one period after the previous
+        // deadline, not one period after this wake-up. Restarting from "now"
+        // stacked the sleep on top of the V-Sync wait: 60 FPS on a 144 Hz screen
+        // came out as 48 (every frame rounded up to three refreshes), and since
+        // the game advances one step per frame at 60, it ran 20% slow. Only a
+        // real stall (more than a period behind) restarts the schedule.
+        m_oldTime += targetFrameTime;
+        const auto now = delta_clock::now();
+        if (now - m_oldTime > targetFrameTime)
+        {
+            m_oldTime = now;
+        }
     }
 
     duration_t SleepTime(duration_t targetFrameTime)
@@ -300,8 +312,15 @@ namespace {
 
 int target_frame_rate()
 {
+    const int headsetRate = partyboard::display::headset_frame_rate();
+    static int lastHeadsetRate = 0;
+    if (headsetRate != lastHeadsetRate) {
+        SDL_Log("Quest render target: %d FPS (simulation 60 Hz, netplay %s)",
+            headsetRate, PartyBoard_NetplayEnabled() ? "60 FPS" : "display rate");
+        lastHeadsetRate = headsetRate;
+    }
     return PartyBoard_TargetFrameRateFor(PartyBoard_NetplayEnabled(),
-        partyboard::getSettings().video.targetFrameRate.getValue());
+        headsetRate > 0 ? headsetRate : partyboard::getSettings().video.targetFrameRate.getValue());
 }
 }
 

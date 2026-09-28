@@ -696,6 +696,14 @@ void release_input_block() noexcept
     sPadInputBlocked = false;
 }
 
+void open_menu() noexcept
+{
+    if (auto *context = aurora::rmlui::get_context()) {
+        dispatch_menu_key(*context);
+        sync_input_block();
+    }
+}
+
 void reset_input_state() noexcept
 {
     clear_gamepad_repeats();
@@ -715,6 +723,19 @@ void handle_event(const SDL_Event &event) noexcept
 
     auto *context = aurora::rmlui::get_context();
     if (context == nullptr) {
+        return;
+    }
+
+    // The Android back button (and back gesture) plays the part of F1 and B:
+    // in game it opens the Party Board menu, inside a menu it goes back.
+    if (event.type == SDL_EVENT_KEY_DOWN && event.key.scancode == SDL_SCANCODE_AC_BACK) {
+        if (!event.key.repeat) {
+            const auto key = any_document_visible() ? Rml::Input::KI_ESCAPE : Rml::Input::KI_F1;
+            context->ProcessMouseLeave();
+            context->ProcessKeyDown(key, 0);
+            context->ProcessKeyUp(key, 0);
+            sync_input_block();
+        }
         return;
     }
 

@@ -5,6 +5,15 @@
 #endif
 #include <windows.h>
 #endif
+#ifdef __ANDROID__
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <cstring>
+#endif
 
 #include "imgui/ImGuiEngine.hpp"
 #include "iso_validate.hpp"
@@ -13,25 +22,34 @@
 #include "partyboard_version.h"
 #include "ui/menu_bar.hpp"
 #include "ui/overlay.hpp"
+#include "ui/touch_overlay.hpp"
+#include "ui/precompile.hpp"
 #include "ui/prelaunch.hpp"
 #include "ui/preset.hpp"
 
+#include <SDL3/SDL_events.h>
 #include <SDL3/SDL_filesystem.h>
+#include <SDL3/SDL_log.h>
 #include <aurora/aurora.h>
 #include <aurora/event.h>
 #include <aurora/gfx.h>
 #include <dolphin/gx/GXAurora.h>
+
+#include <chrono>
 #include <dolphin/os.h>
 #include <dolphin/pad.h>
 #include <dolphin/vi.h>
 #include <game/disp.h>
+#include <musyx/musyx.h>
 #include <port/config.hpp>
+#include <port/display_rate.hpp>
 #include <port/dolassets.h>
 #include <port/main.h>
 #include <port/mods.h>
 #include <port/settings.h>
 #include <port/netplay_runtime.h>
 #include <port/port_version.h>
+#include <port/retroachievements.h>
 
 #include <aurora/dvd.h>
 #include <aurora/lib/logging.hpp>
@@ -40,6 +58,7 @@
 #include <stdlib.h>
 
 extern "C" int game_main();
+extern "C" int PartyBoard_TargetFrameRateFor(bool netplayEnabled, int configured);
 
 using namespace std::string_literals;
 using namespace std::string_view_literals;
@@ -127,7 +146,32 @@ void aurora_log_callback(AuroraLogLevel level, const char* module, const char *m
             out = stderr;
             break;
     }
+#ifdef __ANDROID__
+    // stdout and stderr lead nowhere on Android; SDL's log is what reaches logcat.
+    (void)out;
+    (void)levelStr;
+    SDL_LogPriority priority = SDL_LOG_PRIORITY_INFO;
+    switch (level) {
+        case LOG_DEBUG:
+            priority = SDL_LOG_PRIORITY_DEBUG;
+            break;
+        case LOG_INFO:
+            priority = SDL_LOG_PRIORITY_INFO;
+            break;
+        case LOG_WARNING:
+            priority = SDL_LOG_PRIORITY_WARN;
+            break;
+        case LOG_ERROR:
+            priority = SDL_LOG_PRIORITY_ERROR;
+            break;
+        case LOG_FATAL:
+            priority = SDL_LOG_PRIORITY_CRITICAL;
+            break;
+    }
+    SDL_LogMessage(SDL_LOG_CATEGORY_APPLICATION, priority, "[%s] %s", module, message);
+#else
     fprintf(out, "[%s | %s] %s\n", levelStr, module, message);
+#endif
     if (level == LOG_FATAL) {
         fflush(out);
         abort();
@@ -313,15 +357,28 @@ static std::filesystem::path calculate_config_path() {
 #endif
 #endif
 
-    const auto result = SDL_GetPrefPath("MarioPartyRD", "Party Board");
+    // On Android this is the app's internal files directory (Context.getFilesDir()):
+    // private, kept across updates, removed only on uninstall or "Clear storage".
+    // Config, memory cards, achievements and the pipeline cache all live there.
+    char* result = SDL_GetPrefPath("MarioPartyRD", "Party Board");
     if (!result) {
         PartyBoardMainLog.error("Unable to get PrefPath: {}", SDL_GetError());
+        return {};
     }
 
-    return reinterpret_cast<const char8_t*>(result);
+    std::filesystem::path configPath = reinterpret_cast<const char8_t*>(result);
+    SDL_free(result);
+    return configPath;
 }
 
 static void EnsureInitialPipelineCache(const std::filesystem::path& configDir) {
+#ifdef __ANDROID__
+    // The seed is an APK asset, not a file next to the binary (SDL_GetBasePath()
+    // is "./" here). Aurora merges it itself through SDL_IOFromFile, which reads
+    // assets, so there is nothing to copy.
+    (void)configDir;
+    return;
+#endif
     if (configDir.empty()) {
         return;
     }
@@ -429,9 +486,100 @@ static bool online_wait_for_start(bool pumpEvents) {
     if (go) CloseHandle(go);
     if (cancel) CloseHandle(cancel);
     return started;
+#elif defined(__ANDROID__)
+    // The lobby runs in the app's ":online" process (platforms/android,
+    // online/GameLink.java) and hands over "port:secret". READY is the hello
+    // below; GO is one 'G' byte back. The socket is never closed: the lobby
+    // learns this game has ended, however it ended, from the end of stream.
+    static int link = -1;
+    const char *disc = std::getenv("PARTYBOARD_ONLINE_DISC");
+    const char *barrier = std::getenv("PARTYBOARD_ONLINE_BARRIER");
+    if (!PartyBoard_NetplayEnabled() || !disc || !*disc) return true;
+    if (!barrier || !*barrier) return false;
+    const char *colon = std::strchr(barrier, ':');
+    if (!colon || std::strlen(colon + 1) != 32) return false;
+    const long port = std::strtol(barrier, nullptr, 10);
+    if (port <= 0 || port > 65535) return false;
+    if (link < 0) {
+        const int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (fd < 0) return false;
+        sockaddr_in address {};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(static_cast<uint16_t>(port));
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (connect(fd, reinterpret_cast<sockaddr *>(&address), sizeof(address)) != 0) {
+            close(fd);
+            PartyBoardMainLog.error("Online lobby unreachable, leaving");
+            return false;
+        }
+        std::string hello = "PBGAME1\n";
+        hello.append(colon + 1, 32);
+        hello.push_back('R');
+        if (send(fd, hello.data(), hello.size(), MSG_NOSIGNAL) != static_cast<ssize_t>(hello.size())) {
+            close(fd);
+            return false;
+        }
+        link = fd;
+    }
+    bool started = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(2);
+    while (std::chrono::steady_clock::now() < deadline && PartyBoard_IsRunning) {
+        pollfd wait { link, POLLIN, 0 };
+        const int ready = poll(&wait, 1, 10);
+        if (ready < 0) break;
+        if (ready > 0) {
+            char answer = 0;
+            started = recv(link, &answer, 1, 0) == 1 && answer == 'G';
+            break;
+        }
+        if (pumpEvents) {
+            const AuroraEvent *event = aurora_update();
+            while (event && event->type != AURORA_NONE) {
+                if (event->type == AURORA_EXIT) PartyBoard_IsRunning = false;
+                ++event;
+            }
+        }
+    }
+    PartyBoardMainLog.info("Online start barrier: {}", started ? "go" : "cancelled");
+    return started;
 #else
     return true;
 #endif
+}
+
+// Phones and tablets (SDL sends these on Android and iOS; never on desktop).
+//
+// Pausing is SDL's job, not ours: on Android the next SDL_PumpEvents after the
+// activity pauses blocks until it resumes (SDL_HINT_ANDROID_BLOCK_ON_PAUSE,
+// on by default) and SDL pauses the audio device with it, so game logic, the
+// MusyX output and rendering all stop. Aurora reports it as AURORA_PAUSED /
+// AURORA_UNPAUSED, which main.c uses to reset the frame pacer.
+//
+// What SDL cannot do is keep our data: a backgrounded app can be killed with
+// no further notice, and by then nothing runs. This must happen in an event
+// watch, because the events themselves are only queued -- the thread blocks
+// before the game loop could ever read them. Settings are already written on
+// every change and memory cards on every CARD call; this is the last chance.
+static bool SDLCALL OnAppLifecycleEvent(void*, SDL_Event* event) {
+    switch (event->type) {
+        case SDL_EVENT_WILL_ENTER_BACKGROUND:
+        case SDL_EVENT_TERMINATING:
+            PartyBoardMainLog.info("{}, saving settings",
+                event->type == SDL_EVENT_TERMINATING ? "Terminating" : "Entering background");
+            partyboard::config::Save();
+            fflush(stdout);
+            fflush(stderr);
+            break;
+        case SDL_EVENT_DID_ENTER_FOREGROUND:
+            PartyBoardMainLog.info("Back in the foreground");
+            break;
+        case SDL_EVENT_LOW_MEMORY:
+            PartyBoardMainLog.warn("The system reported low memory");
+            break;
+        default:
+            break;
+    }
+    return true;
 }
 
 extern "C" bool PartyBoard_OnlineWaitForStart(void) { return online_wait_for_start(true); }
@@ -457,6 +605,13 @@ extern "C" int port_main(int argc, char* argv[]) {
         if (const auto *path = _wgetenv(L"PARTYBOARD_ONLINE_DISC"); path && *path) {
             const auto utf8 = std::filesystem::path(path).u8string();
             onlineDisc.assign(reinterpret_cast<const char *>(utf8.c_str()));
+        }
+    }
+#elif defined(__ANDROID__)
+    // Set by PartyBoardActivity from the lobby's launch intent.
+    if (PartyBoard_NetplayEnabled()) {
+        if (const auto *path = std::getenv("PARTYBOARD_ONLINE_DISC"); path && *path) {
+            onlineDisc = path;
         }
     }
 #endif
@@ -507,8 +662,19 @@ extern "C" int port_main(int argc, char* argv[]) {
         config.allowJoystickBackgroundEvents = PartyBoard_NetplayEnabled() || partyboard::getSettings().game.allowBackgroundInput;
         config.pauseOnFocusLost = !PartyBoard_NetplayEnabled() && partyboard::getSettings().game.pauseOnFocusLost;
         // config.imGuiInitCallback = &aurora_imgui_init_callback;
-        config.allowTextureDumps = false;
+        // Aurora can write out every decoded texture it loads, which is the one
+        // way to look at what a draw actually samples instead of inferring it
+        // from code. Opt-in: it writes a DDS per texture into
+        // %APPDATA%/Party Board/texture_dumps.
+        config.allowTextureDumps = std::getenv("PARTYBOARD_DUMP_TEXTURES") != nullptr;
         auroraInfo = aurora_initialize(argc, argv, &config);
+    }
+    // Above 60 FPS the screen has to be asked for its high refresh rate (Android keeps games at
+    // 60 Hz otherwise). An online session always renders at 60 (PartyBoard_TargetFrameRateFor).
+    partyboard::display::request_frame_rate(PartyBoard_TargetFrameRateFor(PartyBoard_NetplayEnabled(),
+        partyboard::getSettings().video.targetFrameRate.getValue()));
+    if (!SDL_AddEventWatch(OnAppLifecycleEvent, nullptr)) {
+        PartyBoardMainLog.warn("Unable to watch app lifecycle events: {}", SDL_GetError());
     }
 
     // Apply the saved ray tracing preferences; a no-op without DXR support.
@@ -560,6 +726,8 @@ extern "C" int port_main(int argc, char* argv[]) {
     }
 
     partyboard::ui::initialize();
+    // Under the overlay, so toasts stay readable over the screen controls.
+    partyboard::ui::push_document(std::make_unique<partyboard::ui::TouchOverlay>(), true, true);
     partyboard::ui::push_document(std::make_unique<partyboard::ui::Overlay>(), true, true);
     partyboard::ui::push_document(std::make_unique<partyboard::ui::MenuBar>(), false);
 
@@ -612,6 +780,69 @@ extern "C" int port_main(int argc, char* argv[]) {
         }
     }
 
+    // Shaders are compiled before the game boots rather than during it. The cache
+    // is loaded at GPU init but compiled asynchronously, and a draw whose pipeline
+    // is not ready is dropped rather than delayed, which is what makes a scene's
+    // first visit show missing geometry for a few seconds. Doing it here -- after
+    // the prelaunch UI has closed, before the disc boots -- trades a one-off wait
+    // for no pop-in at all. Opt-out, since it is a wait the player can see.
+    if (partyboard::getSettings().game.precompileShaders.getValue()) {
+        const u32 total = AuroraPipelinesQueued();
+        if (total > 0) {
+            auto &screen = static_cast<partyboard::ui::ShaderPrecompile &>(
+                partyboard::ui::push_document(std::make_unique<partyboard::ui::ShaderPrecompile>(), true, true));
+            const auto started = std::chrono::steady_clock::now();
+            u32 remaining = total;
+            bool exitRequested = false;
+            while (!exitRequested) {
+                remaining = AuroraPipelinesQueued();
+                screen.set_progress(total - remaining, total);
+                if (remaining == 0) {
+                    break;
+                }
+                // A driver that never finishes must not strand the player on this
+                // screen; give up and let the rest build in the background, which
+                // is exactly the behaviour there was before this existed.
+                if (std::chrono::steady_clock::now() - started > std::chrono::minutes(5)) {
+                    PartyBoardMainLog.warn(
+                        "Gave up waiting on {} shader pipelines, they will finish in the background", remaining);
+                    break;
+                }
+                // Driving a real frame does two jobs: it draws the progress, and on
+                // backends with no dedicated pipeline thread it is what advances the
+                // compilation at all, since there the worker only runs from
+                // end_pipeline_frame().
+                const AuroraEvent *event = aurora_update();
+                while (event != nullptr && event->type != AURORA_NONE) {
+                    if (event->type == AURORA_SDL_EVENT) {
+                        partyboard::ui::handle_event(event->sdl);
+                    } else if (event->type == AURORA_EXIT) {
+                        exitRequested = true;
+                        break;
+                    }
+                    event++;
+                }
+                if (exitRequested) {
+                    break;
+                }
+                if (!aurora_begin_frame()) {
+                    continue;
+                }
+                partyboard::ui::update();
+                aurora_end_frame();
+            }
+            screen.pop();
+            PartyBoardMainLog.info("Precompiled {} of {} shader pipelines before boot", total - remaining, total);
+            if (exitRequested) {
+                fflush(stdout);
+                fflush(stderr);
+                partyboard::ui::shutdown();
+                aurora_shutdown();
+                return 0;
+            }
+        }
+    }
+
     const char *dvd_source = "the saved path";
     std::string dvd_path = partyboard::getSettings().backend.isoPath.getValue();
     if (!launcherDisc.empty()) {
@@ -638,6 +869,14 @@ extern "C" int port_main(int argc, char* argv[]) {
     if (!aurora_dvd_open(dvd_path.c_str())) {
         PartyBoardMainLog.error("Failed to open DVD image: {}", dvd_path);
         if (!onlineDisc.empty()) { partyboard::ui::shutdown(); aurora_shutdown(); return 3; }
+        // Do not remember a disc that cannot be opened (e.g. an Android document
+        // whose provider hands out a stream that cannot seek), or every launch
+        // would boot straight into it again instead of offering the disc picker.
+        if (launcherDisc.empty() && dvd_path == partyboard::getSettings().backend.isoPath.getValue()) {
+            partyboard::getSettings().backend.isoPath.setValue("");
+            partyboard::getSettings().backend.isoVerification.setValue(partyboard::DiscVerificationState::Unknown);
+            partyboard::config::Save();
+        }
     }
 
     // Mods must be overlaid before anything reads the FST.
@@ -659,6 +898,8 @@ extern "C" int port_main(int argc, char* argv[]) {
         PartyBoard_NetplayTrace(diagnostic);
     }
     LanguageInit();
+    // After the disc is known: the achievement set is chosen by its hash.
+    PartyBoard_RAInit();
 
     // OSInit();
 
@@ -680,6 +921,12 @@ extern "C" int port_main(int argc, char* argv[]) {
 
     // Notifies all CVs and causes threads to exit
     OSResetSystem(OS_RESET_SHUTDOWN, 0, 0);
+    // OSResetSystem is a stub on this platform. Stop MusyX explicitly so its
+    // audio worker is joined before Aurora tears down SDL and the process exits.
+    if (sndIsInstalled()) {
+        sndQuit();
+    }
+    PartyBoard_RAShutdown();
 
 #ifdef PARTY_BOARD_DISCORD
     partyboard::discord::shutdown();

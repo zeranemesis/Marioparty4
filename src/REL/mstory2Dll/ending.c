@@ -22,6 +22,7 @@
 #include "game/saveload.h"
 #include "game/thpmain.h"
 #endif
+#include "port/version_runtime.h"
 
 typedef struct {
     /* 0x000 */ s32 unk00;
@@ -313,14 +314,33 @@ void fn_1_19334(void)
     fn_1_BE8(60);
     {
         int time = 0;
-#if VERSION_PAL
+#if VERSION_PAL || defined(TARGET_PC)
         s32 languageOffset = 0;
 #endif
         int gid = HuSprGrpCreate(3);
         int sprid = HuTHPSprCreate(lbl_1_data_10E4[lbl_1_bss_C0C.unk30[lbl_1_bss_C0C.unk00].unk10], FALSE, 1000);
         HuSprGrpMemberSet(gid, 0, sprid);
         HuSprPosSet(gid, 0, 288, 240);
-#if VERSION_PAL
+#ifdef TARGET_PC
+        // A PAL disc has this sprite once per language (the files after it are shifted)
+        if (VERSION_RT_PAL) {
+            switch (GWGameStat.language) {
+                case 2:
+                    languageOffset = 1;
+                    break;
+                case 3:
+                    languageOffset = 2;
+                    break;
+                case 4:
+                    languageOffset = 3;
+                    break;
+                case 5:
+                    languageOffset = 4;
+                    break;
+            }
+        }
+        sprid = HuSprCreate(HuSprAnimRead(HuDataReadNum(DATA_MAKE_NUM(DATADIR_MSTORY2, 0x60) + languageOffset, MEMORY_DEFAULT_NUM)), 950, 0);
+#elif VERSION_PAL
         switch (GWGameStat.language) {
             case 2:
                 languageOffset = 1;
@@ -342,7 +362,7 @@ void fn_1_19334(void)
         HuSprGrpMemberSet(gid, 1, sprid);
         HuSprPosSet(gid, 1, 288, 226);
         HuSprAttrSet(gid, 1, HUSPR_ATTR_DISPOFF);
-        sprid = HuSprCreate(HuSprAnimRead(HuDataReadNum(DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_NTSC ? 0x61 : 0x65), MEMORY_DEFAULT_NUM)), 950, 0);
+        sprid = HuSprCreate(HuSprAnimRead(HuDataReadNum(DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_RT_NTSC ? 0x61 : 0x65), MEMORY_DEFAULT_NUM)), 950, 0);
         HuSprGrpMemberSet(gid, 2, sprid);
         HuSprBankSet(gid, 2, lbl_1_bss_C0C.unk30[lbl_1_bss_C0C.unk00].unk10);
         if (GWLanguageGet() == 0 && lbl_1_bss_C0C.unk30[lbl_1_bss_C0C.unk00].unk10 == 5) {
@@ -512,10 +532,10 @@ void fn_1_1A160(void)
 
 void fn_1_1A368(omObjData *object)
 {
-    object->model[1] = Hu3DModelCreateFile(DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_NTSC ? 0x62 : 0x66));
-    object->motion[1] = Hu3DJointMotionFile(object->model[1], DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_NTSC ? 0x63 : 0x67));
-    object->motion[2] = Hu3DJointMotionFile(object->model[1], DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_NTSC ? 0x70 : 0x71));
-    object->motion[3] = Hu3DJointMotionFile(object->model[1], DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_NTSC ? 0x71 : 0x72));
+    object->model[1] = Hu3DModelCreateFile(DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_RT_NTSC ? 0x62 : 0x66));
+    object->motion[1] = Hu3DJointMotionFile(object->model[1], DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_RT_NTSC ? 0x63 : 0x67));
+    object->motion[2] = Hu3DJointMotionFile(object->model[1], DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_RT_NTSC ? 0x70 : 0x71));
+    object->motion[3] = Hu3DJointMotionFile(object->model[1], DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_RT_NTSC ? 0x71 : 0x72));
     Hu3DModelPosSet(object->model[1], 0, 0, 600);
     Hu3DModelRotSet(object->model[1], 0, 180, 0);
     Hu3DModelScaleSet(object->model[1], 1, 1, 1);
@@ -550,12 +570,12 @@ void fn_1_1A578(void)
 
 void fn_1_1A7CC(omObjData *object)
 {
-    object->model[1] = Hu3DModelCreateFile(DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_NTSC ? 0x72 : 0x73));
-    object->motion[1] = Hu3DJointMotionFile(object->model[1], DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_NTSC ? 0x73 : 0x74));
+    object->model[1] = Hu3DModelCreateFile(DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_RT_NTSC ? 0x72 : 0x73));
+    object->motion[1] = Hu3DJointMotionFile(object->model[1], DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_RT_NTSC ? 0x73 : 0x74));
     object->motion[2] = Hu3DJointMotionFile(object->model[1], DATA_MAKE_NUM(DATADIR_MSTORY2, 0x75));
     object->motion[3] = Hu3DJointMotionFile(object->model[1], DATA_MAKE_NUM(DATADIR_MSTORY2, 0x76));
-    object->motion[4] = Hu3DJointMotionFile(object->model[1], DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_NTSC ? 0x7C : 0x7A));
-    object->motion[5] = Hu3DJointMotionFile(object->model[1], DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_NTSC ? 0x79 : 0x77));
+    object->motion[4] = Hu3DJointMotionFile(object->model[1], DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_RT_NTSC ? 0x7C : 0x7A));
+    object->motion[5] = Hu3DJointMotionFile(object->model[1], DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_RT_NTSC ? 0x79 : 0x77));
     Hu3DModelPosSet(object->model[1], 0, 0, 460);
     Hu3DModelRotSet(object->model[1], 0, 0, 0);
     Hu3DModelScaleSet(object->model[1], 1, 1, 1);

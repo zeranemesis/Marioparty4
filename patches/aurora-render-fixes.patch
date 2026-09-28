@@ -1,0 +1,726 @@
+diff --git a/lib/dolphin/gx/GXFrameBuffer.cpp b/lib/dolphin/gx/GXFrameBuffer.cpp
+index c196cf6..996ec20 100644
+--- a/lib/dolphin/gx/GXFrameBuffer.cpp
++++ b/lib/dolphin/gx/GXFrameBuffer.cpp
+@@ -9,6 +9,7 @@
+ #include "../vi/vi_internal.hpp"
+ 
+ #include <algorithm>
++#include <cstdlib>
+ #include <cmath>
+ 
+ namespace {
+@@ -17,6 +18,7 @@ aurora::Vec2<uint32_t> scale_copy_dst(u32 logicalWidth, u32 logicalHeight) {
+     return {logicalWidth, logicalHeight};
+   }
+ 
++
+   const auto [logicalFbWidth, logicalFbHeight] = aurora::gx::logical_fb_size();
+   const auto [targetWidth, targetHeight] = aurora::gfx::get_render_target_size();
+   if (logicalFbWidth == 0 || logicalFbHeight == 0 || targetWidth == 0 || targetHeight == 0) {
+@@ -141,7 +143,25 @@ void GXSetCopyClear(GXColor color, u32 depth) {
+   __gx->bpSent = 1;
+ }
+ 
+-void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[7]) {}
++void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[7]) {
++  // Was an empty stub. The anti-alias sample pattern still is one -- aurora
++  // resolves MSAA itself -- but the vertical filter is not cosmetic for every
++  // caller: an effect whose EFB copy feeds its own next frame relies on that
++  // blur to stay stable, and without it the feedback sharpens every frame.
++  if (!vf || vfilter == nullptr) {
++    g_gxState.copyFilterEnabled = false;
++    return;
++  }
++  u32 sum = 0;
++  for (size_t i = 0; i < g_gxState.copyFilter.size(); ++i) {
++    g_gxState.copyFilter[i] = vfilter[i];
++    sum += vfilter[i];
++  }
++  // A filter that is only its centre tap is the identity; treating it as
++  // enabled would cost a shader pass per copy to change nothing.
++  const bool centreOnly = g_gxState.copyFilter[3] == sum;
++  g_gxState.copyFilterEnabled = sum > 0 && !centreOnly;
++}
+ 
+ void GXSetDispCopyGamma(GXGamma gamma) {}
+ 
+diff --git a/lib/dolphin/gx/GXTev.cpp b/lib/dolphin/gx/GXTev.cpp
+index 5b88284..1e26ef5 100644
+--- a/lib/dolphin/gx/GXTev.cpp
++++ b/lib/dolphin/gx/GXTev.cpp
+@@ -169,7 +169,43 @@ void GXSetTevOrder(GXTevStageID id, GXTexCoordID tcid, GXTexMapID tmid, GXChanne
+ }
+ 
+ void GXSetZTexture(GXZTexOp op, GXTexFmt fmt, u32 bias) {
+-  // TODO
++  // Was an empty stub, which is why Tree Stomp's trail is not confined by the
++  // depth test: it draws full-screen orthographic quads and relies on this to
++  // take their depth from a Z texture instead of the quad's own
++  // (m419Dll/main.c:279).
++  //
++  // Written through the BP registers rather than straight into the state,
++  // because a scene enables z-texturing, draws, then disables it again within
++  // one frame -- a direct write would apply whichever value happened to be last
++  // to every draw in between.
++  u32 type;
++  switch (fmt) {
++  case GX_TF_Z8:
++    type = 0;
++    break;
++  case GX_TF_Z16:
++    type = 1;
++    break;
++  case GX_TF_Z24X8:
++    type = 2;
++    break;
++  default:
++    CHECK(false, "invalid z texture format {}", static_cast<int>(fmt));
++    type = 0;
++    break;
++  }
++
++  u32 reg1 = 0;
++  SET_REG_FIELD(0, reg1, 24, 0, bias & 0xFFFFFF);
++  SET_REG_FIELD(0, reg1, 8, 24, 0xF4);
++  GX_WRITE_RAS_REG(reg1);
++
++  u32 reg2 = 0;
++  SET_REG_FIELD(0, reg2, 2, 0, type);
++  SET_REG_FIELD(0, reg2, 2, 2, static_cast<u32>(op));
++  SET_REG_FIELD(0, reg2, 8, 24, 0xF5);
++  GX_WRITE_RAS_REG(reg2);
++  __gx->bpSent = 1;
+ }
+ 
+ void GXSetNumTevStages(u8 num) {
+diff --git a/lib/dolphin/mtx/mtx.c b/lib/dolphin/mtx/mtx.c
+index ba2796d..ba28c95 100644
+--- a/lib/dolphin/mtx/mtx.c
++++ b/lib/dolphin/mtx/mtx.c
+@@ -531,6 +531,30 @@ void C_MTXLookAt(Mtx m, const Point3d* camPos, const Vec* camUp, const Point3d*
+   vLook.z = camPos->z - target->z;
+   VECNormalize(&vLook, &vLook);
+   VECCrossProduct(camUp, &vLook, &vRight);
++  /* A camUp parallel to the view direction makes that cross product exactly
++   * zero, and normalising it yields NaN for every element -- which then poisons
++   * the whole matrix. Mario Party 4 reaches this: Slime Time's shadow light
++   * passes normalize(camPos) as its up vector while looking at the origin, so up
++   * and look are bit-identical (m402Dll/main.c:1830). The resulting shadow
++   * matrix was entirely NaN and no surface could ever sample the shadow map.
++   *
++   * Pick any axis not parallel to vLook and rebuild from it. The roll about the
++   * view axis is arbitrary in a degenerate case by definition, but it is a real
++   * basis rather than NaN, and the light's projection is symmetric about that
++   * axis anyway. */
++  if (vRight.x == 0.0f && vRight.y == 0.0f && vRight.z == 0.0f) {
++    Vec fallback;
++    if (fabsf(vLook.x) < 0.5f) {
++      fallback.x = 1.0f;
++      fallback.y = 0.0f;
++      fallback.z = 0.0f;
++    } else {
++      fallback.x = 0.0f;
++      fallback.y = 1.0f;
++      fallback.z = 0.0f;
++    }
++    VECCrossProduct(&fallback, &vLook, &vRight);
++  }
+   VECNormalize(&vRight, &vRight);
+   VECCrossProduct(&vLook, &vRight, &vUp);
+   m[0][0] = vRight.x;
+diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
+index eff0c65..5b61db1 100644
+--- a/lib/gfx/common.cpp
++++ b/lib/gfx/common.cpp
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ #include "common.hpp"
+ 
+ #include "clear.hpp"
+@@ -161,6 +162,7 @@ struct RenderPass {
+   GXTexFmt resolveFormat = GX_TF_RGBA8;
+   ClipRect resolveRect;
+   Range resolveUniformRange;
++  bool resolveFiltered = false;
+   Vec4<float> clearColorValue{0.f, 0.f, 0.f, 0.f};
+   float clearDepthValue = gx::UseReversedZ ? 0.f : 1.f;
+   wgpu::LoadOp colorLoadOp = wgpu::LoadOp::Undefined;
+@@ -570,13 +572,39 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
+   // Push UV transform uniform for tex_copy_conv (crop region in UV space)
+   const auto srcW = static_cast<float>(prevPass.targetSize.width);
+   const auto srcH = static_cast<float>(prevPass.targetSize.height);
++  // The copy filter's taps ride along in the same uniform. Weights are
++  // normalised here rather than in the shader so an unusual filter that does
++  // not sum to 64 still preserves brightness.
++  const auto [logicalFbW, logicalFbH] = gx::logical_fb_size();
++  const auto logicalH = static_cast<float>(logicalFbH);
++  float taps[7] = {0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f};
++  if (gx::g_gxState.copyFilterEnabled) {
++    float sum = 0.f;
++    for (size_t i = 0; i < 7; ++i) {
++      sum += static_cast<float>(gx::g_gxState.copyFilter[i]);
++    }
++    if (sum > 0.f) {
++      for (size_t i = 0; i < 7; ++i) {
++        taps[i] = static_cast<float>(gx::g_gxState.copyFilter[i]) / sum;
++      }
++    }
++  }
+   const std::array uvTransform{
+       static_cast<float>(rect.x) / srcW,
+       static_cast<float>(rect.y) / srcH,
+       static_cast<float>(rect.width) / srcW,
+       static_cast<float>(rect.height) / srcH,
++      taps[0], taps[1], taps[2], taps[3],
++      taps[4], taps[5], taps[6],
++      // One EFB LINE in UV, not one source texel. The copy source is at
++      // internal render resolution, so a texel there is a fraction of a console
++      // line; stepping by texels made the filter several times narrower than
++      // hardware's and therefore invisible. Hardware filters EFB lines, and an
++      // EFB line is 1/logical-height of the copy whatever the render scale.
++      logicalH > 0.f ? 1.f / logicalH : 0.f,
+   };
+   prevPass.resolveUniformRange = push_uniform(uvTransform);
++  prevPass.resolveFiltered = gx::g_gxState.copyFilterEnabled;
+   enqueue_pass(current_frame_packet(), g_recordingFrameSlot, g_currentRenderPass);
+ 
+   // Populate new render pass from previous
+@@ -1327,8 +1355,16 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+         .dst = passInfo.resolveTarget,
+         .sampleFilter = needsScaling ? tex_copy_conv::SampleFilter::Linear : tex_copy_conv::SampleFilter::Nearest,
+     };
++    // A filtered copy has to go through a shader even when it would otherwise
++    // be a straight texture-to-texture copy, since the filter is the whole
++    // point of the pass. Depth copies keep the old path: GXSetCopyFilter
++    // describes a colour filter and averaging depth would be meaningless.
++    const bool filtered = passInfo.resolveFiltered && !isDepth
++        && std::getenv("PARTYBOARD_EFB_COPY_FILTER") != nullptr;
+     if (needsConversion) {
+       tex_copy_conv::run(cmd, convReq);
++    } else if (filtered) {
++      tex_copy_conv::vfilter_blit(cmd, convReq);
+     } else if (needsScaling) {
+       tex_copy_conv::blit(cmd, convReq);
+     } else {
+diff --git a/lib/gfx/tex_copy_conv.cpp b/lib/gfx/tex_copy_conv.cpp
+index 50f4c43..add107d 100644
+--- a/lib/gfx/tex_copy_conv.cpp
++++ b/lib/gfx/tex_copy_conv.cpp
+@@ -24,6 +24,11 @@ static constexpr std::string_view ShaderPreamble = R"(
+ struct UVTransform {
+     offset: vec2f,
+     scale: vec2f,
++    // GXSetCopyFilter's seven vertical taps, weights already divided by their
++    // sum, plus one source texel height in UV. Carried in the transform rather
++    // than a second binding so every copy pipeline keeps one bind group layout.
++    vf0: vec4f,
++    vf1: vec4f,
+ };
+ @group(0) @binding(2) var<uniform> uv_xf: UVTransform;
+ 
+@@ -153,6 +158,26 @@ static constexpr std::string_view FragIA8 = R"(
+ )"sv;
+ 
+ // GX_TF_RGB565: Blit alpha to 1.0
++// GXSetCopyFilter's vertical filter, which aurora ignored entirely until now.
++// Seven taps down the source column, weights out of 64. Hardware applies this
++// while copying the EFB; skipping it leaves every copy sharper than the console
++// produced, and for an effect that samples its own previous copy each frame it
++// removes the low-pass that keeps the feedback from compounding.
++static constexpr std::string_view FragVFilter = R"(
++@fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
++    let h = uv_xf.vf1.w;
++    var acc = vec4f(0.0);
++    acc += textureSample(src, src_samp, vec2f(in.uv.x, in.uv.y - 3.0 * h)) * uv_xf.vf0.x;
++    acc += textureSample(src, src_samp, vec2f(in.uv.x, in.uv.y - 2.0 * h)) * uv_xf.vf0.y;
++    acc += textureSample(src, src_samp, vec2f(in.uv.x, in.uv.y - 1.0 * h)) * uv_xf.vf0.z;
++    acc += textureSample(src, src_samp, in.uv) * uv_xf.vf0.w;
++    acc += textureSample(src, src_samp, vec2f(in.uv.x, in.uv.y + 1.0 * h)) * uv_xf.vf1.x;
++    acc += textureSample(src, src_samp, vec2f(in.uv.x, in.uv.y + 2.0 * h)) * uv_xf.vf1.y;
++    acc += textureSample(src, src_samp, vec2f(in.uv.x, in.uv.y + 3.0 * h)) * uv_xf.vf1.z;
++    return acc;
++}
++)"sv;
++
+ static constexpr std::string_view FragRGB565 = R"(
+ @fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+     let c = textureSample(src, src_samp, in.uv);
+@@ -233,6 +258,21 @@ static constexpr std::string_view FragGB8 = R"(
+ }
+ )"sv;
+ 
++// GX_TF_Z24X8: full 24-bit depth -> RGBA8, high byte in R down to low byte in B.
++// Without this entry needs_conversion() is false for Z24X8 while is_depth_format()
++// is true, so a scaled copy fell through to blit(), whose pipeline is built with
++// g_bindGroupLayout while execute() binds a group laid out for g_depthBindGroupLayout.
++// The layouts do not match and the whole pass is rejected.
++static constexpr std::string_view FragZ24X8 = R"(
++@fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
++    let z24 = gx_z24(in.uv);
++    let r = f32((z24 >> 16u) & 0xFFu) / 255.0;
++    let g = f32((z24 >> 8u) & 0xFFu) / 255.0;
++    let b = f32(z24 & 0xFFu) / 255.0;
++    return vec4f(r, g, b, 1.0);
++}
++)"sv;
++
+ // GX_TF_Z16: Upper 16-bits depth -> IA8
+ static constexpr std::string_view FragZ16 = R"(
+ @fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+@@ -269,6 +309,7 @@ static constexpr std::array ConvPipelines{
+ 
+ static constexpr std::array DepthConvPipelines{
+     ConvPipeline{GX_TF_Z16, FragZ16, wgpu::TextureFormat::RGBA8Unorm, "TexCopyConv Z16"},
++    ConvPipeline{GX_TF_Z24X8, FragZ24X8, wgpu::TextureFormat::RGBA8Unorm, "TexCopyConv Z24X8"},
+ };
+ 
+ static wgpu::BindGroupLayout g_bindGroupLayout;
+@@ -277,6 +318,7 @@ static wgpu::Sampler g_nearestSampler;
+ static wgpu::Sampler g_linearSampler;
+ static absl::flat_hash_map<GXTexFmt, wgpu::RenderPipeline> g_pipelines;
+ static wgpu::RenderPipeline g_blitPipeline;
++static wgpu::RenderPipeline g_vfilterPipeline;
+ 
+ static wgpu::RenderPipeline create_pipeline(const ConvPipeline& conv, const std::string_view shaderPreamble,
+                                             const wgpu::BindGroupLayout& bindGroupLayout) {
+@@ -350,7 +392,9 @@ void initialize() {
+       },
+       wgpu::BindGroupLayoutEntry{
+           .binding = 2,
+-          .visibility = wgpu::ShaderStage::Vertex,
++          // Fragment too: the vertical copy filter reads its taps from the same
++          // uniform, which keeps one bind group layout for every copy pipeline.
++          .visibility = wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Fragment,
+           .buffer =
+               wgpu::BufferBindingLayout{
+                   .type = wgpu::BufferBindingType::Uniform,
+@@ -393,6 +437,9 @@ void initialize() {
+   g_blitPipeline = create_pipeline(
+       {GX_TF_RGBA8, FragPassthrough, webgpu::g_graphicsConfig.surfaceConfiguration.format, "TexCopyConv Blit"},
+       ShaderPreamble, g_bindGroupLayout);
++  g_vfilterPipeline = create_pipeline(
++      {GX_TF_RGBA8, FragVFilter, webgpu::g_graphicsConfig.surfaceConfiguration.format, "TexCopyConv VFilter"},
++      ShaderPreamble, g_bindGroupLayout);
+   for (const auto& conv : ConvPipelines) {
+     g_pipelines[conv.fmt] = create_pipeline(conv, ShaderPreamble, g_bindGroupLayout);
+     if (conv.outputFormat != to_wgpu(conv.fmt)) {
+@@ -424,6 +471,7 @@ void initialize() {
+ void shutdown() {
+   g_pipelines.clear();
+   g_blitPipeline = {};
++  g_vfilterPipeline = {};
+   g_bindGroupLayout = {};
+   g_depthBindGroupLayout = {};
+   g_nearestSampler = {};
+@@ -507,4 +555,8 @@ void run(const wgpu::CommandEncoder& cmd, const ConvRequest& req) {
+ 
+ void blit(const wgpu::CommandEncoder& cmd, const ConvRequest& req) { execute(cmd, req, g_blitPipeline); }
+ 
++void vfilter_blit(const wgpu::CommandEncoder& cmd, const ConvRequest& req) {
++  execute(cmd, req, g_vfilterPipeline);
++}
++
+ } // namespace aurora::gfx::tex_copy_conv
+diff --git a/lib/gfx/tex_copy_conv.hpp b/lib/gfx/tex_copy_conv.hpp
+index 31aa804..f5c1b9c 100644
+--- a/lib/gfx/tex_copy_conv.hpp
++++ b/lib/gfx/tex_copy_conv.hpp
+@@ -25,5 +25,7 @@ void initialize();
+ void shutdown();
+ void run(const wgpu::CommandEncoder& cmd, const ConvRequest& req);
+ void blit(const wgpu::CommandEncoder& cmd, const ConvRequest& req);
++/* Same as blit, with GXSetCopyFilter's vertical filter applied. */
++void vfilter_blit(const wgpu::CommandEncoder& cmd, const ConvRequest& req);
+ 
+ } // namespace aurora::gfx::tex_copy_conv
+diff --git a/lib/gfx/texture.hpp b/lib/gfx/texture.hpp
+index ac7c91c..c214538 100644
+--- a/lib/gfx/texture.hpp
++++ b/lib/gfx/texture.hpp
+@@ -128,9 +128,24 @@ namespace aurora::gfx {
+ struct TextureBind {
+   TextureHandle ref;
+   GXTexObj_ texObj;
++  // What the resolved handle actually depends on besides the texture object itself.
++  // A palettised texture decodes to different pixels depending on the TLUT loaded in
++  // its slot, and a palettised EFB copy also depends on the revision of the copy it
++  // reads from; neither of those touches the texture object, so both have to be part
++  // of the "bind unchanged" test in resolve_sampled_textures.
++  u32 tlutObjId = 0;
++  u32 tlutDataVersion = 0;
++  u32 copyRevision = 0;
+ 
+   TextureBind() noexcept = default;
+   TextureBind(const GXTexObj_& obj, TextureHandle handle) noexcept : ref(std::move(handle)), texObj(obj) {}
++  TextureBind(const GXTexObj_& obj, TextureHandle handle, u32 tlutObjId_, u32 tlutDataVersion_,
++              u32 copyRevision_) noexcept
++  : ref(std::move(handle))
++  , texObj(obj)
++  , tlutObjId(tlutObjId_)
++  , tlutDataVersion(tlutDataVersion_)
++  , copyRevision(copyRevision_) {}
+   void reset() noexcept { ref.reset(); }
+   [[nodiscard]] wgpu::SamplerDescriptor get_descriptor() const noexcept;
+   operator bool() const noexcept { return ref.operator bool(); }
+diff --git a/lib/gfx/texture_replacement.cpp b/lib/gfx/texture_replacement.cpp
+index ad37737..5895439 100644
+--- a/lib/gfx/texture_replacement.cpp
++++ b/lib/gfx/texture_replacement.cpp
+@@ -783,6 +783,13 @@ bool dump_editable_texture_dds(const aurora::texture::TextureSourceKey& key, con
+ 
+   const auto dumpRoot =
+       std::filesystem::path{reinterpret_cast<const char8_t*>(aurora::g_config.cachePath)} / "texture_dumps";
++  // The directory was only ever created by load_replacement_directory, which
++  // returns early when no replacement root is configured -- so with dumps
++  // enabled and no replacement pack installed, every write failed silently and
++  // the feature looked like it simply did nothing.
++  if (!ensure_directory(dumpRoot)) {
++    return false;
++  }
+   const auto path = dumpRoot / format_replacement_filename(key);
+   return aurora::gfx::dds::write_rgba8_dds(path, texWidth, texHeight, pixels.data);
+ }
+@@ -1046,7 +1053,11 @@ std::optional<TextureHandle> find_replacement(const GXTexObj_& obj) noexcept {
+   ZoneScoped;
+ 
+   std::lock_guard lk(s_registryMutex);
+-  if (s_entriesByKey.empty()) {
++  // Not when dumping: the dump lives further down this function, so bailing on
++  // an empty registry made it unreachable in the one situation it exists for --
++  // no replacement pack installed yet, which is exactly when someone wants the
++  // textures written out in order to build one.
++  if (s_entriesByKey.empty() && !g_config.allowTextureDumps) {
+     return std::nullopt;
+   }
+ 
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+index 9748556..db28fb9 100644
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -809,6 +809,20 @@ static void handle_bp(u32 value, bool bigEndian) {
+     break;
+   }
+ 
++  // Z texture (GXSetZTexture): 0xF4 carries the 24-bit bias, 0xF5 the format in
++  // bits 0-1 and the operation in bits 2-3.
++  case 0xF4: {
++    g_gxState.ztexBias = bp_get(value, 24, 0);
++    g_gxState.stateDirty = true;
++    break;
++  }
++  case 0xF5: {
++    g_gxState.ztexFmt = static_cast<u8>(bp_get(value, 2, 0));
++    g_gxState.ztexOp = static_cast<u8>(bp_get(value, 2, 2));
++    g_gxState.stateDirty = true;
++    break;
++  }
++
+   // TEV K color/alpha select (0xF6-0xFD)
+   case 0xF6:
+   case 0xF7:
+diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
+index 9ca9036..a17cb60 100644
+--- a/lib/gx/gx.cpp
++++ b/lib/gx/gx.cpp
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ #include "gx.hpp"
+ 
+ #include "pipeline.hpp"
+@@ -445,27 +446,48 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
+ 
+     GXTexObj_ obj = g_gxState.loadedTextures[i];
+     auto& textureBind = g_gxState.textures[i];
++
++    const auto copyIt = g_gxState.copyTextures.find(obj.data);
++    const GXState::CopyTextureRef* copyRef = copyIt != g_gxState.copyTextures.end() ? &copyIt->second : nullptr;
++
++    // The texture object alone does not determine the pixels we resolve to. A
++    // palettised texture is decoded through whichever TLUT currently sits in its
++    // slot, and the game is free to load a different palette there without ever
++    // touching the texture object -- that is how palette animation works. Fold the
++    // palette's identity, and the source revision of a palettised EFB copy, into the
++    // early-out below, or such a texture keeps the first frame's colours forever.
++    u32 tlutObjId = 0;
++    u32 tlutDataVersion = 0;
++    const GXTlutObj_* tlut = nullptr;
++    if (is_palette_format(obj.format())) {
++      const auto tlutIdx = static_cast<size_t>(obj.tlut);
++      if (tlutIdx < g_gxState.loadedTluts.size() && g_gxState.loadedTluts[tlutIdx].data != nullptr) {
++        tlut = &g_gxState.loadedTluts[tlutIdx];
++        tlutObjId = tlut->tlutObjId;
++        tlutDataVersion = tlut->tlutDataVersion;
++      }
++    }
++    // Only a palettised copy re-reads its source here; a plain copy hands back the
++    // same handle whose contents update in place, so its revision is not a dependency.
++    const u32 copyRevision = (tlut != nullptr && copyRef != nullptr) ? copyRef->revision : 0;
++
+     if (obj.texObjId != 0 && obj.texObjId == textureBind.texObj.texObjId &&
+-        obj.texDataVersion == textureBind.texObj.texDataVersion) {
++        obj.texDataVersion == textureBind.texObj.texDataVersion && tlutObjId == textureBind.tlutObjId &&
++        tlutDataVersion == textureBind.tlutDataVersion && copyRevision == textureBind.copyRevision) {
+       // Texture bind unchanged
+       continue;
+     }
+ 
+     gfx::TextureHandle handle;
+-    const auto copyIt = g_gxState.copyTextures.find(obj.data);
+-    const GXState::CopyTextureRef* copyRef = copyIt != g_gxState.copyTextures.end() ? &copyIt->second : nullptr;
+-    if (is_palette_format(obj.format())) {
+-      const auto tlutIdx = static_cast<size_t>(obj.tlut);
+-      if (tlutIdx < g_gxState.loadedTluts.size()) {
+-        const auto& tlut = g_gxState.loadedTluts[tlutIdx];
+-        if (tlut.data != nullptr) {
+-          if (copyRef != nullptr) {
+-            handle = resolve_dynamic_palette_texture(obj, *copyRef, tlut);
+-          } else {
+-            handle = resolve_static_palette_texture(obj, tlut);
+-          }
+-        }
++    if (tlut != nullptr) {
++      if (copyRef != nullptr) {
++        handle = resolve_dynamic_palette_texture(obj, *copyRef, *tlut);
++      } else {
++        handle = resolve_static_palette_texture(obj, *tlut);
+       }
++    } else if (is_palette_format(obj.format())) {
++      // No palette loaded in the slot yet: leave the bind empty rather than decoding
++      // the indices as if they were colours.
+     } else if (copyRef != nullptr) {
+       handle = copyRef->handle;
+     } else if (obj.data != nullptr) {
+@@ -473,7 +495,7 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
+     }
+ 
+     obj.mFormat = resolved_format_for_handle(handle);
+-    textureBind = gfx::TextureBind{obj, std::move(handle)};
++    textureBind = gfx::TextureBind{obj, std::move(handle), tlutObjId, tlutDataVersion, copyRevision};
+   }
+ }
+ 
+@@ -782,6 +804,11 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
+ 
+   const auto& vtxFmt = g_gxState.vtxFmts[fmt];
+   config.shaderConfig.fogType = g_gxState.fog.type;
++  // Part of the config, not a uniform: replacing the interpolated depth changes
++  // whether the fragment shader declares a frag_depth output at all, so it has
++  // to select a different pipeline.
++  config.shaderConfig.ztexOp = g_gxState.ztexOp;
++  config.shaderConfig.ztexFmt = g_gxState.ztexFmt;
+   u8 vtxOffset = 0;
+   for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
+     const auto attr = static_cast<GXAttr>(i);
+diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
+index 287bbd7..cdceb49 100644
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -345,6 +345,19 @@ struct GXState {
+   std::array<AttrArray, MaxVtxAttr> arrays;
+   gfx::ClipRect texCopySrc;
+   GXTexFmt texCopyFmt;
++  // GXSetCopyFilter's vertical filter: seven taps over EFB lines, weights out
++  // of 64. The default is the centre tap alone, i.e. no filtering, which is
++  // what an unset filter must behave as. Games enable a real one to deflicker
++  // the copy, and for an effect that copies its own output every frame that
++  // blur is also what keeps the feedback from compounding.
++  // GXSetZTexture: the fragment's depth comes from the last stage's texture
++  // instead of the interpolated value. 0 disabled, 1 add, 2 replace; format
++  // 0 = U8, 1 = U16, 2 = U24, matching the BP encoding.
++  u8 ztexOp = 0;
++  u8 ztexFmt = 0;
++  u32 ztexBias = 0;
++  bool copyFilterEnabled = false;
++  std::array<u8, 7> copyFilter{0, 0, 0, 64, 0, 0, 0};
+   u16 texCopyDstWidth = 0;
+   u16 texCopyDstHeight = 0;
+   struct CopyTextureKey {
+@@ -447,7 +460,12 @@ struct ShaderConfig {
+   u8 fogType = GX_FOG_NONE;
+   u8 vtxStride = 0;
+   u8 lineMode : 2 = 0; // 1 = GX_LINES, 2 = GX_LINESTRIP, 3 = GX_POINTS
+-  u8 pad1 : 6 = 0;
++  // Taken from pad1's spare bits so the struct keeps its size and its hash: a
++  // disabled z-texture is 0, exactly what the padding already held, so pipelines
++  // recorded before this stay valid and the shipped cache seed is unaffected.
++  u8 ztexOp : 2 = 0;
++  u8 ztexFmt : 2 = 0;
++  u8 pad1 : 2 = 0;
+   u8 pad2 = 0;
+   std::array<AttrConfig, MaxVtxAttr> attrs;
+   std::array<TevSwap, MaxTevSwap> tevSwapTable;
+@@ -483,6 +501,7 @@ struct ShaderInfo {
+   std::bitset<MaxIndTexMtxs> usedIndTexMtxs;
+   u32 uniformSize = 0;
+   bool usesFog : 1 = false;
++  bool usesZTex : 1 = false;
+   bool lightingEnabled : 1 = false;
+   u8 lineMode : 2 = 0;
+ };
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index 3671ed5..e46fd80 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -80,6 +80,23 @@ static std::string alpha_bump_sel(size_t stageIdx, const ShaderConfig& config, c
+   }
+ }
+ 
++// GX reads the z texture from the last stage that has one BOUND, whether or not
++// that stage's combiner consumes it: Tree Stomp adds a GX_PASSCLR stage solely
++// to aim z-texturing at TEXMAP1 (m419Dll/main.c:278), and picking the last stage
++// that actually samples would take the colour texture instead.
++static int ztex_source_stage(const ShaderConfig& config) noexcept {
++  if (config.ztexOp == 0) {
++    return -1;
++  }
++  for (int i = static_cast<int>(config.tevStageCount) - 1; i >= 0; --i) {
++    const auto& stage = config.tevStages[i];
++    if (stage.texMapId != GX_TEXMAP_NULL && stage.texCoordId != GX_TEXCOORD_NULL) {
++      return i;
++    }
++  }
++  return -1;
++}
++
+ static bool uses_texture_sample(const TevStage& stage) noexcept {
+   const auto& c = stage.colorPass;
+   const auto& a = stage.alphaPass;
+@@ -1294,13 +1311,16 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+   if (info.usedIndStages.any()) {
+     fragmentFnPre += "\n    var t_TexCoord = vec2f(0.0);";
+   }
++  const int zTexStage = ztex_source_stage(config);
++  int lastSampledStage = -1;
+   for (int i = 0; i < config.tevStageCount; ++i) {
+     const auto& stage = config.tevStages[i];
+     const bool needsIndirectCoord = stage.indTexMtxId != GX_ITM_OFF;
+     const bool hasIndirectStage = stage.indTexStage < config.numIndStages;
+     const bool needsTevTexCoord =
+         needsIndirectCoord || stage.indTexWrapS != GX_ITW_OFF || stage.indTexWrapT != GX_ITW_OFF || stage.indTexAddPrev;
+-    const bool needsTextureSample = uses_texture_sample(stage);
++    // Sampled even when the combiner ignores it, when it is the z texture source.
++    const bool needsTextureSample = uses_texture_sample(stage) || i == zTexStage;
+     if (!needsTevTexCoord && !needsTextureSample) {
+       continue;
+     }
+@@ -1469,7 +1489,55 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+     fragmentFnPre +=
+         fmt::format("\n    var sampled{0} = textureSampleBias(tex{1}, tex{1}_samp, {2}, ubuf.tex{1}_size_bias.z);", i,
+                     underlying(stage.texMapId), uvIn);
++    // GX takes the z texture from the last stage that sampled one.
++    lastSampledStage = i;
++  }
++  // GXSetZTexture: the depth comes from the last stage's texture instead of
++  // the interpolated value, which is what confines Tree Stomp's full-screen
++  // trail quads to the scene depth. Weights are baked per format exactly as the
++  // hardware assembles its 24-bit value; the bias stays a uniform because it is
++  // not part of the pipeline config and may differ between draws sharing one.
++  std::string fragOutStruct;
++  std::string fragRetType = "@location(0) vec4f";
++  std::string fragRetStmt = "    return prev;";
++  if (config.ztexOp != 0) {
++    std::string_view zWeights;
++    switch (config.ztexFmt) {
++    case 0:
++      zWeights = "vec4f(0.0, 0.0, 0.0, 1.0)";
++      break;
++    case 1:
++      zWeights = "vec4f(1.0, 0.0, 0.0, 256.0)";
++      break;
++    default:
++      zWeights = "vec4f(65536.0, 256.0, 1.0, 0.0)";
++      break;
++    }
++    fragOutStruct = "\nstruct FragmentOutput {\n"
++                    "    @location(0) color: vec4f,\n"
++                    "    @builtin(frag_depth) depth: f32,\n"
++                    "}\n";
++    fragRetType = "FragmentOutput";
++    const std::string zsrc =
++        zTexStage >= 0 ? fmt::format("sampled{}", zTexStage) : std::string{"vec4f(0.0)"};
++    // 16777215 and the reversed-Z sense match gx_z24 in tex_copy_conv and the
++    // clear value in common.cpp: far is 0 reversed, 1 otherwise.
++    const std::string zInterp = UseReversedZ ? "(1.0 - in.pos.z)" : "in.pos.z";
++    const std::string zAdd =
++        config.ztexOp == 1 ? fmt::format("\n    ztex_z += {} * 16777215.0;", zInterp) : std::string{};
++    fragRetStmt = fmt::format(
++        "    var frag_out: FragmentOutput;"
++        "\n    frag_out.color = prev;"
++        "\n    let ztex_texel = vec4f(round({0}.r * 255.0), round({0}.g * 255.0), "
++        "round({0}.b * 255.0), round({0}.a * 255.0));"
++        "\n    var ztex_z = dot(ztex_texel, {1}) + ubuf.ztex_bias.x;{2}"
++        "\n    let ztex_i = u32(clamp(ztex_z, 0.0, 16777215.0)) & 0xFFFFFFu;"
++        "\n    frag_out.depth = {3}f32(ztex_i) / 16777215.0;"
++        "\n    return frag_out;",
++        zsrc, zWeights, zAdd, UseReversedZ ? "1.0 - " : "");
++    uniBufAttrs += "\n    ztex_bias: vec4f,";
+   }
++
+   if (info.usesPTTexMtx.any())
+     uniBufAttrs += fmt::format("\n    postmtx: array<mat3x4f, {}>,", MaxPTTexMtx);
+   if (info.usesFog) {
+@@ -1920,13 +1988,15 @@ fn vs_main(
+     return out;
+ }}
+ 
++{9}
+ @fragment
+-fn fs_main(in: VertexOutput) -> @location(0) vec4f {{{6}{5}
+-    return prev;
++fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
++{11}
+ }}
+ )""",
+                                         uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn,
+-                                        fragmentFnPre, vtxXfrAttrsPre, uniformPre);
++                                        fragmentFnPre, vtxXfrAttrsPre, uniformPre, fragOutStruct, fragRetType,
++                                        fragRetStmt);
+   if (EnableDebugPrints) {
+     Log.info("Generated shader: {}", shaderSource);
+   }
+diff --git a/lib/gx/shader_info.cpp b/lib/gx/shader_info.cpp
+index bb9ddec..e906aef 100644
+--- a/lib/gx/shader_info.cpp
++++ b/lib/gx/shader_info.cpp
+@@ -1,6 +1,7 @@
+ #include "shader_info.hpp"
+ 
+ #include <cmath>
++#include <cstdlib>
+ 
+ #include <tracy/Tracy.hpp>
+ 
+@@ -322,6 +323,20 @@ ShaderInfo build_shader_info(const ShaderConfig& config) noexcept {
+   if (info.usedIndTexMtxs.any()) {
+     info.uniformSize += MaxIndTexMtxs * sizeof(Mat2x4<float>);
+   }
++  if (config.ztexOp != 0) {
++    info.usesZTex = true;
++    info.uniformSize += sizeof(Vec4<float>);
++    // The z texture's stage may have a combiner that never reads it, so nothing
++    // else would bind it. Register the last stage with a texture bound.
++    for (int i = static_cast<int>(config.tevStageCount) - 1; i >= 0; --i) {
++      const auto& stage = config.tevStages[i];
++      if (stage.texMapId != GX_TEXMAP_NULL && stage.texCoordId != GX_TEXCOORD_NULL) {
++        info.sampledTextures.set(stage.texMapId);
++        info.sampledTexCoords.set(stage.texCoordId);
++        break;
++      }
++    }
++  }
+   info.uniformSize += info.sampledTextures.count() * sizeof(Vec4<float>);
+   info.uniformSize = gfx::align_uniform(info.uniformSize);
+   if (info.uniformSize > MaxUniformSize) {
+@@ -481,6 +496,11 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
+     // CHECK(tex, "unbound texture {}", i);
+     buf.append(texture_size_bias(tex));
+   }
++  if (info.usesZTex) {
++    // Declared after the texture sizes in shader.cpp, so it has to be appended
++    // after them here: the uniform is written positionally.
++    buf.append(Vec4{static_cast<f32>(g_gxState.ztexBias), 0.f, 0.f, 0.f});
++  }
+   g_gxState.stateDirty = false;
+   return gfx::push_uniform(buf.data(), buf.size());
+ }

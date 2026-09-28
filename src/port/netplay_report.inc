@@ -85,8 +85,8 @@ void writeDigestLine(std::FILE *file, const char *role, const StateDigest &diges
 // stopped. Returns the report path, or an empty path when nothing was written.
 std::string writeDesyncReport(std::uint32_t frame, StateFailure failure)
 {
-    const auto *local = gRuntime.states.getLocal(frame);
-    const auto *remote = gRuntime.states.getRemote(frame);
+    const auto *local = reportedStates().getLocal(frame);
+    const auto *remote = reportedStates().getRemote(frame);
     const auto directory = reportDirectory();
     char name[128];
     std::snprintf(name, sizeof(name), "netplay_desync_%s_player%u.log",
@@ -221,15 +221,15 @@ std::string writeDesyncReport(std::uint32_t frame, StateFailure failure)
     const std::uint32_t first = frame > kReportFramesBefore ? frame - kReportFramesBefore : 0;
     const std::uint32_t last = frame + kReportFramesAfter;
     for (std::uint32_t index = first; index <= last; ++index) {
-        if (const auto *value = gRuntime.states.getLocal(index)) writeDigestLine(file, "local", *value);
-        if (const auto *value = gRuntime.states.getRemote(index)) writeDigestLine(file, "remote", *value);
+        if (const auto *value = reportedStates().getLocal(index)) writeDigestLine(file, "local", *value);
+        if (const auto *value = reportedStates().getRemote(index)) writeDigestLine(file, "remote", *value);
     }
 
     // Input timeline around the divergence. An input applied to the wrong frame
     // shows up here even when the canonical state still matches.
     for (std::uint32_t index = first; index <= last; ++index) {
         const auto *localInput = findInput(gRuntime.localHistory, index);
-        const auto *remoteInput = findInput(gRuntime.remoteHistory, index);
+        const auto *remoteInput = findInput(gRuntime.peerHistory[soleRemoteSeat()], index);
         if (!localInput && !remoteInput) continue;
         std::fprintf(file, "INPUT frame=%u", index);
         const auto emit = [file](const char *role, const InputSlot *slot) {

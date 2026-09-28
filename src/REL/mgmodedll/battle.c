@@ -7,6 +7,7 @@
 #include "game/wipe.h"
 
 #include "ext_math.h"
+#include "port/version_runtime.h"
 
 #ifndef __MWERKS__
 #include "game/frand.h"
@@ -91,7 +92,16 @@ s32 fn_1_E72C(void)
             }
             HuPrcVSleep();
         }
-        #if VERSION_PAL
+        #ifdef TARGET_PC
+        // PAL discs describe each battle choice (messages 0x39xxxx)
+        if (VERSION_RT_PAL) {
+            if(lbl_1_data_148 == -1) {
+                lbl_1_data_148 = fn_1_2530C(0, 0, 0);
+                HuWinMesSpeedSet(lbl_1_data_148, 1);
+                fn_1_25838(lbl_1_data_148, 0x390001, -1, -1);
+            }
+        }
+        #elif VERSION_PAL
         if(lbl_1_data_148 == -1) {
             lbl_1_data_148 = fn_1_2530C(0, 0, 0);
             HuWinMesSpeedSet(lbl_1_data_148, 1);
@@ -117,7 +127,23 @@ s32 fn_1_E72C(void)
             lbl_1_bss_20AA = 1;
         }
         lbl_1_bss_3A4 = fn_1_25CA8(0x1A0020);
-        #if VERSION_NTSC
+        #ifdef TARGET_PC
+        if (VERSION_RT_NTSC) {
+            if (lbl_1_data_148 == -1) {
+                lbl_1_data_148 = fn_1_2530C(0, 0, 0);
+            }
+            HuWinMesSpeedSet(lbl_1_data_148, 1);
+            fn_1_25838(lbl_1_data_148, 0x28000F, -1, -1);
+        }
+        else {
+            if(lbl_1_data_148 == -1) {
+                lbl_1_data_148 = fn_1_2530C(0, 0, 0);
+                HuWinMesSpeedSet(lbl_1_data_148, 1);
+                fn_1_25838(lbl_1_data_148, 0x390001, -1, -1);
+            }
+            fn_1_25838(lbl_1_data_148, 0x390002+temp_r29, -1, -999);
+        }
+        #elif VERSION_NTSC
         if (lbl_1_data_148 == -1) {
             lbl_1_data_148 = fn_1_2530C(0, 0, 0);
         }
@@ -147,7 +173,12 @@ s32 fn_1_E72C(void)
                         HuAudFXPlay(0);
                         HuSprTPLvlSet(lbl_1_bss_388, ((temp_r29 + temp_r28) * 2) + 2, 1);
                         HuSprAttrReset(lbl_1_bss_388, ((temp_r29 + temp_r28) * 2) + 2, HUSPR_ATTR_DISPOFF);
-                        #if VERSION_PAL
+                        #ifdef TARGET_PC
+                        // PAL discs describe each battle choice (messages 0x39xxxx)
+                        if (VERSION_RT_PAL) {
+                            fn_1_25838(lbl_1_data_148, 0x390002+temp_r29+temp_r28, -1, -999);
+                        }
+                        #elif VERSION_PAL
                         fn_1_25838(lbl_1_data_148, 0x390002+temp_r29+temp_r28, -1, -999);
                         #endif
                     }

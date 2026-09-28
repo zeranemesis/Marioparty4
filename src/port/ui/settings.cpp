@@ -5,21 +5,39 @@
 #include "aurora/gfx.h"
 #include "bool_button.hpp"
 #include "controller_config.hpp"
+#include "port/app_update.hpp"
 #include "port/config.hpp"
+#include "port/display_rate.hpp"
+#include "port/netplay_runtime.h"
+#include "localization.hpp"
 #include "../imgui/ImGuiEngine.hpp"
 #include "../file_select.hpp"
 #include "graphics_tuner.hpp"
 #include "menu_bar.hpp"
 #include "number_button.hpp"
 #include "pane.hpp"
+#include "port/retroachievements.h"
+#include "string_button.hpp"
 #include "prelaunch.hpp"
 #include "ui.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <fmt/format.h>
 #include <aurora/aurora.h>
 #include <game/disp.h>
 #include <gx/GXAurora.h>
 #include <vi.h>
+
+namespace {
+// The RetroAchievements login fields. Typed in the settings and handed to
+// rcheevos on "Log In"; the password is never saved and is cleared as soon
+// as it has been sent.
+Rml::String s_raPendingUser;
+Rml::String s_raPendingPassword;
+} // namespace
+
+extern "C" int PartyBoard_TargetFrameRateFor(bool netplayEnabled, int configured);
 
 namespace partyboard::ui {
 
@@ -33,9 +51,13 @@ namespace {
         GameLanguage value;
     };
 
+    // Every language a European disc carries (mess/*_g|f|s|i.dat); a USA disc is English only.
     constexpr std::array kLanguageChoices = {
         LanguageChoice { "English", GameLanguage::English },
         LanguageChoice { "French", GameLanguage::French },
+        LanguageChoice { "German", GameLanguage::German },
+        LanguageChoice { "Spanish", GameLanguage::Spanish },
+        LanguageChoice { "Italian", GameLanguage::Italian },
     };
 
     constexpr std::array kCardFileTypes = {
@@ -186,6 +208,8 @@ namespace {
 
         getSettings().game.enableTurboKeybind.setValue(false);
     }
+
+    constexpr std::array<const char *, 3> kTouchControlModes = { "Automatic", "Always", "Never" };
 
     const Rml::String kInternalResolutionHelpText = "Configure the resolution used for rendering the game. Higher values are more demanding on "
                                                     "your graphics hardware.";
@@ -338,9 +362,10 @@ SettingsWindow::SettingsWindow(bool prelaunch)
                                           .key = "Language",
                                           .getValue =
                                               [] {
-                                                  const auto &state = prelaunch_state();
-                                                  if (getSettings().game.language.getValue() == GameLanguage::French) {
-                                                      return kLanguageChoices[1].name;
+                                                  for (const auto &choice : kLanguageChoices) {
+                                                      if (getSettings().game.language.getValue() == choice.value) {
+                                                          return choice.name;
+                                                      }
                                                   }
                                                   return kLanguageChoices[0].name;
                                               },
@@ -414,6 +439,9 @@ SettingsWindow::SettingsWindow(bool prelaunch)
 
         leftPane.add_section("Display");
 
+#ifndef __ANDROID__
+        // There is no window on a phone: SDL answers "leave fullscreen" by
+        // bringing back the status and navigation bars over the game.
         leftPane.register_control(leftPane.add_button("Toggle Fullscreen").on_pressed([] {
             // mDoAud_seStartMenu(kSoundItemChange); // TODO PC
             getSettings().video.enableFullscreen.setValue(!getSettings().video.enableFullscreen);
@@ -429,6 +457,7 @@ SettingsWindow::SettingsWindow(bool prelaunch)
             VICenterWindow();
         }),
             rightPane, [](Pane &pane) { pane.clear(); });
+#endif
         config_bool_select(leftPane, rightPane, getSettings().video.enableVsync,
             {
                 .key = "Enable VSync",
@@ -507,7 +536,20 @@ SettingsWindow::SettingsWindow(bool prelaunch)
                                       },
                                   }),
             rightPane, [](Pane &pane) {
+                // On a phone, only rates the screen shows evenly: a 60/120 Hz screen offers 60 and
+                // 120, a 144 Hz one 144 (120 there would judder between two refresh intervals).
+                const auto screenRates = display::supported_refresh_rates();
+                const int screenMax = screenRates.empty() ? 0 : screenRates.back();
+                const auto shownEvenly = [&screenRates](int frameRate) {
+                    return std::ranges::any_of(screenRates, [frameRate](int refresh) {
+                        const float ratio = static_cast<float>(refresh) / static_cast<float>(frameRate);
+                        return ratio >= 0.99f && std::abs(ratio - std::round(ratio)) < 0.02f;
+                    });
+                };
                 for (const int frameRate : kTargetFrameRates) {
+                    if (!screenRates.empty() && frameRate > kTargetFrameRates[0] && !shownEvenly(frameRate)) {
+                        continue;
+                    }
                     pane.add_button({
                                         .text = Rml::String { std::to_string(frameRate) + " FPS" },
                                         .isSelected = [frameRate] {
@@ -517,7 +559,11 @@ SettingsWindow::SettingsWindow(bool prelaunch)
                         .on_pressed([frameRate] {
                             getSettings().video.targetFrameRate.setValue(frameRate);
                             config::Save();
+                            display::request_frame_rate(PartyBoard_TargetFrameRateFor(PartyBoard_NetplayEnabled(), frameRate));
                         });
+                }
+                if (screenMax > 0) {
+                    pane.add_rml(fmt::format(fmt::runtime(ui_translate("<br/>This screen refreshes at up to {} Hz.")), screenMax));
                 }
                 pane.add_rml("<br/>The original game simulation and audio remain fixed at 60 Hz. Higher settings use latency-compensated 3D and 2D motion, "
                              "colour, opacity, cameras, and transition fades for smoother presentation without delaying input or speeding up gameplay. "
@@ -653,6 +699,51 @@ SettingsWindow::SettingsWindow(bool prelaunch)
                 .onChange = [](bool value) { aurora_set_background_input(value); },
             });
 
+        leftPane.add_section("Screen Controller");
+        leftPane.register_control(leftPane.add_select_button({
+                                      .key = "Screen Controller",
+                                      .getValue = [] { return Rml::String { kTouchControlModes[std::clamp(getSettings().game.touchControls.getValue(), 0, 2)] }; },
+                                      .isModified =
+                                          [] {
+                                              const auto &v = getSettings().game.touchControls;
+                                              return v.getValue() != v.getDefaultValue();
+                                          },
+                                  }),
+            rightPane, [](Pane &pane) {
+                for (int i = 0; i < static_cast<int>(kTouchControlModes.size()); ++i) {
+                    pane.add_button({
+                                        .text = kTouchControlModes[i],
+                                        .isSelected = [i] { return getSettings().game.touchControls.getValue() == i; },
+                                    })
+                        .on_pressed([i] {
+                            getSettings().game.touchControls.setValue(i);
+                            config::Save();
+                        });
+                }
+                pane.add_rml("<br/>");
+                pane.add_text("A GameCube controller drawn on the screen, for playing on a phone or a tablet. Automatic shows it on "
+                              "touch screens whenever no gamepad is plugged into port 1.");
+            });
+        leftPane.register_control(leftPane.add_child<NumberButton>(NumberButton::Props {
+                                      .key = "Screen Controller Opacity",
+                                      .getValue = [] { return getSettings().game.touchControlsOpacity.getValue(); },
+                                      .setValue =
+                                          [](int value) {
+                                              getSettings().game.touchControlsOpacity.setValue(std::clamp(value, 10, 100));
+                                              config::Save();
+                                          },
+                                      .isModified =
+                                          [] {
+                                              const auto &v = getSettings().game.touchControlsOpacity;
+                                              return v.getValue() != v.getDefaultValue();
+                                          },
+                                      .min = 10,
+                                      .max = 100,
+                                      .step = 10,
+                                      .suffix = "%",
+                                  }),
+            rightPane, [](Pane &pane) { pane.add_text("How visible the screen controller is over the game."); });
+
         leftPane.add_section("Tools");
         addOption("Turbo Key", getSettings().game.enableTurboKeybind, "Hold Tab to unlock the FPS, speeding up the game.",
             [] { return getSettings().game.speedrunMode; });
@@ -768,11 +859,73 @@ SettingsWindow::SettingsWindow(bool prelaunch)
         // leftPane.add_section("Abilities");
     });
 
+    add_tab("RetroAchievements", [this](Rml::Element *content) {
+        auto &leftPane = add_child<Pane>(content, Pane::Type::Controlled);
+        auto &rightPane = add_child<Pane>(content, Pane::Type::Uncontrolled);
+
+        if (s_raPendingUser.empty()) {
+            s_raPendingUser = getSettings().retroAchievements.username.getValue();
+        }
+
+        leftPane.add_section("Account");
+        leftPane.register_control(leftPane.add_select_button({
+                                      .key = "Status",
+                                      .getValue = [] { return Rml::String { ra::statusText() }; },
+                                  }),
+            rightPane, [](Pane &pane) {
+                pane.add_text("Achievements are unlocked in softcore mode. Hardcore needs the "
+                              "RetroAchievements team to validate this client first.");
+                pane.add_text("Online sessions do not count toward achievements.");
+            });
+        config_bool_select(leftPane, rightPane, getSettings().retroAchievements.enabled,
+            {
+                .key = "Enable RetroAchievements",
+                .helpText = "Connect to retroachievements.org and unlock achievements while you play. "
+                            "Takes effect the next time the game starts.",
+            });
+        leftPane.register_control(leftPane.add_child<StringButton>(StringButton::Props {
+                                      .key = "Username",
+                                      .getValue = [] { return s_raPendingUser; },
+                                      .setValue = [](Rml::String value) { s_raPendingUser = std::move(value); },
+                                      .maxLength = 64,
+                                  }),
+            rightPane, [](Pane &pane) { pane.add_text("Your retroachievements.org username."); });
+        leftPane.register_control(leftPane.add_child<StringButton>(StringButton::Props {
+                                      .key = "Password",
+                                      .getValue = [] { return s_raPendingPassword; },
+                                      .setValue = [](Rml::String value) { s_raPendingPassword = std::move(value); },
+                                      .maxLength = 256,
+                                      .type = "password",
+                                      .secret = true,
+                                  }),
+            rightPane, [](Pane &pane) {
+                pane.add_text("Only used to log in. It is not saved: the game keeps the session "
+                              "token the server returns instead.");
+            });
+        leftPane.register_control(leftPane.add_button("Log In").on_pressed([] {
+            ra::loginWithPassword(s_raPendingUser, s_raPendingPassword);
+            s_raPendingPassword.clear();
+        }),
+            rightPane, [](Pane &pane) { pane.add_text("Log in with the username and password above."); });
+        leftPane.register_control(leftPane.add_button("Log Out").on_pressed([] { ra::logout(); }),
+            rightPane, [](Pane &pane) { pane.add_text("Forget the saved session on this computer."); });
+    });
+
     add_tab("Interface", [this](Rml::Element *content) {
         auto &leftPane = add_child<Pane>(content, Pane::Type::Controlled);
         auto &rightPane = add_child<Pane>(content, Pane::Type::Uncontrolled);
 
         leftPane.add_section("Party Board");
+        if (update::supported()) {
+            config_bool_select(leftPane, rightPane, getSettings().backend.checkForUpdates,
+                {
+                    .key = "Check for Updates",
+                    .helpText = "Look for a newer build on GitHub when Party Board starts. When there is one, the home "
+                                "screen offers to download it; nothing is downloaded without asking.",
+                });
+            leftPane.register_control(leftPane.add_button("Check Now").on_pressed([] { update::check(false); }), rightPane,
+                [](Pane &pane) { pane.add_text("Look for a newer build on GitHub now. The answer shows on the home screen, under the version."); });
+        }
 #if PARTY_BOARD_CAN_OPEN_DATA_FOLDER
         leftPane.register_control(leftPane.add_button("Open Data Folder").on_pressed([] {
             // mDoAud_seStartMenu(kSoundClick); // TODO PC

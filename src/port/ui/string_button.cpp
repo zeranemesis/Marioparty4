@@ -142,9 +142,10 @@ void BaseStringButton::stop_editing(bool commit, bool refocusRoot)
 }
 
 StringButton::StringButton(Rml::Element *parent, Props props)
-    : BaseStringButton(parent, { .key = std::move(props.key), .maxLength = props.maxLength })
+    : BaseStringButton(parent, { .key = std::move(props.key), .type = std::move(props.type), .maxLength = props.maxLength })
     , mGetValue(std::move(props.getValue))
     , mSetValue(std::move(props.setValue))
+    , mSecret(props.secret)
 {
 }
 

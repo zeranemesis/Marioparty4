@@ -7,7 +7,6 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
-#include <chrono>
 #include <vector>
 
 extern "C" {
@@ -141,8 +140,6 @@ public:
         gain.store(gain_from_volume(volume));
         targetGain.store(gain_from_volume(volume));
         cursor.store(0);
-        audioDriven.store(false);
-        startTime = std::chrono::steady_clock::now();
         stopped.store(false);
         audioDrained.store(false, std::memory_order_relaxed);
         return true;
@@ -170,8 +167,6 @@ public:
         if (stopped.load(std::memory_order_relaxed) || audio.empty()) {
             return;
         }
-        // From here on the mixer owns the playback clock; see playback_frame().
-        audioDriven.store(true, std::memory_order_relaxed);
         const uint32_t available = static_cast<uint32_t>(audio.size() / 2);
         uint64_t position = cursor.load(std::memory_order_relaxed);
         int current = gain.load(std::memory_order_relaxed);
@@ -221,27 +216,21 @@ public:
             / (60ull * 100000ull);
     }
 
-    /* Outside netplay the audio mixer is the reference clock whenever it is
-     * actually running, because that keeps picture and sound locked together.
-     * It is not always running: a movie with no audio track, or one started
-     * while the mixer is idle, would never advance, and the caller's
-     * `while (!HuTHPEndCheck())` loop would hang the game for good. Fall back
-     * to the monotonic clock in that case. Under netplay the simulation clock
-     * above is used instead, and it advances whatever the audio does. */
     uint64_t playback_frame() const {
         if (PartyBoard_NetplayEnabled()) {
             return logical_frame();
         }
-        if (audioDriven.load(std::memory_order_relaxed)) {
-            const uint64_t sample = cursor.load(std::memory_order_relaxed);
-            return sample * static_cast<uint64_t>(fps * 100000.0f) / (uint64_t(rate) * 100000);
-        }
-        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - startTime).count();
-        if (elapsed <= 0) {
-            return 0;
-        }
-        return static_cast<uint64_t>(static_cast<double>(elapsed) * fps / 1000000.0);
+        const uint64_t sample = cursor.load(std::memory_order_relaxed);
+        const uint64_t audioFrame = sample * static_cast<uint64_t>(fps * 100000.0f) / (uint64_t(rate) * 100000);
+        // The device paces the picture while it plays. One that stops draining
+        // (no output, audio focus taken by a call, a Bluetooth headset switching,
+        // an emulator started without sound) froze the movie, and with it every
+        // screen that waits for its end: after choosing a save file the game sat
+        // on an empty screen forever. More than a second behind the simulation
+        // clock, the simulation clock takes over.
+        const uint64_t logical = logical_frame();
+        const uint64_t lag = fps > 1.0f ? static_cast<uint64_t>(fps) : 30u;
+        return logical > audioFrame + lag ? logical - lag : audioFrame;
     }
 
     /* D14: two peers left the movie wait two simulation frames apart while
@@ -286,11 +275,7 @@ public:
         if (frames.empty()) {
             return 0;
         }
-        const uint64_t frame = playback_frame();
-        if (looped) {
-            return static_cast<int>(frame % frames.size());
-        }
-        return static_cast<int>(std::min<uint64_t>(frame, frames.size() - 1));
+        return static_cast<int>(std::min<uint64_t>(playback_frame(), frames.size() - 1));
     }
 
     void logical_tick() { ++logicalTicks; }
@@ -356,8 +341,6 @@ public:
 
     void restart() {
         cursor.store(0, std::memory_order_relaxed);
-        audioDriven.store(false, std::memory_order_relaxed);
-        startTime = std::chrono::steady_clock::now();
         stopped.store(false, std::memory_order_relaxed);
         audioDrained.store(false, std::memory_order_relaxed);
         logicalTicks = 0;
@@ -649,10 +632,6 @@ private:
     // Accepted simulation ticks since the movie started. Game thread only; the
     // audio thread never reads or writes it.
     uint32_t logicalTicks = 0;
-    // Whether the mixer has advanced the cursor since the movie started, and
-    // when it started: the fallback clock of playback_frame().
-    std::atomic<bool> audioDriven{false};
-    std::chrono::steady_clock::time_point startTime{};
 };
 
 std::mutex g_movieMutex;

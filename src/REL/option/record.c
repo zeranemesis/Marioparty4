@@ -11,6 +11,7 @@
 #include "dolphin.h"
 #include "ext_math.h"
 #include "version.h"
+#include "port/version_runtime.h"
 
 #ifndef __MWERKS__
 #include "game/gamework.h"
@@ -583,10 +584,11 @@ static void ShowBoard(omObjData *object, s32 board)
     s32 i;
     s32 j;
 
+    // Record layout of the loaded disc (PAL texts are longer, some unit icons are hidden)
     espPosSet(work->sprList[board], 275.0f, 72.0f);
     value = work->boardRecord[work->board].playCount;
     for (i = 0; i < PLAY_COUNT_NUM_DIGITS; i++) {
-        espPosSet(work->sprList[i + 11], (VERSION_NTSC ? 323.0f : 392.0f) + 20.0f * i, 116.0f);
+        espPosSet(work->sprList[i + 11], (VERSION_RT_NTSC ? 323.0f : 392.0f) + 20.0f * i, 116.0f);
         if (value > 999) {
             espBankSet(work->sprList[i + 11], i + 10);
         }
@@ -597,7 +599,7 @@ static void ShowBoard(omObjData *object, s32 board)
     espPosSet(work->sprList[8], 416.0f, 120.0f);
     value = work->boardRecord[work->board].maxCoins;
     for (i = 0; i < MAX_COINS_NUM_DIGITS; i++) {
-        espPosSet(work->sprList[i + 15], (VERSION_NTSC ? 364.0f : 392.0f) + 20.0f * i, 268.0f);
+        espPosSet(work->sprList[i + 15], (VERSION_RT_NTSC ? 364.0f : 392.0f) + 20.0f * i, 268.0f);
         if (value > 999) {
             espBankSet(work->sprList[i + 15], i + 10);
         }
@@ -605,12 +607,16 @@ static void ShowBoard(omObjData *object, s32 board)
             espBankSet(work->sprList[i + 15], GetDigit(value, 3 - i));
         }
     }
-#if VERSION_NTSC
+#ifdef TARGET_PC
+    if (VERSION_RT_NTSC) {
+        espPosSet(work->sprList[9], 456.0f, 268.0f);
+    }
+#elif VERSION_NTSC
     espPosSet(work->sprList[9], 456.0f, 268.0f);
 #endif
     value = work->boardRecord[work->board].maxStars;
     for (i = 0; i < MAX_STARS_NUM_DIGITS; i++) {
-        espPosSet(work->sprList[i + 19], (VERSION_NTSC ? 364.0f : 392.0f) + 20.0f * i, 312.0f);
+        espPosSet(work->sprList[i + 19], (VERSION_RT_NTSC ? 364.0f : 392.0f) + 20.0f * i, 312.0f);
         if (value > 999) {
             espBankSet(work->sprList[i + 19], i + 10);
         }
@@ -618,7 +624,11 @@ static void ShowBoard(omObjData *object, s32 board)
             espBankSet(work->sprList[i + 19], GetDigit(value, 3 - i));
         }
     }
-#if VERSION_NTSC
+#ifdef TARGET_PC
+    if (VERSION_RT_NTSC) {
+        espPosSet(work->sprList[10], 456.0f, 312.0f);
+    }
+#elif VERSION_NTSC
     espPosSet(work->sprList[10], 456.0f, 312.0f);
 #endif
     for (i = 0; i < CHARACTERS_MAX; i++) {
@@ -634,13 +644,21 @@ static void ShowBoard(omObjData *object, s32 board)
     for (i = 0; i < PLAY_COUNT_NUM_DIGITS; i++) {
         espDispOn(work->sprList[i + 11]);
     }
-#if VERSION_NTSC
+#ifdef TARGET_PC
+    if (VERSION_RT_NTSC) {
+        espDispOn(work->sprList[8]);
+    }
+#elif VERSION_NTSC
     espDispOn(work->sprList[8]);
 #endif
     for (i = 0; i < MAX_COINS_NUM_DIGITS; i++) {
         espDispOn(work->sprList[i + 15]);
     }
-#if VERSION_NTSC
+#ifdef TARGET_PC
+    if (VERSION_RT_NTSC) {
+        espDispOn(work->sprList[9]);
+    }
+#elif VERSION_NTSC
     espDispOn(work->sprList[9]);
 #endif
     for (i = 0; i < MAX_STARS_NUM_DIGITS; i++) {

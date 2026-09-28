@@ -18,6 +18,7 @@
 
 #include "REL/m444dll.h"
 #include "ext_math.h"
+#include "port/version_runtime.h"
 
 typedef struct camera_view_params {
     Vec rot;
@@ -356,7 +357,12 @@ void fn_1_470(void)
         }
         HuPrcVSleep();
     }
-    #if VERSION_PAL
+    #ifdef TARGET_PC
+    // PAL windows are sized with the character names inserted
+    if (VERSION_RT_PAL) {
+        HuWinInsertMesSizeGet((GWPlayerCfg[lbl_1_bss_2D6].character+1)-1, 0);
+    }
+    #elif VERSION_PAL
     HuWinInsertMesSizeGet((GWPlayerCfg[lbl_1_bss_2D6].character+1)-1, 0);
     #endif
     HuWinMesMaxSizeGet(1, sp8, MAKE_MESSID(0x1C, 0x02));
@@ -442,7 +448,13 @@ void fn_1_470(void)
         }
         HuPrcVSleep();
     }
-    #if VERSION_PAL
+    #ifdef TARGET_PC
+    // PAL windows are sized with the character names inserted
+    if (VERSION_RT_PAL) {
+        HuWinInsertMesSizeGet((GWPlayerCfg[lbl_1_bss_2D6].character+1)-1, 0);
+        HuWinInsertMesSizeGet((GWPlayerCfg[lbl_1_bss_2D4].character+1)-1, 2);
+    }
+    #elif VERSION_PAL
     HuWinInsertMesSizeGet((GWPlayerCfg[lbl_1_bss_2D6].character+1)-1, 0);
     HuWinInsertMesSizeGet((GWPlayerCfg[lbl_1_bss_2D4].character+1)-1, 2);
     #endif

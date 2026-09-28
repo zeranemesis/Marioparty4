@@ -3,6 +3,7 @@
 #include "game/wipe.h"
 
 #include "ext_math.h"
+#include "port/version_runtime.h"
 
 extern s32 rand8(void);
 
@@ -1311,7 +1312,11 @@ void fn_1_1EB20(StructBss8_24 *arg0)
     HuSprAttrSet(temp_r30, 32 + arg0->unk58, HUSPR_ATTR_DISPOFF);
     HuSprAttrSet(temp_r30, 36 + arg0->unk58, HUSPR_ATTR_DISPOFF);
     HuSprAttrSet(temp_r30, 49 + arg0->unk58, HUSPR_ATTR_DISPOFF);
-    #if VERSION_PAL
+    #ifdef TARGET_PC
+    if (VERSION_RT_PAL) {
+        HuSprAttrSet(temp_r30, 85, HUSPR_ATTR_DISPOFF);
+    }
+    #elif VERSION_PAL
     HuSprAttrSet(temp_r30, 85, HUSPR_ATTR_DISPOFF);
     #endif
 }

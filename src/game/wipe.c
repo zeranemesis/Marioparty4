@@ -2,6 +2,7 @@
 #include "game/wipe.h"
 #ifdef TARGET_PC
 #include "port/crash_report.h"
+#include "port/quest_stereo.h"
 #endif
 #include "game/memory.h"
 #include "game/flag.h"
@@ -251,6 +252,9 @@ static s32 WipeNormalFade(void)
 
 static void WipeColorFill(GXColor color)
 {
+#ifdef TARGET_PC
+	if(PartyBoard_StereoBoardPresentation()) return;
+#endif
 	static GXColor colorN = { 0xFF, 0xFF, 0xFF, 0xFF };
 	Mtx44 proj;
 	Mtx modelview;
@@ -300,7 +304,11 @@ static s32 WipeCrossFade(void)
 	if(wipe->duration == 0) {
 		return 0;
 	}
-	if(wipe->copy_data == NULL) {
+	if(wipe->copy_data == NULL
+#ifdef TARGET_PC
+		&& !PartyBoard_StereoBoardPresentation()
+#endif
+	) {
 		size = GXGetTexBufferSize(wipe->w, wipe->h, GX_TF_RGB565, GX_FALSE, 0);
 		wipe->copy_data = HuMemDirectMallocNum(HEAP_DATA, size, 0x20000000);
 		GXSetTexCopySrc(wipe->x, wipe->y, wipe->w, wipe->h);
@@ -335,6 +343,11 @@ static s32 WipeCrossFade(void)
 
 static void WipeFrameStill(GXColor color)
 {
+#ifdef TARGET_PC
+	/* The original flat-screen capture contains no MR world. Displaying it
+	 * on the spatial HUD blacks out the board between player turns. */
+	if(PartyBoard_StereoBoardPresentation()) return;
+#endif
 	GXTexObj tex;
 	static GXColor colorN = { 0xFF, 0xFF, 0xFF, 0xFF };
 	Mtx44 proj;

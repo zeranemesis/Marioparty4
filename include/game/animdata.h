@@ -63,6 +63,11 @@ typedef struct AnimPat_s {
 typedef struct anim_tex_data {
     bool tex_initialized;
     bool tlut_initialized;
+    // Which wrap mode is baked into tex_obj. The cache is keyed on (bitmap, slot)
+    // but the wrap mode is a per-call argument, and callers do vary it on a shared
+    // bitmap -- see HuSprTexLoad in sprput.c.
+    GXTexWrapMode wrap_s;
+    GXTexWrapMode wrap_t;
     GXTexObj tex_obj;
     GXTlutObj tlut_obj;
 } AnimTexData;

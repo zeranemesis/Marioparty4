@@ -966,13 +966,26 @@ void msmSysCheckInit(void)
     sndIsInstalled();
 }
 
+#ifdef TARGET_PC
+// SND_HOOKS takes size_t; msmMemAlloc keeps the game's u32. Clang (Android) refuses the
+// mismatched pointer that MSVC let through.
+static void *msmSysHookAlloc(size_t size)
+{
+    return msmMemAlloc((u32)size);
+}
+#endif
+
 s32 msmSysInit(MSM_INIT *init, MSM_ARAM *aram)
 {
     s32 result;
     u32 aramBase;
     void *temp;
 
+#ifdef TARGET_PC
+    SND_HOOKS sndHooks = { msmSysHookAlloc, msmMemFree };
+#else
     SND_HOOKS sndHooks = { msmMemAlloc, msmMemFree };
+#endif
     DVDFileInfo sp10;
     if (sndIsInstalled() == 1) {
         return MSM_ERR_INSTALLED;

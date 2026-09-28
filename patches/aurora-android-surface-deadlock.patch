@@ -1,0 +1,55 @@
+--- a/lib/aurora.cpp
++++ b/lib/aurora.cpp
+@@ -202,6 +202,22 @@
+   ZoneScoped;
+ #ifdef AURORA_ENABLE_GX
+   {
++#if defined(SDL_PLATFORM_ANDROID)
++    // SurfaceLock is SDL's Android activity mutex, and the render worker takes
++    // it too (end_frame's present). Dropping or recreating the surface below
++    // first waits for that worker, so waiting while holding the lock deadlocks
++    // the game, the worker and the UI thread (surfaceDestroyed) as soon as the
++    // app goes to the background. Drain the worker first, unlocked: this
++    // thread is its only producer, so it has nothing left to lock for.
++    bool presentable;
++    {
++      window::SurfaceLock probe;
++      presentable = window::is_presentable() && g_surface;
++    }
++    if (!presentable) {
++      gfx::gpu_synchronize();
++    }
++#endif
+     window::SurfaceLock surfaceLock;
+     if (!window::is_presentable()) {
+       webgpu::release_surface();
+--- a/lib/window.cpp
++++ b/lib/window.cpp
+@@ -3,6 +3,7 @@
+ #ifdef AURORA_ENABLE_GX
+ #include "imgui.hpp"
+ #include "webgpu/gpu.hpp"
++#include "gfx/common.hpp"
+ #endif
+ #include "input.hpp"
+ #include "internal.hpp"
+@@ -82,6 +83,9 @@
+ 
+ void resize_swapchain() noexcept {
+ #if defined(SDL_PLATFORM_ANDROID)
++  // Reconfiguring waits for the render worker, which takes SurfaceLock itself:
++  // let it finish before this thread holds the lock (see aurora::begin_frame).
++  gfx::gpu_synchronize();
+   SurfaceLock surfaceLock;
+ #endif
+   const auto size = get_window_size();
+@@ -211,6 +215,9 @@
+     } else if (event.type == g_sdlCustomEventsStart + CustomEvent::RefreshSurface) {
+       // Refresh surface (vsync changed)
+ #ifdef AURORA_ENABLE_GX
++#if defined(SDL_PLATFORM_ANDROID)
++      gfx::gpu_synchronize();
++#endif
+       SurfaceLock surfaceLock;
+       webgpu::refresh_surface(false);
+ #endif

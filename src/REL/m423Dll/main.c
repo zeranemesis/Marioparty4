@@ -5364,7 +5364,11 @@ void fn_1_11900(HU3DMODEL *arg0, Mtx arg1)
     GXSETARRAY(GX_VA_POS, temp_r31->unk40, temp_r31->unk26 * sizeof(Vec) * 4, sizeof(Vec), TRUE);
     GXSetVtxDesc(GX_VA_CLR0, GX_INDEX16);
     GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
-    GXSETARRAY(GX_VA_CLR0, &temp_r31->unk3C->unk44, sizeof(GXColor), 76, TRUE);
+    /* The display list this calls (built around main.c:5118) emits GXColor1x16(i)
+     * for every one of the unk26 quads, so the window has to span them all at the
+     * 76 byte stride, not just the first. The position window above already counts
+     * unk26 * 4 vertices; this one counted one colour. */
+    GXSETARRAY(GX_VA_CLR0, &temp_r31->unk3C->unk44, temp_r31->unk26 * 76, 76, TRUE);
     GXSetVtxDesc(GX_VA_TEX0, GX_INDEX16);
     GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
     GXSETARRAY(GX_VA_TEX0, temp_r31->unk44, temp_r31->unk26 * sizeof(Vec2f) * 4, sizeof(Vec2f), TRUE);

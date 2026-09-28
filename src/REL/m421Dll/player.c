@@ -1806,7 +1806,12 @@ void fn_1_ABDC(HU3DMODEL *model, Mtx matrix)
         MTXConcat(spB8, sp118, spE8);
         GXLoadTexMtxImm(spE8, 0x1E, GX_MTX3x4);
         GXSETARRAY(GX_VA_POS, work->unk_50[var_r28], 14 * sizeof(Vec), sizeof(Vec), TRUE);
-        GXSETARRAY(GX_VA_CLR0, &work->unk_40[var_r28], sizeof(GXColor), sizeof(GXColor), TRUE);
+        /* The list below emits GXColor1x8(1) as well as index 0, so a one-element
+         * window leaves the rim colour outside what Aurora uploads. unk_40[0] is
+         * alpha 0x40 and unk_40[1] alpha 0: this fan is a radial fade, and without
+         * its second entry the edge never fades. A real GXSetArray has no size, so
+         * the GameCube reads on and the GameCube macro drops the argument. */
+        GXSETARRAY(GX_VA_CLR0, &work->unk_40[var_r28], (4 - var_r28) * sizeof(GXColor), sizeof(GXColor), TRUE);
         GXBegin(GX_TRIANGLEFAN, GX_VTXFMT0, 0xE);
         GXPosition1x8(0);
         GXPosition1x8(0);
@@ -1822,7 +1827,12 @@ void fn_1_ABDC(HU3DMODEL *model, Mtx matrix)
         MTXConcat(spB8, sp118, spE8);
         GXLoadTexMtxImm(spE8, 0x1E, GX_MTX3x4);
         GXSETARRAY(GX_VA_POS, work->unk_50[var_r28 + 1], 14 * sizeof(Vec), sizeof(Vec), TRUE);
-        GXSETARRAY(GX_VA_CLR0, &work->unk_40[var_r28], sizeof(GXColor), sizeof(GXColor), TRUE);
+        /* The list below emits GXColor1x8(1) as well as index 0, so a one-element
+         * window leaves the rim colour outside what Aurora uploads. unk_40[0] is
+         * alpha 0x40 and unk_40[1] alpha 0: this fan is a radial fade, and without
+         * its second entry the edge never fades. A real GXSetArray has no size, so
+         * the GameCube reads on and the GameCube macro drops the argument. */
+        GXSETARRAY(GX_VA_CLR0, &work->unk_40[var_r28], (4 - var_r28) * sizeof(GXColor), sizeof(GXColor), TRUE);
         GXBegin(GX_TRIANGLEFAN, GX_VTXFMT0, 0xE);
         GXPosition1x8(0);
         GXPosition1x8(0);

@@ -26,6 +26,12 @@ protected:
     bool handle_nav_command(Rml::Event &event, NavCommand cmd) override;
 
 private:
+    // The update link under the version: shown when there is something to do,
+    // reachable with a controller after the menu buttons (a headset has no touch).
+    bool update_shown() const;
+    bool update_contains(Rml::Element *element) const;
+    void press_update();
+
     bool mEntranceAnimationStarted = false;
     bool mRestartSuppressed = false;
     std::vector<std::unique_ptr<Button>> mMenuButtons;

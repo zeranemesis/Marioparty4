@@ -18,6 +18,7 @@
 #include "game/sprite.h"
 #include "game/window.h"
 #include "game/wipe.h"
+#include "port/version_runtime.h"
 
 
 typedef struct {
@@ -311,10 +312,10 @@ void fn_1_17338(void)
 
 void fn_1_175CC(omObjData *object)
 {
-    object->model[1] = Hu3DModelCreateFile(DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_NTSC ? 0x62 : 0x66));
-    object->motion[1] = Hu3DJointMotionFile(object->model[1], DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_NTSC ? 0x63 : 0x67));
-    object->motion[2] = Hu3DJointMotionFile(object->model[1], DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_NTSC ? 0x66 : 0x6A));
-    object->motion[3] = Hu3DJointMotionFile(object->model[1], DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_NTSC ? 0x69 : 0x6C));
+    object->model[1] = Hu3DModelCreateFile(DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_RT_NTSC ? 0x62 : 0x66));
+    object->motion[1] = Hu3DJointMotionFile(object->model[1], DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_RT_NTSC ? 0x63 : 0x67));
+    object->motion[2] = Hu3DJointMotionFile(object->model[1], DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_RT_NTSC ? 0x66 : 0x6A));
+    object->motion[3] = Hu3DJointMotionFile(object->model[1], DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_RT_NTSC ? 0x69 : 0x6C));
     Hu3DModelPosSet(object->model[1], 0, 0, 200);
     Hu3DModelRotSet(object->model[1], 0, 0, 0);
     Hu3DModelScaleSet(object->model[1], 1.6f, 1.6f, 1.6f);
@@ -359,8 +360,8 @@ void fn_1_177F8(void)
 
 void fn_1_17A70(omObjData *object)
 {
-    object->model[1] = Hu3DModelCreateFile(DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_NTSC ? 0x7D : 0x7B));
-    object->motion[1] = Hu3DJointMotionFile(object->model[1], DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_NTSC ? 0x7E : 0x7C));
+    object->model[1] = Hu3DModelCreateFile(DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_RT_NTSC ? 0x7D : 0x7B));
+    object->motion[1] = Hu3DJointMotionFile(object->model[1], DATA_MAKE_NUM(DATADIR_MSTORY2, VERSION_RT_NTSC ? 0x7E : 0x7C));
     Hu3DModelPosSet(object->model[1], -120, 0, 800);
     Hu3DModelRotSet(object->model[1], 0, 135, 0);
     Hu3DModelScaleSet(object->model[1], 1, 1, 1);

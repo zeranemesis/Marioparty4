@@ -24,6 +24,7 @@
 
 #include "dolphin.h"
 #include "ext_math.h"
+#include "port/version_runtime.h"
 
 #ifndef __MWERKS__
 #include "game/frand.h"
@@ -916,7 +917,17 @@ static void fn_1_8A60(void) {
         HuPrcVSleep();
     }
     fn_1_7300();
-    #if VERSION_ENG
+    #ifdef TARGET_PC
+    // Only the USA message takes the count
+    if (VERSION_RT_ENG) {
+        sprintf(sp10, "%d", var_r29);
+        BoardWinCreate(2, MAKE_MESSID(32, 11), 9);
+        BOARD_WIN_INSERT_MES_SET_PTR(MAKE_MESSID_PTR(sp10), 0);
+    }
+    else {
+        BoardWinCreate(2, MAKE_MESSID(32, 11), 9);
+    }
+    #elif VERSION_ENG
     sprintf(sp10, "%d", var_r29);
     BoardWinCreate(2, MAKE_MESSID(32, 11), 9);
     BOARD_WIN_INSERT_MES_SET_PTR(MAKE_MESSID_PTR(sp10), 0);

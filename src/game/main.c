@@ -22,6 +22,7 @@
 #include "port/settings.h"
 #include "port/imgui.h"
 #include "port/frame_interpolation.h"
+#include "port/perf_hint.h"
 #include "port/main.h"
 #include "port/rollback.h"
 #include "port/rollback_animation.h"
@@ -30,6 +31,7 @@
 #include "port/crash_report.h"
 #include "port/dolassets.h"
 #include "port/ui.h"
+#include "port/retroachievements.h"
 #include "aurora/dvd.h"
 #include <aurora/aurora.h>
 #include <aurora/event.h>
@@ -240,6 +242,7 @@ void main(void)
          * 60 Hz tick polls PAD from this fresh state immediately before the
          * game consumes it. Events remain queued for aurora_update next loop. */
         SDL_PumpEvents();
+        PartyBoard_PerfFrameBegin();
         simulationTicks = frame_pacer_simulation_tick();
         simulatedTicks = 0;
         finalizedTicks = 0;
@@ -275,6 +278,7 @@ void main(void)
 #ifdef TARGET_PC
                 PartyBoard_RunGameLogicTick();
                 PartyBoard_NetplayCommitTick();
+                PartyBoard_RAGameTick();
                 simulatedTicks++;
 #else
                 pfClsScr();
@@ -298,6 +302,7 @@ void main(void)
            a different number of frames at the same simulation frame have run
            those hooks a different number of times. */
         PartyBoard_RenderedFrames++;
+        PartyBoard_RAFramePump();
         /* Defect D6, detection only. PARTYBOARD_ADVANCE_FRAME is this bool, not
          * a count, and Hu3DExec runs once per rendered frame - so a frame that
          * batches two simulation ticks advances the animation clock once, for
@@ -410,6 +415,7 @@ void main(void)
         }
         ui_update();
         aurora_end_frame();
+        PartyBoard_PerfFrameEnd();
         if (!disableFrameLimiter || PartyBoard_NetplayEnabled()) {
             frame_limiter();
         }

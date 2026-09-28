@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12 and newer: cloud backup and transfer to a new phone. Same rules
+     as backup_rules.xml: keep the player's data, leave out the caches (the
+     shader caches are also specific to one GPU and driver). -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="pipeline_cache.db" />
+        <exclude domain="file" path="pipeline_cache.db-wal" />
+        <exclude domain="file" path="pipeline_cache.db-shm" />
+        <exclude domain="file" path="dawn_cache.db" />
+        <exclude domain="file" path="dawn_cache.db-wal" />
+        <exclude domain="file" path="dawn_cache.db-shm" />
+        <exclude domain="file" path="config.json.tmp" />
+        <exclude domain="file" path="texture_dumps" />
+        <exclude domain="file" path="retroachievements/badges" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="pipeline_cache.db" />
+        <exclude domain="file" path="pipeline_cache.db-wal" />
+        <exclude domain="file" path="pipeline_cache.db-shm" />
+        <exclude domain="file" path="dawn_cache.db" />
+        <exclude domain="file" path="dawn_cache.db-wal" />
+        <exclude domain="file" path="dawn_cache.db-shm" />
+        <exclude domain="file" path="config.json.tmp" />
+        <exclude domain="file" path="texture_dumps" />
+        <exclude domain="file" path="retroachievements/badges" />
+    </device-transfer>
+</data-extraction-rules>

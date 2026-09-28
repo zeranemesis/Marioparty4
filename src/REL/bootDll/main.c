@@ -130,6 +130,17 @@ void ObjectSetup(void)
          HuWindowInit();
          MGSeqInit();
          HuWinInit(1);
+         /*
+          * The boot sequence loads the sample banks in two steps, and only
+          * the second one was reproduced here. HuAudSndGrpSet(0) is the only
+          * path that reaches msmSysLoadBaseGroup(): a group set deliberately
+          * skips every base group (msmSysCheckBaseGroupNo, called from
+          * msmSysLoadGroupSet), so without this call the common sound effect
+          * banks are never resident and every SE stays silent. Base groups
+          * first, exactly as the sequence below does before its own
+          * HuAudSndGrpSetSet(0).
+          */
+         HuAudSndGrpSet(0);
          HuAudSndGrpSetSet(0);
          SystemInitF = TRUE;
      }
@@ -221,6 +232,19 @@ void ObjectSetup(void)
          for (i = 0; i < 4; i++) {
              GWPlayerCfg[i].pad_idx = i;
          }
+#ifdef TARGET_PC
+         // After the PAL language menu SystemInitF is already set: the logo and title still need creating
+         if (partyboard_version_is_pal() && SystemInitF) {
+             data = HuSprAnimReadFile(TITLE_ANM_VER_ADJUSTED(TITLE_HUDSON_ANM));
+             sprite_hudson = HuSprCreate(data, 0, 0);
+             HuSprGrpMemberSet(group, 1, sprite_hudson);
+             HuSprPosSet(group, 1, 288, 240);
+             HuSprAttrSet(group, 1, HUSPR_ATTR_DISPOFF);
+             HuAudSndGrpSetSet(0);
+             BootTitleCreate();
+             HuWinInit(1);
+         }
+#else
          #if VERSION_PAL
          if(SystemInitF) {
              data = HuSprAnimReadFile(TITLE_ANM_VER_ADJUSTED(TITLE_HUDSON_ANM));
@@ -233,6 +257,7 @@ void ObjectSetup(void)
              HuWinInit(1);
          }
          #endif
+#endif
      repeat:
          HuSprAttrReset(group, 0, HUSPR_ATTR_DISPOFF);
          WipeCreate(WIPE_MODE_IN, WIPE_TYPE_NORMAL, 30);

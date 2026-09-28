@@ -22,6 +22,7 @@
 #endif
 
 #include "REL/mpexDll.h"
+#include "port/version_runtime.h"
 
 typedef void (*MpexDllUnkFunc2)(omObjData *, ...);
 
@@ -2349,7 +2350,21 @@ void fn_1_CA98(s32 arg0, u32 arg1)
         case 3:
             OSReport("#################### HI-SCORE(%d) : %d\n", arg1, GWGameStat.mg_record[sp8[arg1]]);
             var_r31 = GWGameStat.mg_record[sp8[arg1]];
-            #if VERSION_NTSC
+            #ifdef TARGET_PC
+            // PAL messages take the score without right alignment
+            if (VERSION_RT_PAL) {
+                sprintf(lbl_1_bss_FC, " %d", var_r31);
+            }
+            else if (var_r31 < 0xA) {
+                sprintf(lbl_1_bss_FC, "  %d", var_r31);
+            }
+            else if (var_r31 < 0x64) {
+                sprintf(lbl_1_bss_FC, " %d", var_r31);
+            }
+            else {
+                sprintf(lbl_1_bss_FC, "%d", var_r31);
+            }
+            #elif VERSION_NTSC
             if (var_r31 < 0xA) {
                 sprintf(lbl_1_bss_FC, "  %d", var_r31);
             }

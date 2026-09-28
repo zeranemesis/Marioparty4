@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="online_lobby">Party Board en ligne</string>
+    <string name="online_join">Rejoindre le salon Party Board</string>
+</resources>

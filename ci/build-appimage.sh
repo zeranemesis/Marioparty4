@@ -41,6 +41,10 @@ cp platforms/freedesktop/partyboard.desktop build/appdir/usr/share/applications
 
 cd build/install
 
+# The executable finds libdol.so beside it, but librmlui.so is in usr/lib,
+# outside its search path; tell linuxdeploy where the bundled libraries are,
+# or it reports "Could not find dependency: librmlui.so".
+LD_LIBRARY_PATH="$GITHUB_WORKSPACE/build/appdir/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 VERSION="$PARTY_BOARD_VERSION" \
 NO_STRIP=1 \
 "$RUNNER_WORKSPACE"/"linuxdeploy-${LINUXDEPLOY_ARCH}.AppImage" \

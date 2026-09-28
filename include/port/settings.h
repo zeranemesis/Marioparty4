@@ -100,11 +100,15 @@ struct UserSettings {
         // Graphics
         ConfigVar<int> internalResolutionScale;
         ConfigVar<int> shadowResolutionMultiplier;
+        ConfigVar<bool> precompileShaders;
 
         // Audio
 
         // Input
         ConfigVar<bool> allowBackgroundInput;
+        // On-screen controller: 0 = automatic (phones and tablets without a gamepad), 1 = always, 2 = never.
+        ConfigVar<int> touchControls;
+        ConfigVar<int> touchControlsOpacity; // percent
 
         // Cheats
         ConfigVar<bool> infiniteHearts;
@@ -134,6 +138,19 @@ struct UserSettings {
         ConfigVar<int> cardFileType;
         ConfigVar<bool> enableAdvancedSettings;
     } backend;
+
+    struct {
+        // RetroAchievements (src/port/retroachievements.cpp). Only the session
+        // token is kept, never the password.
+        ConfigVar<bool> enabled;
+        ConfigVar<std::string> username;
+        ConfigVar<std::string> token;
+    } retroAchievements;
+
+    struct {
+        // The name shown to the other players in an online lobby.
+        ConfigVar<std::string> nickname;
+    } online;
 };
 
 UserSettings& getSettings();

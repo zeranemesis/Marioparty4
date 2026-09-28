@@ -100,6 +100,9 @@ FetchContent_Declare(json
 )
 FetchContent_MakeAvailable(json)
 
+include(cmake/rcheevos.cmake)
+include(cmake/mbedtls.cmake)
+
 set(VERSION 1)
 set(PARTY_BOARD_BUNDLE_NAME PartyBoard)
 set(PARTY_BOARD_BUNDLE_IDENTIFIER com.mariopartyrd.partyboard)
@@ -203,6 +206,19 @@ source_group("Game" FILES ${GAME_FILES})
 source_group("Port" FILES ${PORT_FILES})
 
 add_library(dol SHARED ${GAME_FILES} ${PORT_FILES} extern/libco/libco.c)
+
+# The game was built against the console libc's inline sqrtf, which returns a
+# zero or negative argument unchanged; the system sqrtf returns NaN instead. That
+# difference is what broke Makin' Waves' pool rim. Force-include a shim into the
+# game's own C sources only -- not PORT_FILES, which share this target but are the
+# port's C++, and not Aurora. See include/port/msl_sqrtf.h.
+set(MSL_SQRTF_SHIM ${CMAKE_SOURCE_DIR}/include/port/msl_sqrtf.h)
+if (MSVC)
+    set(MSL_SQRTF_FLAG "/FI${MSL_SQRTF_SHIM}")
+else ()
+    set(MSL_SQRTF_FLAG -include ${MSL_SQRTF_SHIM})
+endif ()
+set_property(SOURCE ${GAME_FILES} APPEND PROPERTY COMPILE_OPTIONS ${MSL_SQRTF_FLAG})
 set_target_properties(dol PROPERTIES C_VISIBILITY_PRESET default CXX_VISIBILITY_PRESET default)
 target_compile_definitions(dol PRIVATE TARGET_PC NON_MATCHING OPTIMIZED_TEXTURE_LOADING BYTESWAPPING TARGET_DOL VERSION=${VERSION} MUSY_VERSION_MAJOR=1 MUSY_VERSION_MINOR=5 MUSY_VERSION_PATCH=4)
 target_include_directories(dol PRIVATE include extern extern/aurora/include extern/aurora/include/dolphin ${CMAKE_BINARY_DIR})
@@ -210,6 +226,28 @@ if (tracy_SOURCE_DIR)
     target_include_directories(dol PRIVATE ${tracy_SOURCE_DIR}/profiler/src)
 endif()
 target_link_libraries(dol PUBLIC aurora::core aurora::card aurora::dvd aurora::gx aurora::mtx aurora::os aurora::si aurora::vi aurora::pad musyx absl::flat_hash_map nlohmann_json::nlohmann_json fmt::fmt rmlui_debugger)
+target_link_libraries(dol PRIVATE rcheevos mbedcrypto)
+if (ANDROID)
+    target_link_libraries(dol PRIVATE log)  # OSReport goes to logcat (src/port/stubs.c)
+endif ()
+# HTTPS for RetroAchievements, through each platform's own networking stack
+# (include/port/http.hpp). Only the curl backend needs anything from the system;
+# without it the feature is simply unavailable rather than breaking the build.
+if (WIN32)
+    target_link_libraries(dol PRIVATE winhttp)
+elseif (APPLE)
+    target_sources(dol PRIVATE src/port/http_apple.m)
+    set_source_files_properties(src/port/http_apple.m PROPERTIES COMPILE_FLAGS -fobjc-arc)
+    target_link_libraries(dol PRIVATE "-framework Foundation")
+elseif (NOT ANDROID)
+    find_package(CURL QUIET)
+    if (CURL_FOUND)
+        target_compile_definitions(dol PRIVATE PARTYBOARD_HAVE_CURL)
+        target_link_libraries(dol PRIVATE CURL::libcurl)
+    else ()
+        message(WARNING "libcurl not found: RetroAchievements will be unavailable in this build")
+    endif ()
+endif ()
 if (WIN32)
     target_link_libraries(dol PUBLIC ws2_32)
     # dbghelp is loaded lazily by the crash reporter for MiniDumpWriteDump, but
@@ -337,6 +375,7 @@ foreach (dir ${REL_TARGETS})
                 target_sources(${dir} PRIVATE src/REL/board_executor.c)
             endif()
             target_compile_definitions(${dir} PRIVATE TARGET_PC OPTIMIZED_TEXTURE_LOADING BYTESWAPPING NON_MATCHING VERSION=${VERSION})
+            target_compile_options(${dir} PRIVATE ${MSL_SQRTF_FLAG})
             target_include_directories(${dir} PRIVATE include extern extern/aurora/include extern/aurora/include/dolphin)
             if (MSVC)
                 set_target_properties(${dir} PROPERTIES LINK_FLAGS "/EXPORT:ObjectSetup")
@@ -381,12 +420,22 @@ if (ANDROID)
 endif ()
 
 if (NOT APPLE)
-    add_custom_command(TARGET partyboard POST_BUILD
+    # Depends on the files themselves, not on the executable being relinked:
+    # as a POST_BUILD step, a change to a stylesheet alone never reached the
+    # build directory, and the game kept showing the old one.
+    file(GLOB_RECURSE PARTY_BOARD_RES_FILES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/res/*")
+    set(PARTY_BOARD_RES_STAMP ${CMAKE_BINARY_DIR}/res.stamp)
+    add_custom_command(OUTPUT ${PARTY_BOARD_RES_STAMP}
             COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_SOURCE_DIR}/res"
             "$<TARGET_FILE_DIR:partyboard>/res"
+            COMMAND ${CMAKE_COMMAND} -E touch ${PARTY_BOARD_RES_STAMP}
+            DEPENDS ${PARTY_BOARD_RES_FILES}
             COMMENT "Copying resources"
+            VERBATIM
     )
+    add_custom_target(partyboard_resources ALL DEPENDS ${PARTY_BOARD_RES_STAMP})
+    add_dependencies(partyboard partyboard_resources)
 endif ()
 #
 if (WIN32)
@@ -500,10 +549,60 @@ endif ()
 
 install(TARGETS ${BINARY_TARGETS} ${EXTRA_TARGETS} DESTINATION ${CMAKE_INSTALL_PREFIX})
 aurora_install_runtime_dlls(partyboard ${CMAKE_INSTALL_PREFIX})
+# RmlUi is fetched EXCLUDE_FROM_ALL, so it is built but never installed. Where
+# the build uses shared libraries (the Linux presets), the executable then
+# needs a librmlui.so that is not in the install tree, and linuxdeploy cannot
+# package the AppImage ("Could not find dependency: librmlui.so").
+foreach (rmlui_target rmlui_core rmlui_debugger)
+    if (TARGET ${rmlui_target})
+        get_target_property(rmlui_type ${rmlui_target} TYPE)
+        if (rmlui_type STREQUAL "SHARED_LIBRARY")
+            install(TARGETS ${rmlui_target} LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX} RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX})
+        endif ()
+    endif ()
+endforeach ()
 
 if (NOT APPLE)
     install(DIRECTORY ${CMAKE_SOURCE_DIR}/res DESTINATION ${CMAKE_INSTALL_PREFIX})
 endif ()
+
+# Aurora's seed_pipeline_cache() reads this from beside the executable and merges
+# it into the live cache. (src/port/portmain.cpp has an EnsureInitialPipelineCache()
+# that copies it too, but into SDL_GetPrefPath("MarioPartyRD", ...) while Aurora
+# keeps its cache in SDL_GetPrefPath(nullptr, ...) -- one level shallower -- so that
+# copy lands where nothing reads it. Aurora's own path is the one that works.)
+# Without a seed every
+# player starts from an empty cache, and a pipeline that is still compiling does not
+# delay its draw -- it drops it (extern/aurora/lib/gx/pipeline.cpp), so a scene seen
+# for the first time is missing geometry for a few seconds.
+#
+# OPTIONAL because the file is a recording, not a build product: produce one with
+# tools/capture_pipeline_cache.ps1 after playing through the scenes worth seeding.
+# A tree without one still builds, and the port logs that none was found.
+install(FILES ${CMAKE_SOURCE_DIR}/initial_pipeline_cache.db
+        DESTINATION ${CMAKE_INSTALL_PREFIX} OPTIONAL)
+
+# The install rule alone only helps a packaged build. A developer running from
+# the build directory gets whatever copy happens to sit there, which is how a
+# stale 207-pipeline seed was still being loaded after the recording had been
+# widened to 437 -- silently, since the engine reports how many rows merged but
+# not which generation of the file they came from. Keep the build directory in
+# step instead of relying on remembering to copy it by hand.
+if (EXISTS ${CMAKE_SOURCE_DIR}/initial_pipeline_cache.db)
+    # Depends on the seed itself rather than hanging off partyboard's POST_BUILD:
+    # a POST_BUILD only fires when the executable relinks, so recapturing the seed
+    # without touching any source would leave the stale copy in place -- which is
+    # precisely the failure this is here to prevent.
+    set(PIPELINE_SEED_STAGED ${CMAKE_BINARY_DIR}/initial_pipeline_cache.db)
+    add_custom_command(OUTPUT ${PIPELINE_SEED_STAGED}
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_SOURCE_DIR}/initial_pipeline_cache.db
+                ${PIPELINE_SEED_STAGED}
+        DEPENDS ${CMAKE_SOURCE_DIR}/initial_pipeline_cache.db
+        COMMENT "Staging the pipeline cache seed next to partyboard")
+    add_custom_target(stage_pipeline_seed ALL DEPENDS ${PIPELINE_SEED_STAGED})
+    add_dependencies(partyboard stage_pipeline_seed)
+endif()
 
 # TODO uncomment
 if (CMAKE_BUILD_TYPE STREQUAL Debug) #OR CMAKE_BUILD_TYPE STREQUAL RelWithDebInfo)
@@ -555,3 +654,22 @@ foreach (target IN LISTS BINARY_TARGETS)
         endif ()
     endforeach ()
 endforeach ()
+
+# Native online, CubeShelf, screen controller and disc version unit tests. Not part of the default build; CI builds and runs them
+# (cmake --build <dir> --target online_tests, then run each from <dir>/tests).
+add_executable(online_invitation_test EXCLUDE_FROM_ALL tools/tests/online_invitation_test.cpp src/port/online/invitation.cpp)
+target_include_directories(online_invitation_test PRIVATE include)
+add_executable(cubeshelf_social_test EXCLUDE_FROM_ALL tools/tests/cubeshelf_social_test.cpp src/port/online/cubeshelf_social.cpp)
+target_include_directories(cubeshelf_social_test PRIVATE include)
+target_link_libraries(cubeshelf_social_test PRIVATE mbedcrypto nlohmann_json::nlohmann_json)
+add_executable(touch_controls_test EXCLUDE_FROM_ALL tools/tests/touch_controls_test.cpp src/port/touch_controls.cpp)
+target_include_directories(touch_controls_test PRIVATE include extern/aurora/include)
+target_compile_definitions(touch_controls_test PRIVATE TARGET_PC)
+add_executable(disc_version_test EXCLUDE_FROM_ALL tools/tests/disc_version_test.cpp)
+target_include_directories(disc_version_test PRIVATE include)
+add_executable(app_update_test EXCLUDE_FROM_ALL tools/tests/app_update_test.cpp src/port/app_update_manifest.cpp)
+target_include_directories(app_update_test PRIVATE include)
+target_link_libraries(app_update_test PRIVATE nlohmann_json::nlohmann_json)
+set_target_properties(online_invitation_test cubeshelf_social_test touch_controls_test disc_version_test app_update_test PROPERTIES
+        CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+add_custom_target(online_tests DEPENDS online_invitation_test cubeshelf_social_test touch_controls_test disc_version_test app_update_test)

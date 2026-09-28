@@ -1,0 +1,15 @@
+--- a/lib/gfx/render_worker.cpp
++++ b/lib/gfx/render_worker.cpp
+@@ -9,7 +9,11 @@
+ namespace aurora::gfx::render_worker {
+ namespace {
+ constexpr size_t QueueCapacity = 256;
+-constexpr auto IdlePumpInterval = std::chrono::milliseconds{1};
++// Nothing runs on a timeout (the loop just waits again), and both enqueue and
++// close() notify, so the worker can sleep until there is work. A 1 ms timeout
++// woke it a thousand times a second while idle: on a phone that is battery,
++// and CPU time taken from the game thread in every frame's idle gap.
++constexpr auto IdlePumpInterval = std::chrono::milliseconds{250};
+ 
+ BoundedQueue g_queue{QueueCapacity};
+ std::thread g_thread;

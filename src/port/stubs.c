@@ -1,3 +1,6 @@
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 #include <dolphin.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -52,8 +55,13 @@ void OSReport(const char *msg, ...)
 {
     va_list args;
     va_start(args, msg);
+#ifdef __ANDROID__
+    // stdout goes nowhere on Android: the game's own reports belong in logcat.
+    __android_log_vprint(ANDROID_LOG_DEBUG, "PartyBoard/OS", msg, args);
+#else
     vprintf(msg, args);
     fflush(stdout);
+#endif
     va_end(args);
 }
 

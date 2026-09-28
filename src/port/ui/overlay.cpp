@@ -1,6 +1,7 @@
 // Credits: TwilitRealm
 
 #include "overlay.hpp"
+#include "touch_overlay.hpp"
 
 #include "aurora/lib/logging.hpp"
 #include "port/achievements.h"
@@ -129,7 +130,7 @@ namespace {
         return "Back";
     }
 
-#if defined(TARGET_ANDROID) || (defined(__APPLE__) && TARGET_OS_IOS && !TARGET_OS_MACCATALYST)
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS && !TARGET_OS_MACCATALYST)
     constexpr auto kMenuNotificationPrefix = "3-finger tap or";
 #else
     constexpr auto kMenuNotificationPrefix = "Press F1 or";
@@ -142,7 +143,7 @@ namespace {
 
         auto *message = append(elem, "message");
         auto *row = append(message, "row");
-        append(row, "span")->SetInnerRML(kMenuNotificationPrefix);
+        append(row, "span")->SetInnerRML(ui_translate(kMenuNotificationPrefix));
         auto *icon = append(row, "icon");
         icon->SetClass("controller", true);
         append(row, "span")->SetInnerRML(escape(back_button_name()));
@@ -265,7 +266,9 @@ void Overlay::update()
     }
 
     u32 buttonCount;
+    // On a phone the screen controller is port 1's controller: nothing to warn about.
     const bool showControllerWarning = PADGetIndexForPort(PAD_CHAN0) < 0 && PADGetKeyButtonBindings(PAD_CHAN0, &buttonCount) == nullptr
+        && !TouchOverlay::stands_in_for_gamepad()
         && dynamic_cast<Window *>(top_document()) == nullptr && dynamic_cast<WindowSmall *>(top_document()) == nullptr;
     if (showControllerWarning && mControllerWarning == nullptr) {
         mControllerWarning = create_controller_warning(mDocument);

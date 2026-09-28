@@ -1,0 +1,187 @@
+--- /dev/null
++++ b/lib/gfx/rgba_mips.hpp
+@@ -0,0 +1,82 @@
++#pragma once
++
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++#include <vector>
++
++namespace aurora::gfx {
++struct RgbaMipChain {
++  std::vector<uint8_t> bytes;
++  uint32_t levels = 1;
++};
++
++// Keep level zero exact. Average sRGB colors in linear light with alpha
++// weighting so transparent texels cannot introduce colored fringes.
++inline RgbaMipChain rgba_mip_chain(const uint8_t* pixels, uint32_t width, uint32_t height) {
++  RgbaMipChain out;
++  if (!pixels || !width || !height) return out;
++  out.bytes.assign(pixels, pixels + size_t(width) * height * 4);
++  float linear[256];
++  for (unsigned i = 0; i < 256; ++i) {
++    const float c = i / 255.0f;
++    linear[i] = c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
++  }
++  size_t offset = 0;
++  bool cutout = true;
++  size_t covered = 0;
++  for (size_t i = 3; i < out.bytes.size(); i += 4) {
++    cutout &= out.bytes[i] == 0 || out.bytes[i] == 255;
++    covered += out.bytes[i] >= 128;
++  }
++  const float coverage = float(covered) / (size_t(width) * height);
++  cutout &= coverage > 0 && coverage < 1;
++  while (width > 1 || height > 1) {
++    const uint32_t nextW = std::max(1u, width / 2), nextH = std::max(1u, height / 2);
++    std::vector<uint8_t> next(size_t(nextW) * nextH * 4);
++    for (uint32_t y = 0; y < nextH; ++y) for (uint32_t x = 0; x < nextW; ++x) {
++      const float x0 = float(x) * width / nextW, x1 = float(x + 1) * width / nextW;
++      const float y0 = float(y) * height / nextH, y1 = float(y + 1) * height / nextH;
++      float rgb[3]{}, alpha = 0, weight = 0;
++      for (uint32_t sy = uint32_t(y0); sy < std::min(height, uint32_t(std::ceil(y1))); ++sy)
++        for (uint32_t sx = uint32_t(x0); sx < std::min(width, uint32_t(std::ceil(x1))); ++sx) {
++          const float w = (std::min(x1, float(sx + 1)) - std::max(x0, float(sx))) *
++                          (std::min(y1, float(sy + 1)) - std::max(y0, float(sy)));
++          const auto* p = out.bytes.data() + offset + (size_t(sy) * width + sx) * 4;
++          const float a = p[3] / 255.0f;
++          for (unsigned c = 0; c < 3; ++c) rgb[c] += linear[p[c]] * a * w;
++          alpha += a * w;
++          weight += w;
++        }
++      auto* p = next.data() + (size_t(y) * nextW + x) * 4;
++      for (unsigned c = 0; c < 3; ++c) {
++        const float v = alpha > 0 ? rgb[c] / alpha : 0;
++        const float encoded = v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
++        p[c] = uint8_t(std::clamp(std::lround(encoded * 255), 0l, 255l));
++      }
++      p[3] = uint8_t(std::clamp(std::lround(alpha / weight * 255), 0l, 255l));
++    }
++    // Preserve the closest representable cutout coverage at the common 0.5
++    // threshold. Smooth alpha textures are left untouched.
++    if (cutout) {
++      float lo = 0, hi = 8, best = 1, error = 2;
++      for (unsigned attempt = 0; attempt < 16; ++attempt) {
++        const float scale = (lo + hi) * 0.5f;
++        size_t visible = 0;
++        for (size_t i = 3; i < next.size(); i += 4) visible += next[i] * scale >= 127.5f;
++        const float fraction = float(visible) / (size_t(nextW) * nextH);
++        if (std::abs(fraction - coverage) < error) { error = std::abs(fraction - coverage); best = scale; }
++        if (fraction < coverage) lo = scale; else hi = scale;
++      }
++      for (size_t i = 3; i < next.size(); i += 4)
++        next[i] = uint8_t(std::clamp(std::lround(next[i] * best), 0l, 255l));
++    }
++    offset = out.bytes.size();
++    out.bytes.insert(out.bytes.end(), next.begin(), next.end());
++    width = nextW;
++    height = nextH;
++    ++out.levels;
++  }
++  return out;
++}
++} // namespace aurora::gfx
+--- a/lib/gfx/texture.cpp
++++ b/lib/gfx/texture.cpp
+@@ -6,6 +6,7 @@
+ #include "texture.hpp"
+ 
+ #include "../rt/rt_textures.hpp"
++#include "rgba_mips.hpp"
+ #include "texture_convert.hpp"
+ #include "../gx/gx_fmt.hpp"
+ 
+@@ -56,26 +57,34 @@ bool setup_swizzle(wgpu::TextureComponentSwizzleDescriptor& swizzle, u32 format)
+ } // namespace
+ 
+ TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 format, ArrayRef<uint8_t> data,
+-                                    bool tlut, const char* label) noexcept {
++                                    bool tlut, const char* label, bool worldMips) noexcept {
+   ZoneScoped;
+ 
+-  auto handle = new_dynamic_texture_2d(width, height, mips, format, label);
+-  auto& ref = *handle;
+-
+   ConvertedTexture converted;
+-  if (ref.gxFormat != InvalidTextureFormat) {
++  if (format != InvalidTextureFormat) {
+     if (tlut) {
+-      CHECK(ref.size.height == 1, "new_static_texture_2d[{}]: expected tlut height 1, got {}", label, ref.size.height);
+-      CHECK(ref.mipCount == 1, "new_static_texture_2d[{}]: expected tlut mipCount 1, got {}", label, ref.mipCount);
+-      converted = convert_tlut(ref.gxFormat, ref.size.width, data);
++      CHECK(height == 1 && mips == 1, "TLUT must have one row and one mip");
++      converted = convert_tlut(format, width, data);
+     } else {
+-      converted = convert_texture(ref.gxFormat, ref.size.width, ref.size.height, ref.mipCount, data);
+-    }
+-    if (!converted.data.empty()) {
+-      data = converted.data;
+-      ref.hasArbitraryMips = converted.hasArbitraryMips;
++      converted = convert_texture(format, width, height, mips, data);
+     }
+   }
++  if (!converted.data.empty()) data = converted.data;
++  RgbaMipChain generated;
++  const bool colorFormat = format == GX_TF_RGBA8 || format == GX_TF_RGB565 ||
++      format == GX_TF_RGB5A3 || format == GX_TF_RGBA8_PC;
++  if (worldMips && !tlut && colorFormat && mips == 1 && width >= 16 && height >= 16 &&
++      width <= 2048 && height <= 2048 && to_wgpu(format) == wgpu::TextureFormat::RGBA8Unorm) {
++    CHECK(data.size() == UINT32_MAX || data.size() >= size_t(width) * height * 4, "RGBA mip source truncated");
++    generated = rgba_mip_chain(data.data(), width, height);
++    data = {generated.bytes.data(), generated.bytes.size()};
++    mips = generated.levels;
++  }
++  auto handle = new_dynamic_texture_2d(width, height, mips, format, label);
++  auto& ref = *handle;
++  ref.hasArbitraryMips = converted.hasArbitraryMips;
++  ref.worldMipsPrepared = worldMips;
++  ref.generatedWorldMips = generated.levels > 1;
+ 
+   // Average the top mip while the decoded texels are still in reach.
+   {
+@@ -253,13 +262,22 @@ void write_texture(TextureRef& ref, ArrayRef<uint8_t> data) noexcept {
+ 
+   ConvertedTexture converted;
+   if (ref.gxFormat != InvalidTextureFormat) {
+-    converted = convert_texture(ref.gxFormat, ref.size.width, ref.size.height, ref.mipCount, data);
++    converted = convert_texture(ref.gxFormat, ref.size.width, ref.size.height,
++                                ref.generatedWorldMips ? 1 : ref.mipCount, data);
+     ref.hasArbitraryMips = converted.hasArbitraryMips;
+     if (!converted.data.empty()) {
+       data = converted.data;
+     }
+   }
+ 
++  RgbaMipChain generated;
++  if (ref.generatedWorldMips) {
++    CHECK(data.size() == UINT32_MAX || data.size() >= size_t(ref.size.width) * ref.size.height * 4,
++          "RGBA mip update truncated");
++    generated = rgba_mip_chain(data.data(), ref.size.width, ref.size.height);
++    data = {generated.bytes.data(), generated.bytes.size()};
++  }
++
+   uint32_t offset = 0;
+   for (uint32_t mip = 0; mip < ref.mipCount; ++mip) {
+     const wgpu::Extent3D mipSize{
+--- a/lib/gfx/texture.hpp
++++ b/lib/gfx/texture.hpp
+@@ -57,6 +57,8 @@ struct TextureRef {
+   // Index into the ray tracing thumbnail registry, 0 when there is none. Lets a
+   // reflection vary across a surface instead of blending one average colour.
+   uint32_t rtThumbnail = 0;
++  bool worldMipsPrepared = false;
++  bool generatedWorldMips = false;
+ 
+   TextureRef(wgpu::Texture texture, wgpu::TextureView sampleTextureView, wgpu::TextureView attachmentTextureView,
+              wgpu::Extent3D size, wgpu::TextureFormat format, uint32_t mipCount, u32 gxFormat)
+@@ -70,7 +72,7 @@ struct TextureRef {
+ };
+ 
+ TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 gxFormat,
+-                                    ArrayRef<uint8_t> data, bool tlut, const char* label) noexcept;
++                                    ArrayRef<uint8_t> data, bool tlut, const char* label, bool worldMips = false) noexcept;
+ TextureHandle new_dynamic_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 gxFormat,
+                                      const char* label) noexcept;
+ TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept;

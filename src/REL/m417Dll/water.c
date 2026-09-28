@@ -1,3 +1,4 @@
+#include <math.h>
 #include "ext_math.h"
 #include "game/audio.h"
 #include "game/disp.h"
@@ -356,6 +357,9 @@ void fn_1_3D58(omObjData *object)
             var_f31 = 750.0f - var_f31;
             if (var_f31 < 100.0f) {
                 var_f31 *= 0.01f;
+                /* A negative argument for the rim ring (radius 750 to 850). On the
+                 * console that returns the argument unchanged; include/port/msl_sqrtf.h
+                 * gives every game source the same semantics on PC. */
                 lbl_1_bss_178.unk_24[var_r30] = sqrtf(var_f31);
             }
             var_r30++;
@@ -616,6 +620,37 @@ void fn_1_4E64(omObjData *object)
     var_r29->unk_00 = -2;
 }
 
+#ifdef TARGET_PC
+/* VECNormalize of a zero vector yields NaN: 1/sqrt(0) is infinity and 0 times
+ * infinity is NaN. The port's frsqrte emulation reproduces that faithfully, so
+ * the console computes the same NaN water normals -- measured here at 116 to
+ * 146 of the 1080 every frame, fluctuating with the waves as quads get crushed
+ * flat against the rim. What differs is the GPU: Flipper, like Dolphin, turns
+ * texture coordinates into fixed point before sampling, which maps a NaN to a
+ * fixed texel, while a modern GPU samples a NaN coordinate however it likes.
+ * TEXCOORD1, the bump coordinate, is generated from this normal, so those NaNs
+ * were the big blocky pixels at the edge.
+ *
+ * A degenerate normal becomes zero instead: a crushed quad then contributes no
+ * direction to its vertices, and a vertex left with none gets a finite,
+ * deterministic bump coordinate rather than an undefined one. Kept local to the
+ * water rather than changed in VECNormalize itself, which the whole game and the
+ * netplay state hash depend on. */
+static void fn_1_SafeNormalize(Vec *src, Vec *dst)
+{
+    const f32 sq = src->x * src->x + src->y * src->y + src->z * src->z;
+    /* Written as "not greater" so a NaN input falls through as well. */
+    if (!(sq > 0.0f)) {
+        dst->x = dst->y = dst->z = 0.0f;
+        return;
+    }
+    VECNormalize(src, dst);
+}
+#define WATER_NORMALIZE(src, dst) fn_1_SafeNormalize((src), (dst))
+#else
+#define WATER_NORMALIZE(src, dst) VECNormalize((src), (dst))
+#endif
+
 void fn_1_57B0(omObjData *object)
 {
     Vec sp30;
@@ -675,18 +710,18 @@ void fn_1_57B0(omObjData *object)
         VECSubtract(&var_r27[(*var_r31)[3]], &var_r27[(*var_r31)[0]], &sp24);
         VECSubtract(&var_r27[(*var_r31)[2]], &var_r27[(*var_r31)[0]], &sp18);
         VECCrossProduct(&sp30, &sp24, &spC);
-        VECNormalize(&spC, &spC);
+        WATER_NORMALIZE(&spC, &spC);
         VECAdd(&spC, &var_r28[(*var_r31)[0]], &var_r28[(*var_r31)[0]]);
         VECAdd(&spC, &var_r28[(*var_r31)[1]], &var_r28[(*var_r31)[1]]);
         VECAdd(&spC, &var_r28[(*var_r31)[3]], &var_r28[(*var_r31)[3]]);
         VECCrossProduct(&sp24, &sp18, &spC);
-        VECNormalize(&spC, &spC);
+        WATER_NORMALIZE(&spC, &spC);
         VECAdd(&spC, &var_r28[(*var_r31)[0]], &var_r28[(*var_r31)[0]]);
         VECAdd(&spC, &var_r28[(*var_r31)[3]], &var_r28[(*var_r31)[3]]);
         VECAdd(&spC, &var_r28[(*var_r31)[2]], &var_r28[(*var_r31)[2]]);
     }
     for (var_r30 = 0; var_r30 < 1080; var_r30++, var_r28++) {
-        VECNormalize(var_r28, var_r28);
+        WATER_NORMALIZE(var_r28, var_r28);
     }
     var_r25 = lbl_1_bss_178.unk_6BC[lbl_1_bss_178.unk_6B4];
     for (var_r30 = 0; var_r30 < lbl_1_bss_178.unk_18; var_r25++, var_r30++) {

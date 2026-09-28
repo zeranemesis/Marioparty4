@@ -8,10 +8,12 @@
 
 #include "achievements.hpp"
 #include "aurora/rmlui.hpp"
+#include "cubeshelf.hpp"
 #include "port/main.h"
 #include "port/settings.h"
 #include "imgui.h"
 #include "modal.hpp"
+#include "online.hpp"
 #include "settings.hpp"
 #include "ui.hpp"
 #include "window.hpp"
@@ -49,6 +51,11 @@ MenuBar::MenuBar()
                 },
             .autoSelect = false,
         });
+    // Only when CubeShelf launched the game: it is what knows the friends. Started any other way,
+    // the menu is exactly what it was.
+    if (cubeshelf::available()) {
+        mTabBar->add_tab(cubeshelf::tab_title(), [this] { push(std::make_unique<cubeshelf::FriendsWindow>()); });
+    }
     mTabBar->add_tab("Settings", [this] { push(std::make_unique<SettingsWindow>()); });
 
 #if defined(_WIN32)
@@ -67,6 +74,23 @@ MenuBar::MenuBar()
             .duration = std::chrono::seconds(5),
         });
     });
+#elif defined(__ANDROID__)
+    // The phone's companion: the lobby screen restarts the game for the session.
+    mTabBar->add_tab("Play Online", [this] {
+        if (open_android_lobby()) {
+            PartyBoard_IsRunning = false;
+            return;
+        }
+        push_toast({
+            .type = "error",
+            .title = "Online mode",
+            .content = "The online lobby could not be opened.",
+            .duration = std::chrono::seconds(5),
+        });
+    });
+#else
+    // No companion process on iOS/Linux/macOS: the lobby lives in the game.
+    mTabBar->add_tab("Play Online", [this] { push(std::make_unique<OnlineWindow>()); });
 #endif
     // mTabBar->add_tab("Warp", [] {
     //     // TODO
@@ -131,7 +155,7 @@ MenuBar::MenuBar()
                             [dismiss](Modal& modal) {
                                 // mDoAud_seStartMenu(kSoundClick); // TODO PC
                                 dismiss(modal);
-                                // IsRunning = false; // TODO PC
+                                PartyBoard_IsRunning = false;
                             },
                     },
                 },

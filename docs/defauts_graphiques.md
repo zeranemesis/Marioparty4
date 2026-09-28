@@ -296,3 +296,1410 @@ Des facettes blanches à arêtes dures, c'est la signature d'une géométrie des
 **sans sa texture**, prenant la couleur du matériau. À confirmer en instrumentant
 le chemin de dessin de cet objet plutôt qu'en le supposant : quatre hypothèses
 « plausibles » ont déjà été écartées sur ce seul mini-jeu aujourd'hui.
+
+## Relevé externe du 2026-09-16 — premier testeur qui n'est pas Valentin
+
+`GerasSB` a ouvert trois tickets après avoir joué **tous** les Free-for-All et
+1v3 en mode mini-jeu, en 4:3 verrouillé et ombres 8x, hors ligne :
+[#1](https://github.com/zeranemesis/Marioparty4/issues/1),
+[#2](https://github.com/zeranemesis/Marioparty4/issues/2),
+[#3](https://github.com/zeranemesis/Marioparty4/issues/3).
+
+C'est la première fois que cette page reçoit des observations d'un œil
+extérieur, et deux d'entre elles retombent exactement sur des lignes déjà
+inscrites ici. G1 et G2 sont donc **reproduits par un second testeur, sur une
+autre machine, sans concertation** :
+
+| ligne existante | ce que GerasSB décrit |
+|---|---|
+| G1 — feux d'artifice de Slime Time | « Slime Time light/confetti at the end displays big white solid boxes » |
+| G2 — Avalanche! | « Avalanche has several visual bugs that make geometry pop in front of the game » |
+
+Le reste de son relevé est nouveau : ombres qui disparaissent dans Stamp Out!,
+bords de l'eau de Makin' Waves, gros carré noir autour du joueur en prenant la
+banane de Tree Stomp, géométrie parasite d'une frame dans Hop or Pop.
+
+## La colonne « module » n'a plus à rester supposée
+
+Cette page portait des « ? » depuis le début, avec cette justification : *« la
+matrice de ce dépôt utilise les noms de développement japonais, qui ne
+correspondent pas aux noms localisés »*. C'était vrai de `selmenuDll/main.c`,
+qui ne connaît que `402:PURURUN! BIGSLIME`.
+
+Mais la correspondance existe ailleurs, et elle est écrite noir sur blanc :
+**`configure.py` commente chaque `Rel(...)` avec le nom localisé**. Elle n'a
+jamais eu besoin d'être devinée.
+
+| module | nom localisé | nom de développement |
+|---|---|---|
+| `m401Dll` | Manta Rings | 401:WAKUGURI DIVING |
+| `m402Dll` | Slime Time | 402:PURURUN! BIGSLIME |
+| `m404Dll` | Trace Race | 404:CRAYON RUNNER |
+| `m406Dll` | Avalanche! | 406:SKI RACE |
+| `m412Dll` | Mr. Blizzard's Brigade | 412:SNOW THROW |
+| `m415Dll` | Stamp Out! | 415:PYONPYON STAMP |
+| `m417Dll` | Makin' Waves | 417:MARIO SURFER |
+| `m419Dll` | Tree Stomp | 419:BANANA DE KOROBASE |
+| `m421Dll` | Hop or Pop | 421:BODY BALOON |
+| `m423Dll` | GOOOOOOOAL!! | 423:GOAL AND GOAL |
+| `m425Dll` | The Great Deflate | 425:AIR DOSSUN |
+| `m427Dll` | Right Oar Left? | 427:BOAT RACE |
+| `m430Dll` | Pair-a-sailing | 430:PARASAILING GO |
+| `m441Dll` | Butterfly Blitz | 441:HIRAHIRA CHOUCHO |
+
+### Ce que cela corrige
+
+**G2 était attribué au mauvais module.** La ligne supposait `m412Dll SNOW
+THROW` par ressemblance de nom ; or `m412Dll` est **Mr. Blizzard's Brigade**, et
+**Avalanche! est `m406Dll`**. La corrélation horodatée du 2026-09-13, qui avait
+placé la session dans le contexte 14 = `m406Dll`, avait donc raison contre la
+supposition — et c'est maintenant établi par lecture, plus par coïncidence.
+
+Les autres suppositions se vérifient : G1 `m402Dll`, G3 `m427Dll`, G4
+`m430Dll`, G5 `m404Dll`, G7 `m441Dll`. Les nouvelles lignes de GerasSB
+s'attribuent directement : Stamp Out! `m415Dll`, Makin' Waves `m417Dll`,
+Tree Stomp `m419Dll`, Hop or Pop `m421Dll`, Manta Rings `m401Dll`.
+
+## Le défaut qui n'est pas un défaut de mini-jeu
+
+GerasSB ouvre son ticket par une observation qui vaut pour **tout le jeu** :
+
+> *The game does not seem to pre-compile any shaders, so nearly every new scene
+> has missing textures and geometry for a few seconds when started up for the
+> first time.*
+
+Celui-là se lit entièrement dans le code, sans instrumentation et sans
+reproduire quoi que ce soit.
+
+1. `lib/gfx/pipeline_cache.cpp` — `find_pipeline_impl()` ne construit un
+   pipeline immédiatement que si aucun fil de compilation n'existe et que le
+   quota `BuildPipelinesPerFrame` de la frame n'est pas épuisé. Sinon il place
+   la demande dans `g_priorityPipelines` / `g_backgroundPipelines` et rend la
+   main aussitôt.
+2. `lib/gfx/pipeline_cache.cpp:1090` — `get_pipeline()` échoue tant que le
+   pipeline n'est pas dans `g_pipelines`.
+3. `lib/gfx/common.cpp:1447` — `bind_pipeline()` propage cet échec.
+4. `lib/gx/pipeline.cpp:18` — `render()` fait alors `return;`.
+
+**Un pipeline pas encore compilé ne retarde donc pas le dessin : il le
+supprime.** La géométrie concernée n'est pas affichée du tout, jusqu'à ce que
+le fil de compilation rattrape son retard. C'est exactement « missing textures
+and geometry for a few seconds », et c'est pire dans une scène neuve, où tous
+les pipelines sont neufs en même temps — d'où Manta Rings, cité comme le cas le
+plus visible.
+
+### Le remède est déjà écrit, et n'est jamais livré
+
+Les deux moitiés du mécanisme existent :
+
+- `src/port/portmain.cpp:323` — `EnsureInitialPipelineCache()`, appelée depuis
+  `portmain.cpp:487`, copie `initial_pipeline_cache.db` depuis le dossier de
+  l'exécutable vers `pipeline_cache.db` du dossier de configuration, au premier
+  lancement seulement.
+- `lib/gfx/pipeline_cache.cpp:522` — `seed_pipeline_cache()` fusionne une base
+  fournie dans le cache local.
+
+Il manque la base elle-même. **Aucun `initial_pipeline_cache.db` n'est présent
+dans les paquets distribués** — vérifié sur `PartyBoard-win-x64.zip` (212
+entrées) et `partyboard_alpha_0.2.0_x64.zip` (99 entrées) — et **rien dans
+`CMakeLists.txt`, `ci/`, `dist/` ni `tools/` ne la produit ni ne la copie**. Le
+seul effet observable aujourd'hui est la ligne d'erreur
+« No bundled initial pipeline cache found at '…' » au premier lancement.
+
+Chaque joueur part donc d'un cache vide et paie la compilation de chaque
+pipeline la première fois qu'il voit chaque scène. Le deuxième passage est
+propre — ce que GerasSB décrit aussi (« when started up for the first time »),
+et ce qui distingue ce défaut des huit autres de cette page, qui eux
+**persistent aux relectures**.
+
+Produire cette base est un travail de build, pas de rendu : il faut parcourir
+une fois les scènes, récupérer le `pipeline_cache.db` engendré, et le livrer
+sous le nom attendu à côté de `partyboard.exe`. Ce n'est pas fait, et rien dans
+le plan ne le prévoit.
+
+## Statut, mis à jour
+
+G10 reste le seul corrigé-et-vérifié. G1 et G2 sont désormais **confirmés par
+deux testeurs indépendants**. La colonne module n'est plus une supposition. Le
+défaut de compilation de pipelines est **diagnostiqué de bout en bout et non
+corrigé**, et il est le seul de cette page dont la cause soit établie sans
+avoir eu besoin de le reproduire.
+
+## La copie de framebuffer — une famille, et un défaut prouvé dedans
+
+Quatre des six défauts de mini-jeu signalés par GerasSB tombent dans des modules
+qui font une **copie de l'EFB re-liée en texture** (`GXCopyTex`) : Stamp Out!
+(`m415Dll`), Makin' Waves (`m417Dll/water.c:885`), Tree Stomp
+(`m419Dll/main.c:246`), Hop or Pop (`m421Dll/player.c:1740`). Deux lignes de
+cette page s'y ajoutent : Right Oar Left? (`m427Dll`, qui porte déjà un
+`// TODO PC why do we need to skip the clear?`) et Pair-a-sailing (`m430Dll`).
+
+Vingt modules sur soixante et un utilisent `GXCopyTex` : six défauts sur dix
+dans un tiers des modules, c'est une **piste**, pas une démonstration. Ce qui
+suit en est une.
+
+### Ce que `GXCopyTex` fait réellement sur PC
+
+`extern/aurora/lib/dolphin/gx/GXFrameBuffer.cpp:150` — le paramètre `dest`
+n'est **qu'une clé de cache** (`CopyTextureKey{.dest = dest, …}`). Aurora
+résout l'EFB dans une texture GPU et **n'écrit jamais un octet dans `dest`**.
+
+Conséquence directe : tout code de jeu qui **relit ces octets côté CPU** lit de
+la mémoire non initialisée sur PC. Le port le sait — `m415Dll/main.c:1585` le
+documente et contourne le problème en faisant pointer le bitmap du canevas sur
+le même `Hu3DShadowData.buf`, pour que l'identité du pointeur retrouve la
+texture résolue :
+
+```c
+// Hu3DShadowData was copied by GXCopyTex and Aurora doesn't actually copy it there
+// it just holds a reference to the pointer
+// TODO PC does this fix cause issues?
+temp_r31->data = Hu3DShadowData.buf;
+```
+
+Mais **`m415Dll/main.c:433`, mille lignes plus haut, fait toujours la relecture
+brute**, sans `#ifdef TARGET_PC` :
+
+```c
+memcpy((*temp_r3)->bmp->data, OSCachedToUncached(Hu3DShadowData.buf), temp_r29);
+```
+
+Deux relectures sœurs dans le même fichier, une corrigée pour PC et l'autre
+non. Elle s'exécute dans `fn_1_1960` **case 1**, juste avant le `case 2` qui
+bascule la carte d'ombre sur le canevas — c'est-à-dire exactement au moment que
+GerasSB décrit, *« before the game begins »*. Le mécanisme est prouvé ; le fait
+qu'il produise précisément la disparition des ombres ne l'est pas.
+
+### Tree Stomp : défaut prouvé de bout en bout, dans Aurora
+
+Tree Stomp est le seul des modules cités à copier la **profondeur** :
+
+```c
+GXSetTexCopySrc(sp8.x, sp8.y, 192, 192);
+GXSetTexCopyDst(96, 96, GX_TF_Z24X8, 1);
+GXCopyTex(lbl_1_bss_64[lbl_1_bss_60], 0);   // m419Dll/main.c:249
+```
+
+Le chemin se lit sans ambiguïté :
+
+1. `tex_copy_conv.cpp:270` — `DepthConvPipelines` ne contient **qu'une seule
+   entrée, `GX_TF_Z16`**. Il n'existe aucun pipeline pour `GX_TF_Z24X8`, donc
+   `needs_conversion(GX_TF_Z24X8)` est faux.
+2. `gx.hpp:431` — `is_depth_format(GX_TF_Z24X8)` est **vrai**.
+3. `common.cpp:1332` — pas de conversion, mais 192→96 impose une mise à
+   l'échelle, donc l'appel part dans `tex_copy_conv::blit()`.
+4. `tex_copy_conv.cpp:508` — `blit()` exécute **`g_blitPipeline`**, construit
+   ligne 393 avec `g_bindGroupLayout` (sampler @0, texture @1, uniforme @2).
+5. `tex_copy_conv.cpp:441` — mais `execute()` choisit son bind group sur le seul
+   critère `is_depth_format(req.fmt)`, et fabrique donc un groupe au layout
+   **`g_depthBindGroupLayout`** (texture @0, uniforme @1, pas de sampler).
+
+**Le bind group et le pipeline n'ont pas le même layout** — ni le même nombre
+d'entrées. WebGPU rejette le `SetBindGroup`, la passe est invalidée, et la copie
+ne produit rien. La texture que l'effet échantillonne ensuite reste vide, donc
+noire : *« Grabbing the Tree Stomp speedup banana causes major visual glitch,
+huge black box around the player »*.
+
+Le défaut vaut pour **tous les formats de profondeur sauf `GX_TF_Z16`** — le
+seul qui dispose d'un pipeline de conversion, et donc le seul qui n'emprunte
+jamais `blit()`. `Z16` marche par accident de couverture, pas par conception.
+
+Deux corrections possibles, toutes deux dans `tex_copy_conv.cpp` :
+
+- créer un `g_depthBlitPipeline` avec `g_depthBindGroupLayout` et
+  `DepthShaderPreamble`, et le sélectionner dans `blit()` — corrige la famille
+  entière ;
+- ou ajouter une entrée `GX_TF_Z24X8` à `DepthConvPipelines`, ce qui rend
+  `needs_conversion` vrai et fait passer par `run()` avec le bon pipeline —
+  corrige `Z24X8` seul, mais c'est la conversion que ce format réclame de toute
+  façon.
+
+**Ces deux fichiers sont dans le sous-module `extern/aurora`, qui pointe sur
+`encounter/aurora` en amont.** Le correctif ne peut donc pas être porté par une
+PR de ce dépôt seul : il faut une PR amont, ou un fork, puis un relèvement du
+sous-module.
+
+### Ce que cela ne dit pas
+
+Slime Time (`m402Dll`), Avalanche! (`m406Dll`), Trace Race (`m404Dll`) et
+Butterfly Blitz (`m441Dll`) **n'appellent pas `GXCopyTex`**. Leurs défauts ont
+une autre cause, et le raisonnement ci-dessus ne s'y applique pas.
+
+## Un défaut prédit, dans un mini-jeu que personne n'a encore testé
+
+En cherchant l'origine de G1 (Slime Time) du côté du *reflection mapping*, une
+autre chose est tombée — sans rapport avec G1, mais réelle.
+
+`hsfman.c:1983`, `Hu3DReflectMapSet()`, l'API qui installe une carte de
+réflexion, est écrite ainsi :
+
+```c
+void Hu3DReflectMapSet(ANIMDATA* arg0) {
+#ifndef BYTESWAPPING
+    ...  reflectAnim[0] = HuSprAnimRead(arg0);  ...
+#else
+    assert(0 == 1);
+    OSReport("PC TODO: Hu3DReflectMapSet ran which tries to reallocate an anim
+");
+#endif
+    reflectMapNo = 0;
+}
+```
+
+**`BYTESWAPPING` est défini par toutes les cibles qui compilent ce fichier** —
+`CMakeLists.txt:207` (`dol`) et `:339` (les DLL de REL). Seul `partyboard`
+(ligne 279), qui ne compile pas le code du jeu, ne le définit pas. La branche
+utile n'existe donc dans aucun binaire livré : sur PC la fonction se réduit à
+
+```c
+assert(0 == 1);
+reflectMapNo = 0;
+```
+
+La carte demandée, `arg0`, est **purement ignorée**. En build `Release` /
+`RelWithDebInfo` (où `NDEBUG` supprime l'`assert`) la fonction échoue en
+silence ; en `Debug` elle **avorte le processus**.
+
+Un seul appelant : `m444dll/main.c:1262` — **Reversal of Fortune** :
+
+```c
+Hu3DReflectMapSet(HuDataSelHeapReadNum(DATA_MAKE_NUM(DATADIR_M444, 0x23),
+                                       MEMORY_DEFAULT_NUM, HEAP_DATA));
+```
+
+Deux conséquences, toutes deux non observées à ce jour parce que **personne n'a
+rapporté avoir joué ce mini-jeu** : la réflexion propre à Reversal of Fortune
+n'est jamais installée (la scène garde la carte 0 chargée au démarrage), et
+l'`ANIMDATA` lue dans `HEAP_DATA` juste avant n'est jamais relâchée — **une
+fuite à chaque appel**.
+
+C'est la première ligne de cette page à être **prédite avant d'être vue**.
+Elle se vérifie en une partie : lancer Reversal of Fortune et regarder.
+
+### Ce que cela règle au passage, et ce que cela ne règle pas
+
+Le même motif existe dans `Hu3DAllKill()` (`hsfman.c:375-386`), avec le
+commentaire *« the game expects this to be executed »* — et il est lui aussi
+compilé hors du binaire. **Ce n'en est pas un défaut** : ce rechargement
+n'existait que pour défaire `Hu3DReflectMapSet()`, qui est inerte sur PC.
+`reflectAnim[0]` garde donc sur PC la valeur posée à l'initialisation, ce qui
+est cohérent. Les deux blocs se neutralisent l'un l'autre ; la question est
+close, il n'y a pas de piste de ce côté.
+
+**G1 et G2 restent sans mécanisme.** Slime Time (`m402Dll`) et Hop or Pop
+(`m421Dll`) sont, avec `m438Dll`, les trois seuls modules à appeler
+`Hu3DModelReflectTypeSet()`, et deux des trois sont dans la liste de GerasSB —
+mais aucun n'appelle `Hu3DReflectMapSet()`, donc cette corrélation **n'a aucun
+mécanisme derrière elle** à ce stade. Elle est notée ici pour ne pas être
+recherchée deux fois, pas comme une piste établie.
+
+## Correction — Tree Stomp : la copie n'était que la moitié du problème
+
+Écrit plus haut : *« la copie ne produit rien […] donc noire »*. C'est exact mais
+**insuffisant**, et présenté comme une cause complète, ce qui était une erreur.
+En lisant l'effet en entier, le coupable dominant est ailleurs.
+
+### Ce que l'effet fait réellement
+
+`m419Dll` est une **traînée de mouvement**. Il garde un anneau de huit couples de
+textures — une copie couleur (`lbl_1_bss_84[]`, RGB5A3) et une copie de
+profondeur (`lbl_1_bss_64[]`, Z24X8) — et redessine les sept dernières frames
+par-dessus la scène. Chaque fantôme est **un quad plein écran** :
+
+```c
+sp2C = {0,0,0};  sp20 = {640,0,0};  sp14 = {640,480,0};  sp8 = {0,480,0};
+```
+
+Ce qui empêche ce quad de recouvrir tout l'écran, c'est uniquement la ligne :
+
+```c
+GXSetZTexture(GX_ZT_REPLACE, GX_TF_Z24X8, 0);   // m419Dll/main.c:279
+```
+
+La profondeur du fragment est **remplacée** par le texel de TEXMAP1, c'est-à-dire
+la profondeur capturée au moment de la frame fantôme ; combinée à
+`GXSetZMode(GX_TRUE, GX_LEQUAL, GX_FALSE)`, elle confine chaque fantôme à la
+silhouette qu'avait la géométrie. La traînée *est* ce test de profondeur.
+
+### Le vrai coupable
+
+`extern/aurora/lib/dolphin/gx/GXTev.cpp:171` :
+
+```cpp
+void GXSetZTexture(GXZTexOp op, GXTexFmt fmt, u32 bias) {
+  // TODO
+}
+```
+
+**Un stub vide.** Et `ztex` n'apparaît nulle part dans le générateur de shaders
+(`lib/gx/shader.cpp`, `shader_info.cpp`) : le Z-texturing n'existe pas dans
+Aurora, ni comme état, ni comme écriture de `frag_depth`.
+
+Sans lui, les sept quads ne sont plus confinés à rien et couvrent 640×480
+chacun, empilés, devant la scène. **C'est la grosse boîte.** La copie de
+profondeur défaillante y contribue, mais même une copie parfaite ne changerait
+rien : sans `GX_ZT_REPLACE`, la texture de profondeur n'est lue par personne.
+
+### Ce qui a quand même été corrigé, et pourquoi
+
+`GX_TF_Z24X8` a été ajouté à `DepthConvPipelines` (`tex_copy_conv.cpp`). Ce
+n'est pas suffisant pour Tree Stomp, mais ce n'est pas cosmétique non plus :
+sans cette entrée, chaque frame de l'effet soumettait un `SetBindGroup` au
+layout incompatible, ce qui **invalide la passe de rendu entière** — et donc
+potentiellement des dessins qui n'ont rien à voir avec cet effet. Supprimer une
+passe invalide par frame vaut d'être fait, et c'est de toute façon un
+prérequis à toute implémentation future du Z-texturing.
+
+`GX_TF_Z24X8` est le **seul** format de copie de profondeur employé par le jeu
+entier, et uniquement ici (`m419Dll/main.c:248`, `:279`, `:305`). Le décalage de
+layout de `blit()` subsiste pour les autres formats de profondeur, mais il est
+désormais **inatteignable dans ce jeu**.
+
+### Ce qui n'a pas été tenté
+
+Implémenter `GXSetZTexture` demande d'ajouter au générateur de shaders une
+écriture de `@builtin(frag_depth)` depuis un texel, et l'état de pipeline qui va
+avec. C'est une fonctionnalité, pas un correctif ; elle est dans un sous-module
+amont ; et rien ici ne peut la compiler. L'écrire à l'aveugle serait pire que de
+ne rien faire. **Tree Stomp reste non corrigé**, et sa cause est maintenant
+nommée.
+
+## Ce qui a été corrigé, et ce qui ne l'est pas
+
+Aucun de ces changements n'a été compilé : la machine où ils ont été écrits n'a
+pas de compilateur C/C++. À lire comme des propositions étayées, pas comme des
+correctifs validés.
+
+| | fichier | état |
+|---|---|---|
+| Reversal of Fortune : carte de réflexion ignorée + fuite | `src/game/hsfman.c` | **corrigé** |
+| Copie de profondeur `Z24X8` : passe invalidée chaque frame | `extern/aurora/lib/gfx/tex_copy_conv.cpp` | **corrigé**, dans le sous-module |
+| Cache de pipelines jamais livré | `CMakeLists.txt`, `tools/capture_pipeline_cache.ps1` | **plomberie posée**, la base reste à enregistrer |
+| Tree Stomp : `GXSetZTexture` non implémenté | — | **non corrigé**, cause nommée |
+| Stamp Out! : relecture CPU non corrigée | `src/REL/m415Dll/main.c:433` | **non corrigé**, délibérément |
+| Slime Time, Avalanche! | — | **sans mécanisme** |
+
+### Reversal of Fortune
+
+`Hu3DReflectMapSet()` installe maintenant la carte demandée. La raison pour
+laquelle l'original ne le pouvait pas est que `HuMemDirectFree(reflectAnim[0])`
+ne libère que l'`ANIMDATA` en laissant fuir les tableaux `bank`/`pat`/`bmp`
+alloués à côté sur un build `BYTESWAPPING`. `HuSprAnimKill()` les libère tous et
+respecte `useNum` : c'est le bon destructeur, il existait déjà.
+
+`Hu3DAllKill()` restaure la carte de démarrage au lieu de relire `refMapData0` —
+une relecture construirait une seconde `ANIMDATA` à partir de la même source et
+perdrait la première. Un pointeur capturé à l'initialisation suffit. Les chemins
+`__MWERKS__` et non-`BYTESWAPPING` ne sont pas touchés, pour ne pas casser les
+builds *matching*.
+
+### Le cache de pipelines
+
+La base ne peut pas être fabriquée par le build : c'est un **enregistrement**,
+produit en jouant. Ce qui manquait n'était donc pas seulement le fichier mais le
+chemin pour le fabriquer et le livrer. Les deux existent maintenant :
+`tools/capture_pipeline_cache.ps1` prélève le `pipeline_cache.db` du dossier de
+configuration, et `CMakeLists.txt` l'installe `OPTIONAL` à côté de
+l'exécutable — un arbre sans base compile toujours.
+
+Le script refuse de travailler si un `-wal` traîne (le jeu est encore ouvert, ou
+s'est mal fermé, et la copie manquerait ses lignes les plus récentes) et refuse
+d'écraser une base par une plus petite sans `-AllowShrink`. Reste à faire, et
+cela demande quelqu'un devant le jeu : parcourir les scènes, capturer, et
+**commiter le fichier** — sinon la CI continuera de livrer des paquets sans
+graine. À refaire à chaque changement de schéma, qu'Aurora rejette en clair
+(*« does not use schema version »*).
+
+### Stamp Out! : pourquoi rien n'a été touché
+
+Le correctif évident serait de refléter `fn_1_66AC` — remplacer le `memcpy` de
+`fn_1_1960` case 1 par l'aliasing du pointeur. Il n'a pas été appliqué : le lien
+entre cette relecture et la disparition des ombres **n'est pas démontré**, et
+l'aliasing transfère la propriété d'un tampon (qui le libère ?) dans un fichier
+que rien ici ne peut compiler ni exécuter. Un correctif spéculatif, non testé,
+sur un symptôme non reproduit, vaut moins qu'une ligne dans ce registre.
+
+## G2 (Avalanche!) — une cinquième hypothèse écartée
+
+L'avalanche est un **maillage procédural**, pas un modèle : `m406Dll/map.c:1104`
+dessine trente bandes de trente-cinq sommets, sans texture (`GX_TEXMAP_NULL`,
+`GX_REPLACE`), éclairées avec spéculaire, en re-pointant les tableaux de sommets
+entre chaque appel d'un **même** display list :
+
+```c
+GXCallDisplayList(var_r31->unk_A4, var_r31->unk_A0);
+for (var_r30 = 1; var_r30 < 29; var_r30++) {
+    var_r29 = var_r30 * 35;
+    GXSETARRAY(GX_VA_POS, &var_r31->unk_84[var_r29], ...);
+    GXSETARRAY(GX_VA_NRM, &var_r31->unk_88[var_r29], ...);
+    GXSETARRAY(GX_VA_CLR0, &var_r31->unk_90[var_r29], ...);
+    GXCallDisplayList(var_r31->unk_A4, var_r31->unk_A0);
+}
+```
+
+Deux choses en découlent, et la première est un **avertissement** : *« facettes
+blanches à arêtes dures, prenant la couleur du matériau »* ne peut pas être la
+signature d'une texture manquante ici — cette géométrie n'a **jamais** de
+texture, par conception. `GXSetChanMatColor(GX_COLOR0A0, lbl_1_data_88F)` pose
+sa couleur, et l'aspect vient entièrement de l'éclairage et des couleurs par
+sommet. L'hypothèse inscrite plus haut sur cette page (« géométrie dessinée sans
+sa texture ») est donc **fausse pour G2**.
+
+La seconde était prometteuse : `GXCallDisplayList` **ne draine pas** la FIFO —
+sa variante `GXCallDisplayListLE` le fait explicitement, en disant pourquoi
+(*« so that any pending CP register writes (VCD, VAT, etc.) are processed into
+g_gxState before the display list's draw commands reference them »*). Si les
+`GXSETARRAY` écrivaient directement `g_gxState` pendant que les trente display
+lists s'empilaient dans la FIFO, les trente bandes seraient dessinées avec le
+**dernier** pointeur : la même bande répétée trente fois, à arêtes dures, au
+lieu d'une masse continue. Cela décrivait exactement la capture.
+
+**Écartée.** `GXSetArray` (`lib/dolphin/gx/GXGeometry.cpp:218`) écrit dans la
+FIFO — `GX_WRITE_AURORA(GX_LOAD_AURORA_ARRAYBASE | cpIdx)` puis le pointeur, la
+taille et le stride — et non dans `g_gxState`. L'ordre entre les liaisons de
+tableaux et les display lists est donc préservé, et chaque bande est dessinée
+avec la sienne.
+
+Cinq hypothèses écartées sur ce seul mini-jeu. G2 reste **non diagnostiqué**, et
+la piste « texture manquante » qui l'accompagnait depuis le début est à
+abandonner.
+
+## Le cache de pipelines : deux dossiers, et une graine qui atterrissait dans le mauvais
+
+Vérifié en lançant le jeu le 2026-09-16, log à l'appui. Le démarrage réclame la
+graine **deux fois**, une par moitié du mécanisme :
+
+```
+[error] [partyboard::main] No bundled initial pipeline cache found at
+        'C:\…\partyboard\initial_pipeline_cache.db'
+[INFO | aurora::gfx::pipeline_cache] No bundled initial pipeline cache found at
+        'C:\…\partyboard\initial_pipeline_cache.db'
+```
+
+Confirmation directe de ce qui n'était jusque-là qu'une lecture de code. Mais
+l'inspection des dossiers a montré autre chose :
+
+| | appel | dossier réel |
+|---|---|---|
+| cache vivant (Aurora) | `SDL_GetPrefPath(nullptr, "Party Board")` | `%APPDATA%\Party Board\` |
+| config du port | `SDL_GetPrefPath("MarioPartyRD", "Party Board")` | `%APPDATA%\MarioPartyRD\Party Board\` |
+
+`pipeline_cache.db` (1,8 Mo) et `dawn_cache.db` sont dans le **premier**.
+`config.json` et la carte mémoire sont dans le **second**.
+
+Or `EnsureInitialPipelineCache()` (`portmain.cpp:323`) copie la graine vers
+`PartyBoard_ConfigPath / "pipeline_cache.db"`, c'est-à-dire le **second**. Aurora
+ne lit jamais là. **Cette fonction est donc inerte**, indépendamment du fait que
+la graine n'existe pas : même livrée, sa copie atterrirait où rien ne regarde.
+
+Ce n'est pas bloquant, parce que la moitié qui compte marche : Aurora lit
+`initial_pipeline_cache.db` **à côté de l'exécutable** (`g_config.resourcesPath`)
+et le fusionne elle-même dans son cache (`seed_pipeline_cache()`). Livrer le
+fichier près de `partyboard.exe` suffit donc, et c'est ce que fait la règle
+`install()` ajoutée à `CMakeLists.txt`.
+
+`tools/capture_pipeline_cache.ps1` visait initialement le mauvais dossier, pour
+la même raison. Corrigé.
+
+### Ce que la machine de test ajoute au tableau
+
+GPU **Intel(R) Graphics (integré)**, D3D12, 1280×960. Sur un GPU intégré la
+compilation de pipelines est nettement plus lente que sur une carte dédiée, ce
+qui rend l'absence de graine d'autant plus visible — et explique qu'un défaut
+décrit comme « quelques secondes » puisse durer plus longtemps ici.
+
+## G2 — Avalanche! : diagnostiqué et corrigé le 2026-09-16
+
+Ouvert depuis le 2026-09-12, confirmé par deux testeurs, **cinq hypothèses
+écartées**. Résolu en trois quarts d'heure le jour où quelqu'un a regardé
+l'image. C'est la leçon de cette page, et `tools/capture_fenetre.ps1` la disait
+déjà en tête de fichier.
+
+### Ce que l'image a donné, et que le code n'avait pas donné
+
+Valentin a précisé : **la masse de neige, dès la première image**. Cela élimine
+d'un coup le cache de pipelines (qui se corrige tout seul) et toute piste de
+texture (cette géométrie n'en a pas). Une capture agrandie de la coulée montre
+alors des **rubans parallèles réguliers à arêtes franches**, plus un grand
+triangle blanc étiré — signature d'indices de sommets hors de leur fenêtre, pas
+d'un défaut d'éclairage.
+
+### La preuve
+
+`map.c:941` construit le display list de la coulée :
+
+```c
+GXBegin(GX_TRIANGLESTRIP, GX_VTXFMT0, 70);
+for (var_r29 = 0; var_r29 < 35; var_r29++) {
+    GXPosition1x16(var_r29 + 35);   /* indices 35..69 */
+    GXNormal1x16(var_r29 + 35);
+    GXColor1x16(var_r29 + 35);
+    GXPosition1x16(var_r29);        /* indices 0..34  */
+    ...
+}
+```
+
+**70 sommets, indices 0 à 69.** Chaque appel dessine la bande *entre* deux
+rangées de 35. C'est cohérent avec tout le reste : 1050 sommets = 30 rangées, et
+la boucle de dessin fait 29 appels — un par intervalle.
+
+Or la boucle rebase les tableaux par fenêtres de **35** :
+
+```c
+GXSETARRAY(GX_VA_POS, &var_r31->unk_84[var_r29], 35 * sizeof(Vec), sizeof(Vec), TRUE);
+```
+
+Les indices 35 à 69 — **la rangée supérieure de chaque bande** — tombent hors de
+la fenêtre déclarée.
+
+### Pourquoi ça ne se voyait que sur PC
+
+`GXSetArray` du vrai GX ne prend **pas de taille** : base et pas, rien d'autre.
+Le matériel lit `base + index × stride` sans borne, donc sortir de 35 ne
+signifie rien pour lui. La macro le dit :
+
+```c
+#define GXSETARRAY(attr, data, size, stride, le) GXSetArray((attr), (data), (size), (stride), (le))  /* Aurora */
+#define GXSETARRAY(attr, data, size, stride, le) GXSetArray((attr), (data), (stride))                /* GameCube */
+```
+
+Le paramètre `size` est une **invention du port**, et Aurora s'en sert pour de
+bon : `push_storage(array.data, array.size)`
+(`command_processor.cpp:1639`) téléverse exactement ces octets. Le décompilateur
+a dû inventer une taille à chacun des ~159 sites d'appel, et ici il a écrit la
+hauteur d'une rangée au lieu de deux.
+
+Détail qui confirme : le **premier** appel, hors boucle, passe le tableau entier
+(`unk_80 * sizeof(Vec)`). Une seule bande était donc correcte, les vingt-huit
+autres tronquées — ce que l'image montre, un bord lisse et le reste en rubans.
+
+### Le correctif
+
+Chaque fenêtre reçoit le reste du tableau, `unk_80 - var_r29`, ce que le
+matériel autorise de fait. À la dernière itération cela vaut exactement 70, soit
+le strict nécessaire. **Aucun risque pour les builds *matching* : la macro
+GameCube ignore l'argument.**
+
+### Ce que cela ouvre
+
+Le motif est systémique, pas local. Une taille sous-estimée ne produit ni
+erreur ni avertissement : elle tronque la géométrie en silence. D'autres sites
+déclarent une fenêtre d'**un seul élément** — `m421Dll/player.c:1809` (Hop or
+Pop), `m423Dll/main.c:5367` (GOOOOOOOAL!!), `m425Dll/thwomp.c:2135` (The Great
+Deflate), `m428Dll/player.c:2194`. C'est **légitime** si le display list n'y
+indexe que 0, et ces trois-là sont précisément des mini-jeux signalés. Rien ne
+prouve qu'ils soient fautifs ; il suffit de lire leur display list comme on
+vient de le faire ici.
+
+### Le même défaut ailleurs : deux autres cas, deux faux positifs
+
+Le motif de G2 n'était pas isolé. Quatre autres sites déclaraient une fenêtre
+`CLR0` d'**un seul élément** ; les lire un par un les départage sans ambiguïté —
+il suffit de retrouver le display list qui les consomme et de regarder ses
+indices.
+
+| module | mini-jeu | indices `CLR0` du display list | verdict |
+|---|---|---|---|
+| `m421Dll/player.c:1809,1825` | **Hop or Pop** | `GXColor1x8(1)` autant que 0 | **fautif** |
+| `m423Dll/main.c:5367` | **GOOOOOOOAL!!** | `GXColor1x16(i)`, i < unk26 | **fautif** |
+| `m425Dll/thwomp.c:2135` | The Great Deflate | `GXColor1x16(0)` seul | correct |
+| `m428Dll/player.c:2194` | Cliffhangers | `GXColor1x16(0)` seul | correct |
+
+**Hop or Pop.** L'éventail est un dégradé radial : `unk_40[0]` a un alpha de
+0x40, `unk_40[1]` un alpha de 0. La fenêtre d'un élément laissait la couleur de
+bord hors du téléversement — le bord ne s'efface donc jamais. GerasSB décrit
+*« random geometry appears in front of the screen for a frame »*, ce qui est
+compatible, sans que cela le prouve.
+
+**GOOOOOOOAL!!** Le display list construit autour de `main.c:5118` émet une
+couleur par quad, `GXColor1x16(i)` pour les `unk26` quads. La fenêtre de
+position juste au-dessus compte bien `unk26 * 4` sommets ; celle des couleurs en
+comptait une. Seul le premier quad recevait la sienne.
+
+Aucun des deux ne peut planter : WebGPU borne les lectures hors d'un buffer de
+stockage. Ce sont des défauts d'image, et cela **n'explique pas** le crash de
+l'issue #3 sur ce même mini-jeu.
+
+Les deux correctifs suivent la règle de G2 : donner à la fenêtre ce que le
+display list indexe réellement. Et comme la macro GameCube jette l'argument,
+aucun n'a d'effet sur un build *matching*.
+
+## G6 — Bowser's Bigger Blast : module identifié, hypothèse du registre invalidée
+
+Valentin, 2026-09-16, sur la build fraîche : *« dans le jeu Bowser's Bigger
+Blast l'explosion est accélérée »*. La ligne G6 portait « module non identifié »
+depuis le 2026-09-12 ; c'est **`m440Dll`**.
+
+### L'hypothèse inscrite ici était fausse
+
+Cette page disait de G6 : *« l'accélération de l'explosion est la signature
+d'une animation pilotée par le nombre d'images affichées plutôt que par les
+ticks de simulation — exactement le mécanisme de D14 et de D6 »*.
+
+Le détecteur de D6 dit l'inverse, dans son propre commentaire
+(`src/game/main.c:301`) :
+
+> *a frame that batches two simulation ticks advances the animation clock
+> **once, for both**. Below 61 frames per second frame_pacer_simulation_tick
+> always returns 1 and this can never fire.*
+
+D6 fait donc **perdre** des pas d'animation, pas en gagner : il **ralentit**, et
+uniquement au-dessus de 60 images par seconde. La machine de test tourne à 60
+(`video.targetFrameRate: 60`, surimpression FPS à 60). **D6 est éliminé pour
+G6**, dans les deux sens : mauvaise direction, et hors de sa plage.
+
+### Ce qui est établi
+
+`m440Dll/main.c:795`, dans l'état 3 de la séquence :
+
+```c
+Hu3DModelAttrReset(object->model[3], HU3D_MOTATTR_PAUSE);
+Hu3DMotionSpeedSet(object->model[3], 2.0f);
+```
+
+L'explosion est jouée à **vitesse 2× par le jeu d'origine**. Elle est donc
+rapide par conception, et la question n'est pas « pourquoi est-elle rapide »
+mais « pourquoi est-elle **plus** rapide qu'elle ne devrait ».
+
+Les deux hooks de dessin du module (`fn_1_806C`, `fn_1_9C04`) n'avancent aucun
+état — ils ne font que dessiner. Le mécanisme du correctif de `m417Dll`
+(`if (HuSysVWaitGet(0) == 0) return;`, qui empêche un hook de faire avancer la
+simulation à la cadence d'affichage) **ne s'applique pas ici** : il n'y a rien à
+garder.
+
+### Ce qu'il reste à trancher, et qui ne se lit pas dans le code
+
+G6 a deux moitiés : l'explosion accélérée **et** *« la fin est buggée avec le
+jeu qui continue malgré être le gagnant »*. Si les deux tiennent encore, il faut
+savoir si c'est **tout le mini-jeu** qui tourne trop vite ou **seulement**
+l'explosion. Le premier cas désigne l'horloge de simulation du module ; le
+second, cette animation-là. Aucune lecture de code ne le départage, et se
+tromper de moitié coûte une journée — c'est exactement ce qui vient d'arriver
+avec D6.
+
+**Statut : module identifié, mécanisme inconnu, hypothèse antérieure écartée.**
+
+## G2 — corrigé et VÉRIFIÉ, 2026-09-16
+
+*« Avalanche est parfait ! »* — Valentin, sur une build compilée à l'instant
+contenant le correctif.
+
+C'est le **deuxième défaut de cette page à passer de rapporté à
+corrigé-et-vérifié**, après G10, et la vérification est celle qui compte : un
+œil humain devant l'écran. G2 était ouvert depuis le 2026-09-12, confirmé par
+deux testeurs sur deux machines, et avait résisté à **cinq hypothèses**. Il a
+cédé le jour où quelqu'un a regardé une capture agrandie.
+
+La méthode, pour mémoire : décrire précisément *quoi* (la masse de neige) et
+*quand* (dès la première image) ; capturer ; agrandir ; lire le display list.
+Trois quarts d'heure. Les cinq hypothèses précédentes avaient coûté plusieurs
+sessions de lecture de code.
+
+Également vérifié dans la même session : **la fin buggée de G6 n'est plus là**.
+Bowser's Bigger Blast se termine normalement. Seule l'accélération de
+l'explosion subsiste.
+
+## G7 — Butterfly Blitz : ce n'est pas « les papillons »
+
+Relevé initial : *« les papillons n'ont pas d'ombre »*. La capture montre autre
+chose, et c'est beaucoup plus net : **aucun objet de la scène n'a d'ombre** —
+ni les papillons, ni Mario, ni Luigi, ni Yoshi, ni Peach. Le sol carrelé est
+uniformément non ombré.
+
+Ce n'est donc pas un défaut d'un modèle particulier : **toute la passe d'ombre
+est éteinte** dans ce mini-jeu.
+
+### Ce que cela élimine
+
+`m441Dll` fait exactement les mêmes appels que `m406Dll`, qui lui **a** des
+ombres (l'ombre du sapin est visible sur `aval-05.png`, quoique à arêtes
+franches) :
+
+| | `m406Dll` (ombres OK) | `m441Dll` (aucune ombre) |
+|---|---|---|
+| `Hu3DShadowCreate` | `(45.0f, 1000.0f, 250000.0f)` | `(30, 20, 20000)` |
+| `Hu3DShadowTPLvlSet` | oui | oui |
+| `Hu3DShadowPosSet` | oui | oui |
+| `Hu3DModelShadowMapSet` | oui | oui |
+| `Hu3DModelShadowSet` | — | 3 sites |
+
+Aucun appel ne manque. Le dessin est conditionné à
+`Hu3DShadowF != 0 && Hu3DShadowCamBit != 0` (`hsfdraw.c`, cinq sites) : **l'un
+des deux vaut zéro**, et lequel ne se déduit pas du code.
+
+Hypothèses écartées en chemin : le filtrage par layer (`Hu3DShadowExec` itère
+tous les modèles sans regarder le layer) ; l'asymétrie du compteur
+(`Hu3DModelShadowReset` décrémente inconditionnellement là où `...Set`
+incrémente sous condition) — réelle, mais `m441Dll` n'appelle jamais `Reset`,
+et dans `m415Dll` les `Reset` sont **appariés** à des `Set`. `hsfman.c` étant un
+objet `Matching`, cette asymétrie est de toute façon du code d'origine, à ne pas
+toucher.
+
+### Ce qu'il faut maintenant
+
+Une sonde de deux lignes qui dit lequel des deux drapeaux est nul. C'est
+désormais possible : cette machine compile depuis aujourd'hui.
+
+## Références console, 2026-09-17 — la page cesse d'être aveugle
+
+Cette page s'ouvre sur : *« une classe entière de défauts échappe à tout ce que
+ce dépôt a construit pour se valider »*, et `tools/capture_fenetre.ps1` ajoute :
+*« every rendering defect was reported by a human describing what he saw, and
+answered by someone reading code and guessing »*.
+
+Il manquait la moitié de la comparaison : **à quoi cela ressemble sur la
+console**. Valentin a fourni une vidéo de référence — *Mario Party 4 - All Mini
+Games*, Typhlosion4President, 1:07:05 — et elle a été lue image par image dans
+le navigateur intégré, en mettant la lecture en pause aux horodatages voulus.
+
+Trois comparaisons en sont sorties, et l'une d'elles **retire** un défaut.
+
+### Avalanche! — 3:57 — défaut d'ombre CONFIRMÉ
+
+| console | port |
+|---|---|
+| chaque sapin porte une **petite ombre sombre et compacte** près du tronc | **quadrilatère bleu clair à arêtes franches** |
+
+Le sol est lisse dans les deux cas. L'écart ne porte donc pas sur le terrain
+mais sur la **forme** de l'ombre projetée : une silhouette contre un bloc uni.
+
+### Makin' Waves — 14:40 — défaut CONFIRMÉ
+
+| console | port |
+|---|---|
+| eau bleu clair **uniforme**, ondulations fines | **sombre, marbrée** de noir et de marine |
+| bord du bassin **net et régulier** | traînées sales, concentrées sur les bords |
+
+C'est la signature d'une distorsion **beaucoup trop ample**. L'eau emploie trois
+étages de texturage indirect (`m417Dll/water.c:810-826`) avec des exposants
+d'échelle **négatifs** (`-2`, `0`, `-3`). `GXSetIndTexMtx` d'Aurora encode
+pourtant correctement (`scaleExp + 17`, conforme au SDK) : c'est donc
+l'**application** du facteur dans le shader qu'il faut instruire, pas son
+encodage.
+
+### Slime Time — 1:28 — défaut PARTIELLEMENT RETIRÉ
+
+**Les confettis sont blancs et gris sur la console.** Ils sont donc **corrects
+dans le port**, et la ligne G1 les accusait à tort — moi le premier, en les
+décrivant comme « des rectangles gris au lieu d'être colorés ».
+
+L'écart réel est ailleurs, et il est net : les **projecteurs** sont des cônes
+**roses/magenta à dégradé doux** sur la console, et des cônes **blancs et
+pleins** dans le port. Perte de teinte et de dégradé.
+
+Cela resserre beaucoup la cible. Le chemin de particules prend sa couleur de
+`GX_CC_RASC` — la **couleur du sommet** — avec la texture en simple masque
+alpha (`hsfanim.c:770-775`). Un cône blanc et plein, c'est une couleur de
+sommet blanche au lieu de rose, et un alpha qui sature.
+
+### Ce que la méthode change
+
+Deux défauts passent de *supposé* à *confirmé par comparaison*, un troisième est
+amputé de sa moitié fausse, et une cible de plusieurs jours se réduit à deux
+valeurs à mesurer. En un quart d'heure.
+
+La leçon de G2 se répète : **regarder l'image coûte moins cher que raisonner
+sur le code.** Il aura suffi d'ajouter la référence à côté de la capture.
+
+**Toujours manquant : Stamp Out!.** Personne n'a encore vu si le cahier, les
+crayons et les jouets portent une ombre sur la console. Tant que cette image
+n'existe pas, on ne sait pas s'il y a un défaut à corriger.
+
+## G1 — Slime Time : les projecteurs, pas les confettis
+
+Mesuré le 2026-09-17 avec une sonde dans `particleFunc` (`hsfanim.c`), sur une
+build compilée localement. La sonde imprime, pour chaque système de particules,
+le format du bitmap, la branche TEV choisie et la couleur du premier sommet.
+
+Trois systèmes tournent pendant la fin de Slime Time :
+
+| système | format | branche TEV | couleur sommet |
+|---|---|---|---|
+| confettis | `bmpFmt=8` | `RASC-only` | gris, 126,126,125 → 88,88,68, alpha 250 → 155 |
+| éclat/bulles | `bmpFmt=8` | `RASC-only` | blanc bleuté, 237,233,251, alpha 98-170 |
+| **projecteurs** | **`bmpFmt=3`** | **`RASC*TEXC`** | **255,255,255,255** |
+
+### Ce que cela règle
+
+Les **confettis fonctionnent** : 150 particules, couleur qui s'assombrit, alpha
+qui décroît — un fondu propre. Et la référence console montre des confettis
+blancs et gris. Ils n'ont jamais eu de défaut.
+
+Les **projecteurs** sont un système de dix particules dont la couleur de sommet
+est **blanc opaque**, avec un TEV en `RASC*TEXC` : le blanc est neutre, donc la
+couleur affichée est **entièrement celle de la texture**. Console : cônes roses
+à dégradé. Port : cônes blancs. **La texture est donc échantillonnée en blanc.**
+
+### Où chercher
+
+`ANIM_BMP_C8 = 3` (`include/game/animdata.h:9`) : c'est une texture
+**palettisée 8 bits**, chargée avec une palette RGB5A3 —
+`GXInitTlutObj(..., GX_TL_RGB5A3, palNum)` puis `GXLoadTlut(tlut_obj, slot)` et
+`GXInitTexObjCI(..., GX_TF_C8, ..., slot)` (`sprput.c:243-251`).
+
+Deux détails rendent ce chemin suspect sur PC, et aucun n'est vérifié :
+
+1. **`HuSprTexLoad` a une implémentation dédiée sous `OPTIMIZED_TEXTURE_LOADING`,
+   drapeau posé par le port** (`CMakeLists.txt`). Elle met en cache le `GXTexObj`
+   et le `GXTlutObj` par bitmap et par slot (`tex_initialized`,
+   `tlut_initialized`), et ne les réinitialise jamais ensuite.
+2. **L'indice de TLUT est le numéro de slot de texture** — `0` pour les
+   particules. Toute autre texture palettisée chargée dans le même slot écrase
+   la palette, et l'ordre de dessin d'un port n'est pas celui de la console.
+
+### Ce qui est acquis, et ce qui ne l'est pas
+
+Acquis : le défaut est dans la **texture** des projecteurs, pas dans la couleur
+de sommet, pas dans les confettis, pas dans le texgen — tout cela est mesuré.
+C8 palettisé est le format en cause.
+
+Non acquis : **pourquoi** elle sort blanche. Les deux pistes ci-dessus sont des
+lectures, pas des mesures, et cette page a assez d'exemples d'hypothèses
+plausibles réfutées par la première mesure venue.
+
+---
+
+## La piste 2 était la bonne, et le défaut est dans Aurora — 2026-09-17
+
+La section précédente laissait deux lectures non vérifiées sur le chemin C8.
+La deuxième disait : *« toute autre texture palettisée chargée dans le même slot
+écrase la palette, et l'ordre de dessin d'un port n'est pas celui de la
+console »*. Elle visait juste, mais pas à l'endroit prévu : le problème n'est pas
+que la palette soit écrasée, c'est que **le moteur refuse de s'en apercevoir**.
+
+### Le test qui décide qu'une texture n'a pas changé
+
+`resolve_sampled_textures` (`extern/aurora/lib/gx/gx.cpp`) commençait par un
+raccourci :
+
+```cpp
+if (obj.texObjId != 0 && obj.texObjId == textureBind.texObj.texObjId &&
+    obj.texDataVersion == textureBind.texObj.texDataVersion) {
+  // Texture bind unchanged
+  continue;
+}
+```
+
+Pour une texture normale, c'est exact : mêmes octets, même image. Pour une
+texture **palettisée**, c'est faux. Ses pixels ne sont pas dans ses données :
+ce sont des *indices*, décodés à travers la TLUT présente dans le slot au moment
+du rendu. Le jeu peut charger une autre palette dans ce slot sans jamais toucher
+au `GXTexObj` — c'est même la définition d'une animation de palette. Le
+raccourci passait alors à côté, et la texture gardait les couleurs de sa
+**première** résolution pour toute sa durée de vie.
+
+Conséquence directe pour G1 : si les projecteurs de Slime Time sont résolus une
+première fois pendant qu'une *autre* palette occupe le slot 0, ils sont figés sur
+celle-là. Les `GXLoadTlut` corrects qui suivent n'y changent rien.
+
+### Ce qui a été corrigé
+
+- **Aurora** — l'identité de la TLUT (`tlutObjId`, `tlutDataVersion`) et, pour
+  une copie de framebuffer palettisée, la révision de la source entrent dans le
+  test. Elles sont portées par `TextureBind` pour que l'image suivante ait
+  quelque chose à comparer. Un slot sans palette chargée ne se résout plus du
+  tout, au lieu de décoder des indices comme s'ils étaient des couleurs.
+- **`src/game/hsfdraw.c`** — `LoadTexture` rafraîchissait déjà le pointeur de
+  données quand une matière animée passe à l'image suivante, mais pas la
+  palette : les formats 9, 10 et 11 décodaient toutes les images suivantes avec
+  la TLUT de l'image 0.
+- **`src/game/sprput.c`** — `HuSprTexLoad` ne lisait `wrap_s`/`wrap_t` que lors
+  de la toute première construction de l'objet. `hsfanim.c` les prend des
+  attributs du modèle et `m415Dll/map.c` choisit REPEAT ou CLAMP par objet, sur
+  le même triplet (anim, bmp, slot) : le premier appel décidait pour tous les
+  autres.
+
+### Ce que cela ne dit pas
+
+Les trois correctifs compilent et sont installés. **Aucun n'est vérifié à
+l'écran.** Le premier est un candidat sérieux pour G1, pas une confirmation :
+il faut relancer Slime Time et regarder la couleur des cônes. Les deux autres
+sont des défauts réels trouvés en cherchant celui-là, et leur effet visible —
+s'il y en a un — reste à constater.
+
+Aucun des trois n'ajoute de géométrie. Ils ne peuvent donc rien pour G7
+(papillons sans ombre) ni pour les arbres d'Avalanche!.
+
+### En marge : les ballons de Hop or Pop
+
+Valentin trouve les ballons « vachement clairs » par rapport au jeu d'origine.
+Mesure par lecture de pixels, port contre vidéo console (18:08) :
+
+| | console | port |
+|---|---|---|
+| vert du ballon Yoshi | `6, 129, 12` | `1, 153, 1` |
+| sol jaune | `255, 244, 86` | `255, 255, 121` |
+
+Les deux échantillons vont dans le même sens, le port est plus clair de 10 à
+20 %. Mais la référence est un encodage YouTube de huit ans, dont le gamma
+propre couvre largement un tel écart. **Soupçonné, non confirmé** : il faudrait
+une capture d'écran d'émulateur ou de console pour trancher. À la différence de
+G1, G2 ou Makin' Waves, l'écart est de *niveau* et non de *structure*, et c'est
+précisément le genre que la chaîne vidéo sait fabriquer toute seule.
+
+## Ballons de Hop or Pop — conforme à Dolphin, 2026-09-23
+
+Comparaison entre un enregistrement du port et une vidéo console
+(MarioPartyGaming, « All Minigames (Master Difficulty) », 32:04), sur la même
+vue de caméra.
+
+**Ce qui est établi :**
+
+- **La chaîne vidéo est neutre.** Le cadre du chronomètre, qui ne reçoit aucun
+  éclairage, vaut 57,39,23 sur la console et 59,37,25 sur le port.
+- **Le sol est fidèle.** Mesuré sur toute sa surface (environ 100 000 pixels) :
+  médiane 255,234,97 sur la console, 255,242,111 sur le port. Un premier
+  chiffre de « ×1,3 » venait de points mal placés sur le motif, il est faux.
+- **Les ballons des joueurs diffèrent vraiment.** Sur la console, le ballon de
+  Peach est rose saumon pastel avec un large reflet brillant. Sur le port, il
+  est rose plus foncé, saturé et mat. Leur matériau utilise un reflet
+  spéculaire (mode de sommet 2, puissance 50, canal `GX_COLOR1` en
+  `GX_AF_SPEC`), sans reflet d'environnement (`refAlpha = 0`).
+
+**Vérifié et conforme au SDK, donc écarté :** plafonnement de l'éclairage
+(`shader.cpp`), position de la lumière spéculaire (`GX_LARGE_NUMBER` vaut
+−1048576, le signe est donc correct), éclairage par sommet, couleurs par défaut
+de `GX_COLOR1A1`, translation nulle de `MTXInvXpose`, branchement de
+`GX_COLOR1A1` dans le TEV, direction de la lumière dans l'espace caméra (droit
+vers le bas, reflet attendu sur le haut-avant du ballon).
+
+**Expérience réfutée :** les normales S8 stockées mesurent 1,97 (en unités à
+6 bits de fraction) au lieu de 1. Ne plus les normaliser rend le dessus des
+ballons blanc brûlé, bien plus que sur la console. Aurora et Dolphin
+normalisent tous deux, et ce choix est le bon.
+
+**Tranché par Dolphin.** Une capture Dolphin de l'utilisateur, avec son
+disque, montre le ballon de Peach **rose et mat, identique au port**. Le port
+est donc fidèle à l'émulateur de référence. L'écart ne concerne que la vidéo
+YouTube, sans doute enregistrée sur une vraie console ou avec d'autres
+réglages. Si un comportement matériel en est la cause, Dolphin ne le reproduit
+pas non plus, et l'expérience des normales brutes montre qu'il ne s'agit pas
+simplement de la normalisation. Aucun correctif n'est justifié en l'état.
+
+## Carrés blancs de Slime Time — CORRIGÉ, 2026-09-23
+
+Confirmé en jeu par l'utilisateur : les carrés blancs ont disparu.
+
+**Ce n'étaient pas les projecteurs.** Une comparaison image par image avec une
+vidéo console (MarioPartyGaming, « All Minigames (Master Difficulty) »,
+Slime Time à 0:19-0:23) contre l'enregistrement du port l'a tranché :
+
+| instant | console | port avant correctif |
+|---|---|---|
+| « FINISH! », le gros slime retombe | lueur rose diffuse, confettis sombres | grands carrés blancs opaques à bords francs |
+| « MARIO WON! », projecteurs | cônes blancs en haut, magenta en bas | **identiques** |
+
+Les projecteurs ont toujours été corrects, et la section suivante, qui les
+visait, se trompait d'objet.
+
+**Cause.** L'objet fautif est l'effet n° 6 de `m402Dll` (`main.c:1071`), un
+modèle HSF animé joué à l'atterrissage du slime. Sous
+`OPTIMIZED_TEXTURE_LOADING`, `LoadTexture` (`hsfdraw.c`) construit un seul
+`GXTexObj` par attribut et, quand l'animation passe à l'image suivante, ne
+rafraîchit que le pointeur de données. Une sonde a montré que cet effet commence
+sur un bitmap **C4** et continue sur 28 bitmaps **RGB5A3** de même taille : les
+pixels RGB5A3 étaient décodés comme des indices de palette 4 bits. La console
+reconstruit l'objet à chaque appel et n'a jamais eu ce problème.
+
+**Correctif.** Avant d'utiliser l'objet en cache, `LoadTexture` vérifie qu'il a
+toujours la taille et le format du bitmap demandé, et le reconstruit sinon.
+`GXInitTexObj` d'Aurora remet l'objet à zéro avec un nouvel identifiant : pas de
+fuite, et le cas courant (toutes les images au même format) ne change pas.
+
+## Projecteurs blancs de Slime Time — mesuré, non résolu, 2026-09-23 (mauvaise cible, voir ci-dessus)
+
+Le défaut est **enfin vu** au lieu d'être décrit. Une image tirée d'un
+enregistrement de l'utilisateur, à l'écran de victoire de Slime Time
+(« MARIO WON! »), montre **quatre barres blanches verticales à bords francs**
+sur le damier, deux de chaque côté du personnage. Ce sont les projecteurs, et
+c'est ce que l'utilisateur appelait « les carrés blancs ».
+
+### Ce qui est établi par la mesure
+
+Une sonde sur le dessin des particules donne deux familles pendant cette scène :
+
+| | format | mélange | couleur | couleur mesurée |
+|---|---|---|---|---|
+| projecteurs | `dataFmt=8` (I4) | additif | du **sommet** | **`rgba=(255,255,255,255)`** |
+| confettis | `dataFmt=3` (C8) | normal | de la texture | `rgba=(38,38,0,30)` |
+
+- **Les bords francs s'expliquent sans bug.** La forme vient de l'alpha de la
+  texture, vérifiée directement depuis son export : alpha de 0 à 238, un vrai
+  dégradé. Avec un mélange **additif**, un dégradé qui sature produit des bords
+  francs. C'est le comportement attendu.
+- **Le blanc n'est pas un accident.** La couleur des particules provient de
+  `param->colorStart[]` interpolée vers `colorEnd[]` (`hsfanim.c:1277` et
+  `1367-1372`), c'est-à-dire des **données de l'effet**. Elle vaut blanc dès
+  l'apparition : ces particules sont blanches **par conception**.
+
+### Hypothèses écartées en chemin
+
+Texture non liée (aucune : sonde dédiée, zéro cas), décodage I4 (correct,
+`alpha = intensité`), alpha de la texture (dégradé conforme), palette des
+textures indexées (chargée à chaque appel), et le blanchiment plein écran de
+fin de mini-jeu, qui est une **transition** sans rapport (luminosité moyenne
+mesurée : 113 → 191 → 110 sur deux secondes).
+
+### Ce qu'il reste
+
+Si les particules sont blanches par conception, alors soit la teinte rose vient
+d'un chemin non identifié, soit **la référence console invoquée est fausse**.
+Cette même section du registre contenait déjà une affirmation erronée du même
+ordre — les confettis y étaient accusés à tort avant qu'une comparaison montre
+qu'ils sont blancs et gris sur console aussi. Trancher demande une capture
+console ou émulateur **de cet écran précis**, que personne n'a encore fournie.
+
+## Ombres manquantes (G7 et Slime Time) — CORRIGÉ, 2026-09-22
+
+**Cause : la matrice de projection d'ombre valait `NaN` dans ses douze
+éléments.** Pas « mal calculée » — littéralement pas un nombre. Une coordonnée
+NaN n'échantillonne rien, c'était donc une garantie mathématique d'absence
+d'ombre.
+
+L'origine est dans les données du jeu, et elle est parfaitement légale :
+
+```c
+VECNormalize(&lbl_1_data_60, &sp20);                       /* « haut » = normalize(position) */
+Hu3DShadowPosSet(&lbl_1_data_60, &sp20, &lbl_1_data_6C);   /* cible = origine */
+```
+
+Le vecteur « haut » de la lumière vaut `normalize(position)`, et sa direction de
+visée vaut `normalize(cible − position)` = `−normalize(position)`. Les deux sont
+calculés depuis la même entrée par la même opération : ils sortent **identiques
+au bit près**. Dans `C_MTXLookAt`, leur produit vectoriel est donc exactement
+`(0,0,0)`, qui est ensuite normalisé — `1/√0 = ∞`, puis `0 × ∞ = NaN`, qui
+contamine toute la matrice.
+
+Correctif dans `C_MTXLookAt` (`extern/aurora/lib/dolphin/mtx/mtx.c`) : quand le
+produit vectoriel dégénère, reconstruire la base depuis un axe non colinéaire à
+la visée. Le roulis autour de l'axe de visée est arbitraire par définition dans
+ce cas, et la projection de la lumière est symétrique autour de cet axe.
+
+### L'analyse précédente était fausse, et voici ce que la mesure a donné
+
+Cette page concluait que la passe d'ombre était éteinte, l'un des deux drapeaux
+valant zéro. C'est faux. Chaque étape a été mesurée :
+
+| mesure | résultat |
+|---|---|
+| drapeaux de garde | `Hu3DShadowF=1 Hu3DShadowCamBit=1` — **la passe s'exécute** |
+| frustum d'Avalanche forcé sur Slime Time | aucun changement — **le frustum n'est pas en cause** |
+| modèles entrant dans la boucle de rendu | 1 |
+| constante substituée à l'échantillon | toutes les surfaces s'assombrissent — **la chaîne d'application fonctionne** |
+| faces dessinées dans la carte | `drawn=442780 skipped=6720` — **la carte a du contenu** |
+| `TEXMTX9` | **`-nan(ind)` sur les douze éléments** |
+
+Tout était vrai simultanément, et tout était inutile tant que la coordonnée
+valait NaN. C'est aussi pourquoi forcer le frustum d'Avalanche n'avait rien
+changé.
+
+**Deux erreurs commises en chemin, consignées pour qu'on ne les refasse pas.**
+Un correctif a été annoncé puis annulé : il ajoutait un amorçage de variables
+déjà présent, et le signe était une modification de code qui échouait parce que
+la cible existait déjà. Et la conclusion « la carte est vide » était une
+sur-interprétation du test d'assombrissement, qui ne prouvait que le bon
+fonctionnement de l'étage TEV.
+
+Butterfly Blitz (`m441Dll`) partage la même signature
+(`Hu3DShadowCreate(30, 20, 20000)`) et devrait être corrigé du même coup —
+**à vérifier**.
+
+## Ombres manquantes (G7) — la passe N'EST PAS bloquée, 2026-09-22
+
+Slime Time n'a **aucune ombre** non plus, constaté en jeu. Ses paramètres
+`Hu3DShadowCreate(30, 20, 20000)` sont **identiques** à ceux de Butterfly Blitz
+(`m441Dll`, le défaut G7), alors qu'Avalanche, qui a des ombres, utilise
+`(45, 1000, 250000)`. Deux mini-jeux défaillants partageant la même signature,
+ce n'est plus une observation isolée.
+
+**L'analyse précédente est réfutée par la mesure.** Cette page concluait que la
+passe d'ombre était éteinte parce que l'un des deux drapeaux valait zéro, tout
+en précisant que « lequel ne se déduit pas du code ». Une sonde sur le site de
+garde (`hsfman.c`) donne, pour Slime Time :
+
+```
+[shadow] Hu3DShadowF=1 Hu3DShadowCamBit=1 -> pass RUNS
+```
+
+**La passe s'exécute.** Le problème n'est donc pas qu'elle soit bloquée, mais
+que son résultat n'apparaisse pas — ce qui déplace entièrement la cible.
+
+### Ce qui a été vérifié et écarté depuis
+
+- **La résolution de la copie EFB.** La carte d'ombre est copiée en
+  `GX_CTF_R8` (`hsfman.c:2240`) puis liée en `GX_TF_I8` (`hsfdraw.c:1629`). Ces
+  formats diffèrent, mais la recherche se fait **par pointeur seul**
+  (`gx.cpp:449`, `copyTextures.find(obj.data)`), donc le format ne l'empêche
+  pas ; et `GX_CTF_R8` possède bien son pipeline de conversion dans Aurora
+  (`tex_copy_conv.cpp:303`).
+- **La taille de la carte** n'est pas le discriminant : `Hu3DShadowData.size`
+  vaut toujours `0xC0`, y compris pour Avalanche qui fonctionne. Le chemin de
+  copie est donc identique dans les trois mini-jeux, réduction 2:1 comprise
+  (`GXSetTexCopySrc` à `size * 2`).
+
+### Ce qui reste
+
+Le seul écart avéré entre les cas qui marchent et ceux qui ne marchent pas
+reste **fov / near / far**. `C_MTXLightPerspective` n'utilise que le `fov` ;
+`nnear` et `ffar` servent ailleurs. La mesure qui trancherait : savoir si la
+carte d'ombre **contient une silhouette** ou si elle est vide. Vide, le rendu
+du point de vue de la lumière est en cause (donc probablement le frustum).
+Pleine, c'est son application sur la scène.
+
+## Tree Stomp — CORRIGÉ, 2026-09-22
+
+Le gros carré noir autour du joueur en prenant la banane dorée est corrigé, et
+confirmé en jeu.
+
+**Cause** : `GXSetZTexture` était une **fonction vide** dans Aurora. Tree Stomp
+dessine sa traînée comme huit quads plein écran en projection orthographique et
+d'alpha décroissant (`m419Dll/main.c:279-290`) ; le Z-texturing leur donne la
+profondeur stockée dans une texture au lieu de celle du quad. Sans lui, rien ne
+confinait ces quads à la scène.
+
+**Sémantique** : profondeur assemblée depuis la texture du dernier étage avec
+les coefficients par format (U8 `(0,0,0,1)`, U16 `(1,0,0,256)`, U24
+`(65536,256,1,0)`), plus le biais, masquée sur 24 bits. Le sens de la
+profondeur inversée et le diviseur 16777215 viennent d'Aurora lui-même
+(`gx_z24` dans `tex_copy_conv`, valeur d'effacement dans `common.cpp`) et non de
+Dolphin, dont le drapeau équivalent a la polarité opposée — le recopier aurait
+inversé la profondeur.
+
+**Le piège, et ce qui a failli faire conclure à un échec** : une première
+implémentation correcte n'a rien changé à l'écran. Une trace posée pour
+distinguer « ça ne marche pas » de « ça ne s'exécute pas » a montré que le
+pipeline était bien construit (`op=2 fmt=2`) mais que la profondeur était lue
+dans la texture de **couleur**. GX prend la texture du dernier étage qui en a
+une **liée**, que le combinateur s'en serve ou non : Tree Stomp déclare son
+étage 1 en `GX_PASSCLR` avec TEXMAP1 uniquement pour viser la texture de
+profondeur, donc `uses_texture_sample()` renvoyait faux et le dernier étage
+réellement échantillonné était l'étage 0. Dolphin signale ce piège dans un
+commentaire (« hopefully this has been read »).
+
+Écrit via les registres BP 0xF4/0xF5 et non directement dans l'état, parce que
+le jeu active puis désactive le Z-texturing au sein d'une même image. L'opération
+et le format occupent les bits libres de `ShaderConfig`, donc sa taille ne change
+pas et un Z-texturing désactivé garde la même empreinte : la graine de pipelines
+livrée reste valide.
+
+## Makin' Waves — CORRIGÉ, 2026-09-23
+
+Le défaut du bord du bassin (creux, eau qui « se tord », gros pixels dès que la
+vague touche le bord) est corrigé et confirmé en jeu.
+
+### La cause : une racine carrée d'un nombre négatif
+
+Pour chaque sommet situé dans le bassin, `water.c` calcule un poids de vague :
+
+```c
+var_f31 = 750.0f - distance;     /* de +100 à −100 pour une distance de 650 à 850 */
+if (var_f31 < 100.0f) {
+    var_f31 *= 0.01f;
+    poids = sqrtf(var_f31);      /* argument NÉGATIF dès que distance > 750 */
+}
+```
+
+Pour tout sommet de l'**anneau du bord** (rayon 750 à 850), l'argument est
+négatif. Le jeu a été compilé avec la `sqrtf` en ligne de MSL
+(`include/PowerPC_EABI_Support/Msl/MSL_C/MSL_Common/math.h`), qui fait
+`if (x > 0) { ... } return x;` : pour un argument négatif elle **renvoie
+l'argument lui-même**. Sur console, ces sommets reçoivent donc un petit poids
+négatif et bougent doucement à contre-sens de la vague.
+
+Le port, lui, lie la `sqrtf` du système, qui renvoie **NaN** pour un argument
+négatif. Chaque sommet du bord portait donc un poids NaN, et prenait une
+**position NaN** dès que le déplacement d'une vague l'atteignait : des triangles
+qui disparaissent ou partent n'importe où — exactement au bord, exactement quand
+la vague le touche. Correctif : reproduire la sémantique MSL à cet appel.
+
+### Pourquoi l'enquête a été si longue, et ce qui l'a débloquée
+
+Aucune hypothèse de rendu ne pouvait aboutir : **le rendu était correct**, et
+c'étaient ses données d'entrée qui étaient empoisonnées. Toute la série
+d'éliminations ci-dessous reste exacte — texturage indirect, matrices, copie
+EFB, filtre de copie, textures — mais elle cherchait au mauvais étage.
+
+C'est la cause des **ombres de Slime Time** (une base de visée dégénérée
+produisant un NaN) qui a fait regarder les NaN dans l'eau. Une première sonde a
+trouvé **116 à 146 normales NaN sur 1 080 à chaque image** ; les neutraliser n'a
+rien changé à l'écran, parce qu'elles n'étaient qu'un **symptôme** des positions
+NaN. Remonter à ce qui rendait les positions NaN a mené à la `sqrtf`.
+
+**Un test antérieur était faussé par ces NaN** : `PARTYBOARD_IND_SCALE=0`
+multipliait le décalage de relief par zéro pour le supprimer, mais
+**NaN × 0 = NaN** — il ne supprimait donc rien aux sommets contaminés. Sa
+conclusion ne valait rien, et elle a été refaite une fois les NaN éliminés.
+
+### Étendu à tout le jeu
+
+Le correctif n'est plus local à l'eau. `include/port/msl_sqrtf.h` donne à
+**tout le code du jeu** la sémantique de la `sqrtf` console, et il est injecté
+(`/FI` ou `-include`) dans les sources C du jeu et de chaque DLL de mini-jeu ou
+de plateau — **et nulle part ailleurs** : ni le C++ du port qui partage la même
+cible, ni Aurora, ni libco, vérifié sur `build.ninja`.
+
+La source faisant foi est `libc/math.h`, l'en-tête C réellement utilisé par le
+build console (`-i libc`, `-nosyspath`) : sa branche MWCC renvoie l'argument
+inchangé pour `x <= 0`, sa branche `#else` — celle que prend tout autre
+compilateur — se contente de déclarer la `sqrtf` système, qui renvoie NaN.
+
+- **Seul le cas `x <= 0` change.** Un argument positif atteint toujours la
+  `sqrtf` système : tout résultat fini aujourd'hui reste identique au bit près,
+  ce qui laisse le comportement existant et le verrouillage du jeu en ligne
+  intacts, sauf là où le port produisait un NaN.
+- **La `sqrt` en double précision n'est pas touchée** : `libc/math.h` y renvoie
+  NaN pour un négatif, exactement comme le système.
+- **Vérifié par désassemblage**, l'exécution d'un binaire de test étant bloquée
+  par Windows : `comiss`/`jbe` qui renvoie `x` pour zéro, négatif et NaN, puis
+  `sqrtss` — l'instruction même de la `sqrtf` système — pour un positif.
+- **Validé en jeu** : le correctif local de `water.c` a été retiré au profit de
+  la ligne d'origine du jeu, et le bord du bassin est resté propre.
+
+Le jeu compte **320 appels à `sqrtf`**. Les développeurs en ont protégé
+certains par `ABS()`, preuve que l'argument pouvait réellement devenir négatif,
+et ont laissé les autres sans garde parce que sur leur plateforme cela n'avait
+aucune conséquence. Chacun était un NaN latent sur PC ; ils sont tous couverts,
+y compris ceux dont personne n'avait encore remarqué l'effet.
+
+## Makin' Waves — enquête du 2026-09-21 : ce qui est éliminé
+
+Le diagnostic de la section « Makin' Waves — 14:40 » ci-dessus (« distorsion
+beaucoup trop ample », cause supposée = application du facteur d'échelle dans le
+shader) est **faux**. Il a été réfuté par la mesure. Voici l'état réel, pour
+qu'on ne recommence pas le même chemin.
+
+### Prouvé équivalent à Dolphin
+
+Tout le chemin du texturage indirect d'Aurora a été comparé ligne à ligne à
+`PixelShaderGen.cpp` de Dolphin, et vérifié en exécution avec le disque réel :
+
+- **Encodage et décodage de `GXSetIndTexMtx`** — matrice ×1024 sur 11 bits
+  signés, exposant biaisé de +17 réparti 2 bits par colonne. Correct pour les
+  trois valeurs employées par `water.c` (`-2`, `0`, `-3`).
+- **Amplitude finale**, calculée des deux côtés pour la matrice 0 :
+  Dolphin `(-512 × coord) >> 3 >> 2` en unités de 1/128 texel, Aurora
+  `-0.5 × coord × 2⁻²` en texels. **±16 texels dans les deux cas.**
+- **Correspondance lignes/colonnes** de la matrice (`ma,mc,me` / `mb,md,mf`),
+  **biais −128** pour `GX_ITF_8`, **décalage de format**, **échelle SU** de
+  texcoord, **division perspective par fragment** (`shader.cpp:1243`).
+- **Modes de répétition**, capturés en exécution : texmap 0/1/2 en `GX_CLAMP`,
+  texmap 3 en `GX_MIRROR` — exactement ce que demande `water.c:775-780`.
+- **Le WGSL généré**, vidé pour ce dessin précis et comparé à `water.c` :
+  3 étages indirects tous sur `TEXCOORD1`/`TEXMAP1` (le jeu fait réellement
+  ainsi), 4 étages TEV avec les bons texcoords et texmaps, 5 texgens avec les
+  bons indices de matrice (30/33/36/39/42 → 10..14). Traduction fidèle.
+- **`indLod` / `lb_utclod`** : ni Aurora ni Dolphin n'exploitent ce bit. Ce
+  n'est donc pas une divergence, et le « corriger » éloignerait du rendu de
+  référence au lieu de s'en rapprocher.
+
+### Éliminé par l'expérience
+
+- **La perturbation indirecte n'est pas la cause.** Avec son amplitude forcée à
+  zéro, l'artefact du bord est atténué mais **subsiste**.
+- **La copie EFB se résout correctement.** La sonde rapporte `tex0 bound=true`
+  en 640×480 au format 4 — la « Resolved Texture » RGB565 que crée `GXCopyTex`
+  pour un EFB sans alpha, et non le format 5 déclaré par `water.c`. C'est la
+  preuve *positive* que TEXMAP0 échantillonne bien le reflet, et non le tampon
+  `malloc` non initialisé de `water.c:323`. (`copyRevision=0` est normal ici :
+  ce compteur ne sert qu'aux copies palettisées.)
+- **La résolution interne n'est pas en cause.** Résoudre les copies EFB à leur
+  taille déclarée au lieu de la résolution interne ne change rien à l'aspect.
+
+### Suite de l'enquête, 2026-09-22 : le filtre de copie EFB
+
+`GXSetCopyFilter` était une **fonction vide** dans Aurora alors que le jeu
+l'active à chaque démarrage (`src/game/init.c:134`, `vf=GX_TRUE` avec le filtre
+sept taps du mode d'affichage). Comme l'eau dessine sans mélange, prend sa
+`GXCopyTex` **après** son propre dessin (`water.c:885`) et réutilise cette copie
+comme TEXMAP0 à l'image suivante, elle se nourrit de sa propre sortie : ce
+filtre est le passe-bas qui empêche une telle boucle de s'emballer. L'hypothèse
+était donc solide.
+
+Elle est **réfutée par la mesure**. Le filtre a été implémenté (passage de
+shader à sept taps, pas d'une ligne EFB et non d'un texel de la source, ce qui
+importe dès que la résolution interne dépasse 480 lignes), et la trace confirme
+que la copie de l'eau l'emprunte réellement :
+
+```
+copy filter: 640x480 fmt=5 enabled=true conversion=false scaling=false -> FILTERED
+```
+
+L'aspect de l'eau est inchangé. Le filtre reste derrière
+`PARTYBOARD_EFB_COPY_FILTER` : c'est un manque réel comblé, qui rapproche toutes
+les copies EFB du rendu console, mais il ne corrige pas ce défaut et il touche
+aussi les ombres, donc il n'est pas activé par défaut sans vérification plus
+large.
+
+Également écarté ce jour : la **magnification**. L'utilisateur décrit « de gros
+pixels dès que la vague touche le bord », ce qui évoque un échantillonnage au
+plus proche — mais `init_texobj_common` met bien `mode0` bit 4 à 1, donc
+`mag_filter()` renvoie `GX_LINEAR`, et `water.c:883-884` copie le plein écran
+sans réduction. Les deux sont corrects.
+
+**Correction d'une conclusion antérieure** : le test
+`PARTYBOARD_EFB_COPY_NATIVE` du 2026-09-21 était vide de sens. Il forçait la
+copie à sa taille déclarée alors que la machine tournait déjà à
+`internalResolutionScale = 1`, donc en 640×480. Il ne pouvait rien montrer. La
+conclusion « la résolution n'est pas en cause » reste vraie, mais elle repose
+sur un autre fait : l'artefact persiste **à 640×480 natif**, c'est-à-dire à la
+résolution exacte de la console.
+
+### Les textures de l'eau sont correctes, 2026-09-22
+
+Exportées depuis le jeu en cours d'exécution (`PARTYBOARD_DUMP_TEXTURES`, voir
+plus bas), et regardées en image plutôt que déduites du code :
+
+| texture | contenu |
+|---|---|
+| 256×256 RGBA8 (TEXMAP1, relief indirect) | motif de vaguelettes — correct |
+| 64×64 I8 (TEXMAP3) | bruit fin — correct |
+| 256×256 RGB5A3 (TEXMAP2) | ondes circulaires — correct |
+
+**Correction d'une observation antérieure** : l'affirmation « TEXMAP2 se décode
+en une photo sans rapport » était une **mauvaise attribution**. La photographie
+(la vallée de Yosemite) existe réellement dans les données et se décode
+proprement — ce n'est donc pas de la mémoire non initialisée — mais elle n'est
+pas la texture de l'eau ; celle-ci est le motif d'ondes circulaires. C'est cette
+erreur d'attribution qui avait mené à l'hypothèse du « mauvais dump RVZ », elle
+aussi fausse : le disque de l'utilisateur rend correctement sous Dolphin.
+
+Deux défauts réels ont été corrigés dans l'export de textures d'Aurora pour
+obtenir ces images, tous deux silencieux : le dossier de destination n'était
+créé que par le chargement d'un pack de remplacement, et `find_replacement`
+sortait immédiatement sur un registre vide alors que l'export vit plus bas dans
+cette même fonction. L'export était donc inopérant pour quiconque n'avait pas
+déjà un pack installé — c'est-à-dire dans la seule situation où il sert.
+
+### Fausses pistes à ne pas refaire
+
+- **« Le dump RVZ est mauvais »** : le SHA-1 du `.rvz` de l'utilisateur ne
+  correspond pas à Redump, mais le même fichier rend correctement sous Dolphin.
+  Les données du disque ne sont pas en cause.
+- **« Ce n'est pas un bug »** : une comparaison vidéo avec Dolphin avait conclu
+  à un aspect identique. C'est faux — le défaut est bien réel et localisé au
+  **bord** du bassin, pas sur toute la surface.
+
+### Ce qui reste à explorer
+
+**Rien de précis.** La dernière piste envisagée — le double tampon de sommets —
+a été vérifiée et écartée le même jour : `water.c` recalcule bien à chaque image
+les positions et normales du maillage 30×36 dans deux tampons alternés
+(`unk_6BC`/`unk_6C4`, basculés par `unk_6B4`), et Aurora met bien en cache les
+tableaux de sommets par pointeur (`command_processor.cpp:1636`), mais
+`end_frame` vide `cachedRange` pour tous les tableaux à chaque fin d'image
+(`gfx/common.cpp:1125`). Le cache ne vit donc qu'à l'intérieur d'une image et
+les sommets sont réenvoyés à chaque frame : aucune donnée périmée possible.
+
+À noter au passage, sans rapport avec ce défaut : l'invalidation de
+`command_processor.cpp:1739` ne lâche le cache que si le **pointeur** change,
+alors qu'un jeu réécrivant le même tampon entre deux dessins d'une même image
+obtiendrait des données périmées. Le vidage de fin d'image masque le problème
+aujourd'hui ; c'est une fragilité latente, pas un bug actif.
+
+Reste donc la géométrie elle-même (valeurs des positions et normales calculées
+par le code décompilé, liste d'affichage, ordre des triangles), qu'aucune mesure
+n'a encore touchée — mais sans hypothèse précise pour l'aborder.
+
+Les sondes employées (`PARTYBOARD_IND_SCALE`, `PARTYBOARD_DEBUG_WATERTEX`,
+`PARTYBOARD_DUMP_WATER_SHADER`, `PARTYBOARD_EFB_COPY_NATIVE`) sont dans
+l'historique git entre `f0ac5f6` et `18b2af3` si besoin de les réemployer.

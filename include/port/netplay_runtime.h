@@ -16,6 +16,8 @@ extern "C" {
  * only by command-line arguments, so the normal offline game remains untouched. */
 bool PartyBoard_NetplayConfigureFromArgs(int argc, char **argv);
 bool PartyBoard_NetplayEnabled(void);
+// The netplay frame, for tagging diagnostics; defined in netplay_runtime.cpp.
+u32 PartyBoard_NetplayFrameForDiagnostics(void);
 /* One named boot/menu diagnostic event; no-op outside a network session. */
 void PartyBoard_NetplayTrace(const char *event);
 /* Rendered frames since boot. Reported, never hashed: it is a property of

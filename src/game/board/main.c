@@ -20,6 +20,9 @@
 #include "game/pad.h"
 #include "game/wipe.h"
 #include "string.h"
+#ifdef TARGET_PC
+#include "port/netplay_runtime.h"
+#endif
 
 #include "game/armem.h"
 #include "game/audio.h"

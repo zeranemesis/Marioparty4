@@ -3,6 +3,7 @@
 #pragma once
 
 #include <atomic>
+#include <port/disc_version.hpp>
 #include <port/settings.h>
 
 namespace partyboard::iso {
@@ -28,6 +29,10 @@ struct VerificationStatus {
 
 struct DiscInfo {
     bool isPal = false;
+    // Only meaningful once the disc was recognised as Mario Party 4 (`known`).
+    bool known = false;
+    version::DiscRegion region = version::DiscRegion::Usa;
+    uint8_t revision = 0;
 };
 
 ValidationError inspect(const char* path, DiscInfo& info);
