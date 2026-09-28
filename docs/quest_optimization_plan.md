@@ -1,5 +1,7 @@
 # Plan d’optimisation et de qualité Quest
 
+> État à jour, mesures et reste à faire : `docs/quest-optimization.md`, section « Ce qui reste a faire ». Ce plan garde les critères d’origine.
+
 ## Objectif et règle de décision
 
 Améliorer la fluidité, la netteté et la stabilité mémoire de Party Board sur

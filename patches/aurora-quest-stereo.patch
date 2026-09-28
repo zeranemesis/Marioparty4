@@ -10,7 +10,7 @@
          lib/gfx/tex_palette_conv.cpp
 --- /dev/null
 +++ b/include/aurora/stereo.h
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,55 @@
 +#ifndef AURORA_STEREO_H
 +#define AURORA_STEREO_H
 +
@@ -56,6 +56,10 @@
 +// The headset does not show the game's own frame (the model replaces it):
 +// the frame is still drawn for the eyes, but not presented to the screen.
 +void AuroraStereoHideScreen(bool hidden);
++// The draws that follow cannot reach the other eye (the game tested their
++// bounds): drawn for both eyes at once, they skip the cut at the eye's edge,
++// which costs the GPU its early depth rejection. Back to false after them.
++void AuroraStereoSetUncut(bool uncut);
 +
 +#ifdef __cplusplus
 +}
@@ -128,7 +132,7 @@
  #include "tex_copy_conv.hpp"
  #include "tex_palette_conv.hpp"
  #include "texture_replacement.hpp"
-@@ -182,6 +183,10 @@ struct RenderPass {
+@@ -182,6 +183,10 @@
    bool captureDepthSnapshot = false;
    bool sealed = false;
    std::vector<tex_palette_conv::ConvRequest> paletteConvs;
@@ -139,7 +143,7 @@
  };
  
  struct TextureCopy {
-@@ -495,6 +500,8 @@ void end_color_pass() {
+@@ -495,6 +500,8 @@
  }
  
  static inline void push_command(CommandType type, const Command::Data& data) {
@@ -148,7 +152,28 @@
    if (g_currentRenderPass == UINT32_MAX)
      UNLIKELY {
        Log.warn("Dropping command {}", magic_enum::enum_name(type));
-@@ -1132,6 +1139,111 @@ void finish() {
+@@ -1119,6 +1126,7 @@
+ 
+ void finish() {
+   ZoneScoped;
++  const bool hidden = stereo::latch_screen_hidden(); // once a frame, see below
+   if (g_recordingFrame == nullptr) {
+     return;
+   }
+@@ -1127,11 +1135,122 @@
+     auto& frame = current_frame_packet();
+     frame.uniforms.append_zeroes(gx::MaxUniformSize); // Pad the end of the GX uniform buffer slice.
+     auto& pass = frame.renderPasses[g_currentRenderPass];
+-    pass.observable = true;
+-    pass.captureDepthSnapshot = true;
++    // A headset showing the game as a model hides this screen (aurora.cpp
++    // does not present it): the final pass is then unobservable and skipped,
++    // with its clear and its store of the whole framebuffer (3840x2160 on
++    // the Quest, some 33 MB a frame) and the depth snapshot for GXPeekZ,
++    // which the game never calls. Passes resolved into textures (EFB copies)
++    // and the eyes' pass are left alone.
++    pass.observable = !hidden;
++    pass.captureDepthSnapshot = !hidden;
      enqueue_pass(frame, g_recordingFrameSlot, g_currentRenderPass);
      g_currentRenderPass = UINT32_MAX;
    }
@@ -260,7 +285,7 @@
  }
  
  void end_frame(EndFrameCallback callback) {
-@@ -1323,6 +1435,9 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+@@ -1323,6 +1442,9 @@
      };
      depthStencilAttachmentPtr = &depthStencilAttachment;
    }
@@ -272,7 +297,7 @@
        .label = passInfo.label.empty() ? label.c_str() : passInfo.label.c_str(),
 --- /dev/null
 +++ b/lib/gfx/stereo.cpp
-@@ -0,0 +1,601 @@
+@@ -0,0 +1,632 @@
 +#include "stereo.hpp"
 +
 +#include <aurora/stereo.h>
@@ -316,13 +341,14 @@
 +// The eyes' multisampling. On the headset's tiled GPU (Adreno 740) 4x takes
 +// four times the tile memory per pixel: smaller bins, and every draw is
 +// processed again in each bin it touches. For a headset A/B, before starting
-+// the game: `adb shell setprop debug.partyboard.stereo_msaa 2` (1, 2 or 4;
-+// 4 when unset).
++// the game: `adb shell setprop debug.partyboard.stereo_msaa 1` (no MSAA).
++// WebGPU only has 1 and 4 samples: any other value keeps 4 (2x aborted the
++// game on its first eye frame, 2026-09-28).
 +uint32_t stereo_samples() {
 +  static const uint32_t samples = [] {
 +    char value[PROP_VALUE_MAX] = {};
 +    __system_property_get("debug.partyboard.stereo_msaa", value);
-+    const uint32_t chosen = value[0] == '1' ? 1u : value[0] == '2' ? 2u : 4u;
++    const uint32_t chosen = value[0] == '1' && value[1] == '\0' ? 1u : 4u;
 +    Log.info("Stereo: MSAA {}x (debug.partyboard.stereo_msaa={})", chosen, value[0] != '\0' ? value : "unset");
 +    return chosen;
 +  }();
@@ -361,6 +387,8 @@
 +bool g_recording = false;
 +bool g_worldMergeable = false;
 +bool g_worldOnly = false;
++// The draws being recorded cannot reach the other eye (AuroraStereoSetUncut).
++bool g_uncut = false;
 +int32_t g_image = -1;
 +uint64_t g_frameTag = 0;
 +bool g_loggedGeometry = false;
@@ -447,9 +475,21 @@
 +#endif
 +}
 +
++// The headset thread may flip it at any time; gfx::finish latches it once a
++// frame, so skipping the final pass and not presenting agree (a skipped pass
++// presented would show an old frame).
++bool g_frameScreenHidden = false; // game thread
++
++bool latch_screen_hidden() noexcept {
++#if defined(__ANDROID__)
++  g_frameScreenHidden = g_screenHidden.load(std::memory_order_relaxed);
++#endif
++  return g_frameScreenHidden;
++}
++
 +bool screen_hidden() noexcept {
 +#if defined(__ANDROID__)
-+  return g_screenHidden.load(std::memory_order_relaxed);
++  return g_frameScreenHidden;
 +#else
 +  return false;
 +#endif
@@ -531,7 +571,7 @@
 +      !g_instancedDisabled.load(std::memory_order_relaxed) &&
 +      info.lineMode == 0 && draw.instanceCount == 1 && gx::stereo_instanced_fits(info)) {
 +    auto instancedConfig = spatialConfig;
-+    instancedConfig.shaderConfig.stereo = mode;
++    instancedConfig.shaderConfig.stereo = g_uncut ? gx::StereoUncut : mode;
 +    // One pipeline request per draw: pipeline_ref skips the cache's lock when
 +    // a draw asks for the same pipeline as the one before, the usual case.
 +    const auto instancedRef = pipeline_ref(instancedConfig);
@@ -586,6 +626,7 @@
 +void end_frame() noexcept {
 +#if defined(__ANDROID__)
 +  g_worldMergeable = false;
++  g_uncut = false;
 +  g_recording = false;
 +  // Even without geometry, clear and submit the leased image. Dropping it
 +  // leaks a ring slot and leaves the preceding scene visible in the room.
@@ -865,6 +906,21 @@
 +#endif
 +}
 +
++extern "C" void AuroraStereoSetUncut(bool uncut) {
++#if defined(__ANDROID__)
++  if (aurora::gfx::stereo::g_uncut == uncut) {
++    return;
++  }
++  // The FIFO is deferred: its draws so far go with the previous value, and
++  // none is merged across the change.
++  aurora::gx::fifo::drain();
++  aurora::gfx::stereo::g_uncut = uncut;
++  aurora::gfx::stereo::g_worldMergeable = false;
++#else
++  (void)uncut;
++#endif
++}
++
 +extern "C" void AuroraStereoWorldOnly(bool enabled) {
 +#if defined(__ANDROID__)
 +  // The FIFO is deferred: process camera draws before changing the scope.
@@ -876,7 +932,7 @@
 +}
 --- /dev/null
 +++ b/lib/gfx/stereo.hpp
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,85 @@
 +#pragma once
 +
 +// Stereo rendering for a VR headset (include/aurora/stereo.h).
@@ -895,7 +951,10 @@
 +bool recording() noexcept;
 +// Backpressure: consume perspective vertices without uploading hidden draws.
 +bool discard_world_draw() noexcept;
-+// The game's own frame is not on show in the headset: aurora.cpp skips presenting it.
++// The game's own frame is not on show in the headset: aurora.cpp skips
++// presenting it, and gfx::finish skips its final pass. Latched once a frame
++// by gfx::finish (game thread); screen_hidden() returns that frame's value.
++bool latch_screen_hidden() noexcept;
 +bool screen_hidden() noexcept;
 +// Anisotropic filtering every mipmapped texture gets while a headset uses the
 +// eyes' images (1: the game's own choice).
@@ -1138,12 +1197,12 @@
    bool le = true;
    bool nbt3 = false;     // GX_NRM_NBT3
  };
-+enum : u8 { StereoOff = 0, StereoClipDistance = 1, StereoDiscard = 2 };
++enum : u8 { StereoOff = 0, StereoClipDistance = 1, StereoDiscard = 2, StereoUncut = 3 };
 +
  struct ShaderConfig {
    u8 fogType = GX_FOG_NONE;
    u8 vtxStride = 0;
-@@ -465,7 +467,13 @@
+@@ -465,7 +467,14 @@
    // recorded before this stay valid and the shipped cache seed is unaffected.
    u8 ztexOp : 2 = 0;
    u8 ztexFmt : 2 = 0;
@@ -1153,7 +1212,8 @@
 +  // spare bits: 0 everywhere else, so other pipelines keep their hash.
 +  // StereoClipDistance cuts each eye at its edge with a clip distance;
 +  // StereoDiscard, for drivers that fail those pipelines (Adreno), with a
-+  // fragment test instead.
++  // fragment test instead; StereoUncut, for draws that cannot reach the other
++  // eye, not at all.
 +  u8 stereo : 2 = 0;
    u8 pad2 = 0;
    std::array<AttrConfig, MaxVtxAttr> attrs;
@@ -1250,7 +1310,7 @@
  std::string build_shader_source(const ShaderConfig& config) noexcept {
    ZoneScoped;
    const auto hash = xxh3_hash(config);
-@@ -1003,7 +1037,28 @@
+@@ -1003,7 +1037,29 @@
                                    attr_load_nbt_slice(config, NbtSlice::T, vidxAttr));
    }
  
@@ -1275,12 +1335,13 @@
 +        "\n    out.pos.x = out.pos.x * eye_x.x + eye_x.y * out.pos.w;"
 +        "\n    {} = select(ubuf.stereo_clip.x * out.pos.w - out.pos.x,"
 +        "\n                                out.pos.x - ubuf.stereo_clip.y * out.pos.w, right_eye);",
-+        vtx_attr(config, GX_VA_POS), config.stereo == StereoDiscard ? "out.stereo_side" : "out.stereo_clip[0]");
++        vtx_attr(config, GX_VA_POS),
++        config.stereo == StereoDiscard ? "out.stereo_side" : config.stereo == StereoUncut ? "_" : "out.stereo_clip[0]");
 +  } else if (config.lineMode == 0) {
      vtxXfrAttrsPre += fmt::format(
          "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
          "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;",
-@@ -1051,6 +1106,13 @@
+@@ -1051,6 +1107,13 @@
    }
  
    uniBufAttrs += "\n    proj: mat4x4f,";
@@ -1294,7 +1355,7 @@
    uniBufAttrs += fmt::format("\n    postex_mtx: array<mat3x4f, {}>,", MaxPnMtx + MaxTexMtx);
    uniBufAttrs += fmt::format("\n    nrm_mtx: array<mat3x4f, {}>,", MaxPnMtx);
    std::string fragmentFnPre;
-@@ -1632,7 +1694,7 @@
+@@ -1632,7 +1695,7 @@
      fragmentFn += "\n    prev = vec4f(in.nrm, prev.a);";
    }
  
@@ -1303,7 +1364,7 @@
  fn bswap32(v: u32, le: bool) -> u32 {{
    if (le) {{
      return v;
-@@ -1997,6 +2059,11 @@
+@@ -1997,6 +2060,11 @@
                                          uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn,
                                          fragmentFnPre, vtxXfrAttrsPre, uniformPre, fragOutStruct, fragRetType,
                                          fragRetStmt);
@@ -1489,7 +1550,39 @@
  struct PipelineConfig {
 --- a/lib/gfx/pipeline_cache.cpp
 +++ b/lib/gfx/pipeline_cache.cpp
-@@ -1017,7 +1017,11 @@
+@@ -930,7 +930,7 @@
+     return 0;
+   }
+ 
+-  size_t acceptedRows = 0;
++  size_t acceptedRows = 0, invalidRows = 0;
+   while ((ret = sqlite3_step(g_pipelineCacheLoadStmt)) == SQLITE_ROW) {
+     const auto* configBlob = static_cast<const uint8_t*>(sqlite3_column_blob(g_pipelineCacheLoadStmt, 0));
+     const auto configSize = sqlite3_column_bytes(g_pipelineCacheLoadStmt, 0);
+@@ -944,10 +944,22 @@
+     if (config.version != configVersion) {
+       continue;
+     }
++    // WebGPU has 1 or 4 samples. Rows with another count (a headset's MSAA 2x
++    // test wrote some on 2026-09-28) made the driver abort while they were
++    // built at every startup, so the game could not start again. Skip them.
++    if constexpr (requires { config.msaaSamples; }) {
++      if (config.msaaSamples != 1 && config.msaaSamples != 4) {
++        ++invalidRows;
++        continue;
++      }
++    }
+ 
+     find_pipeline_impl(type, config, [=] { return create(config); }, false, firstFrameUsed);
+     ++acceptedRows;
+   }
++  if (invalidRows != 0) {
++    Log.warn("Skipped {} cached pipelines with an invalid sample count", invalidRows);
++  }
+ 
+   if (ret != SQLITE_DONE) {
+     Log.error("Failed to read pipeline cache rows: {}", sqlite3_errmsg(g_pipelineCacheDb));
+@@ -1017,7 +1029,11 @@
  
  template <>
  PipelineRef find_pipeline(ShaderType type, const gx::PipelineConfig& config, NewPipelineCallback&& cb) {

@@ -1,12 +1,77 @@
 #include "../../platforms/android/app/src/main/cpp/adaptive_quality.hpp"
+#include "../../platforms/android/app/src/main/cpp/frame_pacing.hpp"
 #include "../../extern/aurora/lib/gfx/rgba_mips.hpp"
 #include "rgba_mips_reference.hpp"
+#include "../../include/port/quest_scene_fit.hpp"
 #include <cassert>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <limits>
 #include <random>
+#include <vector>
+
+namespace {
+// How the game's frames start and when their images may be shown.
+enum class Pacing {
+  OwnClock,  // the game's 60 Hz clock, drifting against the display's
+  Paced,     // started on the pacer's schedule, shown once finished (build 112)
+  PacedDue,  // started on it, and shown at their due look, not before
+};
+
+// Display frames each image stays on show, for a game at 60 images/s on a
+// 120 Hz display whose XR thread looks for a finished image once a period
+// and shows the newest it may. Returns the holds after the first two
+// seconds, and the largest start-to-display delay.
+std::vector<int64_t> simulate_holds(Pacing pacing, int64_t periodNs, int64_t& worstDelayNs) {
+  quest::FramePacer pacer;
+  std::mt19937 random{7};
+  // Start to GPU finish varies more than a display period, as on the Toad
+  // board (a 95th percentile of 18 to 26 ms from one second to the next).
+  std::uniform_int_distribution<int64_t> gpu{9'000'000, 19'000'000}, jitter{-150'000, 150'000};
+  const int64_t ownPeriodNs = 16'666'667;
+  int64_t now = 0, nextLook = 0, lastShown = -1;
+  worstDelayNs = 0;
+  std::vector<int64_t> holds;
+  struct Image { int64_t start, finish, due; };
+  std::vector<Image> pending;
+  for (int frame = 0; frame < 60 * 20; ++frame) {
+    const auto advance = [&](int64_t until) {
+      while (nextLook <= until) {
+        const int64_t at = nextLook + jitter(random);
+        pacer.look(at, periodNs);
+        const Image* newest = nullptr;
+        for (const auto& image : pending) {
+          const bool may = image.finish <= at && (pacing != Pacing::PacedDue || pacer.is_due(image.due, at));
+          if (may && (newest == nullptr || image.start > newest->start)) newest = &image;
+        }
+        if (newest != nullptr) {
+          pacer.finished(newest->finish - newest->start);
+          if (frame > 120) worstDelayNs = std::max(worstDelayNs, nextLook - newest->start);
+          const int64_t shown = newest->start;
+          std::erase_if(pending, [shown](const Image& image) { return image.start <= shown; });
+          if (lastShown >= 0 && frame > 120) holds.push_back((nextLook - lastShown + periodNs / 2) / periodNs);
+          lastShown = nextLook;
+        }
+        nextLook += periodNs;
+      }
+    };
+    int64_t due = 0;
+    int64_t start = pacing != Pacing::OwnClock ? pacer.next_start(now, 60.0f, &due) : 0;
+    if (start == 0) start = std::max(now, static_cast<int64_t>(frame) * ownPeriodNs);
+    advance(start);
+    now = start + 5'000'000; // the game's CPU part
+    pending.push_back({start, start + gpu(random), due});
+    advance(now);
+    if (frame % 60 == 59) pacer.update();
+  }
+  return holds;
+}
+
+size_t off_cadence(const std::vector<int64_t>& holds) {
+  return static_cast<size_t>(std::ranges::count_if(holds, [](int64_t hold) { return hold != 2; }));
+}
+} // namespace
 
 int main() {
   quest::AdaptiveQuality gpu;
@@ -24,13 +89,15 @@ int main() {
   assert(cpu.scale() == 0.8f);
   for (unsigned i = 7; i < 40; ++i) { sample.sequence = i; cpu.update(sample, 72, 0); }
   assert(cpu.scale() == 0.8f); // profile ceiling
-  sample = {40, 120, 20, 2, 1, 50};
   // Limited by its pixels: each lowering brings more images, down to the floor.
+  quest::AdaptiveQuality floor;
+  floor.set_cap(0.8f);
+  sample = {40, 120, 20, 2, 1, 50};
   for (unsigned i = 40; i < 60; ++i) {
     sample.sequence = i;
-    cpu.update(sample, 120, i - 40 < 26 ? 80 - 3 * (i - 40) : 2);
+    floor.update(sample, 120, std::max(2, 80 - 8 * static_cast<int>(i - 40)));
   }
-  assert(cpu.scale() == 0.65f); // readable floor
+  assert(floor.scale() == 0.65f); // readable floor
 
   // Not limited by its pixels (the Toad board, 414 draws per eye): the
   // counters say pressure, but lowering brings no more images. The pixels
@@ -43,9 +110,11 @@ int main() {
   sample.sequence = 101;
   assert(draws.update(sample, 72, 28) == 0.75f); // the resize window, skipped
   sample.sequence = 102;
+  assert(draws.update(sample, 72, 26) == 0.75f); // first judged window
+  sample.sequence = 103;
   assert(draws.update(sample, 72, 27) == 0.8f && draws.last_decision() == D::Restored && draws.holding());
   for (unsigned i = 0; i < quest::AdaptiveQuality::kHoldWindows - 1; ++i) {
-    sample.sequence = 103 + i;
+    sample.sequence = 104 + i;
     assert(draws.update(sample, 72, 28) == 0.8f);
   }
   sample.sequence = 200;
@@ -58,8 +127,21 @@ int main() {
   sample.sequence = 301;
   pixels.update(sample, 72, 20);
   sample.sequence = 302;
-  pixels.update(sample, 72, 12); // 44 -> 60 images: helped, and still under pressure
+  pixels.update(sample, 72, 12);
+  sample.sequence = 303;
+  pixels.update(sample, 72, 12); // 44 -> 60 images on average: helped, and still under pressure
   assert(pixels.scale() == 0.7f && pixels.last_decision() == D::Lowered);
+  // One lucky window after a lowering is not enough: the intro camera case.
+  quest::AdaptiveQuality noisy;
+  noisy.set_cap(0.8f);
+  sample = {400, 120, 9, 2, 3.5f, 0};
+  assert(noisy.update(sample, 120, 50) == 0.75f); // 70 delivered: lowered, before = 70
+  sample.sequence = 401;
+  assert(noisy.update(sample, 120, 40) == 0.75f); // the resize window, skipped
+  sample.sequence = 402;
+  assert(noisy.update(sample, 120, 36) == 0.75f); // 84: one good window, not enough alone
+  sample.sequence = 403;
+  assert(noisy.update(sample, 120, 52) == 0.8f && noisy.last_decision() == D::Restored); // 68: average 76 < 76.6
   quest::AdaptiveQuality blind;
   sample = {1, 120, 2, 2, 1, 5};
   assert(blind.update(sample, 120, 20) < 1); // late frames, full ring: lower despite a low GPU counter
@@ -139,5 +221,92 @@ int main() {
   const double before = time([&] { (void)reference::rgba_mip_chain(big.data(), 512, 512); });
   const double after = time([&] { (void)aurora::gfx::rgba_mip_chain(big.data(), 512, 512); });
   std::printf("512x512 mip chain: %.2f ms with pow per texel, %.2f ms with the lookup\n", before, after);
-  std::puts("PASS: GPU/CPU decisions, freshness, recovery, profile bounds, gamma, alpha and NPOT mipmaps");
+  // Hitches at a capped 60 images/s on 120 Hz: the counters look calm and no
+  // more images can come, so the late images decide.
+  {
+    using D2 = quest::AdaptiveQuality::Decision;
+    quest::AdaptiveQuality hitch;
+    hitch.set_cap(1.0f);
+    quest::QualitySample calm{500, 120, 2, 2, 1, 0};
+    assert(hitch.update(calm, 60, 0, 3) == 0.95f && hitch.last_decision() == D2::Lowered); // 5% late
+    calm.sequence = 501;
+    assert(hitch.update(calm, 60, 0, 2) == 0.95f); // the resize window, skipped
+    calm.sequence = 502;
+    assert(hitch.update(calm, 60, 0, 0) == 0.95f);
+    calm.sequence = 503;
+    assert(hitch.update(calm, 60, 0, 0) == 0.95f && hitch.last_decision() != D2::Restored); // hitches gone: kept
+    for (unsigned i = 504; i < 508; ++i) { calm.sequence = i; hitch.update(calm, 60, 0, 0); }
+    assert(hitch.scale() == 1.0f); // five calm windows: back up
+    // Hitches the pixels do not cause: the lowering is undone.
+    quest::AdaptiveQuality cpuHitch;
+    cpuHitch.set_cap(1.0f);
+    calm.sequence = 600;
+    assert(cpuHitch.update(calm, 60, 0, 4) == 0.95f);
+    for (unsigned i = 601; i < 603; ++i) { calm.sequence = i; cpuHitch.update(calm, 60, 0, 4); }
+    calm.sequence = 603;
+    assert(cpuHitch.update(calm, 60, 0, 4) == 1.0f && cpuHitch.last_decision() == D2::Restored);
+    // One late image a second (under 2%): no lowering, but no raising either.
+    quest::AdaptiveQuality edge;
+    edge.set_cap(1.0f);
+    for (unsigned i = 700; i < 710; ++i) { calm.sequence = i; edge.update(calm, 60, 0, 1); }
+    assert(edge.scale() == 1.0f && edge.last_decision() == D2::Kept);
+  }
+
+  // Instanced stereo without the cut: only a sphere wholly inside both eyes'
+  // sides (identity clip: w = 1, sides at x = -1 and x = 1).
+  float eyes[2][16]{};
+  for (int eye = 0; eye < 2; ++eye) for (int d = 0; d < 4; ++d) eyes[eye][d * 5] = 1;
+  const float middle[3]{0, 0, -0.5f}, nearEdge[3]{0.9f, 0, -0.5f}, beyond[3]{1.5f, 0, -0.5f};
+  assert(partyboard::quest::sphere_inside_eye_sides(eyes, middle, 0.1f));
+  assert(!partyboard::quest::sphere_inside_eye_sides(eyes, nearEdge, 0.1f)); // 0.1 from the side, margin 1.5
+  assert(partyboard::quest::sphere_inside_eye_sides(eyes, nearEdge, 0.05f));
+  assert(!partyboard::quest::sphere_inside_eye_sides(eyes, beyond, 0.1f));
+  assert(!partyboard::quest::sphere_inside_eye_sides(eyes, middle, NAN));
+  eyes[1][3] = 0.95f; // the right eye sees the scene shifted: middle now near its left side
+  assert(!partyboard::quest::sphere_inside_eye_sides(eyes, middle, 0.1f));
+
+  // The ring's images: a smaller drawn size needs no new images at once.
+  quest::ImageSizePolicy images;
+  assert(!images.update(1680, 1760, 1680, 1760, false));
+  assert(images.update(1760, 1840, 1680, 1760, true)); // larger: at once
+  assert(!images.update(1600, 1680, 1680, 1760, true)); // a trial the controller may undo
+  for (unsigned i = 0; i < 2 * quest::ImageSizePolicy::kShrinkSeconds; ++i) {
+    assert(!images.update(1600, 1680, 1680, 1760, false)); // 91% drawn: kept
+  }
+  assert(!images.update(1512, 1584, 1680, 1760, true)); // 81% drawn
+  for (unsigned i = 1; i < quest::ImageSizePolicy::kShrinkSeconds; ++i) {
+    assert(!images.update(1512, 1584, 1680, 1760, false));
+  }
+  assert(images.update(1512, 1584, 1680, 1760, false)); // held: shrink
+  assert(!images.update(1512, 1584, 1512, 1584, false));
+  assert(!images.update(1344, 1408, 1512, 1584, true)); // lowered again
+  for (unsigned i = 1; i < quest::ImageSizePolicy::kShrinkSeconds - 1; ++i) {
+    assert(!images.update(1344, 1408, 1512, 1584, false));
+  }
+  assert(!images.update(1512, 1584, 1512, 1584, true)); // restored before the shrink: nothing made again
+  for (unsigned i = 0; i < 2 * quest::ImageSizePolicy::kShrinkSeconds; ++i) {
+    assert(!images.update(1512, 1584, 1512, 1584, false));
+  }
+
+  // Frame pacing. On its own clock, against a display at 119.88 Hz, the
+  // game's images are not all shown for two display frames; nor paced but
+  // shown once finished, the GPU's time varying more than a period.
+  int64_t worstDelay = 0;
+  assert(off_cadence(simulate_holds(Pacing::OwnClock, 8'341'675, worstDelay)) > 0);
+  assert(off_cadence(simulate_holds(Pacing::Paced, 8'333'333, worstDelay)) > 0);
+  // Paced and shown at their due look, every one is, within the GPU's
+  // longest time and the margin plus a period.
+  for (const int64_t period : {int64_t{8'333'333}, int64_t{8'341'675}}) {
+    const auto paced = simulate_holds(Pacing::PacedDue, period, worstDelay);
+    assert(paced.size() > 1000);
+    assert(off_cadence(paced) == 0);
+    assert(worstDelay <= 19'000'000 + quest::FramePacer::kMarginNs + period);
+  }
+  quest::FramePacer rates;
+  rates.look(1'000'000'000, 8'333'333);
+  assert(rates.next_start(1'001'000'000, 72.0f) == 0);  // not 120 divided by a whole number
+  assert(rates.next_start(1'001'000'000, 120.0f) != 0);
+  assert(rates.next_start(1'200'000'000, 60.0f) == 0);  // no look for 200 ms: the game's clock
+  std::puts("PASS: GPU/CPU decisions, freshness, recovery, profile bounds, gamma, alpha and NPOT mipmaps, image sizes, "
+            "frame pacing");
 }

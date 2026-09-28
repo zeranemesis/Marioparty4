@@ -3,6 +3,8 @@
 #include <GLES2/gl2ext.h>
 #include <unistd.h>
 #include <poll.h>
+#include <linux/sync_file.h>
+#include <sys/ioctl.h>
 #include <sys/system_properties.h>
 
 #include <algorithm>
@@ -84,6 +86,26 @@ void pose_matrix(const XrPosef& pose, float scale, float out[16]) {
 }
 
 void view_matrix(const XrPosef& eye, float out[16]) { pose_matrix(inverse(eye), 1.0f, out); }
+
+int64_t steady_ns() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// When a signaled sync file's fences signaled (CLOCK_MONOTONIC, the steady
+// clock's), the latest of them; 0 when unknown.
+int64_t fence_signal_time_ns(int fd) {
+  if (fd < 0) return 0;
+  sync_fence_info fences[8]{};
+  sync_file_info info{};
+  info.num_fences = 8;
+  info.sync_fence_info = reinterpret_cast<uintptr_t>(fences);
+  if (ioctl(fd, SYNC_IOC_FILE_INFO, &info) != 0 || info.status != 1) return 0;
+  int64_t latest = 0;
+  for (uint32_t i = 0; i < std::min(info.num_fences, 8u); ++i) {
+    latest = std::max(latest, static_cast<int64_t>(fences[i].timestamp_ns));
+  }
+  return latest;
+}
 
 // GX's perspective form (MTXFrustum) for the eye's field of view.
 void projection_matrix(const XrFovf& fov, float out[16]) {
@@ -194,9 +216,10 @@ std::pair<uint32_t, uint32_t> StereoView::eye_size(float renderScale) const {
           std::min(mEyeHeight, round8(static_cast<float>(mEyeHeight) * renderScale))};
 }
 
-// The ring's images at exactly the size the game draws (the eyes side by
-// side, the interface below): the GPU writes whole images out at the end of
-// its pass, so a larger image would cost bandwidth for pixels nobody drew.
+// The ring's images at the size the game draws (the eyes side by side, the
+// interface below): the GPU writes whole images out at the end of its pass,
+// so a larger image costs bandwidth for pixels nobody drew. A smaller drawn
+// size uses a part of them for a while (ImageSizePolicy).
 // XR thread, GL context current, every slot free.
 bool StereoView::allocate_images(uint32_t eyeWidth, uint32_t eyeHeight, uint32_t hudWidth) {
   if (!hudWidth) hudWidth = mHudPixelsWidth;
@@ -343,8 +366,18 @@ void StereoView::update(const XrView (&views)[2], const XrPosef& world, float sc
 bool StereoView::game_frame(StereoFrame& out) {
   std::lock_guard lock{mMutex};
   if (!mEnabled || mScreenRequired || mResizePending) {
+    mLastRequestAt = {}; // not a hitch of the board: the ring drains, or no world
     return false; // resizing: the ring drains, then new images come (layer())
   }
+  // The time between the game's requests: its hitches, for adapt_resolution().
+  const auto requestAt = std::chrono::steady_clock::now();
+  if (mLastRequestAt != std::chrono::steady_clock::time_point{}) {
+    const float ms = std::chrono::duration<float, std::milli>(requestAt - mLastRequestAt).count();
+    if (ms < 250.0f) { // longer: loading or paused
+      mRequestIntervals.push_back(ms);
+    }
+  }
+  mLastRequestAt = requestAt;
   // Never reclaim Drawing by age: a queued GPU frame can still own it.
   // Cameras without a view cancel explicitly; empty eye passes clear and submit.
   const auto free = std::ranges::find_if(mSlots, [](const Slot& slot) { return slot.state == State::Free; });
@@ -355,9 +388,15 @@ bool StereoView::game_frame(StereoFrame& out) {
   }
   ++mLeaseCount;
   ++mAdaptLeases;
-  free->renderWidth = mImageEyeWidth;
-  free->renderHeight = mImageEyeHeight;
+  // The controller's size, within the images (larger: a resize is pending).
+  const auto [drawWidth, drawHeight] = eye_size(mRenderScale);
+  free->renderWidth = std::min(drawWidth, mImageEyeWidth);
+  free->renderHeight = std::min(drawHeight, mImageEyeHeight);
   free->leaseTime = mFrameTime;
+  // The paced start this frame began at (next_frame_start()), for the pacer.
+  free->startNs = mStartGiven ? mGivenStartNs : 0;
+  free->dueNs = mStartGiven ? mGivenDueNs : 0;
+  mStartGiven = false;
   out.generation = mGeneration;
   free->state = State::Drawing;
   free->tag = mNextTag++;
@@ -378,9 +417,20 @@ bool StereoView::game_frame(StereoFrame& out) {
   return true;
 }
 
-void StereoView::set_frame_time(XrTime time) {
+void StereoView::set_frame_time(XrTime time, XrDuration period) {
   std::lock_guard lock{mMutex};
   mFrameTime = time;
+  if (period > 0) mPeriodNs = period;
+}
+
+int64_t StereoView::next_frame_start(int64_t nowNs, float targetHz) {
+  std::lock_guard lock{mMutex};
+  mStartGiven = false;
+  if (!mPacing || !mEnabled || mScreenRequired) return 0;
+  const int64_t start = mPacer.next_start(nowNs, targetHz, &mGivenDueNs);
+  mStartGiven = start != 0;
+  mGivenStartNs = start;
+  return start;
 }
 
 XrDuration StereoView::prediction() const {
@@ -408,8 +458,10 @@ void StereoView::set_quality_cap(float recommendedScale) {
   mQuality.set_cap(recommendedScale);
   mDesiredHudWidth = recommendedScale <= 0.8f ? 1280 : recommendedScale <= 1.0f ? 1600 : 1920;
   mRenderScale = std::min(1.0f, mQuality.scale() / mMaxScale);
-  if (eye_size(mRenderScale) != std::make_pair(mImageEyeWidth, mImageEyeHeight) ||
-      mDesiredHudWidth != mHudPixelsWidth) mResizePending = true;
+  // A lower ceiling: drawn in a part of the images until ImageSizePolicy
+  // shrinks them (adapt_resolution()).
+  const auto [width, height] = eye_size(mRenderScale);
+  if (width > mImageEyeWidth || height > mImageEyeHeight || mDesiredHudWidth != mHudPixelsWidth) mResizePending = true;
 }
 
 // One decision per fresh one-second metric window; do not lower resolution
@@ -420,19 +472,42 @@ void StereoView::adapt_resolution() {
     return;
   }
   mAdaptAt = now;
+  mPacer.update(); // the start's place, from the images finished this second
   const float before = mRenderScale;
   const uint32_t wanted = mAdaptLeases + mAdaptRingFull;
-  const float measuredScale = mQuality.update(mQualitySample, wanted, mAdaptRingFull);
+  // A hitch: an image that came more than 1.5 times the usual interval (the
+  // window's quarter-lowest, whatever the render rate) and 4 ms after it.
+  uint32_t slow = 0;
+  if (mRequestIntervals.size() >= 10) {
+    auto sorted = mRequestIntervals;
+    std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 4, sorted.end());
+    const float usual = sorted[sorted.size() / 4];
+    for (const float ms : mRequestIntervals) {
+      slow += ms > 1.5f * usual && ms > usual + 4.0f;
+    }
+  }
+  mRequestIntervals.clear();
+  mLastSlow = slow;
+  const float measuredScale = mQuality.update(mQualitySample, wanted, mAdaptRingFull, slow);
   mRenderScale = std::min(1.0f, measuredScale / mMaxScale);
   mAdaptLeases = mAdaptRingFull = 0;
-  if (mRenderScale != before && eye_size(mRenderScale) != std::make_pair(mImageEyeWidth, mImageEyeHeight)) {
-    mResizePending = true; // layer() reallocates once the ring is empty
+  // New images only when they must grow, or have been far too large for a
+  // while; layer() reallocates once the ring is empty.
+  const auto [drawWidth, drawHeight] = eye_size(mRenderScale);
+  if (mResizePending || now < mResizeRetryAt) {
+    mImageSize.reset(); // pending, or failed a moment ago: the ring would empty every second
+  } else if (mImageSize.update(drawWidth, drawHeight, mImageEyeWidth, mImageEyeHeight, mRenderScale != before)) {
+    mResizePending = true;
+    ++mResizeCount;
   }
   if (mRenderScale != before) {
     const auto decision = mQuality.last_decision();
-    LOGI("Stereo: resolution %.0f%% of recommended (%ux%u per eye)%s", mRenderScale * mMaxScale * 100.0f,
-         static_cast<unsigned>(mEyeWidth * mRenderScale), static_cast<unsigned>(mEyeHeight * mRenderScale),
-         decision == AdaptiveQuality::Decision::Restored ? ", restored: fewer pixels brought no more images" : "");
+    LOGI("Stereo: resolution %.0f%% of recommended (%ux%u per eye)%s, %u hitches in the last second",
+         mRenderScale * mMaxScale * 100.0f, static_cast<unsigned>(mEyeWidth * mRenderScale),
+         static_cast<unsigned>(mEyeHeight * mRenderScale),
+         decision == AdaptiveQuality::Decision::Restored ? ", restored: fewer pixels brought no more images or hitches"
+                                                          : "",
+         mLastSlow);
   }
 }
 
@@ -442,8 +517,15 @@ bool StereoView::images(void** buffers, uint32_t capacity, uint32_t& count, uint
   if (capacity < mSlots.size() || mSlots[0].buffer == nullptr) {
     return false;
   }
+  // Each buffer gets a reference for the caller, who imports it outside this
+  // lock: the XR thread may replace the images meanwhile (a resize, or the
+  // interface's size set at session start) and release its own references.
+  // A buffer freed under the import aborted the game in Dawn ("Unsupported
+  // VkFormat 0", Quest 3, 2026-09-28). The caller hands them back with
+  // PartyBoardQuest_StereoReleaseImages once imported.
   for (size_t i = 0; i < mSlots.size(); ++i) {
     buffers[i] = mSlots[i].buffer;
+    AHardwareBuffer_acquire(mSlots[i].buffer);
   }
   count = static_cast<uint32_t>(mSlots.size());
   width = std::max(mImageEyeWidth * 2, mHudPixelsWidth);
@@ -513,10 +595,11 @@ std::array<float, 3> StereoView::render_info() const {
           mEnabled ? mWorldRate : 0};
 }
 
-StereoView::Slot* StereoView::newest_completed() {
+StereoView::Slot* StereoView::newest_completed(int64_t lookNs) {
   Slot* newest = nullptr;
   for (auto& slot : mSlots) {
     if (slot.state != State::Ready || slot.tag <= mPresentedTag) continue;
+    if (!mPacer.is_due(slot.dueNs, lookNs)) continue; // finished early: its look comes
     pollfd finished{slot.fence, POLLIN, 0};
     const bool complete = slot.fence < 0 ||
         (poll(&finished, 1, 0) > 0 && (finished.revents & POLLIN));
@@ -556,6 +639,15 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
   int fence = -1;
   {
     std::lock_guard lock{mMutex};
+    // This look's time: the grid the game's frames start on.
+    const auto lookAt = std::chrono::steady_clock::now();
+    const int64_t lookNs = steady_ns();
+    mPacer.look(lookNs, mPeriodNs);
+    if (lookAt - mLastLayerAt > std::chrono::milliseconds(100)) {
+      mHoldCounted = false; // the layer was away: no hold to count
+    }
+    mLastLayerAt = lookAt;
+    ++mFramesSinceNew;
     for (auto& slot : mSlots) {
       if (slot.state == State::Copying && slot.copyFence != nullptr) {
         const GLenum status = glClientWaitSync(slot.copyFence, 0, 0);
@@ -569,7 +661,7 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
     }
     // Do not queue a GPU wait on unfinished game work into the XR copy stream.
     // Resubmit the previous layer until at least one source is complete.
-    newest = newest_completed();
+    newest = newest_completed(lookNs);
     // Older finished images will never be shown now.
     for (auto& slot : mSlots) {
       if (slot.state == State::Ready &&
@@ -587,19 +679,27 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
       newest->fence = -1;
     }
   }
+  // When the GPU finished it, before EGL takes the fence.
+  const int64_t finishedNs = newest != nullptr && newest->startNs != 0 ? fence_signal_time_ns(fence) : 0;
 
   // Dynamic resolution changed: new images at the new size, once every image
   // is back (game_frame() gives no lease meanwhile).
   if (newest == nullptr && resize_ready()) {
     const auto [width, height] = eye_size(mRenderScale);
-    if (allocate_images(width, height, mDesiredHudWidth)) {
-      LOGI("Stereo: images now %ux%u per eye, HUD %ux%u", width, height, mHudPixelsWidth, mHudPixelsHeight);
+    const uint32_t previousWidth = mImageEyeWidth, previousHeight = mImageEyeHeight;
+    const bool resized = allocate_images(width, height, mDesiredHudWidth);
+    if (resized) {
+      LOGI("Stereo: images now %ux%u per eye (were %ux%u), HUD %ux%u, %u resizes since start", width, height,
+           previousWidth, previousHeight, mHudPixelsWidth, mHudPixelsHeight, mResizeCount);
     } else {
+      LOGW("Stereo: resize failed; retaining previous eye images, next try in 10 s");
+    }
+    std::lock_guard lock{mMutex}; // game_frame() reads the scale
+    if (!resized) {
       // Retain the previous valid allocation instead of leaving a dead ring.
       mRenderScale = static_cast<float>(mImageEyeWidth) / mEyeWidth;
-      LOGW("Stereo: resize failed; retaining previous eye images");
+      mResizeRetryAt = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     }
-    std::lock_guard lock{mMutex};
     mResizePending = false;
   }
 
@@ -649,20 +749,22 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
 
       if (!keepBoard) {
         // Only the drawn part of each eye's half (dynamic resolution): at the
-        // left, centered vertically (Aurora's common.cpp draws it there).
-        // The image holds just what was drawn (Aurora puts each eye at the
-        // left of its half, a half being the image's width / 2).
+        // left, centered vertically (Aurora's common.cpp draws it there, a
+        // half being the image's width / 2, the eyes' rows above the
+        // interface's). The images are replaced only when every slot is free,
+        // so this slot has the current images' size.
         const auto y = static_cast<GLint>((mEyeHeight - newest->renderHeight) / 2);
-        const uint32_t srcStride = std::max(newest->renderWidth * 2, mHudPixelsWidth) / 2;
+        const auto srcY = static_cast<GLint>((mImageEyeHeight - newest->renderHeight) / 2);
+        const uint32_t srcStride = std::max(mImageEyeWidth * 2, mHudPixelsWidth) / 2;
         for (uint32_t eye = 0; eye < 2; ++eye) {
-          g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, static_cast<GLint>(eye * srcStride), 0, 0,
+          g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, static_cast<GLint>(eye * srcStride), srcY, 0,
                          mSwapchainImages[index].image, GL_TEXTURE_2D, 0, static_cast<GLint>(eye * mEyeWidth), y, 0,
                          static_cast<GLsizei>(newest->renderWidth), static_cast<GLsizei>(newest->renderHeight), 1);
         }
       }
       if (hudReady) {
         mHudCopiedAt = hudNow;
-        g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, 0, static_cast<GLint>(newest->renderHeight), 0,
+        g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, 0, static_cast<GLint>(mImageEyeHeight), 0,
                       mHudImages[hudIndex].image, GL_TEXTURE_2D, 0, 0, 0, 0,
                       static_cast<GLsizei>(mHudPixelsWidth), static_cast<GLsizei>(mHudPixelsHeight), 1);
 
@@ -694,11 +796,16 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
         mShownIsBoard = newest->board;
         mShownWidth = newest->renderWidth;
         mShownHeight = newest->renderHeight;
+        if (mHoldCounted) ++mHolds[std::min<uint32_t>(mFramesSinceNew, 4) - 1];
+        mHoldCounted = true;
+        mFramesSinceNew = 0;
       }
       // How long images take from the game's lease to the display.
       if (newest->leaseTime > 0 && mFrameTime > newest->leaseTime) {
         const double sample = static_cast<double>(mFrameTime - newest->leaseTime);
         mLatencyNs = mLatencyNs == 0.0 ? sample : mLatencyNs * 0.9 + sample * 0.1;
+        mLatencyMinMs = mLatencyMinMs == 0.0 ? sample / 1e6 : std::min(mLatencyMinMs, sample / 1e6);
+        mLatencyMaxMs = std::max(mLatencyMaxMs, sample / 1e6);
       }
       if (accepted) {
         mShown = true;
@@ -711,6 +818,7 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
       }
     }
     std::lock_guard lock{mMutex};
+    if (finishedNs > newest->startNs) mPacer.finished(finishedNs - newest->startNs);
     mCopyMaxMs = std::max(mCopyMaxMs,
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - copyStart).count());
     if (copyFence != nullptr) {
@@ -736,11 +844,20 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
       }
       LOGI("Stereo perf: source=%.1fHz presented=%.1fHz ringFull=%u copyMax=%.2fms slots=%u/%u/%u world=%d "
            "res=%.0f%% latency=%.1fms screenHidden=%d acquireCpuMax=%.2fms worldNew=%.1fHz hudNew=%.1fHz copyGpuMax=%.3fms gpuSamples=%u eye=%ux%u "
-           "worldAcquireMax=%.3fms worldWaitMax=%.3fms hudAcquireMax=%.3fms hudWaitMax=%.3fms",
+           "worldAcquireMax=%.3fms worldWaitMax=%.3fms hudAcquireMax=%.3fms hudWaitMax=%.3fms "
+           "holds=%u/%u/%u/%u latencyMin=%.1fms latencyMax=%.1fms paced=%d paceWork=%.1fms paceLooks=%lld pacePhase=%.1fms",
           mLeaseCount / elapsed, mPresentedCount / elapsed, mRingFullCount, mCopyMaxMs,
           drawing, ready, copying, mShownHasWorld, mRenderScale * mMaxScale * 100.0f, mLatencyNs / 1e6, mScreenHidden, mAcquireMaxMs, mNewWorldCount / elapsed, mNewHudCount / elapsed, mCopyGpuMaxMs, mCopyGpuSamples,
           mShownWidth, mShownHeight, mDestinationAcquireMaxMs[0], mDestinationWaitMaxMs[0],
-          mDestinationAcquireMaxMs[1], mDestinationWaitMaxMs[1]);
+          mDestinationAcquireMaxMs[1], mDestinationWaitMaxMs[1], mHolds[0], mHolds[1], mHolds[2], mHolds[3],
+          mLatencyMinMs, mLatencyMaxMs, mPacing, mPacer.work_ns() / 1e6, static_cast<long long>(mPacer.looks()),
+          mPacer.phase_ns() / 1e6);
+      mHolds.fill(0);
+      mLatencyMinMs = mLatencyMaxMs = 0;
+      // A/B switch, read every 2 s: `adb shell setprop debug.partyboard.xr_pacing 0`.
+      char pacing[PROP_VALUE_MAX] = {};
+      __system_property_get("debug.partyboard.xr_pacing", pacing);
+      mPacing = std::strcmp(pacing, "0") != 0;
       mWorldRate = static_cast<float>(mNewWorldCount / elapsed);
       mStatsAt = now;
       mLeaseCount = mRingFullCount = mPresentedCount = 0;
@@ -775,18 +892,18 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
   return reinterpret_cast<const XrCompositionLayerBaseHeader*>(&mLayer);
 }
 
-const XrCompositionLayerBaseHeader* StereoView::hud_layer(XrSpace viewSpace, const void* next) {
+const XrCompositionLayerBaseHeader* StereoView::hud_layer(XrSpace space, const XrPosef& pose, XrExtent2Df size,
+                                                          const void* next) {
   if (!world_visible() || !mHudShown) return nullptr;
   mHudLayer = {XR_TYPE_COMPOSITION_LAYER_QUAD};
   mHudLayer.next = next;
   mHudLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
-  mHudLayer.space = viewSpace;
+  mHudLayer.space = space;
   mHudLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
   mHudLayer.subImage.swapchain = mHudSwapchain;
   mHudLayer.subImage.imageRect = {{0, 0}, {static_cast<int32_t>(mHudPixelsWidth), static_cast<int32_t>(mHudPixelsHeight)}};
-  mHudLayer.pose.orientation.w = 1.f;
-  mHudLayer.pose.position = {0.f, -0.12f, -0.7f};
-  mHudLayer.size = {0.72f, 0.54f};
+  mHudLayer.pose = pose;
+  mHudLayer.size = size;
   return reinterpret_cast<const XrCompositionLayerBaseHeader*>(&mHudLayer);
 }
 
@@ -829,6 +946,22 @@ __attribute__((visibility("default"))) bool PartyBoardQuest_StereoImages(void** 
   quest::StereoView* view = quest::g_stereoView;
   return view != nullptr && view->images(buffers, capacity, *count, *width, *height, *generation,
                                         *eyeHeight, *hudWidth, *hudHeight);
+}
+
+// Game thread: the references PartyBoardQuest_StereoImages gave, once imported.
+__attribute__((visibility("default"))) void PartyBoardQuest_StereoReleaseImages(void** buffers, uint32_t count) {
+  for (uint32_t i = 0; i < count; ++i) {
+    if (buffers[i] != nullptr) {
+      AHardwareBuffer_release(static_cast<AHardwareBuffer*>(buffers[i]));
+    }
+  }
+}
+
+// Game thread, its frame done: when its next frame starts (steady-clock
+// nanoseconds), on the display's schedule; 0: the game keeps its own clock.
+__attribute__((visibility("default"))) int64_t PartyBoardQuest_NextFrameStart(int64_t nowNs, float targetHz) {
+  quest::StereoView* view = quest::g_stereoView;
+  return view != nullptr ? view->next_frame_start(nowNs, targetHz) : 0;
 }
 
 __attribute__((visibility("default"))) uint32_t PartyBoardQuest_StereoGeneration(void) {

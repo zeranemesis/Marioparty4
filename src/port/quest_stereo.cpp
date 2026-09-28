@@ -13,18 +13,27 @@
 // eyeView and world for each frame, the shared image to draw into, and takes
 // the image back once the GPU has drawn it. On a phone the library is not
 // loaded and nothing here does anything.
+//
+// The game camera itself is cancelled (the headset is the viewpoint), but the
+// model turns to the camera's side once it rests, and a board brings the
+// player whose turn it is to the table's center (quest_camera_follow.hpp).
 
 extern "C" {
 #include "port/quest_stereo.h"
+#include "port/netplay_runtime.h"
 #include "game/object.h"
+#include "game/gamework_data.h"
 #include "game/board/space.h"
+void BoardPlayerPosGet(s32 player, Vec *pos); // game/board/player.h
 }
+#include "port/quest_camera_follow.hpp"
 #include "port/quest_scene_fit.hpp"
 #include "ui/ui.hpp"
 
 #include <aurora/stereo.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 
@@ -56,12 +65,16 @@ using WorldOnlyFn = bool (*)();
 using ScreenRequiredFn = void (*)(bool);
 using BoardModeFn = void (*)(bool);
 using CancelledFn = void (*)(uint32_t image, uint64_t tag);
+using ReleaseImagesFn = void (*)(void **buffers, uint32_t count);
 using ScreenHiddenFn = bool (*)();
+using TableSetupHoldFn = bool (*)();
+using FollowCameraFn = bool (*)();
 
 struct Quest {
     bool looked = false;
     FrameFn frame = nullptr;
     ImagesFn images = nullptr;
+    ReleaseImagesFn releaseImages = nullptr; // the references images() gives
     SubmittedFn submitted = nullptr;
     GenerationFn generation = nullptr;
     CancelledFn cancelled = nullptr;
@@ -69,6 +82,8 @@ struct Quest {
     BoardModeFn boardMode = nullptr;
     WorldOnlyFn worldOnly = nullptr;
     ScreenHiddenFn screenHidden = nullptr; // optional: an older library has none
+    TableSetupHoldFn tableSetupHold = nullptr; // optional
+    FollowCameraFn followCamera = nullptr;     // optional: following by default
     uint32_t registeredGeneration = 0;
 };
 
@@ -87,6 +102,23 @@ float sEyeInView[2][3]{};
 float sSceneExtent = 0.0f;
 // A backdrop is an object around the eyes much larger than the scene on the table.
 constexpr float kBackdropExtents = 2.5f;
+
+// The model turned to the game camera's side, and its focus (the board's
+// player whose turn it is) at the table's center; restarted with each scene.
+partyboard::quest::CameraFollow sFollow;
+bool sFollowStarted = false;
+std::chrono::steady_clock::time_point sFollowAt {};
+
+bool board_scene(OMOVL scene)
+{
+    return scene >= DLL_w01Dll && scene <= DLL_w06Dll;
+}
+
+// The scenes drawn as a model on the table: the boards and the minigames.
+bool spatial_scene(OMOVL scene)
+{
+    return board_scene(scene) || (scene >= DLL_m401Dll && scene <= DLL_m463Dll);
+}
 
 // The scene's floor, measured from its geometry during its first frames, is
 // what stands on the table: the bottom of the lowest large surface (ground,
@@ -157,6 +189,7 @@ bool find_quest()
         if (lib != nullptr) {
             sQuest.frame = reinterpret_cast<FrameFn>(dlsym(lib, "PartyBoardQuest_StereoFrame"));
             sQuest.images = reinterpret_cast<ImagesFn>(dlsym(lib, "PartyBoardQuest_StereoImages"));
+            sQuest.releaseImages = reinterpret_cast<ReleaseImagesFn>(dlsym(lib, "PartyBoardQuest_StereoReleaseImages"));
             sQuest.submitted = reinterpret_cast<SubmittedFn>(dlsym(lib, "PartyBoardQuest_StereoSubmitted"));
             sQuest.generation = reinterpret_cast<GenerationFn>(dlsym(lib, "PartyBoardQuest_StereoGeneration"));
             sQuest.worldOnly = reinterpret_cast<WorldOnlyFn>(dlsym(lib, "PartyBoardQuest_StereoWorldOnly"));
@@ -164,15 +197,18 @@ bool find_quest()
             sQuest.boardMode = reinterpret_cast<BoardModeFn>(dlsym(lib, "PartyBoardQuest_StereoBoardMode"));
             sQuest.cancelled = reinterpret_cast<CancelledFn>(dlsym(lib, "PartyBoardQuest_StereoCancelled"));
             sQuest.screenHidden = reinterpret_cast<ScreenHiddenFn>(dlsym(lib, "PartyBoardQuest_StereoScreenHidden"));
+            sQuest.tableSetupHold = reinterpret_cast<TableSetupHoldFn>(dlsym(lib, "PartyBoardQuest_TableSetupHold"));
+            sQuest.followCamera = reinterpret_cast<FollowCameraFn>(dlsym(lib, "PartyBoardQuest_StereoFollowCamera"));
             __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Stereo bridge: symbols %s",
-                sQuest.frame && sQuest.images && sQuest.submitted && sQuest.generation && sQuest.cancelled
-                    ? "ready" : "missing");
+                sQuest.frame && sQuest.images && sQuest.releaseImages && sQuest.submitted && sQuest.generation
+                    && sQuest.cancelled ? "ready" : "missing");
         } else {
             // SDL can reach a camera while the headset library is still loading.
             sQuest.looked = false;
         }
     }
-    return sQuest.frame != nullptr && sQuest.images != nullptr && sQuest.submitted != nullptr
+    return sQuest.frame != nullptr && sQuest.images != nullptr && sQuest.releaseImages != nullptr
+        && sQuest.submitted != nullptr
         && sQuest.generation != nullptr && sQuest.cancelled != nullptr && sQuest.screenRequired != nullptr
         && sQuest.worldOnly != nullptr && sQuest.boardMode != nullptr;
 #else
@@ -196,7 +232,12 @@ bool register_images()
     if (!sQuest.images(buffers, 8, &count, &width, &height, &imagesGeneration, &eyeHeight, &hudWidth, &hudHeight) || count == 0) {
         return false;
     }
-    if (!AuroraStereoRegisterImages(buffers, count, width, height, eyeHeight, hudWidth, hudHeight, sQuest.submitted, nullptr)) {
+    // Dawn takes its own references when it imports the buffers; the ones
+    // images() gave for the import go back either way.
+    const bool registered =
+        AuroraStereoRegisterImages(buffers, count, width, height, eyeHeight, hudWidth, hudHeight, sQuest.submitted, nullptr);
+    sQuest.releaseImages(buffers, count);
+    if (!registered) {
         return false;
     }
     sQuest.registeredGeneration = imagesGeneration;
@@ -273,8 +314,7 @@ extern "C" void PartyBoard_StereoBeginCamera(s16 cameraNo)
         return;
     }
     const OMOVL scene = omCurrentOvlGet();
-    const bool spatialScene = (scene >= DLL_w01Dll && scene <= DLL_w06Dll)
-        || (scene >= DLL_m401Dll && scene <= DLL_m463Dll);
+    const bool spatialScene = spatial_scene(scene);
     // Selection rooms and title scenes combine several cameras and projections;
     // preserve their original composition until each has a dedicated MR layout.
     const bool screenRequired = !spatialScene || partyboard::ui::any_document_visible();
@@ -322,9 +362,10 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
         sFloorY = INFINITY;
         sFloorFrames = 0;
         sFloorSettled = false;
+        sFollowStarted = false;
     }
     sViewToWorld = inverse_affine(view);
-    const bool board = scene >= DLL_w01Dll && scene <= DLL_w06Dll;
+    const bool board = board_scene(scene);
     if (board && !sSceneFitted) {
         const int count = BoardSpaceCountGet(0);
         if (count > 0 && count <= 256) {
@@ -372,12 +413,55 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
 #endif
         }
     }
-    Mat4 sceneWorld{};
-    sceneWorld.m[0][0] = sceneWorld.m[1][1] = sceneWorld.m[2][2] = sSceneScale;
-    sceneWorld.m[3][3] = 1.0f;
-    for (int axis = 0; axis < 3; ++axis) {
-        sceneWorld.m[axis][3] = -sSceneCenter[axis] * sSceneScale;
+    // The camera's side toward the player, and the focus at the table's center:
+    // sceneWorld = scale * turn(-yaw) * move(-focus). Unfollowed: the scene's
+    // center, unturned.
+    float yaw = 0.0f;
+    float focusX = sSceneCenter[0], focusZ = sSceneCenter[2];
+    const bool follow = sSceneFitted && (sQuest.followCamera == nullptr || sQuest.followCamera());
+    if (follow) {
+        float cameraYaw = NAN;
+        if (!partyboard::quest::camera_yaw(view, cameraYaw)) {
+            cameraYaw = NAN;
+        }
+        // On a board, the player whose turn it is (none during the intro,
+        // events and a minigame's set-up: the focus stays). The follower
+        // works in the fitted scene's units.
+        float targetX = NAN, targetZ = NAN;
+        const int player = GWSystem.player_curr;
+        if (board && player >= 0 && player < 4) {
+            Vec position {NAN, NAN, NAN};
+            BoardPlayerPosGet(player, &position);
+            if (std::isfinite(position.x) && std::isfinite(position.z)) {
+                targetX = position.x * sSceneScale;
+                targetZ = position.z * sSceneScale;
+            }
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (!sFollowStarted) {
+            sFollow.reset(cameraYaw, sSceneCenter[0] * sSceneScale, sSceneCenter[2] * sSceneScale);
+            sFollowStarted = true;
+        } else {
+            sFollow.update(cameraYaw, targetX, targetZ, std::chrono::duration<float>(now - sFollowAt).count());
+        }
+        sFollowAt = now;
+        yaw = sFollow.yaw();
+        focusX = sFollow.focus_x() / sSceneScale;
+        focusZ = sFollow.focus_z() / sSceneScale;
+    } else {
+        sFollowStarted = false; // following again starts from the camera of that moment
     }
+    const float turnCos = std::cos(yaw), turnSin = std::sin(yaw);
+    Mat4 sceneWorld{};
+    sceneWorld.m[0][0] = turnCos * sSceneScale;
+    sceneWorld.m[0][2] = -turnSin * sSceneScale;
+    sceneWorld.m[1][1] = sSceneScale;
+    sceneWorld.m[2][0] = turnSin * sSceneScale;
+    sceneWorld.m[2][2] = turnCos * sSceneScale;
+    sceneWorld.m[3][3] = 1.0f;
+    sceneWorld.m[0][3] = -(turnCos * focusX - turnSin * focusZ) * sSceneScale;
+    sceneWorld.m[1][3] = -sSceneCenter[1] * sSceneScale;
+    sceneWorld.m[2][3] = -(turnSin * focusX + turnCos * focusZ) * sSceneScale;
     // The measured floor on the table (the table's height is the anchor's).
     if (sFloorSettled && std::isfinite(sFloorY)) {
         sceneWorld.m[1][3] = -sFloorY * sSceneScale;
@@ -452,7 +536,27 @@ extern "C" BOOL PartyBoard_StereoActive(void)
 extern "C" BOOL PartyBoard_StereoBoardPresentation(void)
 {
     const OMOVL scene = omCurrentOvlGet();
-    return scene >= DLL_w01Dll && scene <= DLL_w06Dll && find_quest() && sQuest.worldOnly() ? TRUE : FALSE;
+    return board_scene(scene) && find_quest() && sQuest.worldOnly() ? TRUE : FALSE;
+}
+
+// Before a board or a minigame starts: wait while the headset asks the player
+// to lay the controller on the table (the first time, or when the saved table
+// is out of reach). An online game never waits: its peers would not.
+extern "C" BOOL PartyBoard_QuestHoldOverlay(OMOVL next)
+{
+    if (!spatial_scene(next) || PartyBoard_NetplayEnabled() || !find_quest() || sQuest.tableSetupHold == nullptr) {
+        return FALSE;
+    }
+    const bool hold = sQuest.tableSetupHold();
+#if defined(__ANDROID__)
+    static bool loggedHold = false;
+    if (hold != loggedHold) {
+        __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Scene %d %s the table calibration",
+            static_cast<int>(next), hold ? "waits for" : "starts after");
+        loggedHold = hold;
+    }
+#endif
+    return hold ? TRUE : FALSE;
 }
 
 // The sky, a skybox or a far scenery ring: seen from the headset it would
@@ -520,6 +624,41 @@ extern "C" void PartyBoard_StereoObserveBounds(Mtx modelView, const HuVecF *min,
         return; // the sky is not the floor
     }
     sFloorY = (std::min)(sFloorY, low[1]);
+}
+
+// The object's bounds in the game camera's view space (as hsfdraw.c draws
+// it), as a sphere: its draws go without the eyes' cut when that sphere lies
+// wholly inside both eyes' sides. Everything else (particles, sprites, and
+// any draw outside ObjDraw) keeps the cut.
+extern "C" void PartyBoard_StereoObjectBegin(Mtx modelView, const HuVecF *min, const HuVecF *max)
+{
+    if (!sActive || !sCameraViewSet || min == nullptr || max == nullptr) {
+        return;
+    }
+    float low[3] {INFINITY, INFINITY, INFINITY};
+    float high[3] {-INFINITY, -INFINITY, -INFINITY};
+    for (int corner = 0; corner < 8; ++corner) {
+        const float local[3] {(corner & 1) ? max->x : min->x, (corner & 2) ? max->y : min->y,
+            (corner & 4) ? max->z : min->z};
+        for (int r = 0; r < 3; ++r) {
+            const float view = modelView[r][0] * local[0] + modelView[r][1] * local[1] + modelView[r][2] * local[2]
+                + modelView[r][3];
+            low[r] = (std::min)(low[r], view);
+            high[r] = (std::max)(high[r], view);
+        }
+    }
+    float center[3], radius2 = 0.0f;
+    for (int r = 0; r < 3; ++r) {
+        center[r] = (low[r] + high[r]) * 0.5f;
+        const float half = (high[r] - low[r]) * 0.5f;
+        radius2 += half * half;
+    }
+    AuroraStereoSetUncut(partyboard::quest::sphere_inside_eye_sides(sEyeClip, center, std::sqrt(radius2)));
+}
+
+extern "C" void PartyBoard_StereoObjectEnd(void)
+{
+    AuroraStereoSetUncut(false);
 }
 
 extern "C" BOOL PartyBoard_StereoSphereVisible(float x, float y, float z, float radius)

@@ -79,7 +79,7 @@
 +} // namespace aurora::window
 --- a/lib/webgpu/gpu.cpp
 +++ b/lib/webgpu/gpu.cpp
-@@ -36,6 +36,7 @@ static Module Log("aurora::gpu");
+@@ -36,6 +36,7 @@
  wgpu::Device g_device;
  wgpu::Queue g_queue;
  wgpu::Surface g_surface;
@@ -87,7 +87,42 @@
  wgpu::BackendType g_backendType;
  GraphicsConfig g_graphicsConfig;
  TextureWithSampler g_frameBuffer;
-@@ -688,6 +689,8 @@ static bool create_surface() {
+@@ -667,6 +668,28 @@
+   }
+ }
+ 
++// Dawn destroys an unconfigured swapchain only once the GPU has finished the
++// submission that follows it. In the background nothing is submitted, so on
++// resume the old swapchain was still alive and connected to the Android
++// window. The new surface for that window then failed with
++// VK_ERROR_NATIVE_WINDOW_IN_USE_KHR, a lost device: at every resume after a
++// pause on the Quest 3, whose flat screen is one window kept for the whole
++// session (2026-09-27 and 28). Submit an empty command buffer, wait for it and
++// tick the device, so the released swapchain is gone before a new surface.
++static void flush_released_surfaces() {
++  if (!g_device || !g_queue) {
++    return;
++  }
++  const wgpu::CommandEncoderDescriptor encoderDescriptor{.label = "Surface release flush"};
++  auto encoder = g_device.CreateCommandEncoder(&encoderDescriptor);
++  const auto commands = encoder.Finish();
++  g_queue.Submit(1, &commands);
++  const auto future = g_queue.OnSubmittedWorkDone(wgpu::CallbackMode::WaitAnyOnly,
++                                                  [](wgpu::QueueWorkDoneStatus, wgpu::StringView) {});
++  g_instance.WaitAny(future, UINT64_MAX);
++  g_device.Tick();
++}
++
+ static bool create_surface() {
+   SDL_Window* window = window::get_sdl_window();
+   if (window == nullptr) {
+@@ -683,11 +706,14 @@
+       .label = "Surface",
+   };
+   release_surface();
++  flush_released_surfaces();
+   g_surface = g_instance.CreateSurface(&surfaceDescriptor);
+   if (!g_surface) {
      Log.error("Failed to create surface");
      return false;
    }
@@ -96,7 +131,7 @@
    return true;
  }
  
-@@ -1006,6 +1009,10 @@ void release_surface() noexcept {
+@@ -1006,6 +1032,10 @@
    g_surface = {};
  }
  
@@ -107,7 +142,7 @@
  bool refresh_surface(bool recreate) {
    gfx::gpu_synchronize();
    if (!g_instance || !g_device) {
-@@ -1015,7 +1022,7 @@ bool refresh_surface(bool recreate) {
+@@ -1015,7 +1045,7 @@
      release_surface();
      return false;
    }
@@ -116,7 +151,7 @@
      return false;
    }
    uint32_t width = g_graphicsConfig.surfaceConfiguration.width;
-@@ -1037,9 +1044,13 @@ bool refresh_surface(bool recreate) {
+@@ -1037,9 +1067,13 @@
  
  void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, uint32_t native_height, bool force) {
    gfx::gpu_synchronize();

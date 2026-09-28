@@ -10,6 +10,31 @@ namespace partyboard::quest {
 // Place the lowest playable surface on the table and center the board in X/Z.
 // GX clip volume is -w..w in X/Y and -w..0 in Z. Keep a mesh if either
 // eye intersects its bounding sphere; invalid data must not hide geometry.
+// Instanced stereo (gfx/stereo.cpp) cuts each eye at its edge so nothing
+// spills into the other eye, and the cut (a fragment discard) costs the
+// headset's GPU its early depth rejection. A sphere wholly between both eyes'
+// left and right planes cannot spill: its draws need no cut. `margin` grows
+// the sphere for animation the bounds do not follow. Those planes meet at the
+// eye, so a sphere between them is in front of it. Invalid data: keep the cut.
+inline bool sphere_inside_eye_sides(const float clip[2][16], const float center[3], float radius, float margin = 1.5f) {
+    if (!std::isfinite(radius) || radius < 0 || !std::isfinite(margin)) return false;
+    for (int axis = 0; axis < 3; ++axis) if (!std::isfinite(center[axis])) return false;
+    for (int eye = 0; eye < 2; ++eye) {
+        for (int plane = 0; plane < 2; ++plane) {
+            const float sign = plane == 0 ? 1.0f : -1.0f;
+            float p[4];
+            for (int c = 0; c < 4; ++c) {
+                p[c] = clip[eye][12+c] + sign * clip[eye][c];
+                if (!std::isfinite(p[c])) return false;
+            }
+            const float distance = p[0]*center[0] + p[1]*center[1] + p[2]*center[2] + p[3];
+            const float extent = radius * margin * std::sqrt(p[0]*p[0] + p[1]*p[1] + p[2]*p[2]);
+            if (!(distance > extent)) return false;
+        }
+    }
+    return true;
+}
+
 inline bool sphere_visible(const float clip[2][16], const float center[3], float radius) {
     if (!std::isfinite(radius) || radius < 0) return true;
     for (int axis = 0; axis < 3; ++axis) if (!std::isfinite(center[axis])) return true;

@@ -1,6 +1,7 @@
 package com.mariopartyrd.partyboard.quest;
 
 import android.app.Activity;
+import android.content.pm.PackageManager;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -24,13 +25,29 @@ import java.util.Locale;
  * phones ignore it and never get here. The game renders exactly as on a
  * phone, into the OpenXR surface given to SDL in place of the SurfaceView's.
  *
- * The first visible game world asks for a one-time table calibration. Clicking
- * the right thumbstick opens manual placement mode: the game can be moved, sized, and its
- * resolution (up to 4K) and the room's visibility chosen. The headset keeps
- * the place (a spatial anchor) and the choices (quest_table.txt).
+ * Before the first board or minigame, the game waits for a one-time table
+ * calibration: the right controller laid at the table's center. The table of
+ * the headset's room scan under it (the spatial data permission, asked then)
+ * gives the height and the model's size. Clicking the right thumbstick opens
+ * manual placement mode: the game can be moved, sized, and its resolution (up
+ * to 4K), the room's visibility and the model following the game camera
+ * chosen. The headset keeps the place (a spatial anchor) and the choices
+ * (quest_table.txt).
  */
 public final class QuestVr {
     private static final String TAG = "PartyBoardQuest";
+
+    // The room scan (Space Setup's tables), for the table calibration.
+    private static final String SCENE_PERMISSION = "com.oculus.permission.USE_SCENE";
+    private static final int SCENE_PERMISSION_REQUEST = 0x5C3E;
+
+    // quest_xr.cpp's TableScene::State.
+    private static final int SCENE_UNAVAILABLE = 0;
+    private static final int SCENE_NO_PERMISSION = 1;
+    private static final int SCENE_SEARCHING = 2;
+    private static final int SCENE_NO_TABLE = 3;
+    private static final int SCENE_FOUND = 4;
+    private static final int SCENE_CAPTURING = 5;
 
     // Menu scale: a 1080p desktop at 125%, readable in the headset; a higher
     // resolution scales the menus with it so they keep their size.
@@ -75,6 +92,7 @@ public final class QuestVr {
         QuestControllers.install(QuestVr::rumble);
         QuestUpdater.install(activity);
         String state = new File(activity.getFilesDir(), "quest_table.txt").getAbsolutePath();
+        nativeScenePermission(activity.checkSelfPermission(SCENE_PERMISSION) == PackageManager.PERMISSION_GRANTED);
         sStarted = nativeStart(activity, state);
         if (!sStarted) {
             Log.e(TAG, "Unable to start the headset session");
@@ -125,6 +143,22 @@ public final class QuestVr {
         }
     }
 
+    /**
+     * PartyBoardActivity's permission results: true when it was the spatial
+     * data permission asked for the table calibration.
+     */
+    public static boolean onRequestPermissionsResult(int requestCode, int[] grantResults) {
+        if (requestCode != SCENE_PERMISSION_REQUEST) {
+            return false;
+        }
+        boolean granted = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+        Log.i(TAG, "Spatial data permission " + (granted ? "granted" : "refused"));
+        if (sStarted) {
+            nativeScenePermission(granted);
+        }
+        return true;
+    }
+
     // --- From the OpenXR thread (quest_xr.cpp) ---
 
     private static void onSurface(Surface surface, int width, int height, float refreshRate) {
@@ -166,12 +200,30 @@ public final class QuestVr {
     }
 
     private static void onPlacement(boolean placing, int resolution, boolean passthrough, boolean model,
-                                    boolean calibrating, boolean calibrationConfirmed) {
+                                    boolean calibrating, boolean calibrationConfirmed, boolean followCamera,
+                                    int sceneState, float tableLength, float tableWidth) {
         final Activity activity = sActivity;
         if (placing && activity != null) {
             activity.runOnUiThread(() -> drawHelp(resolution, passthrough, model, calibrating,
-                                                  calibrationConfirmed));
+                                                  calibrationConfirmed, followCamera, sceneState,
+                                                  tableLength, tableWidth));
         }
+    }
+
+    // The table calibration opened: Horizon OS shows its own permission panel
+    // for the room scan, once.
+    private static void requestScenePermission() {
+        final Activity activity = sActivity;
+        if (activity == null) {
+            return;
+        }
+        activity.runOnUiThread(() -> {
+            if (activity.checkSelfPermission(SCENE_PERMISSION) == PackageManager.PERMISSION_GRANTED) {
+                nativeScenePermission(true);
+            } else {
+                activity.requestPermissions(new String[] {SCENE_PERMISSION}, SCENE_PERMISSION_REQUEST);
+            }
+        });
     }
 
     private static void onSessionState(boolean running, boolean focused) {
@@ -207,37 +259,78 @@ public final class QuestVr {
         }
     }
 
+    // What the room scan found, for the calibration panel.
+    private static String sceneLine(boolean french, int sceneState, float length, float width) {
+        switch (sceneState) {
+            case SCENE_FOUND:
+                return String.format(Locale.getDefault(),
+                    french ? "Table scannée : %.2f × %.2f m, le plateau s'y adaptera."
+                           : "Scanned table: %.2f × %.2f m, the board will fit it.", length, width);
+            case SCENE_NO_TABLE:
+                return french ? "Aucune table dans le scan de la pièce."
+                              : "No table in the room scan.";
+            case SCENE_NO_PERMISSION:
+                return french ? "Autorisez « Données spatiales » pour utiliser le scan de la pièce."
+                              : "Allow \"Spatial data\" to use the room scan.";
+            case SCENE_SEARCHING:
+                return french ? "Recherche de la table scannée…" : "Looking for the scanned table…";
+            case SCENE_CAPTURING:
+                return french ? "Scan de la pièce en cours…" : "Scanning the room…";
+            case SCENE_UNAVAILABLE:
+            default:
+                return french ? "Scan de la pièce indisponible : taille du plateau au stick gauche."
+                              : "Room scan unavailable: board size on the left stick.";
+        }
+    }
+
     // The panel under the line of sight while placing: the controls, and the
-    // current resolution, room visibility and model.
+    // current resolution, room visibility and model. While calibrating: the
+    // controller to lay on the table, and what the room scan found.
     private static void drawHelp(int resolution, boolean passthrough, boolean model, boolean calibrating,
-                                 boolean calibrationConfirmed) {
+                                 boolean calibrationConfirmed, boolean followCamera, int sceneState,
+                                 float tableLength, float tableWidth) {
         Surface surface = sHelpSurface;
         if (surface == null || !surface.isValid()) {
             return;
         }
         boolean french = "fr".equals(Locale.getDefault().getLanguage());
-        String title = calibrating ? (french ? "Calibrage de la table" : "Calibrating the table")
+        String title = calibrating ? (french ? "Avant de jouer : votre table" : "Before playing: your table")
                                   : (french ? "Placer le jeu" : "Place the game");
+        boolean canScan = sceneState != SCENE_UNAVAILABLE && sceneState != SCENE_NO_PERMISSION
+            && sceneState != SCENE_CAPTURING;
+        String keys = canScan ? (french ? "A : scanner la pièce   ·   B : plus tard"
+                                        : "A: scan the room   ·   B: later")
+                              : (french ? "B : plus tard" : "B: later");
+        String scene = sceneLine(french, sceneState, tableLength, tableWidth);
         String[] lines = calibrating ? (french ? (calibrationConfirmed ? new String[] {
             "Mesure en cours : gardez la manette droite immobile.",
             "La pose se verrouille après une mesure stable.",
+            scene,
+            keys,
         } : new String[] {
-            "Posez la manette droite à plat, au centre de la table.",
+            "Posez la manette droite à plat, au milieu de la table.",
             "Orientez l'avant vers vous, puis appuyez sur X.",
             "Gardez-la immobile pendant la mesure.",
+            scene,
+            keys,
         }) : (calibrationConfirmed ? new String[] {
             "Measuring: keep the right controller still.",
             "The placement locks after a stable reading.",
+            scene,
+            keys,
         } : new String[] {
-            "Lay the right controller flat at the center of the table.",
+            "Lay the right controller flat at the middle of the table.",
             "Point its front toward you, then press X.",
             "Keep it still during the measurement.",
+            scene,
+            keys,
         })) : (french ? new String[] {
             "Gâchettes droite/gauche : poser le jeu / hauteur de table",
             "Grip droit (maintenu) : déplacer",
             "Stick droit : ↕ taille de l'écran   ↔ tourner",
             "Stick gauche : ↕ hauteur   ↔ taille du plateau",
             "Clic stick gauche : plateau 3D — " + (model ? "oui" : "non"),
+            "Grip gauche : suit la caméra du jeu — " + (followCamera ? "oui" : "non"),
             "X : pièce visible — " + (passthrough ? "oui" : "non"),
             "Y : qualité — " + resolutionName(resolution),
             "A : recalibrer avec la manette droite",
@@ -248,6 +341,7 @@ public final class QuestVr {
             "Right stick: ↕ screen size   ↔ turn",
             "Left stick: ↕ height   ↔ board size",
             "Left stick click: 3D board — " + (model ? "yes" : "no"),
+            "Left grip: follows the game camera — " + (followCamera ? "yes" : "no"),
             "X: room visible — " + (passthrough ? "yes" : "no"),
             "Y: quality — " + resolutionName(resolution),
             "A: recalibrate with the right controller",
@@ -326,6 +420,7 @@ public final class QuestVr {
     private static native boolean nativeStart(Activity activity, String statePath);
     private static native void nativeStop();
     private static native void nativeSurfaceSwitched();
+    private static native void nativeScenePermission(boolean granted);
     private static native void nativeRumble(float amplitude, int durationMs);
     private static native float[] nativeRefreshRates();
     private static native void nativeRequestRefreshRate(float rate);

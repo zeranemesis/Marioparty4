@@ -46,6 +46,9 @@ static void objJoint(HU3DMODEL *modelP, HSFOBJECT *objPtr);
 static void objMap(HU3DMODEL *modelP, HSFOBJECT *objPtr);
 static void objReplica(HU3DMODEL *modelP, HSFOBJECT *objPtr);
 static void ObjDraw(HU3DDRAWOBJ *arg0);
+#ifdef TARGET_PC
+static void ObjDrawBody(HU3DDRAWOBJ *arg0);
+#endif
 static void MDObjCall(HSFDATA *hsf, HSFOBJECT *objPtr);
 static void MDObjMesh(HSFDATA *hsf, HSFOBJECT *objPtr);
 static void MDFaceDraw(HSFOBJECT *objPtr, HSFFACE *face);
@@ -2571,7 +2574,25 @@ void Hu3DDrawPost(void) {
     (void)invF; // required to match
 }
 
+#ifdef TARGET_PC
+// Meta Quest: the object's draws skip the eyes' cut when its bounds cannot
+// reach the other eye (PartyBoard_StereoObjectBegin), for the GPU's early
+// depth rejection. ObjDrawBody is the original ObjDraw.
 static void ObjDraw(HU3DDRAWOBJ *arg0)
+{
+    if (PartyBoard_StereoActive() && arg0->object != NULL) {
+        PartyBoard_StereoObjectBegin(arg0->matrix, &arg0->object->mesh.mesh.min, &arg0->object->mesh.mesh.max);
+        ObjDrawBody(arg0);
+        PartyBoard_StereoObjectEnd();
+        return;
+    }
+    ObjDrawBody(arg0);
+}
+
+static void ObjDrawBody(HU3DDRAWOBJ *arg0)
+#else
+static void ObjDraw(HU3DDRAWOBJ *arg0)
+#endif
 {
     Vec axis;
     Vec sp38;

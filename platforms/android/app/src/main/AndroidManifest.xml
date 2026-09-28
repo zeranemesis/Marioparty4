@@ -15,6 +15,10 @@
          table between sessions (a spatial anchor). -->
     <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="false" />
     <uses-permission android:name="com.oculus.permission.USE_ANCHOR_API" />
+    <!-- The room scan's tables (Space Setup): the table calibration takes the
+         height and size of the one the controller lies on. Asked when the
+         calibration opens; refused, the controller alone measures the table. -->
+    <uses-permission android:name="com.oculus.permission.USE_SCENE" />
     <!-- Without hand tracking declared, Horizon OS refuses to start the game
          while the controllers sleep; the game still plays with the controllers. -->
     <uses-feature android:name="oculus.software.handtracking" android:required="false" />
