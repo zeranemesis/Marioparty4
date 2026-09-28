@@ -2872,3 +2872,105 @@ contrôle passe.
 
 `test_audio_wait` passe au lieu d'être « non applicable » : sa source de
 régression manquait dans le patch GitHub, et la fusion l'y a mise.
+
+## Deuxième fusion avec GitHub : aurora devient une pile de huit patches (28 septembre 2026)
+
+GitHub avait avancé de 104 commits — Android, Meta Quest, conversion PAL,
+RetroAchievements, sessions en ligne à quatre — et aurora n'y est plus portée
+par un patch mais par **huit, que la CI applique dans l'ordre**. Le ray tracing
+vit dans le premier, `aurora-partyboard.patch`. Fusion `b8413d8e`.
+
+### Fusionner du code, pas du texte de patch
+
+Dans un worktree jetable d'aurora, la pile GitHub a été rejouée en un commit par
+patch (T1 à T8), et le premier étage local — le ray tracing — fusionné en trois
+voies avec celui de GitHub contre leur version commune. Les sept étages suivants
+ont ensuite été rejoués par-dessus :
+
+| patch GitHub | par-dessus le ray tracing |
+|---|---|
+| render-fixes, android-surface-deadlock, mobile-one-local-player, render-worker-idle | s'appliquent tels quels, gardés octet pour octet |
+| quest-stereo | conflit dans `webgpu/gpu.cpp` et `gpu.hpp` : l'interop D3D12 (Windows) et la stéréo (Android) ajoutaient chacune leurs fonctionnalités au même endroit ; les deux blocs sont gardés côte à côte |
+| android-surface-generation | contexte déplacé, repris en trois voies sans conflit |
+| quest-quality | conflit dans `gfx/texture.cpp` et `.hpp` : statistiques de texture du ray tracing et indicateurs de mips, les deux gardés |
+
+Vérifié dans les deux sens, par ensembles de lignes : toute ligne que produit la
+pile GitHub est dans l'arbre fusionné, sauf les six que le ray tracing modifiait
+déjà, et toute ligne ajoutée par le ray tracing y est aussi. MusyX a fusionné de
+la même façon, sans conflit.
+
+Le lecteur de films prend la version GitHub : son horloge de simulation reprend
+la main quand l'audio prend une seconde de retard, ce qui couvre — de façon
+déterministe — le cas pour lequel l'horloge de secours locale existait. Elle
+disparaît.
+
+### L'outil de contrôle des patches, face à la pile réelle
+
+L'outil GitHub posait une règle : un fichier ne doit appartenir qu'à un patch.
+La pile GitHub elle-même partageait déjà **douze fichiers** — `gpu.cpp` entre
+trois patches —, et l'outil ne le voyait pas : six des huit patches sont des
+diffs simples, sans l'en-tête `diff --git` sur lequel il découpait. Plutôt que
+de contourner la règle, l'outil est aligné sur ce que fait la CI : il lit les
+deux formats, accepte les fichiers partagés comme une pile appliquée dans
+l'ordre — sa vérification applique tout et compare fichier par fichier, ce qui
+est exact dans ce cas —, et son mode `-Update`, qui ne peut pas redistribuer un
+fichier partagé entre plusieurs patches, refuse au lieu de deviner. La
+correction UTF-8 du 17 septembre y est reportée.
+
+Conséquence pour ce journal : un lot de ray tracing ne se committe plus avec
+`-Update`. La branche `partyboard-local` d'aurora garde la pile en huit commits ;
+un lot est replié dans le premier, les sept autres rejoués par-dessus, chaque
+patch régénéré depuis son étage, et le commit n'a lieu que si l'outil de
+contrôle passe.
+
+### Trois défauts du code GitHub, trouvés parce qu'il fallait que ça tourne ici
+
+1. **Le build Windows ne compilait plus.** Le code Quest appelle `std::max` là
+   où `windows.h` définit `max` (C2589). La CI GitHub est rouge sur le job
+   Windows à chaque push depuis le 25 septembre — dix builds de suite, vérifié
+   sur l'API publique. Neuf appels écrits `(std::max)(…)` : rien ne change à ce
+   qui est calculé.
+2. **Deux tests Quest échouaient faute de SDK Android**, et auraient fait
+   échouer la porte de publication pour cette seule raison. Ils utilisent
+   maintenant la convention du lanceur, code 2 : « cet environnement ne peut pas
+   me lancer ».
+3. **Le menu Party Board s'ouvrait sur l'écran titre** après chaque compilation
+   des shaders au démarrage, et comme un document visible bloque la manette, le
+   jeu restait sur PRESS START. L'écran de compilation se fermait avec `pop()`,
+   qui montre aussi le haut de la pile de documents — or cet écran est passif,
+   hors de la pile, et le haut de la pile était la barre de menu poussée cachée
+   juste avant. Il se ferme maintenant avec `hide(true)`. Un joueur le voyait à
+   chaque mise à jour ; les scripts de test, eux, restaient bloqués soixante pas
+   sur l'écran titre.
+
+### Vérifié sur le code fusionné
+
+| | |
+|---|---|
+| build complet Windows | réussi, après le correctif 1 |
+| auto-tests du moteur (porte CI) | 9 sur 9 |
+| suite de scripts, comme en CI | 16 réussis, 0 échec après le correctif 2 ; les autres ignorés ou non applicables, avec leur raison |
+| contrôle des patches | réussi : 8 patches aurora appliqués dans l'ordre, MusyX |
+| test nul A/B du ray tracing sur le plateau | 0 pixel sur 1 228 800 |
+
+### Les copies d'image entière, lues dans le code avant de lancer le jeu
+
+La silhouette de m423Dll venait d'une frame recomposée à partir de copies de
+l'image. Au lieu de repasser les 48 mini-jeux, une recherche dans `src/REL` de
+`GXSetTexCopySrc(0, 0, HU_FB_WIDTH, HU_FB_HEIGHT)` donne en une seconde les onze
+overlays qui copient l'image entière : m405, m410, m416, m417, m421, m423, m427,
+m430, m440, m448, m460. Ce qui suit la copie, dans la même fonction, les sépare :
+
+- **m410Dll a exactement le motif de m423Dll** : copie, chargement de la copie
+  comme texture 640 × 480, redessin avec la matrice caméra dans le même hook.
+  C'est le candidat suivant au même défaut ;
+- **m448Dll** charge aussi sa copie comme texture dans la même fonction, à des
+  échelles variables ;
+- les autres copient puis retournent : la copie sert ailleurs, et la scène 3D
+  continue après elle.
+
+m460Dll n'est pas atteignable depuis la liste des mini-jeux. La confirmation de
+m410Dll et m448Dll demande deux runs tracés, et ils attendent : le 28 septembre
+au matin, un `llama-server` étranger à ce travail occupait tout le processeur, le
+jeu tournait à 12 images par seconde, et la navigation par menus, cadencée en
+temps réel, n'arrivait plus au bout.
