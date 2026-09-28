@@ -7,14 +7,16 @@ param(
     # A/B switches, restored after the capture. RenderHz: new images per
     # second at most (0: the display rate); the game reads it within 2 s.
     [int]$RenderHz = -1,
-    # Both eyes in one instanced draw; read at startup, so with -RestartGame.
-    [switch]$InstancedStereo,
+    # Eyes: 0 one draw per eye, 1 one draw cut by clip distances, 2 one draw
+    # cut by a fragment test (the default when unset). Read at startup, so
+    # with -RestartGame.
+    [ValidateSet('', '0', '1', '2')] [string]$InstancedStereo = '',
     [string]$Sdk = "$env:LOCALAPPDATA/Android/Sdk"
 )
 $ErrorActionPreference = 'Stop'
 if ($DurationSeconds -lt 10 -or $DurationSeconds -gt 1800) { throw 'Duration must be between 10 and 1800 seconds.' }
 if ($GpuTiming -and -not $RestartGame) { throw 'GPU timing is enabled at startup; specify -RestartGame with -GpuTiming.' }
-if ($InstancedStereo -and -not $RestartGame) { throw 'Instanced stereo is chosen at startup; specify -RestartGame with -InstancedStereo.' }
+if ($InstancedStereo -ne '' -and -not $RestartGame) { throw 'Instanced stereo is chosen at startup; specify -RestartGame with -InstancedStereo.' }
 if ($RenderHz -gt 240) { throw 'RenderHz must be 0 (display rate) to 240.' }
 $taskAdb = Join-Path $Sdk 'platform-tools/adb.exe'
 if (-not $Serial) {
@@ -43,8 +45,8 @@ try {
         & $taskAdb -s $Serial shell setprop debug.partyboard.render_hz $RenderHz
         if ($LASTEXITCODE -ne 0) { throw 'Cannot set the render rate cap on this headset.' }
     }
-    if ($InstancedStereo) {
-        & $taskAdb -s $Serial shell setprop debug.partyboard.instanced_stereo 1
+    if ($InstancedStereo -ne '') {
+        & $taskAdb -s $Serial shell setprop debug.partyboard.instanced_stereo $InstancedStereo
         if ($LASTEXITCODE -ne 0) { throw 'Cannot enable instanced stereo on this headset.' }
     }
     # What the comparison protocol asks to record with every capture.
@@ -53,7 +55,7 @@ try {
         headset = (& $taskAdb -s $Serial shell getprop ro.product.model).Trim()
         durationSeconds = $DurationSeconds; gpuTiming = [bool]$GpuTiming
         renderHz = $(if ($RenderHz -ge 0) { $RenderHz } else { $taskPreviousRenderHz })
-        instancedStereo = [bool]$InstancedStereo -or $taskPreviousInstanced -eq '1'
+        instancedStereo = $(if ($InstancedStereo -ne '') { $InstancedStereo } elseif ($taskPreviousInstanced) { $taskPreviousInstanced } else { 'unset (2)' })
     } | ConvertTo-Json | Out-File -Encoding utf8 (Join-Path $OutputDirectory 'settings.json')
     if ($RestartGame) {
         & $taskAdb -s $Serial shell am force-stop com.mariopartyrd.partyboard
@@ -76,7 +78,7 @@ try {
         Write-Output 'Previous GPU timing property restored; the running game keeps its startup setting until restarted.'
     }
     if ($RenderHz -ge 0) { Restore-Property debug.partyboard.render_hz $taskPreviousRenderHz }
-    if ($InstancedStereo) {
+    if ($InstancedStereo -ne '') {
         Restore-Property debug.partyboard.instanced_stereo $taskPreviousInstanced
         Write-Output 'Previous instanced stereo property restored; the running game keeps its startup setting until restarted.'
     }

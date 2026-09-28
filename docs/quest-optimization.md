@@ -31,14 +31,15 @@ Dans le menu de placement : frequence XR, resolution effective par oeil, nouvell
 Deux proprietes de diagnostic, absentes par defaut (comportement inchange), servent a trancher entre les postes probables. Le script les pose, note les reglages dans `settings.json` et restaure les valeurs precedentes.
 
 - `debug.partyboard.render_hz` plafonne les nouvelles images du jeu (lu toutes les 2 s). L'affichage XR garde sa frequence et remontre la derniere image avec ses poses. Hypothese a verifier : le thread du jeu, qui simule et enregistre les deux yeux, vise 120 images/s et plafonne sous 60 sur le plateau Toad.
-- `debug.partyboard.instanced_stereo=1` reessaie les deux yeux en un seul draw instancie (lu au demarrage). L'echec du pipeline est desormais capture aussi comme erreur Internal ou OutOfMemory, ce qui doit ramener au rendu par oeil. Si Dawn traite l'erreur Adreno comme une perte d'appareil, le jeu s'arretera quand meme : lire le logcat.
+- `debug.partyboard.instanced_stereo` (lu au demarrage) choisit le dessin des yeux. `0` : un draw par oeil. `1` : un draw pour les deux yeux, coupe par des clip distances. C'est ce pipeline qu'Adreno refuse (VK_ERROR_UNKNOWN), et Dawn en fait une perte d'appareil. `2`, la valeur par defaut : un draw pour les deux yeux, coupe par un test en fragments. La distance signee au bord de l'oeil passe en varying, sans fonctionnalite Vulkan particuliere. Sur PC, les deux variantes donnent la meme image que le rendu par oeil (`tools/test_quest_stereo_render.ps1`, 0 pixel different). Le cout du `discard` (LRZ d'Adreno desactive pour ces draws) face au gain sur le nombre de draws reste a mesurer.
 
 ```powershell
 # Meme parcours, trois fois chacun, apres chauffe :
 ./tools/collect_quest_performance.ps1 -DurationSeconds 120               # reference
 ./tools/collect_quest_performance.ps1 -DurationSeconds 120 -RenderHz 72  # cadence 72
 ./tools/collect_quest_performance.ps1 -DurationSeconds 120 -RenderHz 60  # cadence 60
-./tools/collect_quest_performance.ps1 -DurationSeconds 120 -RestartGame -InstancedStereo
+./tools/collect_quest_performance.ps1 -DurationSeconds 120 -RestartGame -InstancedStereo 0  # un draw par oeil
+./tools/collect_quest_performance.ps1 -DurationSeconds 120 -RestartGame -InstancedStereo 2  # un draw pour les deux
 ```
 
 `summary.json` ajoute `game` et `game_by_scene` (images/s du thread du jeu, temps d'enregistrement, saccades), `draws` (draws du monde par oeil, part instanciee) et `memory` (memoire residente, memoire disponible du systeme, croissance sur la capture ; ligne `Memory:` du journal toutes les 5 s). La memoire residente n'est pas le PSS : elle suit la croissance, `dumpsys meminfo` reste la reference ponctuelle.

@@ -135,7 +135,11 @@ int main(int argc, char** argv) {
   auto layout = device.CreatePipelineLayout(&layoutDesc);
 
   auto perEye = make_pipeline("scene.wgsl", layout);
-  auto instanced = make_pipeline("scene-stereo.wgsl", layout);
+  // Both instanced variants: clip distances, and the fragment test drivers
+  // that fail clip-distance pipelines get instead (StereoDiscard).
+  wgpu::RenderPipeline instancedVariants[2]{make_pipeline("scene-stereo.wgsl", layout),
+                                            make_pipeline("scene-stereo-discard.wgsl", layout)};
+  const char* variantNames[2]{"clip distances", "fragment test "};
 
   auto verts = make_buffer(read_bytes("scene-verts.bin"), wgpu::BufferUsage::Storage);
   auto arrays = make_buffer({}, wgpu::BufferUsage::Storage);
@@ -152,8 +156,10 @@ int main(int argc, char** argv) {
   auto rightGroup = uniform_group("scene-right.bin");
 
   int failures = 0;
+  for (unsigned variant = 0; variant < 2; ++variant)
   for (unsigned stride : strides) {
     const unsigned width = stride * 2;
+    const auto& instanced = instancedVariants[variant];
     auto bothGroup = uniform_group("scene-both-" + std::to_string(stride) + ".bin");
     const auto draw = [&](bool useInstanced) {
       wgpu::TextureDescriptor desc{.usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc,
@@ -207,10 +213,11 @@ int main(int argc, char** argv) {
       }
     }
     const bool ok = differing == 0 && gap == 0 && errors == 0 && drawnLeft > 0 && drawnRight > 0 && leftEdge > 0;
-    std::printf("%s stride %u: %u of %u pixels differ (max delta %u), between eyes %u, drawn %u/%u, left edge %u\n",
-                ok ? "OK  " : "FAIL", stride, differing, width * height, maxDelta, gap, drawnLeft, drawnRight, leftEdge);
+    std::printf("%s %s stride %u: %u of %u pixels differ (max delta %u), between eyes %u, drawn %u/%u, left edge %u\n",
+                ok ? "OK  " : "FAIL", variantNames[variant], stride, differing, width * height, maxDelta, gap, drawnLeft,
+                drawnRight, leftEdge);
     write_ppm("scene-per-eye-" + std::to_string(stride) + ".ppm", reference, width, height);
-    write_ppm("scene-both-" + std::to_string(stride) + ".ppm", candidate, width, height);
+    write_ppm("scene-both-" + std::to_string(variant) + "-" + std::to_string(stride) + ".ppm", candidate, width, height);
     failures += !ok;
   }
   return failures + errors;
