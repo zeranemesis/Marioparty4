@@ -27,6 +27,7 @@ class PerformanceLogTests(unittest.TestCase):
 09-27 12:00:05.100 I Stereo draws: 240 frames, world 612 avg / 700 max per eye (0% both eyes at once), HUD 40 avg, 2192x2104 image
 09-27 12:00:05.200 I Memory: rss=900MB available=2100MB
 09-27 12:00:10.200 I Memory: rss=1010MB available=1800MB
+09-27 12:00:11.000 W Perf settings: GPU thermal normal -> warning
 """
         summary = analysis.summarize(analysis.read_samples(text), text)
         self.assertEqual(summary["game_by_scene"]["89"]["frames_per_s"]["max"], 52.3)
@@ -35,6 +36,8 @@ class PerformanceLogTests(unittest.TestCase):
         self.assertEqual(summary["memory"]["rss_growth_mb"], 110)
         self.assertEqual(summary["memory"]["available_mb"]["min"], 1800)
         self.assertEqual(summary["world_windows"], 0)
+        self.assertEqual(summary["perf_events"][0]["to"], "warning")
+        self.assertEqual(summary["perf_events"][0]["sub_domain"], "thermal")
 
     def test_legacy_logs_and_missing_data(self):
         rows = analysis.read_samples("Stereo perf: source=60Hz presented=59Hz copyMax=1.0ms world=1")

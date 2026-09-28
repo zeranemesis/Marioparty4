@@ -1074,6 +1074,24 @@ bool poll_events(App& app, JNIEnv* env) {
       clear_exception(env);
       break;
     }
+    case XR_TYPE_EVENT_DATA_PERF_SETTINGS_EXT: {
+      // The headset warning that it cannot hold the work (compositing,
+      // rendering) or is heating (thermal): the log ("Perf settings") shows
+      // when throttling starts and ends, next to the frame rates. On
+      // 2026-09-28 the GPU ran at level 2 (456 MHz) while 92% busy.
+      const auto& perf = reinterpret_cast<const XrEventDataPerfSettingsEXT&>(event);
+      const auto level = [](XrPerfSettingsNotificationLevelEXT l) {
+        return l == XR_PERF_SETTINGS_NOTIF_LEVEL_NORMAL_EXT    ? "normal"
+               : l == XR_PERF_SETTINGS_NOTIF_LEVEL_WARNING_EXT ? "warning"
+                                                                : "impaired";
+      };
+      const char* subDomain = perf.subDomain == XR_PERF_SETTINGS_SUB_DOMAIN_COMPOSITING_EXT ? "compositing"
+                              : perf.subDomain == XR_PERF_SETTINGS_SUB_DOMAIN_RENDERING_EXT ? "rendering"
+                                                                                            : "thermal";
+      LOGW("Perf settings: %s %s %s -> %s", perf.domain == XR_PERF_SETTINGS_DOMAIN_CPU_EXT ? "CPU" : "GPU", subDomain,
+           level(perf.fromLevel), level(perf.toLevel));
+      break;
+    }
     default:
       break;
     }

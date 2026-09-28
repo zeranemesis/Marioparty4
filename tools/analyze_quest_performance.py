@@ -74,6 +74,17 @@ def read_memory(text):
     return rows
 
 
+def read_perf_events(text):
+    """The headset's throttling notifications ("Perf settings"), in order."""
+    events = []
+    for line in text.splitlines():
+        match = re.search(r"Perf settings: (CPU|GPU) (\w+) (\w+) -> (\w+)", line)
+        if match:
+            events.append({"time": line[:18].strip(), "domain": match[1], "sub_domain": match[2],
+                           "from": match[3], "to": match[4]})
+    return events
+
+
 def spread(rows):
     metrics = {}
     for key in rows[0] if rows else []:
@@ -92,6 +103,7 @@ def summarize(samples, text=None):
         result["game_by_scene"] = {str(scene): spread([row for row in game if row["scene"] == scene])
                                    for scene in sorted({row["scene"] for row in game})}
         result["draws"] = spread(read_draws(text))
+        result["perf_events"] = read_perf_events(text)
         memory = read_memory(text)
         result["memory"] = spread(memory)
         if memory and memory[0]["rss_mb"] >= 0 and memory[-1]["rss_mb"] >= 0:

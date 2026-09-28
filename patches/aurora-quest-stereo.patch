@@ -272,7 +272,7 @@
        .label = passInfo.label.empty() ? label.c_str() : passInfo.label.c_str(),
 --- /dev/null
 +++ b/lib/gfx/stereo.cpp
-@@ -0,0 +1,587 @@
+@@ -0,0 +1,601 @@
 +#include "stereo.hpp"
 +
 +#include <aurora/stereo.h>
@@ -313,7 +313,21 @@
 +uint32_t g_width = 0;
 +uint32_t g_height = 0;
 +uint32_t g_eyeHeight = 0, g_hudWidth = 0, g_hudHeight = 0;
-+constexpr uint32_t kStereoSamples = 4;
++// The eyes' multisampling. On the headset's tiled GPU (Adreno 740) 4x takes
++// four times the tile memory per pixel: smaller bins, and every draw is
++// processed again in each bin it touches. For a headset A/B, before starting
++// the game: `adb shell setprop debug.partyboard.stereo_msaa 2` (1, 2 or 4;
++// 4 when unset).
++uint32_t stereo_samples() {
++  static const uint32_t samples = [] {
++    char value[PROP_VALUE_MAX] = {};
++    __system_property_get("debug.partyboard.stereo_msaa", value);
++    const uint32_t chosen = value[0] == '1' ? 1u : value[0] == '2' ? 2u : 4u;
++    Log.info("Stereo: MSAA {}x (debug.partyboard.stereo_msaa={})", chosen, value[0] != '\0' ? value : "unset");
++    return chosen;
++  }();
++  return samples;
++}
 +// Both eyes in one draw halve the draws the board is limited by (414 per eye
 +// kept the Toad board at 43-45 images/s whatever the resolution, 2026-09-28).
 +// Quest Vulkan fails to create the clip-distance pipeline (VK_ERROR_UNKNOWN,
@@ -490,7 +504,7 @@
 +    return false;
 +  }
 +  auto spatialConfig = config;
-+  spatialConfig.msaaSamples = kStereoSamples;
++  spatialConfig.msaaSamples = stereo_samples();
 +  if (spatialConfig.colorUpdate) {
 +    spatialConfig.alphaUpdate = true; // transparent MR targets need coverage
 +  }
@@ -595,7 +609,7 @@
 +
 +  // Same sample count and formats as the game's frame, so its pipelines draw here too.
 +  const auto& config = webgpu::g_graphicsConfig;
-+  const uint32_t samples = kStereoSamples;
++  const uint32_t samples = stereo_samples();
 +  if (samples > 1 && (g_color.size.width != g_width || g_color.size.height != g_height)) {
 +    g_color = create_target(config.surfaceConfiguration.format, samples, "Stereo color");
 +  }
