@@ -1526,7 +1526,39 @@
  struct PipelineConfig {
 --- a/lib/gfx/pipeline_cache.cpp
 +++ b/lib/gfx/pipeline_cache.cpp
-@@ -1017,7 +1017,11 @@
+@@ -930,7 +930,7 @@
+     return 0;
+   }
+ 
+-  size_t acceptedRows = 0;
++  size_t acceptedRows = 0, invalidRows = 0;
+   while ((ret = sqlite3_step(g_pipelineCacheLoadStmt)) == SQLITE_ROW) {
+     const auto* configBlob = static_cast<const uint8_t*>(sqlite3_column_blob(g_pipelineCacheLoadStmt, 0));
+     const auto configSize = sqlite3_column_bytes(g_pipelineCacheLoadStmt, 0);
+@@ -944,10 +944,22 @@
+     if (config.version != configVersion) {
+       continue;
+     }
++    // WebGPU has 1 or 4 samples. Rows with another count (a headset's MSAA 2x
++    // test wrote some on 2026-09-28) made the driver abort while they were
++    // built at every startup, so the game could not start again. Skip them.
++    if constexpr (requires { config.msaaSamples; }) {
++      if (config.msaaSamples != 1 && config.msaaSamples != 4) {
++        ++invalidRows;
++        continue;
++      }
++    }
+ 
+     find_pipeline_impl(type, config, [=] { return create(config); }, false, firstFrameUsed);
+     ++acceptedRows;
+   }
++  if (invalidRows != 0) {
++    Log.warn("Skipped {} cached pipelines with an invalid sample count", invalidRows);
++  }
+ 
+   if (ret != SQLITE_DONE) {
+     Log.error("Failed to read pipeline cache rows: {}", sqlite3_errmsg(g_pipelineCacheDb));
+@@ -1017,7 +1029,11 @@
  
  template <>
  PipelineRef find_pipeline(ShaderType type, const gx::PipelineConfig& config, NewPipelineCallback&& cb) {
