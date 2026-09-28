@@ -1,4 +1,5 @@
 #include "../../platforms/android/app/src/main/cpp/adaptive_quality.hpp"
+#include "../../platforms/android/app/src/main/cpp/frame_pacing.hpp"
 #include "../../extern/aurora/lib/gfx/rgba_mips.hpp"
 #include "rgba_mips_reference.hpp"
 #include "../../include/port/quest_scene_fit.hpp"
@@ -8,6 +9,58 @@
 #include <cstring>
 #include <limits>
 #include <random>
+#include <vector>
+
+namespace {
+// Display frames each image stays on show, for a game at 60 images/s on a
+// 120 Hz display whose XR thread looks for a finished image once a period.
+// `paced`: frames start on the pacer's schedule; otherwise on the game's own
+// 60 Hz clock, which drifts against the display's. Returns the holds after
+// the first two seconds and the largest start-to-display delay.
+std::vector<int64_t> simulate_holds(bool paced, int64_t periodNs, int64_t& worstDelayNs) {
+  quest::FramePacer pacer;
+  std::mt19937 random{7};
+  std::uniform_int_distribution<int64_t> gpu{16'000'000, 19'000'000}, jitter{-150'000, 150'000};
+  const int64_t ownPeriodNs = 16'666'667;
+  int64_t now = 0, nextLook = 0, lastShown = -1;
+  worstDelayNs = 0;
+  std::vector<int64_t> holds;
+  std::vector<std::pair<int64_t, int64_t>> pending; // start, finish
+  for (int frame = 0; frame < 60 * 20; ++frame) {
+    // The looks up to now: each shows the newest finished image.
+    const auto advance = [&](int64_t until) {
+      while (nextLook <= until) {
+        const int64_t at = nextLook + jitter(random);
+        pacer.look(at, periodNs);
+        int64_t newest = -1;
+        for (auto it = pending.begin(); it != pending.end();) {
+          if (it->second <= at) {
+            newest = it->first;
+            pacer.finished(it->second - it->first);
+            if (frame > 120) worstDelayNs = std::max(worstDelayNs, nextLook - it->first);
+            it = pending.erase(it);
+          } else {
+            ++it;
+          }
+        }
+        if (newest >= 0) {
+          if (lastShown >= 0 && frame > 120) holds.push_back((nextLook - lastShown + periodNs / 2) / periodNs);
+          lastShown = nextLook;
+        }
+        nextLook += periodNs;
+      }
+    };
+    int64_t start = paced ? pacer.next_start(now, 60.0f) : 0;
+    if (start == 0) start = std::max(now, static_cast<int64_t>(frame) * ownPeriodNs);
+    advance(start);
+    now = start + 5'000'000; // the game's CPU part
+    pending.push_back({start, start + gpu(random)});
+    advance(now);
+    if (frame % 60 == 59) pacer.update();
+  }
+  return holds;
+}
+} // namespace
 
 int main() {
   quest::AdaptiveQuality gpu;
@@ -223,5 +276,24 @@ int main() {
   for (unsigned i = 0; i < 2 * quest::ImageSizePolicy::kShrinkSeconds; ++i) {
     assert(!images.update(1512, 1584, 1512, 1584, false));
   }
-  std::puts("PASS: GPU/CPU decisions, freshness, recovery, profile bounds, gamma, alpha and NPOT mipmaps, image sizes");
+
+  // Frame pacing. On its own clock, against a display at 119.88 Hz, the
+  // game's images are not all shown for two display frames.
+  int64_t worstDelay = 0;
+  const auto unpaced = simulate_holds(false, 8'341'675, worstDelay);
+  assert(std::ranges::count_if(unpaced, [](int64_t hold) { return hold != 2; }) > 0);
+  // Paced, every one is, within the GPU's time and the margin plus a period.
+  for (const int64_t period : {int64_t{8'333'333}, int64_t{8'341'675}}) {
+    const auto paced = simulate_holds(true, period, worstDelay);
+    assert(paced.size() > 1000);
+    assert(std::ranges::all_of(paced, [](int64_t hold) { return hold == 2; }));
+    assert(worstDelay <= 19'000'000 + quest::FramePacer::kMarginNs + period);
+  }
+  quest::FramePacer rates;
+  rates.look(1'000'000'000, 8'333'333);
+  assert(rates.next_start(1'001'000'000, 72.0f) == 0);  // not 120 divided by a whole number
+  assert(rates.next_start(1'001'000'000, 120.0f) != 0);
+  assert(rates.next_start(1'200'000'000, 60.0f) == 0);  // no look for 200 ms: the game's clock
+  std::puts("PASS: GPU/CPU decisions, freshness, recovery, profile bounds, gamma, alpha and NPOT mipmaps, image sizes, "
+            "frame pacing");
 }

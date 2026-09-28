@@ -13,6 +13,7 @@
 
 #include "xr_util.hpp"
 #include "adaptive_quality.hpp"
+#include "frame_pacing.hpp"
 
 #include <EGL/eglext.h>
 #include <android/hardware_buffer.h>
@@ -68,8 +69,12 @@ public:
   // A camera with no view never enqueues GPU work: return its lease explicitly.
   void cancelled(uint32_t image, uint64_t tag);
 
-  // XR thread, each frame before update(): the display time being prepared.
-  void set_frame_time(XrTime time);
+  // XR thread, each frame before update(): the display time being prepared,
+  // and the display's period.
+  void set_frame_time(XrTime time, XrDuration period = 0);
+  // Game thread, its frame done: when to start the next one (steady-clock
+  // nanoseconds), on the display's schedule; 0 when not paced (FramePacer).
+  int64_t next_frame_start(int64_t nowNs, float targetHz);
   // How far ahead of this frame the game's next image will be seen: measured
   // from the images already shown, for the eye poses given to the game.
   XrDuration prediction() const;
@@ -95,6 +100,7 @@ private:
     XrView views[2]{};
     uint32_t renderWidth = 0, renderHeight = 0; // drawn part of each eye's half
     XrTime leaseTime = 0;                       // the XR frame the game took it in
+    int64_t startNs = 0;                        // its frame's paced start, 0 when not paced
   };
 
   // Dynamic resolution, once a second (caller holds mMutex).
@@ -180,6 +186,19 @@ private:
   // between taking an image and showing it (moving average, nanoseconds).
   XrTime mFrameTime = 0;
   double mLatencyNs = 0;
+  double mLatencyMinMs = 0, mLatencyMaxMs = 0; // this stats window
+  // The game's frames on the display's schedule (next_frame_start()), and
+  // what shows it works: display frames each new image stayed on show (1, 2,
+  // 3, 4 or more), this stats window.
+  FramePacer mPacer;
+  XrDuration mPeriodNs = 0;
+  bool mPacing = true;             // debug.partyboard.xr_pacing=0 turns it off
+  bool mStartGiven = false;        // a start the next lease belongs to
+  int64_t mGivenStartNs = 0;
+  uint32_t mFramesSinceNew = 0;
+  bool mHoldCounted = false;       // an image shown since the layer came back
+  std::chrono::steady_clock::time_point mLastLayerAt{};
+  std::array<uint32_t, 4> mHolds{};
   bool mScreenHidden = false;
   // The interface is copied at 30 Hz: text and scores need no more.
   std::chrono::steady_clock::time_point mHudCopiedAt{};

@@ -1265,7 +1265,7 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   // The scene's floor is measured by the game (quest_stereo.cpp) and put on
   // the table exactly: no clearance.
   app.stereo.set_quality_sample(g_perf.quality_sample());
-  app.stereo.set_frame_time(time);
+  app.stereo.set_frame_time(time, frame.predictedDisplayPeriod);
   app.stereo.update(views, modelPose, app.table.modelScale, model, app.table.screenWidth, app.table.screenWidth * 0.75f);
   XrCompositionLayerImageLayoutFB modelFlip{XR_TYPE_COMPOSITION_LAYER_IMAGE_LAYOUT_FB};
   modelFlip.flags = XR_COMPOSITION_LAYER_IMAGE_LAYOUT_VERTICAL_FLIP_BIT_FB;

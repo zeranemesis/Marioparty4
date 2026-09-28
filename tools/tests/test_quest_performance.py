@@ -39,6 +39,16 @@ class PerformanceLogTests(unittest.TestCase):
         self.assertEqual(summary["perf_events"][0]["to"], "warning")
         self.assertEqual(summary["perf_events"][0]["sub_domain"], "thermal")
 
+    def test_cadence(self):
+        rows = analysis.read_samples("Stereo perf: source=60Hz presented=120Hz world=1 latency=25.0ms "
+                                     "holds=3/110/4/1 latencyMin=16.7ms latencyMax=33.3ms paced=1 "
+                                     "paceWork=19.2ms paceLooks=3 pacePhase=4.3ms")
+        self.assertAlmostEqual(rows[0]["off_cadence_percent"], 100 * 8 / 118)
+        self.assertEqual(rows[0]["latency_max_ms"], 33.3)
+        self.assertEqual(rows[0]["paced"], 1)
+        self.assertEqual(rows[0]["pace_phase_ms"], 4.3)
+        self.assertIsNone(analysis.read_samples("Stereo perf: world=1")[0]["off_cadence_percent"])
+
     def test_legacy_logs_and_missing_data(self):
         rows = analysis.read_samples("Stereo perf: source=60Hz presented=59Hz copyMax=1.0ms world=1")
         self.assertEqual(rows[0]["world_new_hz"], 59)

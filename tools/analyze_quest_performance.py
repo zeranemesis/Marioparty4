@@ -19,6 +19,9 @@ def read_samples(text):
         if values.get("world") != 1:
             continue
         size = re.search(r"eye=(\d+)x(\d+)", line)
+        # Display frames each new world image stayed on show: 1, 2, 3, 4 or more.
+        holds = re.search(r"holds=(\d+)/(\d+)/(\d+)/(\d+)", line)
+        hold_counts = [int(value) for value in holds.groups()] if holds else None
         samples.append({
             "time": line[:18].strip(), "target_hz": target,
             "source_hz": values.get("source"),
@@ -34,6 +37,12 @@ def read_samples(text):
             "copy_gpu_window_max_ms": values.get("copyGpuMax"),
             "gpu_samples": values.get("gpuSamples"), "latency_ms": values.get("latency"),
             "eye_width": int(size[1]) if size else None, "eye_height": int(size[2]) if size else None,
+            "latency_min_ms": values.get("latencyMin"), "latency_max_ms": values.get("latencyMax"),
+            "paced": values.get("paced"), "pace_work_ms": values.get("paceWork"),
+            "pace_phase_ms": values.get("pacePhase"),
+            # Images not shown for the window's usual number of display frames: judder.
+            "off_cadence_percent": (100.0 * (sum(hold_counts) - max(hold_counts)) / sum(hold_counts)
+                                    if hold_counts and sum(hold_counts) else None),
         })
     return samples
 

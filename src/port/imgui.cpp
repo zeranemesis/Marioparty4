@@ -178,6 +178,12 @@ class Limiter
         m_oldTime = delta_clock::now();
     }
 
+    // The last frame was due at `time` (another clock decided it).
+    void Align(delta_clock::time_point time)
+    {
+        m_oldTime = time;
+    }
+
     void Sleep(duration_t targetFrameTime)
     {
         if (targetFrameTime.count() == 0)
@@ -465,6 +471,25 @@ bool frame_pacer_interpolation_enabled()
 
 void frame_limiter()
 {
+#ifdef __ANDROID__
+    /* On the headset, frames start on the display's schedule: on the game's
+     * own 60 Hz clock, drifting against the headset's 120 Hz, some images
+     * were shown for one display frame and others for three, a judder of the
+     * board (platforms/android/.../frame_pacing.hpp). Not in netplay, whose
+     * ticks keep their own schedule. */
+    if (!PartyBoard_NetplayEnabled()) {
+        const auto now = std::chrono::steady_clock::now();
+        const int64_t start = partyboard::display::headset_frame_start(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(), target_frame_rate());
+        if (start > 0) {
+            const std::chrono::steady_clock::time_point at{
+                std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::nanoseconds{start})};
+            std::this_thread::sleep_until(at);
+            g_frameLimiter.Align(at); // back on the game's clock, from here
+            return;
+        }
+    }
+#endif
     g_frameLimiter.Sleep(
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::seconds{1}) /
         target_frame_rate());
