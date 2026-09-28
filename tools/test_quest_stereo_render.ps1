@@ -65,6 +65,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Shader generation failed.' }
 & "$out/validate.exe" @(Get-ChildItem "$out/shaders/*.wgsl" | ForEach-Object FullName) 2>$null
 if ($LASTEXITCODE -ne 0) { throw 'Generated shaders rejected by Dawn.' }
 & "$out/harness.exe" "$out/scene" scene
+# The TEV operand wrap as before, for render.exe's comparison.
+$env:AURORA_TEV_OVERFLOW_ALL = '1'
+& "$out/harness.exe" "$out/scene" scene | Out-Null
+$env:AURORA_TEV_OVERFLOW_ALL = $null
 & "$out/render.exe" "$out/scene" 2>$null
 if ($LASTEXITCODE -ne 0) { throw 'Instanced stereo does not match per-eye rendering.' }
 Write-Output 'PASS: generated shaders valid, instanced stereo identical to per-eye rendering'

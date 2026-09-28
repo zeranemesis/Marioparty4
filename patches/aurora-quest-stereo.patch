@@ -1482,7 +1482,67 @@
    uint32_t msaaSamples = 1;
 --- a/lib/gx/shader.cpp
 +++ b/lib/gx/shader.cpp
-@@ -851,6 +851,40 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8
+@@ -9,6 +9,10 @@
+ #include <dolphin/gx/GXEnum.h>
+ 
+ #include <absl/container/flat_hash_set.h>
++#include <cstdlib>
++#if defined(__ANDROID__)
++#include <sys/system_properties.h>
++#endif
+ #include <mutex>
+ #include <string_view>
+ #include <utility>
+@@ -388,9 +392,36 @@ static std::string tev_op(GXTevOp op, std::string_view bias, std::string_view sc
+   }
+ }
+ 
++// GX's TEV inputs a, b and c are 8 bits: a register's value past that range
++// wraps, which tev_overflow_* reproduces. Textures, rasterized colors and
++// constants are 8-bit values in [0, 1] already, where the wrap changes
++// nothing, so it is left out for them: several operations fewer per operand
++// and per stage in every fragment. debug.partyboard.tev_overflow=all (Android,
++// read once) or AURORA_TEV_OVERFLOW_ALL=1 wraps every operand as before.
++static bool tev_overflow_all() {
++  static const bool all = [] {
++#if defined(__ANDROID__)
++    char value[PROP_VALUE_MAX] = {};
++    __system_property_get("debug.partyboard.tev_overflow", value);
++    return std::string_view{value} == "all";
++#else
++    const char* value = std::getenv("AURORA_TEV_OVERFLOW_ALL");
++    return value != nullptr && value[0] == '1';
++#endif
++  }();
++  return all;
++}
++
++static bool tev_may_overflow(std::string_view operand) {
++  return tev_overflow_all() || operand.find("prev") != std::string_view::npos ||
++         operand.find("tevreg") != std::string_view::npos;
++}
++
+ static std::string tev_color_op(GXTevOp op, std::string_view bias, std::string_view scale, bool clamp,
+                                 std::string_view a, std::string_view b, std::string_view c, std::string_view d) {
+-  const auto overflow = [](std::string_view reg) { return fmt::format("tev_overflow_vec3f({})", reg); };
++  const auto overflow = [](std::string_view reg) {
++    return tev_may_overflow(reg) ? fmt::format("tev_overflow_vec3f({})", reg) : std::string{reg};
++  };
+   std::string expr = tev_op(op, bias, scale, overflow(a), overflow(b), overflow(c), d, "vec3(0)"sv);
+   return clamp ? fmt::format("clamp({}, vec3f(0.0), vec3f(1.0))", expr)
+                : fmt::format("clamp({}, vec3f(-4.0), vec3f(4.0))", expr);
+@@ -398,7 +429,9 @@ static std::string tev_color_op(GXTevOp op, std::string_view bias, std::string_v
+ 
+ static std::string tev_alpha_op(GXTevOp op, std::string_view bias, std::string_view scale, bool clamp,
+                                 std::string_view a, std::string_view b, std::string_view c, std::string_view d) {
+-  const auto overflow = [](std::string_view reg) { return fmt::format("tev_overflow_f32({})", reg); };
++  const auto overflow = [](std::string_view reg) {
++    return tev_may_overflow(reg) ? fmt::format("tev_overflow_f32({})", reg) : std::string{reg};
++  };
+   std::string expr = tev_op(op, bias, scale, overflow(a), overflow(b), overflow(c), d, "0.0"sv);
+   return clamp ? fmt::format("clamp({}, 0.0, 1.0)", expr) : fmt::format("clamp({}, -4.0, 4.0)", expr);
+ }
+@@ -851,6 +884,40 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8
                       alpha ? "a"sv : ""sv);
  }
  
@@ -1523,7 +1583,7 @@
  std::string build_shader_source(const ShaderConfig& config) noexcept {
    ZoneScoped;
    const auto hash = xxh3_hash(config);
-@@ -1003,7 +1037,29 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+@@ -1003,7 +1070,29 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
                                    attr_load_nbt_slice(config, NbtSlice::T, vidxAttr));
    }
  
@@ -1554,7 +1614,7 @@
      vtxXfrAttrsPre += fmt::format(
          "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
          "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;",
-@@ -1051,6 +1107,13 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+@@ -1051,6 +1140,13 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
    }
  
    uniBufAttrs += "\n    proj: mat4x4f,";
@@ -1568,7 +1628,7 @@
    uniBufAttrs += fmt::format("\n    postex_mtx: array<mat3x4f, {}>,", MaxPnMtx + MaxTexMtx);
    uniBufAttrs += fmt::format("\n    nrm_mtx: array<mat3x4f, {}>,", MaxPnMtx);
    std::string fragmentFnPre;
-@@ -1632,7 +1695,7 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+@@ -1632,7 +1728,7 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
      fragmentFn += "\n    prev = vec4f(in.nrm, prev.a);";
    }
  
@@ -1577,7 +1637,7 @@
  fn bswap32(v: u32, le: bool) -> u32 {{
    if (le) {{
      return v;
-@@ -1997,6 +2060,11 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
+@@ -1997,6 +2093,11 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
                                          uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn,
                                          fragmentFnPre, vtxXfrAttrsPre, uniformPre, fragOutStruct, fragRetType,
                                          fragRetStmt);

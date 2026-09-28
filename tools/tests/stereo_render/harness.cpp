@@ -7,6 +7,7 @@
 #include "gfx/stereo.hpp"
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -135,7 +136,25 @@ static int render_scene(const std::string& dir) {
     build_uniform_stereo_instanced(build_shader_info(config), 0, ranges, left, right, eyeX, eyeClip);
     write_bytes(dir + "/scene-both-" + std::to_string(strides[i]) + ".bin", pushed[0].data(), pushed[0].size());
   }
-  std::ofstream params(dir + "/scene.txt");
+  // The same grid with its vertex colours as a TEV "b" input (a lerp towards
+  // them by 1.0), where tev_overflow_* applies: written with the operand
+  // wrap left out (the default) or, under AURORA_TEV_OVERFLOW_ALL=1, with it.
+  // render.exe draws both and wants the same image.
+  {
+    auto tev = config;
+    tev.stereo = 0;
+    auto& stage = tev.tevStages[0];
+    stage.colorPass = {GX_CC_ZERO, GX_CC_RASC, GX_CC_ONE, GX_CC_ZERO};
+    stage.alphaPass = {GX_CA_ZERO, GX_CA_RASA, GX_CA_KONST, GX_CA_ZERO};
+    stage.kaSel = GX_TEV_KASEL_8_8;
+    const char* all = std::getenv("AURORA_TEV_OVERFLOW_ALL");
+    const bool wrapAll = all != nullptr && all[0] == '1';
+    write(dir + (wrapAll ? "/scene-tev-old.wgsl" : "/scene-tev.wgsl"), build_shader_source(tev));
+    state.proj = left; // the per-eye path's projection
+    pushed.clear();
+    build_uniform(build_shader_info(tev), 0, ranges);
+    write_bytes(dir + "/scene-tev-left.bin", pushed[0].data(), pushed[0].size());
+  }  std::ofstream params(dir + "/scene.txt");
   params << verts.size() / 16 << ' ' << eyeWidth << ' ' << height << ' ' << strides[0] << ' ' << strides[1] << '\n';
   std::printf("scene: %zu vertices\n", verts.size() / 16);
   return 0;

@@ -220,5 +220,48 @@ int main(int argc, char** argv) {
     write_ppm("scene-both-" + std::to_string(variant) + "-" + std::to_string(stride) + ".ppm", candidate, width, height);
     failures += !ok;
   }
+  // The TEV operand wrap left out where it changes nothing (harness.cpp):
+  // both shaders, per eye, must give the same image.
+  if (!read_bytes("scene-tev.wgsl").empty() && !read_bytes("scene-tev-old.wgsl").empty()) {
+    auto wrapped = make_pipeline("scene-tev-old.wgsl", layout);
+    auto direct = make_pipeline("scene-tev.wgsl", layout);
+    auto tevGroup = uniform_group("scene-tev-left.bin");
+    const unsigned width = eyeWidth;
+    const auto draw_tev = [&](wgpu::RenderPipeline pipeline) {
+      wgpu::TextureDescriptor desc{.usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc,
+                                   .size = {width, height, 1},
+                                   .format = wgpu::TextureFormat::RGBA8Unorm};
+      auto texture = device.CreateTexture(&desc);
+      wgpu::RenderPassColorAttachment color{.view = texture.CreateView(),
+                                            .loadOp = wgpu::LoadOp::Clear,
+                                            .storeOp = wgpu::StoreOp::Store,
+                                            .clearValue = {0, 0, 0, 0}};
+      wgpu::RenderPassDescriptor passDesc{.colorAttachmentCount = 1, .colorAttachments = &color};
+      auto encoder = device.CreateCommandEncoder();
+      auto pass = encoder.BeginRenderPass(&passDesc);
+      pass.SetBindGroup(0, storageGroup);
+      pass.SetPipeline(pipeline);
+      pass.SetBindGroup(1, tevGroup);
+      pass.Draw(vertexCount, 1);
+      pass.End();
+      auto commands = encoder.Finish();
+      device.GetQueue().Submit(1, &commands);
+      return read_back(texture, width, height);
+    };
+    const auto before = draw_tev(wrapped);
+    const auto after = draw_tev(direct);
+    unsigned differing = 0, maxDelta = 0, drawn = 0;
+    for (size_t i = 0; i < before.size(); i += 4) {
+      unsigned delta = 0;
+      for (int c = 0; c < 4; ++c) delta = std::max<unsigned>(delta, std::abs(before[i + c] - after[i + c]));
+      differing += delta > 1;
+      maxDelta = std::max(maxDelta, delta);
+      drawn += (before[i] | before[i + 1] | before[i + 2]) != 0;
+    }
+    const bool ok = differing == 0 && drawn > 0 && errors == 0;
+    std::printf("%s tev operand wrap: %u of %u pixels differ (max delta %u), drawn %u\n", ok ? "OK  " : "FAIL",
+                differing, width * height, maxDelta, drawn);
+    failures += !ok;
+  }
   return failures + errors;
 }
