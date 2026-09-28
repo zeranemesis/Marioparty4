@@ -130,8 +130,11 @@ private:
   uint32_t mEyeWidth = 0; // an eye's half of the swapchain: the largest drawn size
   uint32_t mEyeHeight = 0;
   uint32_t mRecommendedEyeWidth = 0;
-  uint32_t mImageEyeWidth = 0, mImageEyeHeight = 0; // the ring's images: the drawn size
+  uint32_t mImageEyeWidth = 0, mImageEyeHeight = 0; // the ring's images: the drawn size or larger
   bool mResizePending = false;
+  ImageSizePolicy mImageSize;  // when the images follow the drawn size (adapt_resolution())
+  uint32_t mResizeCount = 0;   // the controller's, for the log
+  std::chrono::steady_clock::time_point mResizeRetryAt{}; // after a failed allocation
   uint32_t mDesiredHudWidth = 1600;
   int64_t mSwapchainFormat = 0;
 

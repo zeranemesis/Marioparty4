@@ -200,5 +200,28 @@ int main() {
   assert(!partyboard::quest::sphere_inside_eye_sides(eyes, middle, NAN));
   eyes[1][3] = 0.95f; // the right eye sees the scene shifted: middle now near its left side
   assert(!partyboard::quest::sphere_inside_eye_sides(eyes, middle, 0.1f));
-  std::puts("PASS: GPU/CPU decisions, freshness, recovery, profile bounds, gamma, alpha and NPOT mipmaps");
+
+  // The ring's images: a smaller drawn size needs no new images at once.
+  quest::ImageSizePolicy images;
+  assert(!images.update(1680, 1760, 1680, 1760, false));
+  assert(images.update(1760, 1840, 1680, 1760, true)); // larger: at once
+  assert(!images.update(1600, 1680, 1680, 1760, true)); // a trial the controller may undo
+  for (unsigned i = 0; i < 2 * quest::ImageSizePolicy::kShrinkSeconds; ++i) {
+    assert(!images.update(1600, 1680, 1680, 1760, false)); // 91% drawn: kept
+  }
+  assert(!images.update(1512, 1584, 1680, 1760, true)); // 81% drawn
+  for (unsigned i = 1; i < quest::ImageSizePolicy::kShrinkSeconds; ++i) {
+    assert(!images.update(1512, 1584, 1680, 1760, false));
+  }
+  assert(images.update(1512, 1584, 1680, 1760, false)); // held: shrink
+  assert(!images.update(1512, 1584, 1512, 1584, false));
+  assert(!images.update(1344, 1408, 1512, 1584, true)); // lowered again
+  for (unsigned i = 1; i < quest::ImageSizePolicy::kShrinkSeconds - 1; ++i) {
+    assert(!images.update(1344, 1408, 1512, 1584, false));
+  }
+  assert(!images.update(1512, 1584, 1512, 1584, true)); // restored before the shrink: nothing made again
+  for (unsigned i = 0; i < 2 * quest::ImageSizePolicy::kShrinkSeconds; ++i) {
+    assert(!images.update(1512, 1584, 1512, 1584, false));
+  }
+  std::puts("PASS: GPU/CPU decisions, freshness, recovery, profile bounds, gamma, alpha and NPOT mipmaps, image sizes");
 }

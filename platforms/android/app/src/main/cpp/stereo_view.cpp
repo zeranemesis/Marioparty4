@@ -194,9 +194,10 @@ std::pair<uint32_t, uint32_t> StereoView::eye_size(float renderScale) const {
           std::min(mEyeHeight, round8(static_cast<float>(mEyeHeight) * renderScale))};
 }
 
-// The ring's images at exactly the size the game draws (the eyes side by
-// side, the interface below): the GPU writes whole images out at the end of
-// its pass, so a larger image would cost bandwidth for pixels nobody drew.
+// The ring's images at the size the game draws (the eyes side by side, the
+// interface below): the GPU writes whole images out at the end of its pass,
+// so a larger image costs bandwidth for pixels nobody drew. A smaller drawn
+// size uses a part of them for a while (ImageSizePolicy).
 // XR thread, GL context current, every slot free.
 bool StereoView::allocate_images(uint32_t eyeWidth, uint32_t eyeHeight, uint32_t hudWidth) {
   if (!hudWidth) hudWidth = mHudPixelsWidth;
@@ -365,8 +366,10 @@ bool StereoView::game_frame(StereoFrame& out) {
   }
   ++mLeaseCount;
   ++mAdaptLeases;
-  free->renderWidth = mImageEyeWidth;
-  free->renderHeight = mImageEyeHeight;
+  // The controller's size, within the images (larger: a resize is pending).
+  const auto [drawWidth, drawHeight] = eye_size(mRenderScale);
+  free->renderWidth = std::min(drawWidth, mImageEyeWidth);
+  free->renderHeight = std::min(drawHeight, mImageEyeHeight);
   free->leaseTime = mFrameTime;
   out.generation = mGeneration;
   free->state = State::Drawing;
@@ -418,8 +421,10 @@ void StereoView::set_quality_cap(float recommendedScale) {
   mQuality.set_cap(recommendedScale);
   mDesiredHudWidth = recommendedScale <= 0.8f ? 1280 : recommendedScale <= 1.0f ? 1600 : 1920;
   mRenderScale = std::min(1.0f, mQuality.scale() / mMaxScale);
-  if (eye_size(mRenderScale) != std::make_pair(mImageEyeWidth, mImageEyeHeight) ||
-      mDesiredHudWidth != mHudPixelsWidth) mResizePending = true;
+  // A lower ceiling: drawn in a part of the images until ImageSizePolicy
+  // shrinks them (adapt_resolution()).
+  const auto [width, height] = eye_size(mRenderScale);
+  if (width > mImageEyeWidth || height > mImageEyeHeight || mDesiredHudWidth != mHudPixelsWidth) mResizePending = true;
 }
 
 // One decision per fresh one-second metric window; do not lower resolution
@@ -448,8 +453,14 @@ void StereoView::adapt_resolution() {
   const float measuredScale = mQuality.update(mQualitySample, wanted, mAdaptRingFull, slow);
   mRenderScale = std::min(1.0f, measuredScale / mMaxScale);
   mAdaptLeases = mAdaptRingFull = 0;
-  if (mRenderScale != before && eye_size(mRenderScale) != std::make_pair(mImageEyeWidth, mImageEyeHeight)) {
-    mResizePending = true; // layer() reallocates once the ring is empty
+  // New images only when they must grow, or have been far too large for a
+  // while; layer() reallocates once the ring is empty.
+  const auto [drawWidth, drawHeight] = eye_size(mRenderScale);
+  if (mResizePending || now < mResizeRetryAt) {
+    mImageSize.reset(); // pending, or failed a moment ago: the ring would empty every second
+  } else if (mImageSize.update(drawWidth, drawHeight, mImageEyeWidth, mImageEyeHeight, mRenderScale != before)) {
+    mResizePending = true;
+    ++mResizeCount;
   }
   if (mRenderScale != before) {
     const auto decision = mQuality.last_decision();
@@ -625,14 +636,20 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
   // is back (game_frame() gives no lease meanwhile).
   if (newest == nullptr && resize_ready()) {
     const auto [width, height] = eye_size(mRenderScale);
-    if (allocate_images(width, height, mDesiredHudWidth)) {
-      LOGI("Stereo: images now %ux%u per eye, HUD %ux%u", width, height, mHudPixelsWidth, mHudPixelsHeight);
+    const uint32_t previousWidth = mImageEyeWidth, previousHeight = mImageEyeHeight;
+    const bool resized = allocate_images(width, height, mDesiredHudWidth);
+    if (resized) {
+      LOGI("Stereo: images now %ux%u per eye (were %ux%u), HUD %ux%u, %u resizes since start", width, height,
+           previousWidth, previousHeight, mHudPixelsWidth, mHudPixelsHeight, mResizeCount);
     } else {
+      LOGW("Stereo: resize failed; retaining previous eye images, next try in 10 s");
+    }
+    std::lock_guard lock{mMutex}; // game_frame() reads the scale
+    if (!resized) {
       // Retain the previous valid allocation instead of leaving a dead ring.
       mRenderScale = static_cast<float>(mImageEyeWidth) / mEyeWidth;
-      LOGW("Stereo: resize failed; retaining previous eye images");
+      mResizeRetryAt = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     }
-    std::lock_guard lock{mMutex};
     mResizePending = false;
   }
 
@@ -682,20 +699,22 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
 
       if (!keepBoard) {
         // Only the drawn part of each eye's half (dynamic resolution): at the
-        // left, centered vertically (Aurora's common.cpp draws it there).
-        // The image holds just what was drawn (Aurora puts each eye at the
-        // left of its half, a half being the image's width / 2).
+        // left, centered vertically (Aurora's common.cpp draws it there, a
+        // half being the image's width / 2, the eyes' rows above the
+        // interface's). The images are replaced only when every slot is free,
+        // so this slot has the current images' size.
         const auto y = static_cast<GLint>((mEyeHeight - newest->renderHeight) / 2);
-        const uint32_t srcStride = std::max(newest->renderWidth * 2, mHudPixelsWidth) / 2;
+        const auto srcY = static_cast<GLint>((mImageEyeHeight - newest->renderHeight) / 2);
+        const uint32_t srcStride = std::max(mImageEyeWidth * 2, mHudPixelsWidth) / 2;
         for (uint32_t eye = 0; eye < 2; ++eye) {
-          g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, static_cast<GLint>(eye * srcStride), 0, 0,
+          g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, static_cast<GLint>(eye * srcStride), srcY, 0,
                          mSwapchainImages[index].image, GL_TEXTURE_2D, 0, static_cast<GLint>(eye * mEyeWidth), y, 0,
                          static_cast<GLsizei>(newest->renderWidth), static_cast<GLsizei>(newest->renderHeight), 1);
         }
       }
       if (hudReady) {
         mHudCopiedAt = hudNow;
-        g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, 0, static_cast<GLint>(newest->renderHeight), 0,
+        g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, 0, static_cast<GLint>(mImageEyeHeight), 0,
                       mHudImages[hudIndex].image, GL_TEXTURE_2D, 0, 0, 0, 0,
                       static_cast<GLsizei>(mHudPixelsWidth), static_cast<GLsizei>(mHudPixelsHeight), 1);
 

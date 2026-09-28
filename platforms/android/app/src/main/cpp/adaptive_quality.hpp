@@ -143,6 +143,43 @@ private:
   Decision mDecision = Decision::Kept;
 };
 
+// Whether the ring's images must be made again for the eyes' drawn size
+// (stereo_view.cpp). New images empty the ring first: the headset shows the
+// last image again for a few frames, a hitch of the board, and the game makes
+// its render targets again. A smaller size is drawn in a part of the images
+// at once (Aurora draws each eye at the left of its half, centered
+// vertically), so a lowering the controller undoes costs no new images. The
+// images shrink to it once it has held kShrinkSeconds and leaves more than
+// 15% of them undrawn: the GPU clears and writes out whole images. A larger
+// size needs new images at once.
+class ImageSizePolicy {
+public:
+  static constexpr unsigned kShrinkSeconds = 20;
+
+  // Once a second. `changed`: the drawn size changed since the last call.
+  bool update(uint32_t drawWidth, uint32_t drawHeight, uint32_t imageWidth, uint32_t imageHeight, bool changed) {
+    if (drawWidth > imageWidth || drawHeight > imageHeight) {
+      mSmallerSeconds = 0;
+      return true;
+    }
+    const uint64_t drawn = static_cast<uint64_t>(drawWidth) * drawHeight;
+    const uint64_t image = static_cast<uint64_t>(imageWidth) * imageHeight;
+    if (changed || drawn * 100 >= image * 85) {
+      mSmallerSeconds = 0;
+      return false;
+    }
+    if (++mSmallerSeconds < kShrinkSeconds) {
+      return false;
+    }
+    mSmallerSeconds = 0;
+    return true;
+  }
+  void reset() { mSmallerSeconds = 0; }
+
+private:
+  unsigned mSmallerSeconds = 0;
+};
+
 inline float quality_cap(int screenHeight) {
   return screenHeight >= 2160 ? 1.25f : screenHeight >= 1440 ? 1.0f : 0.8f;
 }
