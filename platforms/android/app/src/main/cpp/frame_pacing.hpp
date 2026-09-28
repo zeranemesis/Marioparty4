@@ -14,9 +14,12 @@ namespace quest {
 // for one display frame, the next for three, and the eye poses, predicted for
 // the average delay, are a display frame off for both. The board judders,
 // most when the head moves. Here each frame starts a fixed time after one of
-// those looks, chosen so that nearly every image (95%) finishes kMarginNs
-// before the look k periods later: every image is shown for the same number
-// of display frames, with the shortest delay that allows.
+// those looks, chosen so that nearly every image (98%) finishes kMarginNs
+// before the look k periods later, its due look, and no image is shown
+// before it: every image is shown for the same number of display frames,
+// with the shortest delay that allows. Paced but shown as soon as finished,
+// 11% of the board's images stayed one or three display frames instead of
+// two: the GPU's time varies more than a period (Quest 3, build 112).
 //
 // Not synchronized: the caller holds its lock. Times are steady-clock (Android:
 // CLOCK_MONOTONIC) nanoseconds.
@@ -50,7 +53,7 @@ public:
   // Once a second: the start's place from the images finished since.
   void update() {
     if (mPeriodNs > 0 && mWork.size() >= 20) {
-      const size_t index = mWork.size() * 95 / 100;
+      const size_t index = mWork.size() * 98 / 100;
       std::nth_element(mWork.begin(), mWork.begin() + static_cast<std::ptrdiff_t>(index), mWork.end());
       const int64_t work = mWork[index];
       const int64_t looks = ceil_div(work + kMarginNs, mPeriodNs);
@@ -66,9 +69,11 @@ public:
   }
 
   // Game thread, once its frame is done: when the next one starts, for
-  // `targetHz` images a second. 0: not paced (no recent look, or a rate that
-  // is not the display's divided by a whole number).
-  int64_t next_start(int64_t nowNs, float targetHz) {
+  // `targetHz` images a second, and the look its image is for (`dueNs`, 0
+  // before the GPU's time is known). 0: not paced (no recent look, or a rate
+  // that is not the display's divided by a whole number).
+  int64_t next_start(int64_t nowNs, float targetHz, int64_t* dueNs = nullptr) {
+    if (dueNs != nullptr) *dueNs = 0;
     if (mPeriodNs <= 0 || mGridNs == 0 || nowNs - mLastLookNs > kStaleNs || !(targetHz > 0.0f)) return 0;
     const double displayHz = 1e9 / static_cast<double>(mPeriodNs);
     const int64_t every = std::max<int64_t>(1, std::llround(displayHz / targetHz));
@@ -79,9 +84,18 @@ public:
       earliest = std::max(earliest, mLastStartNs + every * mPeriodNs - mPeriodNs / 2);
     }
     const int64_t base = mGridNs + mPhaseNs;
-    const int64_t start = std::max(nowNs, base + ceil_div(earliest - base, mPeriodNs) * mPeriodNs);
+    const int64_t scheduled = base + ceil_div(earliest - base, mPeriodNs) * mPeriodNs;
+    const int64_t start = std::max(nowNs, scheduled);
     mLastStartNs = start;
+    if (dueNs != nullptr && mLooks > 0) *dueNs = scheduled - mPhaseNs + mLooks * mPeriodNs;
     return start;
+  }
+
+  // XR thread: whether an image due at `dueNs` may be shown at this look.
+  // Earlier, it waits (it finished early: shown now, the one before it would
+  // stay a display frame only); a due time far off is not trusted.
+  bool is_due(int64_t dueNs, int64_t lookNs) const {
+    return dueNs == 0 || mPeriodNs <= 0 || lookNs >= dueNs - mPeriodNs / 4 || dueNs - lookNs > 4 * mPeriodNs;
   }
 
   int64_t work_ns() const { return mWorkNs; }

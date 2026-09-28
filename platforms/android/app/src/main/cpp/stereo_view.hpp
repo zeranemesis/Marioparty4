@@ -104,6 +104,7 @@ private:
     uint32_t renderWidth = 0, renderHeight = 0; // drawn part of each eye's half
     XrTime leaseTime = 0;                       // the XR frame the game took it in
     int64_t startNs = 0;                        // its frame's paced start, 0 when not paced
+    int64_t dueNs = 0;                          // the look it is for, 0: as soon as finished
   };
 
   // Dynamic resolution, once a second (caller holds mMutex).
@@ -124,7 +125,7 @@ public:
 private:
 
   void release_slot(Slot& slot);
-  Slot* newest_completed(); // Caller holds mMutex.
+  Slot* newest_completed(int64_t lookNs); // Caller holds mMutex.
 
   EGLDisplay mDisplay = EGL_NO_DISPLAY;
   XrInstance mInstance = XR_NULL_HANDLE;
@@ -197,7 +198,7 @@ private:
   XrDuration mPeriodNs = 0;
   bool mPacing = true;             // debug.partyboard.xr_pacing=0 turns it off
   bool mStartGiven = false;        // a start the next lease belongs to
-  int64_t mGivenStartNs = 0;
+  int64_t mGivenStartNs = 0, mGivenDueNs = 0;
   uint32_t mFramesSinceNew = 0;
   bool mHoldCounted = false;       // an image shown since the layer came back
   std::chrono::steady_clock::time_point mLastLayerAt{};

@@ -395,6 +395,7 @@ bool StereoView::game_frame(StereoFrame& out) {
   free->leaseTime = mFrameTime;
   // The paced start this frame began at (next_frame_start()), for the pacer.
   free->startNs = mStartGiven ? mGivenStartNs : 0;
+  free->dueNs = mStartGiven ? mGivenDueNs : 0;
   mStartGiven = false;
   out.generation = mGeneration;
   free->state = State::Drawing;
@@ -426,7 +427,7 @@ int64_t StereoView::next_frame_start(int64_t nowNs, float targetHz) {
   std::lock_guard lock{mMutex};
   mStartGiven = false;
   if (!mPacing || !mEnabled || mScreenRequired) return 0;
-  const int64_t start = mPacer.next_start(nowNs, targetHz);
+  const int64_t start = mPacer.next_start(nowNs, targetHz, &mGivenDueNs);
   mStartGiven = start != 0;
   mGivenStartNs = start;
   return start;
@@ -594,10 +595,11 @@ std::array<float, 3> StereoView::render_info() const {
           mEnabled ? mWorldRate : 0};
 }
 
-StereoView::Slot* StereoView::newest_completed() {
+StereoView::Slot* StereoView::newest_completed(int64_t lookNs) {
   Slot* newest = nullptr;
   for (auto& slot : mSlots) {
     if (slot.state != State::Ready || slot.tag <= mPresentedTag) continue;
+    if (!mPacer.is_due(slot.dueNs, lookNs)) continue; // finished early: its look comes
     pollfd finished{slot.fence, POLLIN, 0};
     const bool complete = slot.fence < 0 ||
         (poll(&finished, 1, 0) > 0 && (finished.revents & POLLIN));
@@ -639,7 +641,8 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
     std::lock_guard lock{mMutex};
     // This look's time: the grid the game's frames start on.
     const auto lookAt = std::chrono::steady_clock::now();
-    mPacer.look(steady_ns(), mPeriodNs);
+    const int64_t lookNs = steady_ns();
+    mPacer.look(lookNs, mPeriodNs);
     if (lookAt - mLastLayerAt > std::chrono::milliseconds(100)) {
       mHoldCounted = false; // the layer was away: no hold to count
     }
@@ -658,7 +661,7 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
     }
     // Do not queue a GPU wait on unfinished game work into the XR copy stream.
     // Resubmit the previous layer until at least one source is complete.
-    newest = newest_completed();
+    newest = newest_completed(lookNs);
     // Older finished images will never be shown now.
     for (auto& slot : mSlots) {
       if (slot.state == State::Ready &&

@@ -12,53 +12,64 @@
 #include <vector>
 
 namespace {
+// How the game's frames start and when their images may be shown.
+enum class Pacing {
+  OwnClock,  // the game's 60 Hz clock, drifting against the display's
+  Paced,     // started on the pacer's schedule, shown once finished (build 112)
+  PacedDue,  // started on it, and shown at their due look, not before
+};
+
 // Display frames each image stays on show, for a game at 60 images/s on a
-// 120 Hz display whose XR thread looks for a finished image once a period.
-// `paced`: frames start on the pacer's schedule; otherwise on the game's own
-// 60 Hz clock, which drifts against the display's. Returns the holds after
-// the first two seconds and the largest start-to-display delay.
-std::vector<int64_t> simulate_holds(bool paced, int64_t periodNs, int64_t& worstDelayNs) {
+// 120 Hz display whose XR thread looks for a finished image once a period
+// and shows the newest it may. Returns the holds after the first two
+// seconds, and the largest start-to-display delay.
+std::vector<int64_t> simulate_holds(Pacing pacing, int64_t periodNs, int64_t& worstDelayNs) {
   quest::FramePacer pacer;
   std::mt19937 random{7};
-  std::uniform_int_distribution<int64_t> gpu{16'000'000, 19'000'000}, jitter{-150'000, 150'000};
+  // Start to GPU finish varies more than a display period, as on the Toad
+  // board (a 95th percentile of 18 to 26 ms from one second to the next).
+  std::uniform_int_distribution<int64_t> gpu{9'000'000, 19'000'000}, jitter{-150'000, 150'000};
   const int64_t ownPeriodNs = 16'666'667;
   int64_t now = 0, nextLook = 0, lastShown = -1;
   worstDelayNs = 0;
   std::vector<int64_t> holds;
-  std::vector<std::pair<int64_t, int64_t>> pending; // start, finish
+  struct Image { int64_t start, finish, due; };
+  std::vector<Image> pending;
   for (int frame = 0; frame < 60 * 20; ++frame) {
-    // The looks up to now: each shows the newest finished image.
     const auto advance = [&](int64_t until) {
       while (nextLook <= until) {
         const int64_t at = nextLook + jitter(random);
         pacer.look(at, periodNs);
-        int64_t newest = -1;
-        for (auto it = pending.begin(); it != pending.end();) {
-          if (it->second <= at) {
-            newest = it->first;
-            pacer.finished(it->second - it->first);
-            if (frame > 120) worstDelayNs = std::max(worstDelayNs, nextLook - it->first);
-            it = pending.erase(it);
-          } else {
-            ++it;
-          }
+        const Image* newest = nullptr;
+        for (const auto& image : pending) {
+          const bool may = image.finish <= at && (pacing != Pacing::PacedDue || pacer.is_due(image.due, at));
+          if (may && (newest == nullptr || image.start > newest->start)) newest = &image;
         }
-        if (newest >= 0) {
+        if (newest != nullptr) {
+          pacer.finished(newest->finish - newest->start);
+          if (frame > 120) worstDelayNs = std::max(worstDelayNs, nextLook - newest->start);
+          const int64_t shown = newest->start;
+          std::erase_if(pending, [shown](const Image& image) { return image.start <= shown; });
           if (lastShown >= 0 && frame > 120) holds.push_back((nextLook - lastShown + periodNs / 2) / periodNs);
           lastShown = nextLook;
         }
         nextLook += periodNs;
       }
     };
-    int64_t start = paced ? pacer.next_start(now, 60.0f) : 0;
+    int64_t due = 0;
+    int64_t start = pacing != Pacing::OwnClock ? pacer.next_start(now, 60.0f, &due) : 0;
     if (start == 0) start = std::max(now, static_cast<int64_t>(frame) * ownPeriodNs);
     advance(start);
     now = start + 5'000'000; // the game's CPU part
-    pending.push_back({start, start + gpu(random)});
+    pending.push_back({start, start + gpu(random), due});
     advance(now);
     if (frame % 60 == 59) pacer.update();
   }
   return holds;
+}
+
+size_t off_cadence(const std::vector<int64_t>& holds) {
+  return static_cast<size_t>(std::ranges::count_if(holds, [](int64_t hold) { return hold != 2; }));
 }
 } // namespace
 
@@ -278,15 +289,17 @@ int main() {
   }
 
   // Frame pacing. On its own clock, against a display at 119.88 Hz, the
-  // game's images are not all shown for two display frames.
+  // game's images are not all shown for two display frames; nor paced but
+  // shown once finished, the GPU's time varying more than a period.
   int64_t worstDelay = 0;
-  const auto unpaced = simulate_holds(false, 8'341'675, worstDelay);
-  assert(std::ranges::count_if(unpaced, [](int64_t hold) { return hold != 2; }) > 0);
-  // Paced, every one is, within the GPU's time and the margin plus a period.
+  assert(off_cadence(simulate_holds(Pacing::OwnClock, 8'341'675, worstDelay)) > 0);
+  assert(off_cadence(simulate_holds(Pacing::Paced, 8'333'333, worstDelay)) > 0);
+  // Paced and shown at their due look, every one is, within the GPU's
+  // longest time and the margin plus a period.
   for (const int64_t period : {int64_t{8'333'333}, int64_t{8'341'675}}) {
-    const auto paced = simulate_holds(true, period, worstDelay);
+    const auto paced = simulate_holds(Pacing::PacedDue, period, worstDelay);
     assert(paced.size() > 1000);
-    assert(std::ranges::all_of(paced, [](int64_t hold) { return hold == 2; }));
+    assert(off_cadence(paced) == 0);
     assert(worstDelay <= 19'000'000 + quest::FramePacer::kMarginNs + period);
   }
   quest::FramePacer rates;
