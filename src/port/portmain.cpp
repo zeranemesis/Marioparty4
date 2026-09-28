@@ -831,7 +831,12 @@ extern "C" int port_main(int argc, char* argv[]) {
                 partyboard::ui::update();
                 aurora_end_frame();
             }
-            screen.pop();
+            // hide(true), not pop(): pop() also shows the top of the document
+            // stack, and this screen is passive, so the top of the stack is the
+            // menu bar pushed hidden above. It opened over the title screen after
+            // every precompilation and, being a visible document, blocked the
+            // pad until the player closed it.
+            screen.hide(true);
             PartyBoardMainLog.info("Precompiled {} of {} shader pipelines before boot", total - remaining, total);
             if (exitRequested) {
                 fflush(stdout);
