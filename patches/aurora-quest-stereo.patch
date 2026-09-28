@@ -128,7 +128,7 @@
  #include "tex_copy_conv.hpp"
  #include "tex_palette_conv.hpp"
  #include "texture_replacement.hpp"
-@@ -182,6 +183,10 @@ struct RenderPass {
+@@ -182,6 +183,10 @@
    bool captureDepthSnapshot = false;
    bool sealed = false;
    std::vector<tex_palette_conv::ConvRequest> paletteConvs;
@@ -139,7 +139,7 @@
  };
  
  struct TextureCopy {
-@@ -495,6 +500,8 @@ void end_color_pass() {
+@@ -495,6 +500,8 @@
  }
  
  static inline void push_command(CommandType type, const Command::Data& data) {
@@ -148,7 +148,28 @@
    if (g_currentRenderPass == UINT32_MAX)
      UNLIKELY {
        Log.warn("Dropping command {}", magic_enum::enum_name(type));
-@@ -1132,6 +1139,111 @@ void finish() {
+@@ -1119,6 +1126,7 @@
+ 
+ void finish() {
+   ZoneScoped;
++  const bool hidden = stereo::latch_screen_hidden(); // once a frame, see below
+   if (g_recordingFrame == nullptr) {
+     return;
+   }
+@@ -1127,11 +1135,122 @@
+     auto& frame = current_frame_packet();
+     frame.uniforms.append_zeroes(gx::MaxUniformSize); // Pad the end of the GX uniform buffer slice.
+     auto& pass = frame.renderPasses[g_currentRenderPass];
+-    pass.observable = true;
+-    pass.captureDepthSnapshot = true;
++    // A headset showing the game as a model hides this screen (aurora.cpp
++    // does not present it): the final pass is then unobservable and skipped,
++    // with its clear and its store of the whole framebuffer (3840x2160 on
++    // the Quest, some 33 MB a frame) and the depth snapshot for GXPeekZ,
++    // which the game never calls. Passes resolved into textures (EFB copies)
++    // and the eyes' pass are left alone.
++    pass.observable = !hidden;
++    pass.captureDepthSnapshot = !hidden;
      enqueue_pass(frame, g_recordingFrameSlot, g_currentRenderPass);
      g_currentRenderPass = UINT32_MAX;
    }
@@ -260,7 +281,7 @@
  }
  
  void end_frame(EndFrameCallback callback) {
-@@ -1323,6 +1435,9 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+@@ -1323,6 +1442,9 @@
      };
      depthStencilAttachmentPtr = &depthStencilAttachment;
    }
@@ -272,7 +293,7 @@
        .label = passInfo.label.empty() ? label.c_str() : passInfo.label.c_str(),
 --- /dev/null
 +++ b/lib/gfx/stereo.cpp
-@@ -0,0 +1,601 @@
+@@ -0,0 +1,613 @@
 +#include "stereo.hpp"
 +
 +#include <aurora/stereo.h>
@@ -447,9 +468,21 @@
 +#endif
 +}
 +
++// The headset thread may flip it at any time; gfx::finish latches it once a
++// frame, so skipping the final pass and not presenting agree (a skipped pass
++// presented would show an old frame).
++bool g_frameScreenHidden = false; // game thread
++
++bool latch_screen_hidden() noexcept {
++#if defined(__ANDROID__)
++  g_frameScreenHidden = g_screenHidden.load(std::memory_order_relaxed);
++#endif
++  return g_frameScreenHidden;
++}
++
 +bool screen_hidden() noexcept {
 +#if defined(__ANDROID__)
-+  return g_screenHidden.load(std::memory_order_relaxed);
++  return g_frameScreenHidden;
 +#else
 +  return false;
 +#endif
@@ -876,7 +909,7 @@
 +}
 --- /dev/null
 +++ b/lib/gfx/stereo.hpp
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,85 @@
 +#pragma once
 +
 +// Stereo rendering for a VR headset (include/aurora/stereo.h).
@@ -895,7 +928,10 @@
 +bool recording() noexcept;
 +// Backpressure: consume perspective vertices without uploading hidden draws.
 +bool discard_world_draw() noexcept;
-+// The game's own frame is not on show in the headset: aurora.cpp skips presenting it.
++// The game's own frame is not on show in the headset: aurora.cpp skips
++// presenting it, and gfx::finish skips its final pass. Latched once a frame
++// by gfx::finish (game thread); screen_hidden() returns that frame's value.
++bool latch_screen_hidden() noexcept;
 +bool screen_hidden() noexcept;
 +// Anisotropic filtering every mipmapped texture gets while a headset uses the
 +// eyes' images (1: the game's own choice).
