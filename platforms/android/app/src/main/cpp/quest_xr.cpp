@@ -59,6 +59,9 @@ constexpr float kDefaultDropMeters = 0.35f;
 // set on the floor): the screen would stand out of sight, on black.
 constexpr float kReachableTableMeters = 3.0f;
 constexpr float kTableBelowEyesMeters = 1.5f;
+// Nor is a table this close to the floor, or under it: on 2026-09-28 a place
+// saved before Space Setup came back 16 cm under the floor, and the model with it.
+constexpr float kLowestTableMeters = 0.2f;
 constexpr XrDuration kPlacementCheckDuration = 10'000'000'000; // the anchor loads meanwhile
 // With the model on the table, the flat screen (text, menus, split-screen
 // minigames) stands behind it.
@@ -188,6 +191,7 @@ struct App {
   Egl egl;
   Actions actions;
   XrSpace stage = XR_NULL_HANDLE; // the room's floor; LOCAL without a play area
+  bool stageIsFloor = false;      // STAGE: y = 0 is the floor
   XrSpace view = XR_NULL_HANDLE;  // the head
   Passthrough passthrough;
   PFN_xrRequestDisplayRefreshRateFB requestRefreshRate = nullptr;
@@ -473,7 +477,8 @@ bool create_session(App& app) {
   }
 
   // STAGE is the room's floor: it stays put when the player recenters.
-  if (!create_reference_space(app, XR_REFERENCE_SPACE_TYPE_STAGE, app.stage)) {
+  app.stageIsFloor = create_reference_space(app, XR_REFERENCE_SPACE_TYPE_STAGE, app.stage);
+  if (!app.stageIsFloor) {
     LOGW("No STAGE space: placing relative to the start position");
     if (!create_reference_space(app, XR_REFERENCE_SPACE_TYPE_LOCAL, app.stage)) {
       return false;
@@ -1439,9 +1444,11 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
       time - app.firstFrameTime < kPlacementCheckDuration) {
     const float away = std::hypot(app.pose.position.x - head.position.x, app.pose.position.z - head.position.z);
     const float below = head.position.y - app.pose.position.y;
-    if (away > kReachableTableMeters || below > kTableBelowEyesMeters) {
-      LOGW("Saved table place out of reach (%.2f m away, %.2f m below the eyes): screen in front for this session",
-           away, below);
+    const bool underFloor = app.stageIsFloor && app.pose.position.y < kLowestTableMeters;
+    if (away > kReachableTableMeters || below > kTableBelowEyesMeters || underFloor) {
+      LOGW("Saved table place out of reach (%.2f m away, %.2f m below the eyes, %.2f m above the floor): screen in "
+           "front for this session",
+           away, below, app.pose.position.y);
       app.savedPlaceIgnored = true;
       default_pose(app, head);
       // The model needs a real table here: the next board or minigame asks for one.

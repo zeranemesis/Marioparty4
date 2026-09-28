@@ -491,15 +491,15 @@
 +//                                        rejection: 11% fewer fragments shaded
 +//                                        per image on the Toad board (Quest 3,
 +//                                        build 117, 2026-09-28)
-+//   debug.partyboard.opaque_blend on     the game's opaque objects keep their
-+//                                        alpha blend (default: off, so the
-+//                                        Adreno's early depth rejection works;
-+//                                        edges of translucent textures in them
-+//                                        are drawn hard)
++//   debug.partyboard.opaque_blend off    the game's opaque objects drawn without
++//                                        their alpha blend (edges of translucent
++//                                        textures turn hard). Build 119 found no
++//                                        gain over keeping it with the sort on,
++//                                        so it stays on by default
 +struct Switches {
 +  bool sortOpaque = true;
 +  bool crossingPerEye = true;
-+  bool opaqueBlendOff = true;
++  bool opaqueBlendOff = false;
 +};
 +Switches g_switches;
 +std::chrono::steady_clock::time_point g_switchesAt{};
@@ -519,7 +519,7 @@
 +  read.crossingPerEye = value[0] != '0';
 +  value[0] = '\0';
 +  __system_property_get("debug.partyboard.opaque_blend", value);
-+  read.opaqueBlendOff = std::string_view{value} != "on";
++  read.opaqueBlendOff = std::string_view{value} == "off";
 +  static bool logged = false;
 +  if (!logged || read.sortOpaque != g_switches.sortOpaque || read.crossingPerEye != g_switches.crossingPerEye ||
 +      read.opaqueBlendOff != g_switches.opaqueBlendOff) {

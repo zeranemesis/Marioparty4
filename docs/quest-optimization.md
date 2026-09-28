@@ -117,6 +117,18 @@ Session casque proposee :
 
 Repousses tant que la trace GPU ne les justifie pas : demi-precision (A) et textures ETC2/ASTC (B). La recompression baisse la nettete de textures deja compressees une fois ; a ne faire que si la trace montre que la bande passante des textures limite.
 
+## Mesures du 28/09 au soir (builds 117-119, plateau Toad, yeux a 95 %)
+
+- Par defaut desormais : tri avant vers arriere des objets opaques, objets a cheval dessines par oeil, emulation TEV reduite. Contre l'ancien comportement : 50 M fragments par image au lieu de 78 M, GPU 71 % au lieu de 81 %, 0 saccade au lieu de 12, 60 ms de latence au lieu de 66.
+- Sans effet : priorite haute du contexte de copie (la latence suit la charge GPU : 17 ms en menus, 53 a 68 ms sur le plateau), niveau GPU boost (reste a 640 MHz). Melange coupe : pas de gain net avec le tri, il reste actif par defaut (`debug.partyboard.opaque_blend off` pour le couper).
+- La charge varie de 40 % avec la scene (meme reglage : 50 M puis 71 M) : une comparaison fiable demande des phases courtes alternees.
+- Resolution 80 % : 37 M fragments, GPU 51 %, 50 ms. 110 % : trop lourd. MSAA 1x : -20 % de fragments, crenelage visible.
+
+Plan suivant :
+1. Campagne alternee (A/B/A/B, phases de 20 s) pour chaque reglage restant.
+2. 72 Hz natif (`debug.partyboard.display_hz 72`) maintenant que le GPU a de la marge.
+3. Plus de nettete : remonter la resolution par defaut si 72 ou 120 Hz tient.
+4. Reprise apres Space Setup : verifier la ligne `Layers:` et la garde "table sous le sol".
 ## Ce qui reste a faire
 Etat au 28/09/2026, apres le build 112 (branche `quest/lrz-uncut`). Chaque point se mesure seul, sur le meme parcours (plateau Toad, scene 89), avec `tools/collect_quest_performance.ps1`.
 
