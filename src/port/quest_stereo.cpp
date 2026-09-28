@@ -14,17 +14,16 @@
 // the image back once the GPU has drawn it. On a phone the library is not
 // loaded and nothing here does anything.
 //
-// The game camera itself is cancelled (the headset is the viewpoint), but the
-// model turns to the camera's side once it rests, and a board brings the
-// player whose turn it is to the table's center (quest_camera_follow.hpp).
+// The game camera itself is cancelled (the headset is the viewpoint). A
+// minigame's model floats where the board's screen stands (quest_xr.cpp),
+// turned so the player sees it as its camera does once the camera rests
+// (quest_camera_follow.hpp). A board stays as placed on the table.
 
 extern "C" {
 #include "port/quest_stereo.h"
 #include "port/netplay_runtime.h"
 #include "game/object.h"
-#include "game/gamework_data.h"
 #include "game/board/space.h"
-void BoardPlayerPosGet(s32 player, Vec *pos); // game/board/player.h
 }
 #include "port/quest_camera_follow.hpp"
 #include "port/quest_scene_fit.hpp"
@@ -103,8 +102,7 @@ float sSceneExtent = 0.0f;
 // A backdrop is an object around the eyes much larger than the scene on the table.
 constexpr float kBackdropExtents = 2.5f;
 
-// The model turned to the game camera's side, and its focus (the board's
-// player whose turn it is) at the table's center; restarted with each scene.
+// A minigame's model turned to its camera's point of view; restarted with each scene.
 partyboard::quest::CameraFollow sFollow;
 bool sFollowStarted = false;
 std::chrono::steady_clock::time_point sFollowAt {};
@@ -413,57 +411,47 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
 #endif
         }
     }
-    // The camera's side toward the player, and the focus at the table's center:
-    // sceneWorld = scale * turn(-yaw) * move(-focus). Unfollowed: the scene's
-    // center, unturned.
-    float yaw = 0.0f;
-    float focusX = sSceneCenter[0], focusZ = sSceneCenter[2];
-    const bool follow = sSceneFitted && (sQuest.followCamera == nullptr || sQuest.followCamera());
+    // A minigame, where the board's screen stands (quest_xr.cpp puts the
+    // model's frame there, its +Z toward the player's eyes): turned so the
+    // camera looks along -Z, about what it looks at. The player, on +Z, sees
+    // the arena from the camera's side and height:
+    //   sceneWorld = scale * turn(yaw, pitch) * move(-center)
+    // Not following, and on a board: unturned, the lowest floor on the table.
+    // A board never moves: sliding or turning it made the player sick.
+    const bool follow = sSceneFitted && !board && (sQuest.followCamera == nullptr || sQuest.followCamera());
+    float turn[3][3] {{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}};
     if (follow) {
-        float cameraYaw = NAN;
+        float cameraYaw = NAN, cameraPitch = NAN;
         if (!partyboard::quest::camera_yaw(view, cameraYaw)) {
             cameraYaw = NAN;
         }
-        // On a board, the player whose turn it is (none during the intro,
-        // events and a minigame's set-up: the focus stays). The follower
-        // works in the fitted scene's units.
-        float targetX = NAN, targetZ = NAN;
-        const int player = GWSystem.player_curr;
-        if (board && player >= 0 && player < 4) {
-            Vec position {NAN, NAN, NAN};
-            BoardPlayerPosGet(player, &position);
-            if (std::isfinite(position.x) && std::isfinite(position.z)) {
-                targetX = position.x * sSceneScale;
-                targetZ = position.z * sSceneScale;
-            }
+        if (!partyboard::quest::camera_pitch(view, cameraPitch)) {
+            cameraPitch = NAN;
         }
         const auto now = std::chrono::steady_clock::now();
         if (!sFollowStarted) {
-            sFollow.reset(cameraYaw, sSceneCenter[0] * sSceneScale, sSceneCenter[2] * sSceneScale);
+            sFollow.reset(cameraYaw, cameraPitch);
             sFollowStarted = true;
         } else {
-            sFollow.update(cameraYaw, targetX, targetZ, std::chrono::duration<float>(now - sFollowAt).count());
+            sFollow.update(cameraYaw, cameraPitch, std::chrono::duration<float>(now - sFollowAt).count());
         }
         sFollowAt = now;
-        yaw = sFollow.yaw();
-        focusX = sFollow.focus_x() / sSceneScale;
-        focusZ = sFollow.focus_z() / sSceneScale;
+        partyboard::quest::camera_turn(sFollow.yaw(), sFollow.pitch(), turn);
     } else {
         sFollowStarted = false; // following again starts from the camera of that moment
     }
-    const float turnCos = std::cos(yaw), turnSin = std::sin(yaw);
     Mat4 sceneWorld{};
-    sceneWorld.m[0][0] = turnCos * sSceneScale;
-    sceneWorld.m[0][2] = -turnSin * sSceneScale;
-    sceneWorld.m[1][1] = sSceneScale;
-    sceneWorld.m[2][0] = turnSin * sSceneScale;
-    sceneWorld.m[2][2] = turnCos * sSceneScale;
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            sceneWorld.m[r][c] = turn[r][c] * sSceneScale;
+        }
+        sceneWorld.m[r][3] = -(turn[r][0] * sSceneCenter[0] + turn[r][1] * sSceneCenter[1]
+            + turn[r][2] * sSceneCenter[2]) * sSceneScale;
+    }
     sceneWorld.m[3][3] = 1.0f;
-    sceneWorld.m[0][3] = -(turnCos * focusX - turnSin * focusZ) * sSceneScale;
-    sceneWorld.m[1][3] = -sSceneCenter[1] * sSceneScale;
-    sceneWorld.m[2][3] = -(turnSin * focusX + turnCos * focusZ) * sSceneScale;
-    // The measured floor on the table (the table's height is the anchor's).
-    if (sFloorSettled && std::isfinite(sFloorY)) {
+    // Unturned, the measured floor on the table (the table's height is the
+    // anchor's). A minigame in the air turns about its center instead.
+    if (!follow && sFloorSettled && std::isfinite(sFloorY)) {
         sceneWorld.m[1][3] = -sFloorY * sSceneScale;
     }
     // Cancel the game camera every frame: the tracked headset supplies the

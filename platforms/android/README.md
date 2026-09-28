@@ -157,7 +157,7 @@ The screen turns blue and the game waits meanwhile.
 | Right thumbstick ↕ / ↔ | Size / turn |
 | Left thumbstick ↕ / ↔ | Height / diorama scale |
 | Left thumbstick click | Enable or disable the 3D diorama (during placement) |
-| Left grip | The diorama follows the game camera, or stays as placed |
+| Left grip | Minigames on the board's screen, seen as their camera sees them, or on the table |
 | X | Room visible (mixed reality) or not |
 | Y | Resolution: 1080p, 1440p, 4K (3840×2160), live |
 | A, B, menu or right thumbstick click | Done |
@@ -266,8 +266,9 @@ two emulators can play through the host PC's port forwarding.
 The experimental spatial renderer currently enables only w01�w06 and m401�m463.
 Title/selection/instruction scenes retain the original screen composition.
 Once a world image is presented, the classic screen is hidden; original orthographic
-sprites/messages are placed on a panel standing at the back of the model, facing
-the player (`hud_pose` in quest_xr.cpp); the model hides it where the board is taller. This is a compatibility bridge,
+sprites/messages are placed on a screen raised at the back of the board, facing
+the player like a stadium's (`hud_pose` in quest_xr.cpp, drawn over the model with
+a dark face and a bezel, StereoView::hud_screen_layer). This is a compatibility bridge,
 not a completed MR interface; multicamera games and per-draw clipping still need validation.
 Eye images use a 0.5 resolution scale and new placements default to a 1080p screen.
 
@@ -277,12 +278,15 @@ sequenced music runs, `sequence_diagnostic.log` in the private files directory.
 Use a fresh ordinary launch to disable this opt-in diagnostic mode.
 
 The board's playable-space bounds determine its initial center, scale and lowest
-surface. The game camera itself is cancelled (the headset is the viewpoint),
-but the diorama turns to the camera's side once the camera rests for 0.4 s
-(turns under 8 degrees and fly-overs are ignored), so the stick's "up" goes
-away from the player as on the screen. On a board it also slides to bring the
-player whose turn it is to the table's center. Zoom and field of view are not
-reproduced. `include/port/quest_camera_follow.hpp` has the filter,
+surface. The game camera itself is cancelled (the headset is the viewpoint) and
+a board never moves: sliding or turning it with the turns made the player sick.
+A minigame floats where the board's screen stands, without its face, facing the
+player's eyes as they are when it starts, as wide as the screen; it is turned so
+the player sees the arena from its camera's side and height, once the camera
+rests for 0.4 s (changes under 8 degrees and fly-overs are ignored), so the
+stick's "up" goes away from the player as on the screen. The table stays empty
+meanwhile. Zoom and field of view are not reproduced.
+`include/port/quest_camera_follow.hpp` has the filter,
 `tools/test_quest_table_follow.ps1` tests it with the table fit.
 
 Stereo source images remain leased while an asynchronous GL copy fence is pending.
