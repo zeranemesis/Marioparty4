@@ -77,6 +77,10 @@ bool TableSettings::load(const std::string& path) {
       diorama = on != 0;
     } else if (key == "model_scale") {
       fields >> modelScale;
+    } else if (key == "follow_camera") {
+      int on = 1;
+      fields >> on;
+      followCamera = on != 0;
     }
   }
   if (resolution != 1080 && resolution != 1440 && resolution != 2160) {
@@ -128,6 +132,7 @@ void TableSettings::save(const std::string& path) const {
     out << "passthrough " << (passthrough ? 1 : 0) << '\n';
     out << "diorama " << (diorama ? 1 : 0) << '\n';
     out << "model_scale " << modelScale << '\n';
+    out << "follow_camera " << (followCamera ? 1 : 0) << '\n';
     if (!anchorUuid.empty()) {
       out << "anchor " << anchorUuid << '\n';
     }
@@ -320,7 +325,7 @@ bool TableAnchor::handle_event(const XrEventDataBuffer& event) {
   case XR_TYPE_EVENT_DATA_SPACE_QUERY_RESULTS_AVAILABLE_FB: {
     const auto& available = reinterpret_cast<const XrEventDataSpaceQueryResultsAvailableFB&>(event);
     if (available.requestId != mQueryRequest) {
-      return true;
+      return false; // another query's (the room scan, table_scene.cpp)
     }
     XrSpaceQueryResultsFB results{XR_TYPE_SPACE_QUERY_RESULTS_FB};
     if (XR_FAILED(mRetrieve(mSession, available.requestId, &results)) || results.resultCountOutput == 0) {
@@ -340,7 +345,10 @@ bool TableAnchor::handle_event(const XrEventDataBuffer& event) {
   }
   case XR_TYPE_EVENT_DATA_SPACE_QUERY_COMPLETE_FB: {
     const auto& done = reinterpret_cast<const XrEventDataSpaceQueryCompleteFB&>(event);
-    if (done.requestId == mQueryRequest && mSpace == XR_NULL_HANDLE) {
+    if (done.requestId != mQueryRequest) {
+      return false;
+    }
+    if (mSpace == XR_NULL_HANDLE) {
       LOGW("Table anchor not found: using the saved position");
     }
     return true;

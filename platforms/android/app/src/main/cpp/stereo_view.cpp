@@ -889,18 +889,18 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
   return reinterpret_cast<const XrCompositionLayerBaseHeader*>(&mLayer);
 }
 
-const XrCompositionLayerBaseHeader* StereoView::hud_layer(XrSpace viewSpace, const void* next) {
+const XrCompositionLayerBaseHeader* StereoView::hud_layer(XrSpace space, const XrPosef& pose, XrExtent2Df size,
+                                                          const void* next) {
   if (!world_visible() || !mHudShown) return nullptr;
   mHudLayer = {XR_TYPE_COMPOSITION_LAYER_QUAD};
   mHudLayer.next = next;
   mHudLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
-  mHudLayer.space = viewSpace;
+  mHudLayer.space = space;
   mHudLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
   mHudLayer.subImage.swapchain = mHudSwapchain;
   mHudLayer.subImage.imageRect = {{0, 0}, {static_cast<int32_t>(mHudPixelsWidth), static_cast<int32_t>(mHudPixelsHeight)}};
-  mHudLayer.pose.orientation.w = 1.f;
-  mHudLayer.pose.position = {0.f, -0.12f, -0.7f};
-  mHudLayer.size = {0.72f, 0.54f};
+  mHudLayer.pose = pose;
+  mHudLayer.size = size;
   return reinterpret_cast<const XrCompositionLayerBaseHeader*>(&mHudLayer);
 }
 
