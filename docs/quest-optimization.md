@@ -94,17 +94,51 @@ py -3 tools/tests/test_quest_performance.py
 
 Le moteur Android ARM64 compile, l'APK Quest assemble et les tests JVM passent. Les decisions GPU/CPU, bornes, fraicheur des mesures et mipmaps passent les tests locaux. La pile de patches Aurora est appliquee dans l'ordre par CI, avec aurora-quest-quality.patch apres aurora-android-surface-generation.patch. Les modifications du sous-module sont distribuees par ces patches.
 
-Aucun casque n'etait connecte pour cette validation : fluidite, absence de scintillement, consommation et comportement des redimensionnements doivent encore etre verifies sur appareil. Aucune amelioration chiffree n'est revendiquee.
+Les mesures sur casque sont dans les sections plus haut (builds 100 et 112, Quest 3). La liste suivante dit ce qui reste a verifier ou a faire.
 
-## Etapes restantes du plan
+## Ce qui reste a faire
 
-1. Capturer les profils Quest 2/3, identifier CPU, GPU, bande passante et cout des copies, puis regler les marges avec ces mesures.
-2. Valider la stereo instanciee presente dans le moteur et ses shaders sur appareil, y compris fallback. Ce chemin ne constitue pas le multiview natif OpenXR.
-3. Construire une integration Dawn/Vulkan capable de cibler les images OpenXR directement, puis remplacer la liaison par buffers Android partages et les copies GL. La bibliotheque Dawn precompilee actuelle ne fournit pas le chemin d'import/export requis pour cette integration. C'est un changement de backend, pas un reglage.
-4. Integrer le vrai multiview et la foveation dans ce backend, avec detection des capacites et fallback Quest 2/3. La foveation doit affecter la passe 3D couteuse, pas seulement une copie de presentation.
-5. Etudier resolution variable par zone, projection symetrique et profondeur du compositeur seulement apres les profils. Tester transparences, particules, interfaces et geometrie proche.
-6. Traiter les minijeux au cas par cas avec captures reproductibles ; eviter de modifier le temps de simulation pour obtenir une frequence d'affichage plus haute.
-7. Evaluer une reconstruction temporelle uniquement avec vecteurs de mouvement et historique coherents. Pas de promesse d'upscaling IA sans implementation et mesures de cout.
+Etat au 28/09/2026, apres le build 112 (branche `quest/lrz-uncut`). Chaque point se mesure seul, sur le meme parcours (plateau Toad, scene 89), avec `tools/collect_quest_performance.ps1`.
+
+### 1. A valider sur casque
+
+1. **Calage sur l'ecran avec passage prevu** (build 113, 6921e395). A/B avec `debug.partyboard.xr_pacing` sur le plateau. Objectif : `off_cadence_percent` sous 3 % (11,3 % au build 112, 17,3 % sans calage), une latence stable et, au ressenti, plus de saccade quand la tete bouge.
+2. **Stabilite** :
+   - retour au jeu apres une longue pause (le build 109 n'a ete teste que sur cinq retours courts) ;
+   - plantage de m440 (SIGSEGV, build 88), a reproduire ; son rapport n'est pas lisible sans acces root ;
+   - parcours plateau, m428, retour au plateau, en suivant la memoire (`Memory:` : 611 a 634 Mo residents sur le plateau au build 112).
+3. **Controles visuels** :
+   - bords des yeux avec le mode sans coupe (`StereoUncut`) ;
+   - HUD au fond du plateau ;
+   - table du scan de la piece : le 28/09, la piece n'avait aucune table scannee (`Room scan: 0 table(s)`). A refaire apres en avoir ajoute une dans Space Setup.
+4. **Hauteur des mini-jeux par rapport a la table** (trop hauts ou trop bas). Le sol est mesure sur la geometrie des 20 premieres images (`PartyBoard_StereoObserveBounds`). Piste : la hauteur des pieds des personnages. Ils sont dans `charWork[]`, statique dans `src/game/chrman.c` ; il faudrait un accesseur sous `TARGET_PC`.
+
+### 2. Alleger le GPU, le poste dominant
+
+Ce qu'on sait :
+- 92 a 93 % du temps GPU sont passes sur les fragments, avec 6 a 7 fragments par pixel.
+- Le GPU reste au niveau 2 (456 a 640 MHz) ; le niveau boost ne change rien.
+- A 72 Hz, le plateau tombe a 49-72 i/s, et baisser la resolution a 90 % n'y fait rien.
+
+5. **Trace par etape de rendu et par draw**, avant de choisir entre A, B et C. Commandes : `ovrgpuprofiler -t 0.25 --renderstage-metrics=...`, puis `-x`, en mode detaille (`ovrgpuprofiler -e`, a desactiver ensuite avec `-d`). La session du 28/09 a ete coupee par une deconnexion du casque.
+6. **A : demi-precision (f16)** dans les shaders GX, pour les calculs de couleur. Il faut la fonctionnalite `ShaderF16` de Dawn, que `lib/webgpu/gpu.cpp` ne demande pas aujourd'hui. Il faut aussi comparer l'image au rendu actuel (`tools/test_quest_stereo_render.ps1`, avec une tolerance).
+7. **B : textures compressees**. Sur casque, toutes les textures couleur, CMPR compris, sont decodees en RGBA8 (`lib/gfx/texture.cpp`), soit huit fois la taille du CMPR. Adreno accepte l'ASTC (`g_astcTexturesSupported`). Piste : transcoder au chargement, sur le CPU ou par un calcul GPU. A mesurer : bande passante (`ovrgpuprofiler`), memoire et temps de chargement.
+8. **C : surdessin**. Trier les draws opaques de l'avant vers l'arriere quand l'ordre du jeu le permet. La coupe des yeux par `discard` desactive le LRZ d'Adreno ; le mode sans coupe a deja retire environ 6 % des fragments par pixel. Il faudrait l'etendre aux objets qui touchent les deux yeux sans passer par un test en fragments.
+9. **Compositeur** : 1,5 a 2,3 ms de GPU par image affichee a 120 Hz (`compositor/gpu_frametime`). L'A/B `debug.partyboard.layer_filter` (`normal`, `none`) reste a mesurer.
+10. **Attente du compositeur derriere le jeu**. La prediction du runtime (`Prd` dans les lignes VrApi) passe de 18 ms dans les menus a 34 ms des que le plateau est dessine : les copies GL et le compositeur attendent le rendu du jeu. Pistes : decouper le rendu des yeux en plusieurs soumissions, ou une priorite de file Vulkan si Dawn l'expose.
+
+### 3. Ensuite
+
+11. **72 Hz** (`debug.partyboard.display_hz 72`), a remesurer apres les points 6 a 8. Il faut 72 i/s tenus sur le plateau. Chaque image n'est alors montree qu'une fois : il n'y a plus de translation de la tete a corriger.
+12. **E, la profondeur pour le compositeur** : conception plus haut. A lancer seulement si son critere est rempli.
+13. **Mini-jeux au cas par cas**, avec des captures reproductibles. Ne pas modifier le temps de simulation pour obtenir une frequence d'affichage plus haute.
+14. **Fusion de `quest/lrz-uncut` dans `audio-local`**, par une PR, sur decision de l'utilisateur. `origin/audio-local` s'arrete a a1e1ada8 (PR #7 fusionnee en partie).
+
+### 4. Long terme : changement de backend
+
+- Une integration Dawn/Vulkan qui cible directement les images OpenXR, a la place des buffers Android partages et des copies GL. La bibliotheque Dawn precompilee actuelle ne fournit pas le chemin d'import/export necessaire.
+- Le vrai multiview et la foveation dans ce backend, avec detection des capacites et repli Quest 2/3. La foveation doit porter sur la passe 3D couteuse, pas sur une copie de presentation.
+- Une reconstruction temporelle, seulement avec des vecteurs de mouvement et un historique coherents (GX n'en fournit pas). Pas d'upscaling IA promis sans implementation ni mesure de cout.
 
 ## Sources Meta du plan
 
