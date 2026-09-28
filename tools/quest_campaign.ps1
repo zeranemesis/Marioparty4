@@ -1,23 +1,31 @@
-# One headset session for every live A/B switch: the player stays on the
-# same view (the Toad board, say) while this script flips one switch at a
-# time, keeps the game's log of each phase apart, and prints a table.
+# One headset session for many A/B switches: the player stays on the same
+# view (the Toad board, say) while this script flips one switch at a time,
+# keeps the game's log and the GPU's counters of each phase apart, and
+# prints one row per phase.
 #
-#   ./tools/quest_campaign.ps1                    # 7 phases of 45 s, about 6 minutes
-#   ./tools/quest_campaign.ps1 -PhaseSeconds 60
+#   ./tools/quest_campaign.ps1                  # live phases, about 6 minutes
+#   ./tools/quest_campaign.ps1 -RestartPhases   # then the startup switches:
+#                                               # the game restarts, the player
+#                                               # goes back to the board each time
 #
-# Only switches the game reads while running are used, so the game is never
-# restarted. Every switch is restored afterwards. Per phase, the first
-# -SettleSeconds are left out (a resolution change, pipelines being built).
-# Output in build/quest-campaign/<time>: the whole log, one log and
-# summary.json per phase (analyze_quest_performance.py), and campaign.csv.
+# Live phases use switches the game reads while running; the eyes'
+# resolution is pinned (debug.partyboard.eye_scale) so every phase draws the
+# same pixels. Per phase, the first -SettleSeconds are left out. Every
+# switch is restored afterwards. Output in build/quest-campaign/<time>: the
+# whole log and GPU counters, one folder per phase (phase.log, gpu.log,
+# summary.json from analyze_quest_performance.py) and campaign.csv.
 param(
     [string]$Serial,
-    [int]$PhaseSeconds = 45,
+    [int]$PhaseSeconds = 40,
     [int]$SettleSeconds = 10,
+    [int]$EyeScale = 95,
+    [switch]$RestartPhases,
+    # The scene the restart phases wait for (89: the Toad board), and how long.
+    [int]$Scene = 89,
+    [int]$SceneWaitSeconds = 300,
     [string]$OutputDirectory,
-    # Analyze a campaign log already recorded (no headset): its path, and the game's pid in it.
-    [string]$AnalyzeLog,
-    [string]$GamePid,
+    # Analyze a campaign already recorded (no headset): its folder.
+    [string]$AnalyzeDirectory,
     [string]$Sdk = "$env:LOCALAPPDATA/Android/Sdk"
 )
 $ErrorActionPreference = 'Stop'
@@ -25,68 +33,123 @@ if ($PhaseSeconds -lt 20 -or $PhaseSeconds -gt 600) { throw 'PhaseSeconds must b
 if ($SettleSeconds -lt 0 -or $SettleSeconds -ge $PhaseSeconds - 10) { throw 'SettleSeconds must leave at least 10 s per phase.' }
 $repo = Split-Path $PSScriptRoot -Parent
 $adb = Join-Path $Sdk 'platform-tools/adb.exe'
-if ($AnalyzeLog) {
-    if (-not $GamePid) { throw 'With -AnalyzeLog, give the game''s -GamePid.' }
-    if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repo "build/quest-campaign/analysis-$(Get-Date -Format yyyyMMdd-HHmmss)" }
-    New-Item -ItemType Directory -Force $OutputDirectory | Out-Null
-    $gamePid = $GamePid
-    $logPath = $AnalyzeLog
-    $marks = @(Get-Content $logPath -Encoding UTF8 | ForEach-Object { if ($_ -match 'PartyBoardCampaign: phase=(.+) start') { $Matches[1] } })
-} else {
-if (-not $Serial) {
-    $devices = @(& $adb devices | Where-Object { $_ -match '^([^\s]+)\s+device$' })
-    if ($devices.Count -ne 1) { throw 'Connect one headset or specify -Serial.' }
-    $Serial = ($devices[0] -split '\s+')[0]
-}
 $package = 'com.mariopartyrd.partyboard'
-$gamePid = (& $adb -s $Serial shell pidof $package).Trim()
-if (-not $gamePid) { throw 'Start the game and go to the view to measure first.' }
-if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repo "build/quest-campaign/$(Get-Date -Format yyyyMMdd-HHmmss)" }
-New-Item -ItemType Directory -Force $OutputDirectory | Out-Null
+$eye = "$EyeScale"
 
-# The live switches (read again every 2 s by the game) and the phases.
-$switches = @('debug.partyboard.sort_opaque', 'debug.partyboard.stereo_crossing', 'debug.partyboard.layer_filter')
-$phases = @(
-    @{ name = 'reference';      props = @{} },
-    @{ name = 'sort';           props = @{ 'debug.partyboard.sort_opaque' = '1' } },
-    @{ name = 'crossing';       props = @{ 'debug.partyboard.stereo_crossing' = '1' } },
-    @{ name = 'sort+crossing';  props = @{ 'debug.partyboard.sort_opaque' = '1'; 'debug.partyboard.stereo_crossing' = '1' } },
-    @{ name = 'filter-normal';  props = @{ 'debug.partyboard.layer_filter' = 'normal' } },
-    @{ name = 'filter-none';    props = @{ 'debug.partyboard.layer_filter' = 'none' } },
-    @{ name = 'reference-end';  props = @{} }  # the same as the first: heat and drift
+# Every switch a phase may set; each phase sets all of them (unset = default).
+$switches = @('debug.partyboard.sort_opaque', 'debug.partyboard.stereo_crossing', 'debug.partyboard.layer_filter',
+              'debug.partyboard.gpu_level', 'debug.partyboard.eye_scale', 'debug.partyboard.tev_overflow',
+              'debug.partyboard.xr_priority', 'debug.partyboard.stereo_msaa', 'debug.partyboard.opaque_blend')
+$live = @(
+    @{ name = 'reference';     props = @{ 'debug.partyboard.eye_scale' = $eye } },
+    @{ name = 'crossing-off';  props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.stereo_crossing' = '0' } },
+    @{ name = 'sort';          props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.sort_opaque' = '1' } },
+    @{ name = 'sort+blend-off'; props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.sort_opaque' = '1'; 'debug.partyboard.opaque_blend' = 'off' } },
+    @{ name = 'blend-off';     props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.opaque_blend' = 'off' } },
+    @{ name = 'gpu-boost';     props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.gpu_level' = 'boost' } },
+    @{ name = 'res-80';        props = @{ 'debug.partyboard.eye_scale' = '80' } },
+    @{ name = 'res-110';       props = @{ 'debug.partyboard.eye_scale' = '110' } },
+    @{ name = 'reference-end'; props = @{ 'debug.partyboard.eye_scale' = $eye } }
+)
+$restart = @(
+    @{ name = 'restart-reference';   props = @{ 'debug.partyboard.eye_scale' = $eye } },
+    @{ name = 'tev-overflow-all';    props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.tev_overflow' = 'all' } },
+    @{ name = 'xr-priority-off';     props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.xr_priority' = 'off' } },
+    @{ name = 'msaa-1';              props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.stereo_msaa' = '1' } }
 )
 
+function Adb([string[]]$arguments) { & $adb -s $Serial @arguments }
 function Set-Switch([string]$name, [string]$value) {
-    if ($value) { & $adb -s $Serial shell setprop $name $value } else { & $adb -s $Serial shell "setprop $name ''" }
+    if ($value) { Adb @('shell', 'setprop', $name, $value) } else { Adb @('shell', "setprop $name ''") }
     if ($LASTEXITCODE -ne 0) { throw "Cannot set $name on this headset." }
 }
-$previous = @{}
-foreach ($name in $switches) { $previous[$name] = (& $adb -s $Serial shell getprop $name).Trim() }
-
-$logPath = Join-Path $OutputDirectory 'campaign-logcat.txt'
-$logcat = Start-Process -FilePath $adb -ArgumentList @('-s', $Serial, 'logcat', '-v', 'threadtime', '-T', '1') `
-    -RedirectStandardOutput $logPath -NoNewWindow -PassThru
-$marks = @()
-try {
-    foreach ($phase in $phases) {
-        foreach ($name in $switches) {
-            Set-Switch $name ($(if ($phase.props.ContainsKey($name)) { $phase.props[$name] } else { '' }))
-        }
-        & $adb -s $Serial shell log -t PartyBoardCampaign "phase=$($phase.name) start" | Out-Null
-        Write-Output ("{0:HH:mm:ss} {1,-14} {2} s (stay still, same view)" -f (Get-Date), $phase.name, $PhaseSeconds)
-        Start-Sleep -Seconds $PhaseSeconds
-        & $adb -s $Serial shell log -t PartyBoardCampaign "phase=$($phase.name) end" | Out-Null
-        $marks += $phase.name
-    }
-} finally {
-    foreach ($name in $switches) { Set-Switch $name $previous[$name] }
+function Set-Phase($phase) {
+    foreach ($name in $switches) { Set-Switch $name ($(if ($phase.props.ContainsKey($name)) { $phase.props[$name] } else { '' })) }
+}
+function Mark([string]$text) { Adb @('shell', 'log', '-t', 'PartyBoardCampaign', $text) | Out-Null }
+function Start-Recording([string]$dir) {
+    $log = Start-Process -FilePath $adb -ArgumentList @('-s', $Serial, 'logcat', '-v', 'threadtime', '-T', '1') `
+        -RedirectStandardOutput (Join-Path $dir 'campaign-logcat.txt') -RedirectStandardError (Join-Path $dir 'logcat-err.txt') `
+        -WindowStyle Hidden -PassThru
+    # The GPU's counters once a second, each line stamped with the headset's clock.
+    $gpu = Start-Process -FilePath $adb -ArgumentList @('-s', $Serial, 'shell',
+        'ovrgpuprofiler --realtime=2,3,4,7,8,11,12,13,17,25,26,32,33,40 | while read l; do echo "$(date +%T) $l"; done') `
+        -RedirectStandardOutput (Join-Path $dir 'campaign-gpu.txt') -RedirectStandardError (Join-Path $dir 'gpu-err.txt') `
+        -WindowStyle Hidden -PassThru
+    return @($log, $gpu)
+}
+function Stop-Recording($processes) {
+    Adb @('shell', 'pkill -f ovrgpuprofiler') 2>$null | Out-Null
     Start-Sleep -Seconds 2
-    if (-not $logcat.HasExited) { Stop-Process -Id $logcat.Id }
+    foreach ($p in $processes) { if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -ErrorAction SilentlyContinue } }
 }
+function Wait-Scene([string]$logPath, [datetime]$since) {
+    $deadline = (Get-Date).AddSeconds($SceneWaitSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $hit = Select-String -Path $logPath -Pattern "PartyBoardQuest: Scene $Scene`: spatial rendering" -ErrorAction SilentlyContinue |
+            Select-Object -Last 1
+        if ($hit -and (Get-Item $logPath).LastWriteTime -gt $since -and $hit.LineNumber -gt $script:sceneLine) {
+            $script:sceneLine = $hit.LineNumber
+            return $true
+        }
+        Start-Sleep -Seconds 3
+    }
+    return $false
 }
 
-# Each phase: the game's lines between its marks, less the settling seconds.
+if ($AnalyzeDirectory) {
+    $OutputDirectory = $AnalyzeDirectory
+} else {
+    if (-not $Serial) {
+        $devices = @(& $adb devices | Where-Object { $_ -match '^([^\s]+)\s+device$' })
+        if ($devices.Count -ne 1) { throw 'Connect one headset or specify -Serial.' }
+        $Serial = ($devices[0] -split '\s+')[0]
+    }
+    if (-not (Adb @('shell', 'pidof', $package) | Out-String).Trim()) { throw 'Start the game and go to the view to measure first.' }
+    if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repo "build/quest-campaign/$(Get-Date -Format yyyyMMdd-HHmmss)" }
+    New-Item -ItemType Directory -Force $OutputDirectory | Out-Null
+    $previous = @{}
+    foreach ($name in $switches) { $previous[$name] = (Adb @('shell', 'getprop', $name) | Out-String).Trim() }
+    $recording = Start-Recording $OutputDirectory
+    $logPath = Join-Path $OutputDirectory 'campaign-logcat.txt'
+    $script:sceneLine = 0
+    try {
+        foreach ($phase in $live) {
+            Set-Phase $phase
+            Mark "phase=$($phase.name) start"
+            Write-Output ("{0:HH:mm:ss} {1,-18} {2} s (stay still, same view)" -f (Get-Date), $phase.name, $PhaseSeconds)
+            Start-Sleep -Seconds $PhaseSeconds
+            Mark "phase=$($phase.name) end"
+        }
+        if ($RestartPhases) {
+            foreach ($phase in $restart) {
+                Set-Phase $phase
+                Adb @('shell', 'am', 'force-stop', $package) | Out-Null
+                $since = Get-Date
+                Adb @('shell', 'am', 'start', '-n', "$package/.PartyBoardActivity") | Out-Null
+                Write-Output ("{0:HH:mm:ss} {1,-18} game restarted: go back to scene {2}, then stay still" -f (Get-Date), $phase.name, $Scene)
+                if (-not (Wait-Scene $logPath $since)) { Write-Warning "Scene $Scene not reached for $($phase.name); skipped."; continue }
+                Start-Sleep -Seconds 20 # the board's intro camera
+                Mark "phase=$($phase.name) start"
+                Write-Output ("{0:HH:mm:ss} {1,-18} {2} s (stay still, same view)" -f (Get-Date), $phase.name, $PhaseSeconds)
+                Start-Sleep -Seconds $PhaseSeconds
+                Mark "phase=$($phase.name) end"
+            }
+        }
+    } finally {
+        foreach ($name in $switches) { Set-Switch $name $previous[$name] }
+        Stop-Recording $recording
+    }
+}
+
+# Each phase: the game's lines and the GPU's counters between its marks, less
+# the settling seconds; then one row of medians and averages.
+$logPath = Join-Path $OutputDirectory 'campaign-logcat.txt'
+$gpuLines = @(Get-Content (Join-Path $OutputDirectory 'campaign-gpu.txt') -Encoding UTF8 -ErrorAction SilentlyContinue)
 $lines = Get-Content $logPath -Encoding UTF8
+$marks = @($lines | ForEach-Object { if ($_ -match 'PartyBoardCampaign: phase=(\S+) start') { $Matches[1] } })
+function Time-Of([string]$line) { [datetime]::ParseExact($line.Substring(6, 12), 'HH:mm:ss.fff', $null) }
+function Average($values) { if (@($values).Count) { [math]::Round((@($values) | Measure-Object -Average).Average, 2) } else { $null } }
 $rows = @()
 foreach ($name in $marks) {
     $start = -1; $end = -1
@@ -95,31 +158,47 @@ foreach ($name in $marks) {
         elseif ($start -ge 0 -and $lines[$i] -match "PartyBoardCampaign: phase=$([regex]::Escape($name)) end") { $end = $i; break }
     }
     if ($start -lt 0 -or $end -lt 0) { Write-Warning "No marks for $name"; continue }
-    $t0 = [datetime]::ParseExact($lines[$start].Substring(6, 12), 'HH:mm:ss.fff', $null)
-    $phaseLines = $lines[($start + 1)..($end - 1)] | Where-Object {
-        $_.Length -gt 30 -and $_.Substring(19).TrimStart().StartsWith("$gamePid ") -and
-        ([datetime]::ParseExact($_.Substring(6, 12), 'HH:mm:ss.fff', $null) - $t0).TotalSeconds -ge $SettleSeconds
-    }
+    $t0 = (Time-Of $lines[$start]).AddSeconds($SettleSeconds)
+    $t1 = Time-Of $lines[$end]
+    $phaseLines = @($lines[($start + 1)..($end - 1)] | Where-Object {
+        $_.Length -gt 30 -and $_.Substring(0, 2) -match '\d\d' -and (Time-Of $_) -ge $t0 })
+    $gamePid = ($phaseLines | Where-Object { $_ -match 'PartyBoardQuest: ' } | Select-Object -First 1)
+    $gamePid = if ($gamePid) { ($gamePid.Substring(19).TrimStart() -split '\s+')[0] } else { '' }
+    $game = @($phaseLines | Where-Object { $_.Substring(19).TrimStart().StartsWith("$gamePid ") })
+    $gpu = @($gpuLines | Where-Object {
+        $_.Length -gt 9 -and ($_.Substring(0, 8) -ge $t0.ToString('HH:mm:ss')) -and ($_.Substring(0, 8) -lt $t1.ToString('HH:mm:ss')) })
     $dir = Join-Path $OutputDirectory ($name -replace '[^\w-]', '_')
     New-Item -ItemType Directory -Force $dir | Out-Null
-    $phaseLog = Join-Path $dir 'phase.log'
-    Set-Content -Path $phaseLog -Value $phaseLines -Encoding UTF8
-    py -3 (Join-Path $repo 'tools/analyze_quest_performance.py') $phaseLog --output $dir | Out-Null
+    Set-Content -Path (Join-Path $dir 'phase.log') -Value $game -Encoding UTF8
+    Set-Content -Path (Join-Path $dir 'gpu.log') -Value $gpu -Encoding UTF8
+    py -3 (Join-Path $repo 'tools/analyze_quest_performance.py') (Join-Path $dir 'phase.log') --output $dir | Out-Null
     $summary = Get-Content (Join-Path $dir 'summary.json') -Raw | ConvertFrom-Json
     $median = { param($block, $key) if ($block -and $block.$key) { $block.$key.median } else { $null } }
-    $gpu = @($phaseLines | ForEach-Object { if ($_ -match 'device/gpu_utilization=([\d.]+)') { [double]$Matches[1] } })
+    $counter = { param($label) @($gpu | Where-Object { $_ -match [regex]::Escape($label) } | ForEach-Object { [double](($_ -split ':')[-1].Trim()) }) }
+    $number = { param($pattern) @($game | ForEach-Object { if ($_ -match $pattern) { [double]$Matches[1] } }) }
+    $images = & $median $summary.metrics 'world_new_hz'
+    $res = & $median $summary.metrics 'resolution_percent'
+    $fragments = Average (& $counter 'Fragments Shaded / Second')
     $rows += [pscustomobject]@{
-        phase             = $name
-        game_fps          = & $median $summary.game 'frames_per_s'
-        stutters          = & $median $summary.game 'stutters'
-        world_new_hz      = & $median $summary.metrics 'world_new_hz'
-        off_cadence_pct   = & $median $summary.metrics 'off_cadence_percent'
-        resolution_pct    = & $median $summary.metrics 'resolution_percent'
-        latency_ms        = & $median $summary.metrics 'latency_ms'
-        gpu_util_pct      = if ($gpu.Count) { [math]::Round(($gpu | Measure-Object -Average).Average, 1) } else { $null }
-        draws_per_eye     = & $median $summary.draws 'world_draws_avg'
+        phase            = $name
+        images_s         = $images
+        stutters         = & $median $summary.game 'stutters'
+        off_cadence_pct  = if ($null -ne (& $median $summary.metrics 'off_cadence_percent')) { [math]::Round((& $median $summary.metrics 'off_cadence_percent'), 1) } else { $null }
+        res_pct          = $res
+        # Fragments per new image, for the pinned resolution: what a switch saves.
+        frag_M_image     = if ($fragments -and $images) { [math]::Round($fragments / $images / 1e6, 1) } else { $null }
+        gpu_util_pct     = Average (& $counter 'GPU % Utilization')
+        gpu_MHz          = if ($f = Average (& $counter 'GPU Frequency')) { [math]::Round($f / 1e6) } else { $null }
+        tex_stall_pct    = Average (& $counter '% Texture Fetch Stall')
+        mem_stall_pct    = Average (& $counter '% Stalled on System Memory')
+        read_GB_s        = if ($r = Average (& $counter 'Read Total')) { [math]::Round($r / 1e9, 2) } else { $null }
+        compositor_ms    = Average (& $number 'compositor/gpu_frametime=([\d.]+)ms')
+        motion_photon_ms = Average (& $number 'app/motion_to_photon_latency=([\d.]+)ms')
+        predicted_ms     = Average (& $number 'VrApi\s*: FPS=.*?Prd=(\d+)ms')
+        draws_eye        = & $median $summary.draws 'world_draws_avg'
     }
 }
 $rows | Export-Csv -Path (Join-Path $OutputDirectory 'campaign.csv') -NoTypeInformation -Encoding UTF8
-$rows | Format-Table -AutoSize | Out-String -Width 200
+$rows | Format-Table phase, images_s, stutters, off_cadence_pct, res_pct, frag_M_image, gpu_util_pct, gpu_MHz -AutoSize | Out-String
+$rows | Format-Table phase, tex_stall_pct, mem_stall_pct, read_GB_s, compositor_ms, motion_photon_ms, predicted_ms, draws_eye -AutoSize | Out-String
 Write-Output "Output: $OutputDirectory"
