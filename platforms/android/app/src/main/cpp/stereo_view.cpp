@@ -198,6 +198,7 @@ bool StereoView::init(XrInstance instance, XrSession session, XrSystemId system,
   mHudImages.assign(imageCount, {XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR});
   xrEnumerateSwapchainImages(mHudSwapchain, imageCount, &imageCount,
                             reinterpret_cast<XrSwapchainImageBaseHeader*>(mHudImages.data()));
+  create_hud_screen();
 
   // The images the game draws into, exactly the size it draws.
   const auto [width, height] = eye_size(mRenderScale);
@@ -347,6 +348,10 @@ void StereoView::destroy() {
   if (mHudSwapchain != XR_NULL_HANDLE) {
     xrDestroySwapchain(mHudSwapchain);
     mHudSwapchain = XR_NULL_HANDLE;
+  }
+  if (mHudScreenSwapchain != XR_NULL_HANDLE) {
+    xrDestroySwapchain(mHudScreenSwapchain);
+    mHudScreenSwapchain = XR_NULL_HANDLE;
   }
   mHudShown = false;
   mShown = false;
@@ -566,6 +571,11 @@ bool StereoView::world_only() const {
 bool StereoView::screen_required() const {
   std::lock_guard lock{mMutex};
   return mScreenRequired;
+}
+
+bool StereoView::minigame_mode() const {
+  std::lock_guard lock{mMutex};
+  return !mScreenRequired && !mBoardMode;
 }
 
 void StereoView::submitted(uint32_t image, uint64_t tag, int syncFd, bool hasWorld) {
@@ -905,6 +915,88 @@ const XrCompositionLayerBaseHeader* StereoView::hud_layer(XrSpace space, const X
   mHudLayer.pose = pose;
   mHudLayer.size = size;
   return reinterpret_cast<const XrCompositionLayerBaseHeader*>(&mHudLayer);
+}
+
+// The interface's screen: a static image, a bezel around a dark face, drawn
+// once (GL context current). Without it the interface shows on its own.
+void StereoView::create_hud_screen() {
+  constexpr int kWidth = 256, kHeight = 192; // the interface's 4:3
+  XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+  info.createFlags = XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT;
+  info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+  info.format = mSwapchainFormat;
+  info.sampleCount = 1;
+  info.width = kWidth;
+  info.height = kHeight;
+  info.faceCount = 1;
+  info.arraySize = 1;
+  info.mipCount = 1;
+  if (!check(mInstance, xrCreateSwapchain(mSession, &info, &mHudScreenSwapchain), "xrCreateSwapchain (HUD screen)")) {
+    mHudScreenSwapchain = XR_NULL_HANDLE;
+    return;
+  }
+  uint32_t count = 0;
+  xrEnumerateSwapchainImages(mHudScreenSwapchain, 0, &count, nullptr);
+  std::vector<XrSwapchainImageOpenGLESKHR> images(count, {XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR});
+  xrEnumerateSwapchainImages(mHudScreenSwapchain, count, &count,
+                             reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data()));
+  uint32_t index = 0;
+  XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+  XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+  wait.timeout = XR_INFINITE_DURATION;
+  if (count == 0 || XR_FAILED(xrAcquireSwapchainImage(mHudScreenSwapchain, &acquire, &index)) ||
+      XR_FAILED(xrWaitSwapchainImage(mHudScreenSwapchain, &wait))) {
+    xrDestroySwapchain(mHudScreenSwapchain);
+    mHudScreenSwapchain = XR_NULL_HANDLE;
+    return;
+  }
+  // The bezel's width in pixels: kHudBezel of the interface's width on each
+  // side of a quad that is the interface plus its bezel.
+  const auto bezel = static_cast<GLint>(std::lround(kWidth * kHudBezel / (1.0f + 2.0f * kHudBezel)));
+  GLuint framebuffer = 0;
+  glGenFramebuffers(1, &framebuffer);
+  glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, images[index].image, 0);
+  const bool complete = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+  if (complete) {
+    // Linear colors (the image is sRGB), alpha premultiplied: a dark grey
+    // bezel, and a nearly black face that lets a little of the room through.
+    glViewport(0, 0, kWidth, kHeight);
+    glClearColor(0.035f, 0.035f, 0.045f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    constexpr float kFaceAlpha = 0.88f;
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(bezel, bezel, kWidth - 2 * bezel, kHeight - 2 * bezel);
+    glClearColor(0.003f * kFaceAlpha, 0.004f * kFaceAlpha, 0.008f * kFaceAlpha, kFaceAlpha);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_SCISSOR_TEST);
+  }
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  glDeleteFramebuffers(1, &framebuffer);
+  glFinish();
+  XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+  xrReleaseSwapchainImage(mHudScreenSwapchain, &release);
+  if (!complete) {
+    LOGW("Stereo: HUD screen unavailable (framebuffer incomplete)");
+    xrDestroySwapchain(mHudScreenSwapchain);
+    mHudScreenSwapchain = XR_NULL_HANDLE;
+  }
+}
+
+const XrCompositionLayerBaseHeader* StereoView::hud_screen_layer(XrSpace space, const XrPosef& pose, XrExtent2Df size) {
+  if (!world_visible() || !mHudShown || mHudScreenSwapchain == XR_NULL_HANDLE) return nullptr;
+  mHudScreenLayer = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+  mHudScreenLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+  mHudScreenLayer.space = space;
+  mHudScreenLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+  mHudScreenLayer.subImage.swapchain = mHudScreenSwapchain;
+  mHudScreenLayer.subImage.imageRect = {{0, 0}, {256, 192}};
+  mHudScreenLayer.pose = pose;
+  // The interface's size plus the bezel on each side (the same in both
+  // directions, as on a real screen).
+  const float bezel = size.width * kHudBezel;
+  mHudScreenLayer.size = {size.width + 2.0f * bezel, size.height + 2.0f * bezel};
+  return reinterpret_cast<const XrCompositionLayerBaseHeader*>(&mHudScreenLayer);
 }
 
 } // namespace quest

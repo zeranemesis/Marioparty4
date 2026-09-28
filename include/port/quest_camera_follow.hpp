@@ -3,11 +3,12 @@
 #include <cmath>
 
 namespace partyboard::quest {
-// The model on the table seen from the game camera's side: it turns so that
-// what the camera looks at lies ahead of the player (the stick's "up" goes away
-// from them, as on the screen), and on a board the player whose turn it is
-// comes to the table's center. Only a camera at rest is followed: fly-overs
-// and orbits leave the model still, and small sways are ignored.
+// A minigame seen from its camera's point of view: the model floats where the
+// board's screen stands (quest_xr.cpp) and turns so that the player sees it
+// as the camera does, from the same side and the same height above the arena.
+// Only a camera at rest is followed: fly-overs and orbits leave the model
+// still, and small sways are ignored. Boards stay as placed: a board sliding
+// or turning with the turns made the player sick (2026-09-28).
 
 constexpr float kPi = 3.14159265358979323846f;
 
@@ -29,6 +30,30 @@ inline bool camera_yaw(const float view[3][4], float& yaw) {
     return false;
 }
 
+// How high the camera stands above what it looks at: the angle of its back
+// axis above the horizontal, pi/2 looking straight down.
+inline bool camera_pitch(const float view[3][4], float& pitch) {
+    const float backY = view[2][1];
+    if (!std::isfinite(backY)) {
+        return false;
+    }
+    pitch = std::asin(std::fmax(-1.0f, std::fmin(backY, 1.0f)));
+    return true;
+}
+
+// The rotation (rows) that turns the game world so the camera at `yaw` and
+// `pitch` looks along -Z: its back axis goes to +Z, its up to +Y. Seen from
+// +Z, the model looks as it does through the camera.
+inline void camera_turn(float yaw, float pitch, float rows[3][3]) {
+    const float c = std::cos(yaw), s = std::sin(yaw), cp = std::cos(pitch), sp = std::sin(pitch);
+    const float turned[3][3] = {{c, 0.0f, -s}, {-sp * s, cp, -sp * c}, {cp * s, sp, cp * c}};
+    for (int r = 0; r < 3; ++r) {
+        for (int k = 0; k < 3; ++k) {
+            rows[r][k] = turned[r][k];
+        }
+    }
+}
+
 // b - a, the short way round, in -pi..pi.
 inline float angle_between(float a, float b) {
     return std::remainder(b - a, 2.0f * kPi);
@@ -41,68 +66,53 @@ public:
     static constexpr float kMinTurn = 8.0f * kPi / 180.0f;
     static constexpr float kTurnSeconds = 0.35f;
     static constexpr float kMaxTurnSpeed = 90.0f * kPi / 180.0f; // per second
-    // The focus is in the fitted scene's units (2800 across the scene).
-    static constexpr float kFocusDeadZone = 100.0f;
-    static constexpr float kFocusSeconds = 0.6f;
-    static constexpr float kMaxFocusSpeed = 1400.0f; // per second
 
     // Entering a scene: its first view is taken at once.
-    void reset(float yaw, float focusX, float focusZ)
+    void reset(float yaw, float pitch = 0.0f)
     {
         mYaw = mTargetYaw = mRestYaw = std::isfinite(yaw) ? yaw : 0.0f;
+        mPitch = mTargetPitch = mRestPitch = std::isfinite(pitch) ? pitch : 0.0f;
         mRestTime = 0.0f;
-        mFocusX = mTargetX = focusX;
-        mFocusZ = mTargetZ = focusZ;
     }
 
-    // Each frame: the camera's yaw (NaN when unknown), the point to bring to
-    // the table's center, and the seconds since the previous frame.
-    void update(float cameraYaw, float focusX, float focusZ, float dt)
+    // Each frame: the camera's yaw and pitch (NaN when unknown), and the
+    // seconds since the previous frame.
+    void update(float cameraYaw, float cameraPitch, float dt)
     {
         if (!(dt > 0.0f) || !std::isfinite(dt)) {
             return;
         }
         dt = std::fmin(dt, 0.1f);
         if (std::isfinite(cameraYaw)) {
-            if (std::abs(angle_between(mRestYaw, cameraYaw)) > kRestTolerance) {
+            const float pitch = std::isfinite(cameraPitch) ? cameraPitch : mRestPitch;
+            if (std::abs(angle_between(mRestYaw, cameraYaw)) > kRestTolerance
+                || std::abs(pitch - mRestPitch) > kRestTolerance) {
                 mRestYaw = cameraYaw;
+                mRestPitch = pitch;
                 mRestTime = 0.0f;
             } else {
                 mRestTime += dt;
-                if (mRestTime >= kRestSeconds && std::abs(angle_between(mTargetYaw, mRestYaw)) >= kMinTurn) {
+                if (mRestTime >= kRestSeconds
+                    && (std::abs(angle_between(mTargetYaw, mRestYaw)) >= kMinTurn
+                        || std::abs(mRestPitch - mTargetPitch) >= kMinTurn)) {
                     mTargetYaw = mRestYaw;
+                    mTargetPitch = mRestPitch;
                 }
             }
         }
         const float ease = 1.0f - std::exp(-dt / kTurnSeconds);
-        float turn = angle_between(mYaw, mTargetYaw) * ease;
         const float maxTurn = kMaxTurnSpeed * dt;
-        turn = std::fmax(-maxTurn, std::fmin(turn, maxTurn));
+        const float turn = std::fmax(-maxTurn, std::fmin(angle_between(mYaw, mTargetYaw) * ease, maxTurn));
         mYaw = std::remainder(mYaw + turn, 2.0f * kPi);
-
-        if (std::isfinite(focusX) && std::isfinite(focusZ)
-            && std::hypot(focusX - mTargetX, focusZ - mTargetZ) > kFocusDeadZone) {
-            mTargetX = focusX;
-            mTargetZ = focusZ;
-        }
-        const float slide = 1.0f - std::exp(-dt / kFocusSeconds);
-        float dx = (mTargetX - mFocusX) * slide, dz = (mTargetZ - mFocusZ) * slide;
-        const float step = std::hypot(dx, dz), maxStep = kMaxFocusSpeed * dt;
-        if (step > maxStep) {
-            dx *= maxStep / step;
-            dz *= maxStep / step;
-        }
-        mFocusX += dx;
-        mFocusZ += dz;
+        mPitch += std::fmax(-maxTurn, std::fmin((mTargetPitch - mPitch) * ease, maxTurn));
     }
 
     float yaw() const { return mYaw; }
-    float focus_x() const { return mFocusX; }
-    float focus_z() const { return mFocusZ; }
+    float pitch() const { return mPitch; }
 
 private:
-    float mYaw = 0.0f, mTargetYaw = 0.0f;
-    float mRestYaw = 0.0f, mRestTime = 0.0f;
-    float mFocusX = 0.0f, mFocusZ = 0.0f, mTargetX = 0.0f, mTargetZ = 0.0f;
+    float mYaw = 0.0f, mTargetYaw = 0.0f, mRestYaw = 0.0f;
+    float mPitch = 0.0f, mTargetPitch = 0.0f, mRestPitch = 0.0f;
+    float mRestTime = 0.0f;
 };
 }
