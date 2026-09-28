@@ -1,6 +1,7 @@
 #include "../../platforms/android/app/src/main/cpp/adaptive_quality.hpp"
 #include "../../extern/aurora/lib/gfx/rgba_mips.hpp"
 #include "rgba_mips_reference.hpp"
+#include "../../include/port/quest_scene_fit.hpp"
 #include <cassert>
 #include <chrono>
 #include <cstdio>
@@ -156,5 +157,17 @@ int main() {
   const double before = time([&] { (void)reference::rgba_mip_chain(big.data(), 512, 512); });
   const double after = time([&] { (void)aurora::gfx::rgba_mip_chain(big.data(), 512, 512); });
   std::printf("512x512 mip chain: %.2f ms with pow per texel, %.2f ms with the lookup\n", before, after);
+  // Instanced stereo without the cut: only a sphere wholly inside both eyes'
+  // sides (identity clip: w = 1, sides at x = -1 and x = 1).
+  float eyes[2][16]{};
+  for (int eye = 0; eye < 2; ++eye) for (int d = 0; d < 4; ++d) eyes[eye][d * 5] = 1;
+  const float middle[3]{0, 0, -0.5f}, nearEdge[3]{0.9f, 0, -0.5f}, beyond[3]{1.5f, 0, -0.5f};
+  assert(partyboard::quest::sphere_inside_eye_sides(eyes, middle, 0.1f));
+  assert(!partyboard::quest::sphere_inside_eye_sides(eyes, nearEdge, 0.1f)); // 0.1 from the side, margin 1.5
+  assert(partyboard::quest::sphere_inside_eye_sides(eyes, nearEdge, 0.05f));
+  assert(!partyboard::quest::sphere_inside_eye_sides(eyes, beyond, 0.1f));
+  assert(!partyboard::quest::sphere_inside_eye_sides(eyes, middle, NAN));
+  eyes[1][3] = 0.95f; // the right eye sees the scene shifted: middle now near its left side
+  assert(!partyboard::quest::sphere_inside_eye_sides(eyes, middle, 0.1f));
   std::puts("PASS: GPU/CPU decisions, freshness, recovery, profile bounds, gamma, alpha and NPOT mipmaps");
 }

@@ -10,7 +10,7 @@
          lib/gfx/tex_palette_conv.cpp
 --- /dev/null
 +++ b/include/aurora/stereo.h
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,55 @@
 +#ifndef AURORA_STEREO_H
 +#define AURORA_STEREO_H
 +
@@ -56,6 +56,10 @@
 +// The headset does not show the game's own frame (the model replaces it):
 +// the frame is still drawn for the eyes, but not presented to the screen.
 +void AuroraStereoHideScreen(bool hidden);
++// The draws that follow cannot reach the other eye (the game tested their
++// bounds): drawn for both eyes at once, they skip the cut at the eye's edge,
++// which costs the GPU its early depth rejection. Back to false after them.
++void AuroraStereoSetUncut(bool uncut);
 +
 +#ifdef __cplusplus
 +}
@@ -293,7 +297,7 @@
        .label = passInfo.label.empty() ? label.c_str() : passInfo.label.c_str(),
 --- /dev/null
 +++ b/lib/gfx/stereo.cpp
-@@ -0,0 +1,614 @@
+@@ -0,0 +1,632 @@
 +#include "stereo.hpp"
 +
 +#include <aurora/stereo.h>
@@ -383,6 +387,8 @@
 +bool g_recording = false;
 +bool g_worldMergeable = false;
 +bool g_worldOnly = false;
++// The draws being recorded cannot reach the other eye (AuroraStereoSetUncut).
++bool g_uncut = false;
 +int32_t g_image = -1;
 +uint64_t g_frameTag = 0;
 +bool g_loggedGeometry = false;
@@ -565,7 +571,7 @@
 +      !g_instancedDisabled.load(std::memory_order_relaxed) &&
 +      info.lineMode == 0 && draw.instanceCount == 1 && gx::stereo_instanced_fits(info)) {
 +    auto instancedConfig = spatialConfig;
-+    instancedConfig.shaderConfig.stereo = mode;
++    instancedConfig.shaderConfig.stereo = g_uncut ? gx::StereoUncut : mode;
 +    // One pipeline request per draw: pipeline_ref skips the cache's lock when
 +    // a draw asks for the same pipeline as the one before, the usual case.
 +    const auto instancedRef = pipeline_ref(instancedConfig);
@@ -620,6 +626,7 @@
 +void end_frame() noexcept {
 +#if defined(__ANDROID__)
 +  g_worldMergeable = false;
++  g_uncut = false;
 +  g_recording = false;
 +  // Even without geometry, clear and submit the leased image. Dropping it
 +  // leaks a ring slot and leaves the preceding scene visible in the room.
@@ -899,6 +906,21 @@
 +#endif
 +}
 +
++extern "C" void AuroraStereoSetUncut(bool uncut) {
++#if defined(__ANDROID__)
++  if (aurora::gfx::stereo::g_uncut == uncut) {
++    return;
++  }
++  // The FIFO is deferred: its draws so far go with the previous value, and
++  // none is merged across the change.
++  aurora::gx::fifo::drain();
++  aurora::gfx::stereo::g_uncut = uncut;
++  aurora::gfx::stereo::g_worldMergeable = false;
++#else
++  (void)uncut;
++#endif
++}
++
 +extern "C" void AuroraStereoWorldOnly(bool enabled) {
 +#if defined(__ANDROID__)
 +  // The FIFO is deferred: process camera draws before changing the scope.
@@ -1175,12 +1197,12 @@
    bool le = true;
    bool nbt3 = false;     // GX_NRM_NBT3
  };
-+enum : u8 { StereoOff = 0, StereoClipDistance = 1, StereoDiscard = 2 };
++enum : u8 { StereoOff = 0, StereoClipDistance = 1, StereoDiscard = 2, StereoUncut = 3 };
 +
  struct ShaderConfig {
    u8 fogType = GX_FOG_NONE;
    u8 vtxStride = 0;
-@@ -465,7 +467,13 @@
+@@ -465,7 +467,14 @@
    // recorded before this stay valid and the shipped cache seed is unaffected.
    u8 ztexOp : 2 = 0;
    u8 ztexFmt : 2 = 0;
@@ -1190,7 +1212,8 @@
 +  // spare bits: 0 everywhere else, so other pipelines keep their hash.
 +  // StereoClipDistance cuts each eye at its edge with a clip distance;
 +  // StereoDiscard, for drivers that fail those pipelines (Adreno), with a
-+  // fragment test instead.
++  // fragment test instead; StereoUncut, for draws that cannot reach the other
++  // eye, not at all.
 +  u8 stereo : 2 = 0;
    u8 pad2 = 0;
    std::array<AttrConfig, MaxVtxAttr> attrs;
@@ -1287,7 +1310,7 @@
  std::string build_shader_source(const ShaderConfig& config) noexcept {
    ZoneScoped;
    const auto hash = xxh3_hash(config);
-@@ -1003,7 +1037,28 @@
+@@ -1003,7 +1037,29 @@
                                    attr_load_nbt_slice(config, NbtSlice::T, vidxAttr));
    }
  
@@ -1312,12 +1335,13 @@
 +        "\n    out.pos.x = out.pos.x * eye_x.x + eye_x.y * out.pos.w;"
 +        "\n    {} = select(ubuf.stereo_clip.x * out.pos.w - out.pos.x,"
 +        "\n                                out.pos.x - ubuf.stereo_clip.y * out.pos.w, right_eye);",
-+        vtx_attr(config, GX_VA_POS), config.stereo == StereoDiscard ? "out.stereo_side" : "out.stereo_clip[0]");
++        vtx_attr(config, GX_VA_POS),
++        config.stereo == StereoDiscard ? "out.stereo_side" : config.stereo == StereoUncut ? "_" : "out.stereo_clip[0]");
 +  } else if (config.lineMode == 0) {
      vtxXfrAttrsPre += fmt::format(
          "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
          "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;",
-@@ -1051,6 +1106,13 @@
+@@ -1051,6 +1107,13 @@
    }
  
    uniBufAttrs += "\n    proj: mat4x4f,";
@@ -1331,7 +1355,7 @@
    uniBufAttrs += fmt::format("\n    postex_mtx: array<mat3x4f, {}>,", MaxPnMtx + MaxTexMtx);
    uniBufAttrs += fmt::format("\n    nrm_mtx: array<mat3x4f, {}>,", MaxPnMtx);
    std::string fragmentFnPre;
-@@ -1632,7 +1694,7 @@
+@@ -1632,7 +1695,7 @@
      fragmentFn += "\n    prev = vec4f(in.nrm, prev.a);";
    }
  
@@ -1340,7 +1364,7 @@
  fn bswap32(v: u32, le: bool) -> u32 {{
    if (le) {{
      return v;
-@@ -1997,6 +2059,11 @@
+@@ -1997,6 +2060,11 @@
                                          uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn,
                                          fragmentFnPre, vtxXfrAttrsPre, uniformPre, fragOutStruct, fragRetType,
                                          fragRetStmt);
