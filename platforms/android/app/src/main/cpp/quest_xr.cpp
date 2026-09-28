@@ -388,8 +388,35 @@ bool create_egl(Egl& egl) {
     LOGW("No EGL config");
     return false;
   }
+  // The copies into the headset's images run on this context. On the board
+  // the headset predicted its frames about 70 ms ahead (VrApi Prd), up from
+  // 18 ms in the menus: these copies waited behind the game's rendering on
+  // the GPU. A high-priority context lets them go first where the driver
+  // allows it (EGL_IMG_context_priority). debug.partyboard.xr_priority
+  // medium|off, read at startup, for an A/B.
+  constexpr EGLint kPriorityLevel = 0x3100; // EGL_CONTEXT_PRIORITY_LEVEL_IMG
+  constexpr EGLint kPriorityHigh = 0x3101, kPriorityMedium = 0x3102;
+  char priority[PROP_VALUE_MAX] = {};
+  __system_property_get("debug.partyboard.xr_priority", priority);
+  const char* extensions = eglQueryString(egl.display, EGL_EXTENSIONS);
+  const bool canPrioritize = extensions != nullptr && std::strstr(extensions, "EGL_IMG_context_priority") != nullptr;
+  const EGLint wanted = std::strcmp(priority, "off") == 0 ? 0 : std::strcmp(priority, "medium") == 0 ? kPriorityMedium
+                                                                                                       : kPriorityHigh;
+  const EGLint prioritized[] = {EGL_CONTEXT_CLIENT_VERSION, 3, kPriorityLevel, wanted, EGL_NONE};
   const EGLint contextAttributes[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
-  egl.context = eglCreateContext(egl.display, egl.config, EGL_NO_CONTEXT, contextAttributes);
+  egl.context = eglCreateContext(egl.display, egl.config, EGL_NO_CONTEXT,
+                                 canPrioritize && wanted != 0 ? prioritized : contextAttributes);
+  if (egl.context == EGL_NO_CONTEXT && canPrioritize && wanted != 0) {
+    egl.context = eglCreateContext(egl.display, egl.config, EGL_NO_CONTEXT, contextAttributes);
+  }
+  EGLint obtained = 0;
+  if (egl.context != EGL_NO_CONTEXT && canPrioritize) {
+    eglQueryContext(egl.display, egl.context, kPriorityLevel, &obtained);
+  }
+  LOGI("XR GL context priority: asked %s, got %s (debug.partyboard.xr_priority=%s)",
+       !canPrioritize ? "nothing (no EGL_IMG_context_priority)" : wanted == kPriorityHigh ? "high" : wanted ? "medium" : "default",
+       obtained == kPriorityHigh ? "high" : obtained == kPriorityMedium ? "medium" : obtained == 0x3103 ? "low" : "default",
+       priority[0] != '\0' ? priority : "unset");
   const EGLint pbufferAttributes[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
   egl.pbuffer = eglCreatePbufferSurface(egl.display, egl.config, pbufferAttributes);
   if (egl.context == EGL_NO_CONTEXT || egl.pbuffer == EGL_NO_SURFACE ||
@@ -709,9 +736,29 @@ float current_refresh_rate(const App& app) {
 
 // The game emulates a console on the CPU and renders up to 4K: ask for the
 // highest levels the headset sustains without throttling.
-void request_performance(const App& app) {
+// Read again every 2 s from the frame loop, so a capture can compare the GPU
+// levels in one session; the levels are asked again only when it changes.
+void request_performance(const App& app, bool sessionStart = false) {
   if (!app.extensions.performance) {
     return;
+  }
+  static std::string applied = "<none>";
+  if (sessionStart) {
+    applied = "<none>"; // a new session: ask again
+  }
+  static auto checkedAt = std::chrono::steady_clock::time_point{};
+  const auto now = std::chrono::steady_clock::now();
+  if (applied != "<none>" && now - checkedAt < std::chrono::seconds(2)) {
+    return;
+  }
+  checkedAt = now;
+  {
+    char current[PROP_VALUE_MAX] = {};
+    __system_property_get("debug.partyboard.gpu_level", current);
+    if (applied == current) {
+      return;
+    }
+    applied = current;
   }
   auto set = proc<PFN_xrPerfSettingsSetPerformanceLevelEXT>(app.instance, "xrPerfSettingsSetPerformanceLevelEXT");
   if (set != nullptr) {
@@ -1281,7 +1328,7 @@ bool poll_events(App& app, JNIEnv* env) {
         begin.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
         app.running = check(app.instance, xrBeginSession(app.session, &begin), "xrBeginSession");
         if (app.running) {
-          request_performance(app);
+          request_performance(app, true);
         }
       } else if (app.state == XR_SESSION_STATE_STOPPING) {
         xrEndSession(app.session);
@@ -1321,6 +1368,7 @@ bool poll_events(App& app, JNIEnv* env) {
 }
 
 void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
+  request_performance(app); // debug.partyboard.gpu_level, every 2 s
   XrFrameState frame{XR_TYPE_FRAME_STATE};
   if (!check(app.instance, xrWaitFrame(app.session, nullptr, &frame), "xrWaitFrame")) {
     return;

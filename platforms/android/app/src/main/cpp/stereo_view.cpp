@@ -6,6 +6,7 @@
 #include <linux/sync_file.h>
 #include <sys/ioctl.h>
 #include <sys/system_properties.h>
+#include <cstdlib>
 
 #include <algorithm>
 #include <cmath>
@@ -495,6 +496,14 @@ void StereoView::adapt_resolution() {
   mLastSlow = slow;
   const float measuredScale = mQuality.update(mQualitySample, wanted, mAdaptRingFull, slow);
   mRenderScale = std::min(1.0f, measuredScale / mMaxScale);
+  // debug.partyboard.eye_scale <percent of recommended, 50 to 125>: a fixed
+  // resolution instead of the adaptive one, read every second, so an A/B
+  // capture (tools/quest_campaign.ps1) compares the same pixels.
+  char pinned[PROP_VALUE_MAX] = {};
+  __system_property_get("debug.partyboard.eye_scale", pinned);
+  if (const float percent = std::strtof(pinned, nullptr); percent >= 50.0f && percent <= 125.0f) {
+    mRenderScale = std::min(1.0f, percent / 100.0f / mMaxScale);
+  }
   mAdaptLeases = mAdaptRingFull = 0;
   // New images only when they must grow, or have been far too large for a
   // while; layer() reallocates once the ring is empty.
