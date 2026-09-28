@@ -442,8 +442,15 @@ bool StereoView::images(void** buffers, uint32_t capacity, uint32_t& count, uint
   if (capacity < mSlots.size() || mSlots[0].buffer == nullptr) {
     return false;
   }
+  // Each buffer gets a reference for the caller, who imports it outside this
+  // lock: the XR thread may replace the images meanwhile (a resize, or the
+  // interface's size set at session start) and release its own references.
+  // A buffer freed under the import aborted the game in Dawn ("Unsupported
+  // VkFormat 0", Quest 3, 2026-09-28). The caller hands them back with
+  // PartyBoardQuest_StereoReleaseImages once imported.
   for (size_t i = 0; i < mSlots.size(); ++i) {
     buffers[i] = mSlots[i].buffer;
+    AHardwareBuffer_acquire(mSlots[i].buffer);
   }
   count = static_cast<uint32_t>(mSlots.size());
   width = std::max(mImageEyeWidth * 2, mHudPixelsWidth);
@@ -829,6 +836,15 @@ __attribute__((visibility("default"))) bool PartyBoardQuest_StereoImages(void** 
   quest::StereoView* view = quest::g_stereoView;
   return view != nullptr && view->images(buffers, capacity, *count, *width, *height, *generation,
                                         *eyeHeight, *hudWidth, *hudHeight);
+}
+
+// Game thread: the references PartyBoardQuest_StereoImages gave, once imported.
+__attribute__((visibility("default"))) void PartyBoardQuest_StereoReleaseImages(void** buffers, uint32_t count) {
+  for (uint32_t i = 0; i < count; ++i) {
+    if (buffers[i] != nullptr) {
+      AHardwareBuffer_release(static_cast<AHardwareBuffer*>(buffers[i]));
+    }
+  }
 }
 
 __attribute__((visibility("default"))) uint32_t PartyBoardQuest_StereoGeneration(void) {
