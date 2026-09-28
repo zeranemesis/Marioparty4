@@ -1,6 +1,7 @@
 ﻿using System;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Diagnostics;
 using System.Drawing;
 using System.Threading;
@@ -58,6 +59,7 @@ sealed class MainForm : Form {
         play.MinimumSize=new Size(240,38);
         cancel=Make("Quitter le salon",Reset);bottom.Controls.Add(play);bottom.Controls.Add(cancel);root.Controls.Add(bottom,0,9);
         actions.Controls.Add(Make("Exporter diagnostic",ExportReport));
+        network=Make("Port fixe…",ChooseNetwork);actions.Controls.Add(network);
         update=Make("Vérifier les mises à jour",CheckForUpdates);actions.Controls.Add(update);
         footer=new Label{Dock=DockStyle.Fill,Font=new Font("Segoe UI",9),ForeColor=Color.DimGray};root.Controls.Add(footer,0,10);UpdateFooter();
         nickname.TextChanged+=(s,e)=>RefreshLobby();RefreshControls();RefreshLobby();Task.Run(()=>StartupUpdateCheck());
@@ -65,6 +67,33 @@ sealed class MainForm : Form {
         // that verified faster than the window appeared would vanish without a trace.
         Shown+=(s,e)=>{if(startupApplied)return;startupApplied=true;ApplyStartup();};
         FormClosing+=(s,e)=>{closing=true;fileCancel.Cancel();var old=session;session=null;if(old!=null)old.Dispose();if(disc!=null)disc.Dispose();};
+    }
+    Button network;
+    // The fixed port (Gateway.cs, NetworkSettings): empty means automatic.
+    void ChooseNetwork() {
+        if(session!=null){SetStatus("Quittez le salon avant de changer le port.");return;}
+        NetworkSettings.Load();
+        using(var dialog=new Form{Text="Port fixe",FormBorderStyle=FormBorderStyle.FixedDialog,StartPosition=FormStartPosition.CenterParent,MinimizeBox=false,MaximizeBox=false,AutoSize=true,AutoSizeMode=AutoSizeMode.GrowAndShrink,Padding=new Padding(12),Font=Font}) {
+            var layout=new TableLayoutPanel{ColumnCount=2,AutoSize=true,Dock=DockStyle.Fill};
+            layout.Controls.Add(new Label{Text="Laissez vide pour la préparation automatique de la box.\nAvec un port fixe P, ouvrez sur votre box : TCP P, UDP P et UDP P+1.",AutoSize=true,MaximumSize=new Size(440,0),Margin=new Padding(0,0,0,10)},0,0);
+            layout.SetColumnSpan(layout.GetControlFromPosition(0,0),2);
+            layout.Controls.Add(new Label{Text="Port (1024 à 65534)",AutoSize=true,Padding=new Padding(0,6,8,0)},0,1);
+            var port=new TextBox{Text=NetworkSettings.Port==0?"":NetworkSettings.Port.ToString(),Width=120,AccessibleName="Port fixe"};layout.Controls.Add(port,1,1);
+            layout.Controls.Add(new Label{Text="Adresse publique (facultatif)",AutoSize=true,Padding=new Padding(0,6,8,0)},0,2);
+            var address=new TextBox{Text=NetworkSettings.PublicAddress==null?"":NetworkSettings.PublicAddress.ToString(),Width=160,AccessibleName="Adresse publique"};layout.Controls.Add(address,1,2);
+            layout.Controls.Add(new Label{Text="Seulement si la box ne la donne pas : celle affichée dans son interface.",AutoSize=true,MaximumSize=new Size(440,0),ForeColor=Color.DimGray,Margin=new Padding(0,4,0,10)},0,3);
+            layout.SetColumnSpan(layout.GetControlFromPosition(0,3),2);
+            var ok=new Button{Text="Enregistrer",AutoSize=true,DialogResult=DialogResult.OK};var no=new Button{Text="Annuler",AutoSize=true,DialogResult=DialogResult.Cancel};
+            var buttons=new FlowLayoutPanel{AutoSize=true,FlowDirection=FlowDirection.RightToLeft,Dock=DockStyle.Fill};buttons.Controls.Add(no);buttons.Controls.Add(ok);
+            layout.Controls.Add(buttons,0,4);layout.SetColumnSpan(buttons,2);
+            dialog.Controls.Add(layout);dialog.AcceptButton=ok;dialog.CancelButton=no;
+            if(dialog.ShowDialog(this)!=DialogResult.OK)return;
+            int value=0;IPAddress publicAddress=null;
+            if(port.Text.Trim().Length>0 && (!int.TryParse(port.Text.Trim(),out value) || value==0 || !NetworkSettings.Valid(value))){SetStatus("Port invalide : choisissez un nombre entre 1024 et 65534.");return;}
+            if(address.Text.Trim().Length>0 && (!IPAddress.TryParse(address.Text.Trim(),out publicAddress) || !Gateway.Public(publicAddress))){SetStatus("Adresse publique invalide : indiquez une adresse IPv4 publique, par exemple 82.64.1.2.");return;}
+            NetworkSettings.Port=value;NetworkSettings.PublicAddress=publicAddress;NetworkSettings.Save();
+            SetStatus(value==0?"Port automatique : la box sera préparée automatiquement.":"Port fixe "+value+" enregistré. Ouvrez sur votre box TCP "+value+", UDP "+value+" et UDP "+(value+1)+".");
+        }
     }
     Button Make(string text,Action action){var b=new Button{Text=text,AutoSize=true,Height=38,MinimumSize=new Size(160,38),Margin=new Padding(0,3,12,3),FlatStyle=FlatStyle.Flat,BackColor=Color.White};b.Click+=(s,e)=>{try{action();}catch(Exception ex){SetStatus(Friendly(ex));}};return b;}
     int SelectedPlayers(){int n;return int.TryParse(playerCount.SelectedItem as string,out n)?n:2;}

@@ -44,3 +44,29 @@ Il reste deux joueurs et du lockstep, sans rollback complet. TCP peut augmenter 
 
 Voir NETPLAY_HOST_LOBBY.md : pseudos, ping mesuré, SHA-256 complet du disque et départ coordonné réservé à l’hôte. La suite actuelle passe 79 contrôles et 1 200 ticks natifs via TLS.
 
+
+## Port fixe (routeur sans UPnP)
+
+Par défaut, Windows choisit un port libre à chaque salon et la box est préparée
+automatiquement (PCP, NAT-PMP puis UPnP). Un routeur sans aucun de ces trois
+mécanismes ne peut pas être préparé ainsi : le bouton **Port fixe…** du salon
+permet alors d'ouvrir les ports à la main.
+
+Avec un port fixe P, ouvrir sur le routeur, vers ce PC :
+
+| Protocole | Port | Usage |
+|---|---|---|
+| TCP | P | salon et invitation (chiffré) |
+| UDP | P | jeu à deux joueurs |
+| UDP | P + 1 | jeu à trois ou quatre joueurs |
+
+L'ouverture automatique est tout de même tentée d'abord sur ce port. Si la box la
+refuse, le port est considéré comme ouvert à la main. L'adresse publique inscrite
+dans l'invitation vient de la box quand elle la donne (NAT-PMP) ; sinon elle doit
+être saisie dans la même fenêtre, telle que l'affiche l'interface du routeur.
+Aucun service extérieur n'est interrogé. Le réglage est enregistré dans
+`%LOCALAPPDATA%\PartyBoard\online-network.txt`.
+
+Un partage de connexion de téléphone ne permet pas d'héberger, même avec un port
+fixe : il n'offre pas de redirection de port, et l'opérateur partage l'adresse
+IPv4 publique entre plusieurs abonnés. Rejoindre une partie reste possible.
