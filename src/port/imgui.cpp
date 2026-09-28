@@ -314,38 +314,55 @@ extern "C" int PartyBoard_TargetFrameRateFor(bool netplayEnabled, int configured
 
 namespace {
 
-// Headset A/B only: `adb shell setprop debug.partyboard.render_hz 72` draws new
-// images at most that often while the XR display keeps its own rate and shows
-// the last image again (with its poses, so the compositor corrects the head).
-// Unset or 0: the display rate. Read every two seconds, not every frame.
+// How often the headset gets a new image. `adb shell setprop
+// debug.partyboard.render_hz 72` draws at most that often, 0 at the display
+// rate; the XR display keeps its own rate and shows the last image again
+// (with its poses, so the compositor corrects the head). Unset (-1 here):
+// half the display rate from 110 Hz up, the display rate below. Read every
+// two seconds, not every frame.
 int headset_render_cap()
 {
 #ifdef __ANDROID__
-    static int cap = 0;
+    static int cap = -1;
     static FramePacerClock::time_point checkedAt{};
     const auto now = FramePacerClock::now();
     if (now - checkedAt >= std::chrono::seconds(2)) {
         checkedAt = now;
         char value[PROP_VALUE_MAX] = {};
         __system_property_get("debug.partyboard.render_hz", value);
-        cap = (std::max)(0, std::atoi(value));
+        cap = value[0] == '\0' ? -1 : (std::max)(0, std::atoi(value));
     }
     return cap;
 #else
-    return 0;
+    return -1;
 #endif
+}
+
+// At 120 Hz the board is limited by the GPU, at 62 to 92 images/s with 50
+// to 80 late frames every 5 s; capped at 60, the same route held 60 with 0 to
+// 2 (Quest 3, 2026-09-28). 60 is also the simulation's rate: every image is a
+// new game state, each shown for exactly two display frames. Below 110 Hz
+// half the rate would fall under the simulation, so the display rate stays.
+int automatic_render_rate(int headsetRate)
+{
+    return headsetRate >= 110 ? headsetRate / 2 : headsetRate;
 }
 
 int target_frame_rate()
 {
     int headsetRate = partyboard::display::headset_frame_rate();
-    const int cap = headsetRate > 0 ? headset_render_cap() : 0;
-    if (cap > 0 && cap < headsetRate) headsetRate = (std::max)(cap, kOriginalSimulationRate);
+    const int cap = headsetRate > 0 ? headset_render_cap() : -1;
+    const bool automatic = headsetRate > 0 && cap < 0;
+    if (automatic) {
+        headsetRate = automatic_render_rate(headsetRate);
+    } else if (cap > 0 && cap < headsetRate) {
+        headsetRate = (std::max)(cap, kOriginalSimulationRate);
+    }
     static int lastHeadsetRate = 0;
     if (headsetRate != lastHeadsetRate) {
         SDL_Log("Quest render target: %d FPS (simulation 60 Hz, netplay %s%s)",
             headsetRate, PartyBoard_NetplayEnabled() ? "60 FPS" : "display rate",
-            cap > 0 ? ", capped by debug.partyboard.render_hz" : "");
+            automatic ? ", automatic" : cap > 0 ? ", capped by debug.partyboard.render_hz" : "");
         lastHeadsetRate = headsetRate;
     }
     return PartyBoard_TargetFrameRateFor(PartyBoard_NetplayEnabled(),

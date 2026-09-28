@@ -24,13 +24,15 @@ int main() {
   assert(cpu.scale() == 0.8f);
   for (unsigned i = 7; i < 40; ++i) { sample.sequence = i; cpu.update(sample, 72, 0); }
   assert(cpu.scale() == 0.8f); // profile ceiling
-  sample = {40, 120, 20, 2, 1, 50};
   // Limited by its pixels: each lowering brings more images, down to the floor.
+  quest::AdaptiveQuality floor;
+  floor.set_cap(0.8f);
+  sample = {40, 120, 20, 2, 1, 50};
   for (unsigned i = 40; i < 60; ++i) {
     sample.sequence = i;
-    cpu.update(sample, 120, i - 40 < 26 ? 80 - 3 * (i - 40) : 2);
+    floor.update(sample, 120, std::max(2, 80 - 8 * static_cast<int>(i - 40)));
   }
-  assert(cpu.scale() == 0.65f); // readable floor
+  assert(floor.scale() == 0.65f); // readable floor
 
   // Not limited by its pixels (the Toad board, 414 draws per eye): the
   // counters say pressure, but lowering brings no more images. The pixels
@@ -43,9 +45,11 @@ int main() {
   sample.sequence = 101;
   assert(draws.update(sample, 72, 28) == 0.75f); // the resize window, skipped
   sample.sequence = 102;
+  assert(draws.update(sample, 72, 26) == 0.75f); // first judged window
+  sample.sequence = 103;
   assert(draws.update(sample, 72, 27) == 0.8f && draws.last_decision() == D::Restored && draws.holding());
   for (unsigned i = 0; i < quest::AdaptiveQuality::kHoldWindows - 1; ++i) {
-    sample.sequence = 103 + i;
+    sample.sequence = 104 + i;
     assert(draws.update(sample, 72, 28) == 0.8f);
   }
   sample.sequence = 200;
@@ -58,8 +62,21 @@ int main() {
   sample.sequence = 301;
   pixels.update(sample, 72, 20);
   sample.sequence = 302;
-  pixels.update(sample, 72, 12); // 44 -> 60 images: helped, and still under pressure
+  pixels.update(sample, 72, 12);
+  sample.sequence = 303;
+  pixels.update(sample, 72, 12); // 44 -> 60 images on average: helped, and still under pressure
   assert(pixels.scale() == 0.7f && pixels.last_decision() == D::Lowered);
+  // One lucky window after a lowering is not enough: the intro camera case.
+  quest::AdaptiveQuality noisy;
+  noisy.set_cap(0.8f);
+  sample = {400, 120, 9, 2, 3.5f, 0};
+  assert(noisy.update(sample, 120, 50) == 0.75f); // 70 delivered: lowered, before = 70
+  sample.sequence = 401;
+  assert(noisy.update(sample, 120, 40) == 0.75f); // the resize window, skipped
+  sample.sequence = 402;
+  assert(noisy.update(sample, 120, 36) == 0.75f); // 84: one good window, not enough alone
+  sample.sequence = 403;
+  assert(noisy.update(sample, 120, 52) == 0.8f && noisy.last_decision() == D::Restored); // 68: average 76 < 76.6
   quest::AdaptiveQuality blind;
   sample = {1, 120, 2, 2, 1, 5};
   assert(blind.update(sample, 120, 20) < 1); // late frames, full ring: lower despite a low GPU counter
