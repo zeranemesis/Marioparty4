@@ -412,6 +412,15 @@ public class PartyBoardActivity extends SDLActivity {
     }
 
     @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        // Meta Quest: the spatial data permission the table calibration asked for.
+        if (QuestVr.onRequestPermissionsResult(requestCode, grantResults)) {
+            return;
+        }
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+    }
+
+    @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         if (resultCode == RESULT_OK) {
             persistUriPermissions(data);

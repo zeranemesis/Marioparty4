@@ -12,6 +12,11 @@
 // standing on the table (a spatial anchor, table_anchor.cpp), and the
 // placement help while the player moves it.
 //
+// Before the first board or minigame, while the table is not calibrated, the
+// game waits (PartyBoardQuest_TableSetupHold) for the player to lay the right
+// controller at the table's center. The table of the headset's room scan
+// under it (table_scene.cpp) gives the height and the model's size.
+//
 // Everything OpenXR runs on one thread, started by nativeStart: set-up, the
 // frame loop and tear-down. The controllers go to Java (QuestVr.onControllers),
 // which presents them to SDL as a gamepad.
@@ -19,6 +24,8 @@
 #include "perf_metrics.hpp"
 #include "stereo_view.hpp"
 #include "table_anchor.hpp"
+#include "table_fit.hpp"
+#include "table_scene.hpp"
 #include "xr_util.hpp"
 
 #include <algorithm>
@@ -103,6 +110,7 @@ struct Java {
   jmethodID onSessionState = nullptr;
   jmethodID onControllers = nullptr;
   jmethodID onExit = nullptr;
+  jmethodID requestScenePermission = nullptr;
 };
 
 struct Actions {
@@ -152,6 +160,8 @@ struct Extensions {
   bool imageLayout = false;
   bool anchors = false;
   bool perfMetrics = false;
+  bool scene = false;        // the room scan's tables
+  bool sceneCapture = false; // opening Space Setup from the game
 };
 
 struct App {
@@ -177,7 +187,9 @@ struct App {
   std::string statePath;
   TableSettings table;
   TableAnchor anchor;
+  TableScene scene;  // the tables of the headset's room scan
   StereoView stereo; // the game's world as a model on the table
+  bool modelAvailable = false; // the stereo images exist: the model can show
   XrPosef pose = identity_pose(); // the anchor point, in STAGE space
   bool poseKnown = false;
   // The saved place was out of reach at startup: the screen stands in front
@@ -190,6 +202,11 @@ struct App {
   bool calibrating = false;
   bool calibrationConfirmed = false;
   bool calibrationConfirmArmed = false;
+  bool scanArmed = false;           // A (scan the room) was released since the panel opened
+  bool skipArmed = false;           // B (later) too
+  bool calibrationSkipped = false;  // B: not before the next session
+  bool permissionRequested = false; // the spatial data permission, asked once a session
+  int shownSceneState = -1;         // TableScene::State on the panel
   std::deque<XrPosef> calibrationSamples;
   XrTime calibrationStableSince = 0;
 
@@ -197,6 +214,7 @@ struct App {
   bool grabbing = false;
   bool triggerHeld = false;
   bool leftTriggerHeld = false;
+  bool leftGripHeld = false;
   XrPosef grabOffset = identity_pose();
   int previousButtons = 0;
   int suppressedButtons = 0; // held when placement ended: the game waits for their release
@@ -219,6 +237,19 @@ std::atomic_uint g_rumbleSerial = 0;
 
 // Frame pacing and the headset's counters: logged, and read by the placement panel.
 PerfMetrics g_perf;
+
+// The spatial data permission (QuestVr): -1 not known yet, 0 refused, 1 granted.
+std::atomic_int g_scenePermission = -1;
+
+// The table set-up the game waits for (PartyBoardQuest_TableSetupHold, the
+// game thread) and the XR thread runs. Needed: no calibrated table yet, and
+// not put off (B) this session. Open: the calibration panel is up.
+std::atomic_bool g_setupNeeded = false;
+std::atomic_bool g_setupOpen = false;
+std::atomic_bool g_setupRequested = false;
+
+// The model follows the game camera (PartyBoardQuest_StereoFollowCamera).
+std::atomic_bool g_followCamera = true;
 
 void clear_exception(JNIEnv* env) {
   if (env->ExceptionCheck()) {
@@ -288,6 +319,9 @@ bool create_instance(App& app) {
                                     [&](const char* name) { return has_extension(available, name); });
   if (ext.anchors) {
     enabled.insert(enabled.end(), std::begin(TableAnchor::kExtensions), std::end(TableAnchor::kExtensions));
+    // The room scan's entities are queried like the anchors.
+    ext.scene = optional(TableScene::kExtension);
+    ext.sceneCapture = ext.scene && optional(TableScene::kCaptureExtension);
   }
 
   XrInstanceCreateInfoAndroidKHR android{XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
@@ -783,14 +817,24 @@ void send_controllers(JNIEnv* env, const ControllerState& s) {
 
 // --- Placement ---
 
-void notify_placement(const App& app, JNIEnv* env) {
+void notify_placement(App& app, JNIEnv* env) {
+  // The panel also says what the room scan found (TableScene::State).
+  float length = 0.0f, width = 0.0f;
+  app.scene.largest(length, width);
+  app.shownSceneState = static_cast<int>(app.scene.state());
   env->CallStaticVoidMethod(g_java.questVr, g_java.onPlacement, app.placing, app.table.resolution,
                             app.table.passthrough && passthrough_available(app), app.table.diorama, app.calibrating,
-                            app.calibrationConfirmed);
+                            app.calibrationConfirmed, app.table.followCamera, app.shownSceneState, length, width);
   clear_exception(env);
 }
 
 void save_settings(App& app) { app.table.save(app.statePath); }
+
+// The model is to stand on a table nobody measured yet (or the saved one is
+// out of reach), and the player has not put it off this session.
+bool table_setup_needed(const App& app) {
+  return app.modelAvailable && app.table.diorama && !app.table.calibrated && !app.calibrationSkipped;
+}
 
 // Where the screen appears before the first placement: ahead, facing the player.
 void default_pose(App& app, const XrPosef& head) {
@@ -808,6 +852,7 @@ void begin_placement(App& app, JNIEnv* env) {
   app.grabbing = false;
   app.triggerHeld = true; // a trigger already held does not place at once
   app.leftTriggerHeld = true;
+  app.leftGripHeld = true;
   notify_placement(app, env);
 }
 
@@ -815,6 +860,8 @@ void begin_table_calibration(App& app, JNIEnv* env, int buttons) {
   app.calibrating = true;
   app.calibrationConfirmed = false;
   app.calibrationConfirmArmed = (buttons & kButtonX) == 0;
+  app.scanArmed = (buttons & kButtonA) == 0;
+  app.skipArmed = (buttons & kButtonB) == 0;
   app.placing = true;
   app.grabbing = false;
   app.triggerHeld = true;
@@ -822,10 +869,52 @@ void begin_table_calibration(App& app, JNIEnv* env, int buttons) {
   app.calibrationSamples.clear();
   app.calibrationStableSince = 0;
   LOGI("Automatic table calibration started");
+  // The room scan may have changed since the last look (the player scanned it
+  // from the headset's settings), or the permission is still to be asked.
+  if (app.scene.available()) {
+    if (g_scenePermission.load() != 1 && !app.permissionRequested && g_java.requestScenePermission != nullptr) {
+      app.permissionRequested = true;
+      env->CallStaticVoidMethod(g_java.questVr, g_java.requestScenePermission);
+      clear_exception(env);
+    }
+    app.scene.query();
+  }
+  notify_placement(app, env);
+}
+
+// B on the calibration panel: not now. An uncalibrated table is asked for
+// again next session; a recalibration keeps the table as it was.
+void skip_table_calibration(App& app, JNIEnv* env, int heldButtons) {
+  LOGI("Table calibration put off");
+  app.calibrationSkipped = !app.table.calibrated;
+  app.calibrating = false;
+  app.calibrationConfirmed = false;
+  app.calibrationConfirmArmed = false;
+  app.placing = false;
+  app.grabbing = false;
+  app.suppressedButtons = heldButtons;
+  app.calibrationSamples.clear();
+  app.calibrationStableSince = 0;
   notify_placement(app, env);
 }
 
 void sample_table_calibration(App& app, const XrPosef* grip, XrTime time, int pressed, int heldButtons, JNIEnv* env) {
+  if ((heldButtons & kButtonB) == 0) {
+    app.skipArmed = true;
+  } else if (app.skipArmed && (pressed & kButtonB) != 0) {
+    skip_table_calibration(app, env, heldButtons);
+    return;
+  }
+  // A: scan the room in Space Setup (the panel shows the table when back).
+  if ((heldButtons & kButtonA) == 0) {
+    app.scanArmed = true;
+  } else if (app.scanArmed && (pressed & kButtonA) != 0) {
+    app.scanArmed = false;
+    if (app.scene.request_capture()) {
+      tick(app);
+      notify_placement(app, env);
+    }
+  }
   if (!app.calibrationConfirmed) {
     if ((heldButtons & kButtonX) == 0) {
       app.calibrationConfirmArmed = true;
@@ -903,6 +992,21 @@ void sample_table_calibration(App& app, const XrPosef* grip, XrTime time, int pr
   }
   calibrated.position.y -= kControllerGripToTableMeters;
   calibrated.orientation = yaw_rotation(std::atan2(yawSin, yawCos));
+  // The scanned table under the controller: its top's height (the scan
+  // measures it better than the grip's offset), and the model sized so the
+  // scene spans the table from there. The center and the turn stay the
+  // controller's: the player laid it where the game goes.
+  const std::vector<ScannedTable> tables = app.scene.tables(time);
+  if (const ScannedTable* table =
+          pick_table(tables, calibrated.position.x, calibrated.position.y, calibrated.position.z)) {
+    calibrated.position.y = table->height;
+    app.table.modelScale =
+        scale_for_table(*table, calibrated.position.x, calibrated.position.z, kMinModelScale, kMaxModelScale);
+    LOGI("Table scan: matched %.2f x %.2f m, model scale %.6f (scene %.2f m across)", table->halfLength * 2.0f,
+         table->halfWidth * 2.0f, app.table.modelScale, app.table.modelScale * kSceneExtentUnits);
+  } else {
+    LOGI("Table scan: no scanned table under the controller (%zu table(s)), model scale kept", tables.size());
+  }
   app.pose = calibrated;
   app.poseKnown = true;
   app.table.placed = true;
@@ -1044,6 +1148,16 @@ void place(App& app, JNIEnv* env, const ControllerState& input, int pressed, flo
     tick(app);
     notify_placement(app, env);
   }
+  // Left grip: the model follows the game camera, or stays as placed.
+  const bool leftGrip = input.leftGrip > (app.leftGripHeld ? 0.4f : 0.6f);
+  if (leftGrip && !app.leftGripHeld) {
+    app.table.followCamera = !app.table.followCamera;
+    g_followCamera.store(app.table.followCamera, std::memory_order_relaxed);
+    LOGI("Model follows the game camera: %s", app.table.followCamera ? "yes" : "no");
+    tick(app);
+    notify_placement(app, env);
+  }
+  app.leftGripHeld = leftGrip;
 
   if ((pressed & kButtonX) != 0 && passthrough_available(app)) {
     set_passthrough(app, !app.table.passthrough);
@@ -1063,7 +1177,8 @@ void place(App& app, JNIEnv* env, const ControllerState& input, int pressed, flo
 bool poll_events(App& app, JNIEnv* env) {
   XrEventDataBuffer event{XR_TYPE_EVENT_DATA_BUFFER};
   while (xrPollEvent(app.instance, &event) == XR_SUCCESS) {
-    if (app.anchor.handle_event(event)) {
+    // The room scan first: it takes only its own requests' events.
+    if (app.scene.handle_event(event) || app.anchor.handle_event(event)) {
       event = {XR_TYPE_EVENT_DATA_BUFFER};
       continue;
     }
@@ -1134,7 +1249,16 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   const ControllerState input = focused ? read_controllers(app) : ControllerState{};
   const int pressed = input.buttons & ~app.previousButtons;
   app.previousButtons = input.buttons;
-  if (!app.table.calibrated && !app.placing && app.stereo.world_visible()) {
+  // The spatial data permission, as QuestVr last heard it.
+  const int permission = g_scenePermission.load(std::memory_order_relaxed);
+  if (permission >= 0) {
+    app.scene.set_permission(permission == 1);
+  }
+  // The game waits for a table before its first board or minigame
+  // (PartyBoardQuest_TableSetupHold). A game world shown without one (an
+  // online game, which does not wait) asks for it too.
+  const bool setupRequested = g_setupRequested.exchange(false);
+  if (table_setup_needed(app) && !app.placing && (setupRequested || app.stereo.world_visible())) {
     begin_table_calibration(app, env, input.buttons);
   }
   XrPosef head, aim;
@@ -1174,7 +1298,7 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
            away, below);
       app.savedPlaceIgnored = true;
       default_pose(app, head);
-      // The model needs a real table here: the first game world asks for one.
+      // The model needs a real table here: the next board or minigame asks for one.
       app.table.calibrated = false;
     }
   }
@@ -1193,6 +1317,12 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   } else if (app.placing) {
     place(app, env, input, pressed, dt, haveHead ? &head : nullptr, haveAim ? &aim : nullptr,
           haveLeftAim ? &leftAim : nullptr);
+  }
+  g_setupNeeded.store(table_setup_needed(app));
+  g_setupOpen.store(app.calibrating);
+  // The calibration panel follows the room scan (permission, search, Space Setup).
+  if (app.calibrating && static_cast<int>(app.scene.state()) != app.shownSceneState) {
+    notify_placement(app, env);
   }
 
   // Sent every frame (SDL drops repeated values) so the pad is right as soon
@@ -1383,9 +1513,11 @@ bool set_up(App& app, JNIEnv* env) {
   // the Quest 3 panel's own pixels): sharp polygons and textures on the table.
   // Dynamic resolution (stereo_view.cpp) draws less of them when 120 Hz needs it.
   const float eyeScale = 1.25f;
-  if (!app.stereo.init(app.instance, app.session, app.system, app.egl.display, eyeScale)) {
+  app.modelAvailable = app.stereo.init(app.instance, app.session, app.system, app.egl.display, eyeScale);
+  if (!app.modelAvailable) {
     LOGW("No model on the table: the game stays on its screen");
   }
+  g_followCamera.store(app.table.followCamera, std::memory_order_relaxed);
   app.stereo.set_quality_cap(quality_cap(app.table.resolution));
   query_refresh_rates(app);
   if (app.extensions.anchors) {
@@ -1394,12 +1526,22 @@ bool set_up(App& app, JNIEnv* env) {
       app.anchor.load(app.table.anchorUuid);
     }
   }
+  if (app.extensions.scene) {
+    app.scene.init(app.instance, app.session, app.stage, app.extensions.sceneCapture);
+    const int permission = g_scenePermission.load();
+    if (permission >= 0) {
+      app.scene.set_permission(permission == 1); // queries the scan when granted
+    }
+  }
   return true;
 }
 
 void tear_down(App& app, JNIEnv* env) {
   app.stereo.destroy(); // GL objects: while the context is current
+  app.scene.destroy();
   app.anchor.destroy();
+  g_setupNeeded.store(false);
+  g_setupOpen.store(false); // the game does not wait for a session that is gone
   destroy_passthrough(app);
   for (SurfaceQuad* quad : {&app.screen, &app.next, &app.retiring, &app.help}) {
     destroy_surface_quad(env, *quad);
@@ -1450,7 +1592,7 @@ void xr_thread(std::string statePath) {
   if (ok) {
     LOGI("Screen %dx%d, room %s, anchors %s", app.screen.width, app.screen.height,
          passthrough_available(app) ? "visible" : "unavailable", app.extensions.anchors ? "on" : "off");
-    // An uncalibrated table is measured when the first game world is visible.
+    // An uncalibrated table is measured before the first board or minigame.
     notify_placement(app, env);
     unsigned rumbleSerial = 0;
     while (!g_stop.load(std::memory_order_acquire)) {
@@ -1492,6 +1634,26 @@ __attribute__((visibility("default"))) float PartyBoardQuest_ActiveRefreshRate()
   return g_activeRefreshRate.load(std::memory_order_relaxed);
 }
 
+// The game thread, before it starts a board or a minigame (src/game/objmain.c
+// through PartyBoard_QuestHoldOverlay): true while it should wait for the
+// table's calibration. The first call opens the panel, which the XR thread
+// shows on its next frame.
+__attribute__((visibility("default"))) bool PartyBoardQuest_TableSetupHold() {
+  if (g_setupOpen.load()) {
+    return true;
+  }
+  if (!g_setupNeeded.load()) {
+    return false;
+  }
+  g_setupRequested.store(true);
+  return true;
+}
+
+// The game thread, each eye frame: whether the model follows the game camera.
+__attribute__((visibility("default"))) bool PartyBoardQuest_StereoFollowCamera() {
+  return g_followCamera.load(std::memory_order_relaxed);
+}
+
 JNIEXPORT jboolean JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_nativeStart(JNIEnv* env, jclass clazz,
                                                                                      jobject activity,
                                                                                      jstring statePath) {
@@ -1507,9 +1669,11 @@ JNIEXPORT jboolean JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_native
   g_java.onSessionState = static_method(env, clazz, "onSessionState", "(ZZ)V");
   g_java.onControllers = static_method(env, clazz, "onControllers", "(IFFFFFFFF)V");
   g_java.onExit = static_method(env, clazz, "onExit", "()V");
-  g_java.onPlacement = static_method(env, clazz, "onPlacement", "(ZIZZZZ)V");
+  g_java.onPlacement = static_method(env, clazz, "onPlacement", "(ZIZZZZZIFF)V");
+  g_java.requestScenePermission = static_method(env, clazz, "requestScenePermission", "()V");
   for (jmethodID method : {g_java.onSurface, g_java.onSurfaceReplaced, g_java.onHelpSurface, g_java.onPlacement,
-                           g_java.onSessionState, g_java.onControllers, g_java.onExit}) {
+                           g_java.onSessionState, g_java.onControllers, g_java.onExit,
+                           g_java.requestScenePermission}) {
     if (method == nullptr) {
       return JNI_FALSE;
     }
@@ -1540,6 +1704,11 @@ JNIEXPORT void JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_nativeStop
 
 JNIEXPORT void JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_nativeSurfaceSwitched(JNIEnv*, jclass) {
   g_surfaceSwitched.store(true);
+}
+
+JNIEXPORT void JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_nativeScenePermission(JNIEnv*, jclass,
+                                                                                           jboolean granted) {
+  g_scenePermission.store(granted ? 1 : 0);
 }
 
 JNIEXPORT void JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_nativeRumble(JNIEnv*, jclass, jfloat amplitude,
