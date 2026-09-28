@@ -138,7 +138,11 @@ sealed class Invitation {
                 i.LocalAddress=new IPAddress(r.ReadBytes(4));i.LocalPort=r.ReadUInt16();
                 i.MaxPlayers=r.ReadByte();
                 if(i.MaxPlayers<2 || i.MaxPlayers>Lobby.MaxSeats) throw new FormatException();
-                if(i.Port==0 || (!localTest && !Gateway.Public(i.Address))) throw new FormatException();
+                // A private main address is only a salon on this network: the
+                // host then announces the same address and port as its local
+                // path, and nothing else is accepted.
+                bool localSalon=Gateway.Private(i.Address) && i.Address.Equals(i.LocalAddress) && i.LocalPort==i.Port;
+                if(i.Port==0 || (!localTest && !Gateway.Public(i.Address) && !localSalon)) throw new FormatException();
                 // The local address is deliberately NOT required to be public -
                 // that is the whole point - but it must be a private address, so
                 // an invitation cannot redirect the first attempt anywhere else.

@@ -167,6 +167,11 @@ private:
   AdaptiveQuality mQuality;
   QualitySample mQualitySample;
   uint32_t mAdaptLeases = 0, mAdaptRingFull = 0, mCalmSeconds = 0;
+  // The intervals between the game's image requests this second, and the
+  // hitches counted in the last one (adapt_resolution()).
+  std::chrono::steady_clock::time_point mLastRequestAt{};
+  std::vector<float> mRequestIntervals;
+  uint32_t mLastSlow = 0;
   std::chrono::steady_clock::time_point mAdaptAt = std::chrono::steady_clock::now();
   // Pose prediction: this XR frame's display time, and the measured delay
   // between taking an image and showing it (moving average, nanoseconds).

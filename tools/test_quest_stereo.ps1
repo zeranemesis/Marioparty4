@@ -6,7 +6,11 @@ function Check-Exit([string]$step) {
     if ($LASTEXITCODE -ne 0) { throw "$step failed ($LASTEXITCODE)" }
 }
 if (-not $CompileOnly -and -not $Serial) {
+    # No headset tooling at all (a CI runner): this environment cannot run the
+    # test, which run_all_tests.ps1 reports as not applicable (exit 2).
+    if (-not (Test-Path $taskAdb)) { Write-Output "not applicable: no Android platform-tools at $taskAdb, and no headset"; exit 2 }
     $taskDevices = @(& $taskAdb devices | Where-Object { $_ -match '^([^\s]+)\s+device$' })
+    if ($taskDevices.Count -eq 0) { Write-Output 'not applicable: no headset connected over adb'; exit 2 }
     if ($taskDevices.Count -ne 1) { throw 'Specify -Serial when no device or several devices are connected.' }
     $Serial = ($taskDevices[0] -split '\s+')[0]
 }
@@ -23,9 +27,11 @@ $taskTriple = switch ($taskAbi) {
 $taskNdk = Join-Path $Sdk 'ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64/bin'
 $taskCompiler = Join-Path $taskNdk "$taskTriple-clang++.cmd"
 # Gradle resolves the OpenXR headers through Prefab; reuse that exact version.
-$taskNinja = Get-ChildItem (Join-Path $taskRepo 'platforms/android/app/.cxx/Debug') -Filter build.ninja -Recurse |
-    Where-Object { $_.Directory.Name -eq $taskAbi } | Select-Object -First 1
-if (-not $taskNinja) { throw 'Build assembleQuestDebug once to resolve the OpenXR headers.' }
+$taskCxx = Join-Path $taskRepo 'platforms/android/app/.cxx/Debug'
+$taskNinja = if (Test-Path $taskCxx) {
+    Get-ChildItem $taskCxx -Filter build.ninja -Recurse | Where-Object { $_.Directory.Name -eq $taskAbi } | Select-Object -First 1
+}
+if (-not $taskNinja) { Write-Output 'not applicable: build assembleQuestDebug once to resolve the OpenXR headers'; exit 2 }
 $taskIncludeLine = Get-Content $taskNinja.FullName | Where-Object { $_ -match '^  INCLUDES = -isystem (.+/modules/headers/include)$' } | Select-Object -First 1
 if (-not $taskIncludeLine) { throw 'OpenXR Prefab include path missing from the configured build.' }
 $taskHeaders = $taskIncludeLine.Substring('  INCLUDES = -isystem '.Length)

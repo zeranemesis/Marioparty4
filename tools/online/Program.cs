@@ -87,20 +87,25 @@ sealed class Session : IDisposable {
     // Above two, there is no "the guest" to relay for -- every seat, this
     // host's own included, reaches the others through MeshRelay instead, so
     // the UDP mapping below is skipped and OpenMesh() opens its own later.
+    // No opening was possible: the salon is reachable only from this network.
+    public bool LocalOnly {get{return mapping!=null && mapping.LocalOnly;}}
     public void Create(int players=2) {
         if(players<2 || players>Lobby.MaxSeats)throw new IOException("Nombre de joueurs invalide.");
         maxPlayers=players;
         Host=true;status("Vérification de votre connexion…");var route=Route.Detect();
         build=Wire.BuildHash(AppDomain.CurrentDomain.BaseDirectory);
-        cert=Wire.Certificate(); listener=new TcpListener(route.Local,0);listener.Start(4);
+        NetworkSettings.Load();
+        cert=Wire.Certificate(); listener=new TcpListener(route.Local,NetworkSettings.Port);
+        try {listener.Start(4);}
+        catch(SocketException) {if(NetworkSettings.Port==0)throw;throw new IOException("Le port fixe "+NetworkSettings.Port+" est déjà utilisé par un autre programme. Choisissez-en un autre dans Port fixe….");}
         int port=((IPEndPoint)listener.LocalEndpoint).Port;
         try {
             if(players==2) internetGame=new UdpClient(new IPEndPoint(route.Local,port));
             status("Autorisez PartyBoard si Windows vous le demande…"); firewall=Firewall.Open(port);
             if(disposed) throw new OperationCanceledException();
-            status("Préparation automatique de votre box…"); mapping=new Gateway(route,port);mapping.Open();
+            status(NetworkSettings.Port==0?"Préparation automatique de votre box…":"Préparation du port fixe "+port+"…"); mapping=Gateway.OpenFor(route,port,port,false);
             if(players==2) {
-                mappingUdp=new Gateway(route,port,mapping.Port,true);mappingUdp.Open();
+                mappingUdp=Gateway.OpenFor(route,port,mapping.Port,true);
                 if(mappingUdp.Port!=mapping.Port || !mappingUdp.Address.Equals(mapping.Address))throw new IOException("La box n'a pas pu réserver le même accès rapide pour le jeu. Inversez les rôles et réessayez.");
             }
             if(disposed) throw new OperationCanceledException();
@@ -313,12 +318,15 @@ sealed class Session : IDisposable {
     public void OpenMesh() {
         if(Lobby==null)throw new IOException("Le salon doit être prêt avant d'ouvrir la mise en réseau directe.");
         var route=Route.Detect();
-        var socket=new UdpClient(new IPEndPoint(route.Local,0));
+        NetworkSettings.Load();
+        UdpClient socket;
+        try {socket=new UdpClient(new IPEndPoint(route.Local,NetworkSettings.MeshPort));}
+        catch(SocketException) {if(NetworkSettings.MeshPort==0)throw;throw new IOException("Le port fixe "+NetworkSettings.MeshPort+" (jeu à 3 ou 4) est déjà utilisé par un autre programme. Choisissez un autre port fixe.");}
         int port=((IPEndPoint)socket.Client.LocalEndPoint).Port;
         try {
             meshFirewall=Firewall.Open(port);
             if(disposed)throw new OperationCanceledException();
-            meshMapping=new Gateway(route,port,port,true);meshMapping.Open();
+            meshMapping=Gateway.OpenFor(route,port,port,true);
             if(disposed)throw new OperationCanceledException();
             meshRelay=new MeshRelay(Lobby.LocalSeat,Invite.Token,socket){Diagnostic=Report.Write};
             var wiring=new MeshWiring(meshRelay,Lobby.LocalSeat);

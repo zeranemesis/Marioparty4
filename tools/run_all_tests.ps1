@@ -64,6 +64,8 @@ $notApplicableExit = @{
     'test_generate_input'    = 2   # needs a human recording under work/netplay-recordings
     'test_crash_pipeline'    = 2   # needs a configured build tree for nlohmann/json
     'test_audio_wait'        = 2   # needs a MusyX regression source that is in no commit
+    'test_quest_stereo'      = 2   # needs a Quest headset over adb
+    'test_quest_stereo_render' = 2 # needs a configured build/android-arm64-quest tree
 }
 
 # Most scripts compile and run their own standalone test with cl.exe and never

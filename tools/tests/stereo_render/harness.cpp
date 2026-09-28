@@ -149,7 +149,8 @@ int main(int argc, char** argv) {
   int written = 0;
   const auto emit = [&](const char* name, ShaderConfig config) {
     for (const auto [stereo, suffix] : {std::pair{StereoOff, ".wgsl"}, std::pair{StereoClipDistance, "-stereo.wgsl"},
-                                        std::pair{StereoDiscard, "-stereo-discard.wgsl"}}) {
+                                        std::pair{StereoDiscard, "-stereo-discard.wgsl"},
+                                        std::pair{StereoUncut, "-stereo-uncut.wgsl"}}) {
       config.stereo = stereo;
       write(dir + "/" + name + suffix, build_shader_source(config));
       ++written;

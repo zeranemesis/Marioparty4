@@ -25,6 +25,10 @@ void PartyBoard_StereoObserveBounds(Mtx modelView, const HuVecF *min, const HuVe
 // An object the headset should not draw: a backdrop around the player (sky, skybox).
 BOOL PartyBoard_StereoBackdrop(float x, float y, float z, float radius);
 BOOL PartyBoard_StereoSphereVisible(float x, float y, float z, float radius);
+// Around each object hsfdraw.c draws (ObjDraw): its draws skip the eyes' cut
+// when its bounds cannot reach the other eye.
+void PartyBoard_StereoObjectBegin(Mtx modelView, const HuVecF *min, const HuVecF *max);
+void PartyBoard_StereoObjectEnd(void);
 
 #ifdef __cplusplus
 }
