@@ -107,11 +107,13 @@ Etat au 28/09/2026, apres le build 112 (branche `quest/lrz-uncut`). Chaque point
    - retour au jeu apres une longue pause (le build 109 n'a ete teste que sur cinq retours courts) ;
    - plantage de m440 (SIGSEGV, build 88), a reproduire ; son rapport n'est pas lisible sans acces root ;
    - parcours plateau, m428, retour au plateau, en suivant la memoire (`Memory:` : 611 a 634 Mo residents sur le plateau au build 112).
-3. **Controles visuels** :
+3. **Controles visuels**, dont ceux de 81bbc211 (fusionne au build 114) :
    - bords des yeux avec le mode sans coupe (`StereoUncut`) ;
-   - HUD au fond du plateau ;
+   - plateau fixe : le recentrage sur le joueur actif est retire, il donnait la nausee ;
+   - HUD sur un ecran de stade au-dessus du plateau ;
+   - mini-jeux : une maquette inclinee a la place de l'ecran, vue depuis leur camera (le grip gauche bascule ce mode) ;
    - table du scan de la piece : le 28/09, la piece n'avait aucune table scannee (`Room scan: 0 table(s)`). A refaire apres en avoir ajoute une dans Space Setup.
-4. **Hauteur des mini-jeux par rapport a la table** (trop hauts ou trop bas). Le sol est mesure sur la geometrie des 20 premieres images (`PartyBoard_StereoObserveBounds`). Piste : la hauteur des pieds des personnages. Ils sont dans `charWork[]`, statique dans `src/game/chrman.c` ; il faudrait un accesseur sous `TARGET_PC`.
+4. **Hauteur des mini-jeux par rapport a la table**, seulement quand ils sont poses sur la table (trop hauts ou trop bas). Le sol est mesure sur la geometrie des 20 premieres images (`PartyBoard_StereoObserveBounds`). Piste : la hauteur des pieds des personnages. Ils sont dans `charWork[]`, statique dans `src/game/chrman.c` ; il faudrait un accesseur sous `TARGET_PC`.
 
 ### 2. Alleger le GPU, le poste dominant
 
