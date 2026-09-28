@@ -55,6 +55,12 @@ public:
   // quest_xr.cpp stands it at the back of the model. nullptr while hidden.
   const XrCompositionLayerBaseHeader* hud_layer(XrSpace space, const XrPosef& pose, XrExtent2Df size,
                                                 const void* next);
+  // The screen the interface shows on, like a stadium's: a dark face with a
+  // bezel around the interface's quad (same pose and size), to submit just
+  // before hud_layer. nullptr while the interface is hidden.
+  const XrCompositionLayerBaseHeader* hud_screen_layer(XrSpace space, const XrPosef& pose, XrExtent2Df size);
+  // The bezel, as a part of the interface's width on each side.
+  static constexpr float kHudBezel = 0.025f;
 
   // Game thread (PartyBoardQuest_StereoFrame): an image and the view to draw it with.
   bool game_frame(StereoFrame& out);
@@ -67,6 +73,9 @@ public:
   void set_screen_required(bool required);
   void set_board_mode(bool board);
   bool screen_required() const;
+  // A minigame is on show (the game's 3D world, not a board): quest_xr.cpp
+  // stands it where the board's screen is.
+  bool minigame_mode() const;
   bool world_only() const;
   bool world_visible() const { return mShown && mShownHasWorld; }
   // A camera with no view never enqueues GPU work: return its lease explicitly.
@@ -135,6 +144,10 @@ private:
   uint32_t mHudPixelsWidth = 1600, mHudPixelsHeight = 1200;
   bool mHudShown = false;
   XrCompositionLayerQuad mHudLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
+  // The screen behind the interface: one static image, drawn once.
+  XrSwapchain mHudScreenSwapchain = XR_NULL_HANDLE;
+  XrCompositionLayerQuad mHudScreenLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
+  void create_hud_screen();
   std::vector<XrSwapchainImageOpenGLESKHR> mSwapchainImages;
   uint32_t mEyeWidth = 0; // an eye's half of the swapchain: the largest drawn size
   uint32_t mEyeHeight = 0;

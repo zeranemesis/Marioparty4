@@ -134,66 +134,100 @@ void test_camera_yaw() {
   assert(!camera_yaw(broken, yaw));
 }
 
-void run(partyboard::quest::CameraFollow& follow, float yaw, float x, float z, float seconds) {
-  for (float t = 0; t < seconds; t += 1.0f / 60.0f) follow.update(yaw, x, z, 1.0f / 60.0f);
+void run(partyboard::quest::CameraFollow& follow, float yaw, float seconds) {
+  for (float t = 0; t < seconds; t += 1.0f / 60.0f) follow.update(yaw, 0.0f, 1.0f / 60.0f);
 }
 
 void test_follow() {
   using partyboard::quest::CameraFollow;
   using partyboard::quest::kPi;
   CameraFollow follow;
-  follow.reset(0.5f, 100.0f, -200.0f); // entering a scene: at once
-  assert(near(follow.yaw(), 0.5f) && near(follow.focus_x(), 100.0f) && near(follow.focus_z(), -200.0f));
+  follow.reset(0.5f); // entering a scene: at once
+  assert(near(follow.yaw(), 0.5f));
 
   // An orbit (the camera never rests) leaves the model still.
   for (int frame = 0; frame < 600; ++frame) {
-    follow.update(0.5f + frame * 0.02f, 100.0f, -200.0f, 1.0f / 60.0f);
+    follow.update(0.5f + frame * 0.02f, 0.0f, 1.0f / 60.0f);
   }
   assert(near(follow.yaw(), 0.5f));
 
   // A small sway at rest is ignored.
-  follow.reset(0.0f, 0, 0);
-  run(follow, 0.1f, 0, 0, 2.0f); // under 8 degrees
+  follow.reset(0.0f);
+  run(follow, 0.1f, 2.0f); // under 8 degrees
   assert(near(follow.yaw(), 0.0f));
 
   // A camera at rest elsewhere: the model turns there, not at once.
-  follow.reset(0.0f, 0, 0);
-  run(follow, 1.2f, 0, 0, 0.3f);
+  follow.reset(0.0f);
+  run(follow, 1.2f, 0.3f);
   assert(near(follow.yaw(), 0.0f)); // not at rest long enough yet
-  run(follow, 1.2f, 0, 0, 0.3f);
+  run(follow, 1.2f, 0.3f);
   assert(follow.yaw() > 0.0f && follow.yaw() < 1.2f);
-  run(follow, 1.2f, 0, 0, 3.0f);
+  run(follow, 1.2f, 3.0f);
   assert(near(follow.yaw(), 1.2f, 0.01f));
 
   // Across +-180 degrees: the short way round.
-  follow.reset(3.0f, 0, 0);
-  run(follow, -3.0f, 0, 0, 0.6f);
+  follow.reset(3.0f);
+  run(follow, -3.0f, 0.6f);
   assert(follow.yaw() > 3.0f || follow.yaw() < -3.0f);
-  run(follow, -3.0f, 0, 0, 3.0f);
+  run(follow, -3.0f, 3.0f);
   assert(near(follow.yaw(), -3.0f, 0.01f));
 
   // Never faster than 90 degrees a second.
-  follow.reset(0.0f, 0, 0);
-  run(follow, 3.0f, 0, 0, 0.4f); // at rest now
+  follow.reset(0.0f);
+  run(follow, 3.0f, 0.4f); // at rest now
   const float before = follow.yaw();
-  follow.update(3.0f, 0, 0, 0.1f);
+  follow.update(3.0f, 0.0f, 0.1f);
   assert(follow.yaw() - before <= CameraFollow::kMaxTurnSpeed * 0.1f + 0.0001f);
 
-  // The focus slides to a new player; a step inside the dead zone is ignored.
-  follow.reset(0.0f, 0, 0);
-  run(follow, 0.0f, 50.0f, 0, 2.0f);
-  assert(near(follow.focus_x(), 0.0f));
-  run(follow, 0.0f, 1000.0f, -500.0f, 0.2f);
-  assert(follow.focus_x() > 0.0f && follow.focus_x() < 1000.0f);
-  run(follow, 0.0f, 1000.0f, -500.0f, 6.0f);
-  assert(near(follow.focus_x(), 1000.0f, 1.0f) && near(follow.focus_z(), -500.0f, 1.0f));
-  // No player (NaN): the focus stays.
-  run(follow, 0.0f, NAN, NAN, 1.0f);
-  assert(near(follow.focus_x(), 1000.0f, 1.0f));
-  // Bad frame times change nothing.
-  follow.update(2.0f, 0, 0, NAN);
-  follow.update(2.0f, 0, 0, -1.0f);
-  assert(near(follow.focus_x(), 1000.0f, 1.0f));
+  // No camera (NaN), or bad frame times: nothing moves.
+  follow.reset(1.0f);
+  run(follow, NAN, 1.0f);
+  follow.update(2.0f, 0.0f, NAN);
+  follow.update(2.0f, 0.0f, -1.0f);
+  assert(near(follow.yaw(), 1.0f));
+
+  // The camera's height above the arena is followed like its side.
+  follow.reset(0.0f, 0.7f);
+  assert(near(follow.pitch(), 0.7f));
+  for (float t = 0; t < 0.3f; t += 1.0f / 60.0f) follow.update(0.0f, 1.2f, 1.0f / 60.0f);
+  assert(near(follow.pitch(), 0.7f)); // not at rest long enough yet
+  for (float t = 0; t < 3.0f; t += 1.0f / 60.0f) follow.update(0.0f, 1.2f, 1.0f / 60.0f);
+  assert(near(follow.pitch(), 1.2f, 0.01f) && near(follow.yaw(), 0.0f));
+  // A small change of height at rest is ignored; an unknown one keeps it.
+  for (float t = 0; t < 2.0f; t += 1.0f / 60.0f) follow.update(0.0f, 1.25f, 1.0f / 60.0f);
+  for (float t = 0; t < 2.0f; t += 1.0f / 60.0f) follow.update(0.0f, NAN, 1.0f / 60.0f);
+  assert(near(follow.pitch(), 1.2f, 0.01f));
+}
+
+// Turned by camera_turn, the camera looks along -Z: its back axis goes to +Z
+// and its up to +Y, whatever its side and height (straight down included).
+void test_camera_turn() {
+  using partyboard::quest::camera_pitch;
+  using partyboard::quest::camera_turn;
+  using partyboard::quest::camera_yaw;
+  using partyboard::quest::kPi;
+  const float cases[][2] = {{0.0f, 0.7f}, {1.3f, 0.4f}, {-2.6f, 1.0f}, {0.8f, kPi * 0.5f}, {3.0f, 0.0f}};
+  for (const auto& angles : cases) {
+    float view[3][4];
+    look_at(angles[0], angles[1], view);
+    float yaw = 0, pitch = 0, rows[3][3];
+    assert(camera_yaw(view, yaw) && camera_pitch(view, pitch));
+    assert(near(pitch, angles[1], 0.01f));
+    camera_turn(yaw, pitch, rows);
+    for (int axis = 1; axis <= 2; ++axis) { // up, back
+      float turned[3];
+      for (int r = 0; r < 3; ++r) {
+        turned[r] = rows[r][0] * view[axis][0] + rows[r][1] * view[axis][1] + rows[r][2] * view[axis][2];
+      }
+      assert(near(turned[0], 0.0f, 0.01f));
+      assert(near(turned[1], axis == 1 ? 1.0f : 0.0f, 0.01f));
+      assert(near(turned[2], axis == 2 ? 1.0f : 0.0f, 0.01f));
+    }
+  }
+  float broken[3][4] = {};
+  broken[2][1] = NAN;
+  float pitch = 0;
+  assert(!camera_pitch(broken, pitch));
 }
 
 } // namespace
@@ -203,6 +237,7 @@ int main() {
   test_pick_and_scale();
   test_camera_yaw();
   test_follow();
+  test_camera_turn();
   std::puts("quest table and camera follow: PASS");
   return 0;
 }
