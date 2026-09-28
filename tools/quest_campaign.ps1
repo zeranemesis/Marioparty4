@@ -42,11 +42,10 @@ $switches = @('debug.partyboard.sort_opaque', 'debug.partyboard.stereo_crossing'
               'debug.partyboard.xr_priority', 'debug.partyboard.stereo_msaa', 'debug.partyboard.opaque_blend')
 $live = @(
     @{ name = 'reference';     props = @{ 'debug.partyboard.eye_scale' = $eye } },
+    @{ name = 'sort-off';      props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.sort_opaque' = '0' } },
+    @{ name = 'blend-on';      props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.opaque_blend' = 'on' } },
     @{ name = 'crossing-off';  props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.stereo_crossing' = '0' } },
-    @{ name = 'sort';          props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.sort_opaque' = '1' } },
-    @{ name = 'sort+blend-off'; props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.sort_opaque' = '1'; 'debug.partyboard.opaque_blend' = 'off' } },
-    @{ name = 'blend-off';     props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.opaque_blend' = 'off' } },
-    @{ name = 'gpu-boost';     props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.gpu_level' = 'boost' } },
+    @{ name = 'legacy';        props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.sort_opaque' = '0'; 'debug.partyboard.opaque_blend' = 'on'; 'debug.partyboard.stereo_crossing' = '0' } },
     @{ name = 'res-80';        props = @{ 'debug.partyboard.eye_scale' = '80' } },
     @{ name = 'res-110';       props = @{ 'debug.partyboard.eye_scale' = '110' } },
     @{ name = 'reference-end'; props = @{ 'debug.partyboard.eye_scale' = $eye } }
@@ -124,6 +123,9 @@ if ($AnalyzeDirectory) {
         if ($RestartPhases) {
             foreach ($phase in $restart) {
                 Set-Phase $phase
+                # Wait for an arrival after this restart, not the one already in the log.
+                $last = Select-String -Path $logPath -Pattern "PartyBoardQuest: Scene $Scene`: spatial rendering" -ErrorAction SilentlyContinue | Select-Object -Last 1
+                $script:sceneLine = if ($last) { $last.LineNumber } else { 0 }
                 Adb @('shell', 'am', 'force-stop', $package) | Out-Null
                 $since = Get-Date
                 Adb @('shell', 'am', 'start', '-n', "$package/.PartyBoardActivity") | Out-Null

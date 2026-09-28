@@ -358,7 +358,7 @@
  #ifdef AURORA_ENABLE_RMLUI
 --- /dev/null
 +++ b/lib/gfx/stereo.cpp
-@@ -0,0 +1,735 @@
+@@ -0,0 +1,740 @@
 +#include "stereo.hpp"
 +
 +#include <aurora/stereo.h>
@@ -477,8 +477,13 @@
 +std::vector<DrawOrder> g_eyeOrder;
 +uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
 +// Headset A/B switches, read again every 2 s so a capture can flip them
-+// without restarting the game:
-+//   debug.partyboard.sort_opaque 1       opaque draws of objects front to back
++// without restarting the game. On the Toad board (Quest 3, build 118,
++// 2026-09-28) the sort with the opaque blend off shaded 35% fewer fragments
++// per image than neither (59% GPU instead of 82%, 53 ms motion-to-photon
++// instead of 68), with no difference the player could see: both are on by
++// default.
++//   debug.partyboard.sort_opaque 0       opaque draws of objects in the game's
++//                                        order (default: front to back)
 +//   debug.partyboard.stereo_crossing 0   an object that reaches both eyes is
 +//                                        one instanced draw cut by a fragment
 +//                                        test; by default it is drawn once per
@@ -486,15 +491,15 @@
 +//                                        rejection: 11% fewer fragments shaded
 +//                                        per image on the Toad board (Quest 3,
 +//                                        build 117, 2026-09-28)
-+//   debug.partyboard.opaque_blend off    measurement only: the game's opaque
-+//                                        objects drawn without their alpha blend,
-+//                                        which the Adreno's early depth rejection
-+//                                        may not take; edges of translucent
-+//                                        textures turn hard
++//   debug.partyboard.opaque_blend on     the game's opaque objects keep their
++//                                        alpha blend (default: off, so the
++//                                        Adreno's early depth rejection works;
++//                                        edges of translucent textures in them
++//                                        are drawn hard)
 +struct Switches {
-+  bool sortOpaque = false;
++  bool sortOpaque = true;
 +  bool crossingPerEye = true;
-+  bool opaqueBlendOff = false;
++  bool opaqueBlendOff = true;
 +};
 +Switches g_switches;
 +std::chrono::steady_clock::time_point g_switchesAt{};
@@ -508,13 +513,13 @@
 +  char value[PROP_VALUE_MAX] = {};
 +  Switches read;
 +  __system_property_get("debug.partyboard.sort_opaque", value);
-+  read.sortOpaque = value[0] == '1';
++  read.sortOpaque = value[0] != '0';
 +  value[0] = '\0';
 +  __system_property_get("debug.partyboard.stereo_crossing", value);
 +  read.crossingPerEye = value[0] != '0';
 +  value[0] = '\0';
 +  __system_property_get("debug.partyboard.opaque_blend", value);
-+  read.opaqueBlendOff = std::string_view{value} == "off";
++  read.opaqueBlendOff = std::string_view{value} != "on";
 +  static bool logged = false;
 +  if (!logged || read.sortOpaque != g_switches.sortOpaque || read.crossingPerEye != g_switches.crossingPerEye ||
 +      read.opaqueBlendOff != g_switches.opaqueBlendOff) {
