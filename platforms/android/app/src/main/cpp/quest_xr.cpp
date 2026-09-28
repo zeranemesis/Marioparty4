@@ -1477,15 +1477,22 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   // The compositor runs the filter at the display rate: about 2 ms of GPU per
   // displayed frame at 120 Hz, a quarter of the GPU, was the compositor's on
   // 2026-09-28. For a headset A/B: `adb shell setprop
-  // debug.partyboard.layer_filter normal` (lighter sharpening) or `none`.
-  static const int layerFilter = [] {
+  // debug.partyboard.layer_filter normal` (lighter sharpening) or `none`,
+  // read again every 2 s so a capture can compare them in one session.
+  static int layerFilter = -1;
+  static auto layerFilterAt = std::chrono::steady_clock::time_point{};
+  if (const auto now = std::chrono::steady_clock::now(); layerFilter < 0 || now - layerFilterAt >= std::chrono::seconds(2)) {
+    layerFilterAt = now;
     char value[PROP_VALUE_MAX] = {};
     __system_property_get("debug.partyboard.layer_filter", value);
     const int chosen = std::strcmp(value, "none") == 0 ? 0 : std::strcmp(value, "normal") == 0 ? 1 : 2;
-    LOGI("Eyes' layer filter: %s (debug.partyboard.layer_filter=%s)",
-         chosen == 0 ? "none" : chosen == 1 ? "normal sharpening" : "by resolution", value[0] != '\0' ? value : "unset");
-    return chosen;
-  }();
+    if (chosen != layerFilter) {
+      LOGI("Eyes' layer filter: %s (debug.partyboard.layer_filter=%s)",
+           chosen == 0 ? "none" : chosen == 1 ? "normal sharpening" : "by resolution",
+           value[0] != '\0' ? value : "unset");
+    }
+    layerFilter = chosen;
+  }
   if (layerFilter == 1) {
     modelSettings.layerFlags = XR_COMPOSITION_LAYER_SETTINGS_NORMAL_SHARPENING_BIT_FB;
   }
