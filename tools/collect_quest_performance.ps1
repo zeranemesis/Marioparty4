@@ -5,7 +5,8 @@ param(
     [switch]$GpuTiming,
     [switch]$RestartGame,
     # A/B switches, restored after the capture. RenderHz: new images per
-    # second at most (0: the display rate); the game reads it within 2 s.
+    # second at most (0: the display rate; unset: half the display rate from
+    # 110 Hz up); the game reads it within 2 s.
     [int]$RenderHz = -1,
     # Eyes: 0 one draw per eye, 1 one draw cut by clip distances, 2 one draw
     # cut by a fragment test (the default when unset). Read at startup, so
@@ -14,6 +15,10 @@ param(
     # The eyes' MSAA: 1 (none) or 4 (the default when unset); WebGPU has no
     # 2x. Read at startup.
     [ValidateSet('', '1', '4')] [string]$StereoMsaa = '',
+    # Also record the Adreno counters of Meta's ovrgpuprofiler, once a second
+    # (gpu-metrics.txt): frequency, busy and utilization, vertex/texture/
+    # memory stalls, bandwidth, time shading vertices and fragments.
+    [switch]$GpuMetrics,
     [string]$Sdk = "$env:LOCALAPPDATA/Android/Sdk"
 )
 $ErrorActionPreference = 'Stop'
@@ -41,6 +46,7 @@ function Restore-Property([string]$name, [string]$value) {
     else { & $taskAdb -s $Serial shell "setprop $name ''" }
 }
 $taskCapture = $null
+$taskMetrics = $null
 try {
     if ($GpuTiming) {
         & $taskAdb -s $Serial shell setprop debug.partyboard.gpu_timing 1
@@ -77,11 +83,20 @@ try {
     $taskLog = Join-Path $OutputDirectory 'quest.log'
     $taskCapture = Start-Process -FilePath $taskAdb -ArgumentList @('-s', $Serial, 'logcat', "--pid=$taskGamePid", '-v', 'threadtime', '-T', '1') `
         -WindowStyle Hidden -PassThru -RedirectStandardOutput $taskLog -RedirectStandardError (Join-Path $OutputDirectory 'adb-errors.log')
+    if ($GpuMetrics) {
+        $taskMetrics = Start-Process -FilePath $taskAdb -ArgumentList @('-s', $Serial, 'shell', 'ovrgpuprofiler', '--realtime=2,3,4,7,8,11,12,13,17,25,26,32,33,40') `
+            -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutputDirectory 'gpu-metrics.txt') `
+            -RedirectStandardError (Join-Path $OutputDirectory 'gpu-metrics-errors.log')
+    }
     $taskUntil = [DateTime]::UtcNow.AddSeconds($DurationSeconds)
     Write-Output "Recording $DurationSeconds seconds to $taskLog. Play the same board route for each comparison."
     while ([DateTime]::UtcNow -lt $taskUntil -and -not $taskCapture.HasExited) { Start-Sleep -Seconds 1 }
 } finally {
     if ($taskCapture -and -not $taskCapture.HasExited) { Stop-Process -Id $taskCapture.Id; $taskCapture.WaitForExit() }
+    if ($taskMetrics -and -not $taskMetrics.HasExited) {
+        Stop-Process -Id $taskMetrics.Id; $taskMetrics.WaitForExit()
+        & $taskAdb -s $Serial shell "pkill -f ovrgpuprofiler" 2>$null
+    }
     if ($GpuTiming) {
         if ($taskPreviousTiming) { & $taskAdb -s $Serial shell setprop debug.partyboard.gpu_timing $taskPreviousTiming }
         else { & $taskAdb -s $Serial shell "setprop debug.partyboard.gpu_timing ''" }

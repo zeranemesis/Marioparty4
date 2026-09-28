@@ -34,6 +34,8 @@
 #include <thread>
 #include <vector>
 
+#include <sys/system_properties.h>
+
 using namespace quest;
 
 namespace {
@@ -626,10 +628,21 @@ void request_performance(const App& app) {
   }
   auto set = proc<PFN_xrPerfSettingsSetPerformanceLevelEXT>(app.instance, "xrPerfSettingsSetPerformanceLevelEXT");
   if (set != nullptr) {
+    // The board is GPU-bound (85-98% busy), yet the GPU mostly ran at level 2
+    // under "sustained high" (Quest 3, 2026-09-28). For a headset test,
+    // `adb shell setprop debug.partyboard.gpu_level boost` before the session
+    // starts asks for the boost level instead; watch "Perf settings" (thermal)
+    // and the VrApi GPU level in the log.
+    char value[PROP_VALUE_MAX] = {};
+    __system_property_get("debug.partyboard.gpu_level", value);
+    const bool boost = std::strcmp(value, "boost") == 0;
+    const XrPerfSettingsLevelEXT gpuLevel =
+        boost ? XR_PERF_SETTINGS_LEVEL_BOOST_EXT : XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT;
     check(app.instance, set(app.session, XR_PERF_SETTINGS_DOMAIN_CPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT),
           "CPU performance level");
-    check(app.instance, set(app.session, XR_PERF_SETTINGS_DOMAIN_GPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT),
-          "GPU performance level");
+    check(app.instance, set(app.session, XR_PERF_SETTINGS_DOMAIN_GPU_EXT, gpuLevel), "GPU performance level");
+    LOGI("Performance levels: CPU sustained high, GPU %s (debug.partyboard.gpu_level=%s)",
+         boost ? "boost" : "sustained high", value[0] != '\0' ? value : "unset");
   }
 }
 
@@ -1232,8 +1245,23 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
       ? XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SHARPENING_BIT_FB
       : XR_COMPOSITION_LAYER_SETTINGS_NORMAL_SHARPENING_BIT_FB;
   modelSettings.next = app.extensions.imageLayout ? &modelFlip : nullptr;
-  const void* modelChain = app.extensions.layerSettings ? static_cast<const void*>(&modelSettings)
-                                                       : modelSettings.next;
+  // The compositor runs the filter at the display rate: about 2 ms of GPU per
+  // displayed frame at 120 Hz, a quarter of the GPU, was the compositor's on
+  // 2026-09-28. For a headset A/B: `adb shell setprop
+  // debug.partyboard.layer_filter normal` (lighter sharpening) or `none`.
+  static const int layerFilter = [] {
+    char value[PROP_VALUE_MAX] = {};
+    __system_property_get("debug.partyboard.layer_filter", value);
+    const int chosen = std::strcmp(value, "none") == 0 ? 0 : std::strcmp(value, "normal") == 0 ? 1 : 2;
+    LOGI("Eyes' layer filter: %s (debug.partyboard.layer_filter=%s)",
+         chosen == 0 ? "none" : chosen == 1 ? "normal sharpening" : "by resolution", value[0] != '\0' ? value : "unset");
+    return chosen;
+  }();
+  if (layerFilter == 1) {
+    modelSettings.layerFlags = XR_COMPOSITION_LAYER_SETTINGS_NORMAL_SHARPENING_BIT_FB;
+  }
+  const void* modelChain = app.extensions.layerSettings && layerFilter != 0 ? static_cast<const void*>(&modelSettings)
+                                                                             : modelSettings.next;
   const auto* modelLayer = model ? app.stereo.layer(app.stage, modelChain) : nullptr;
 
   std::array<const XrCompositionLayerBaseHeader*, 5> layers{};
