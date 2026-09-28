@@ -180,7 +180,7 @@
  #include "texture_convert.hpp"
  #include "../gx/gx_fmt.hpp"
  
-@@ -54,26 +55,34 @@ bool setup_swizzle(wgpu::TextureComponentSwizzleDescriptor& swizzle, u32 format)
+@@ -54,26 +55,38 @@
  } // namespace
  
  TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 format, ArrayRef<uint8_t> data,
@@ -211,8 +211,12 @@
    }
 +  if (!converted.data.empty()) data = converted.data;
 +  RgbaMipChain generated;
++  // Colour formats, CMPR included: decoded to RGBA8 on the headset (no BC
++  // there), and the boards' large textures, which shimmer at a distance
++  // without mips. Intensity formats stay out: often masks or fonts, their
++  // alpha is not a colour's coverage.
 +  const bool colorFormat = format == GX_TF_RGBA8 || format == GX_TF_RGB565 ||
-+      format == GX_TF_RGB5A3 || format == GX_TF_RGBA8_PC;
++      format == GX_TF_RGB5A3 || format == GX_TF_RGBA8_PC || format == GX_TF_CMPR;
 +  if (worldMips && !tlut && colorFormat && mips == 1 && width >= 16 && height >= 16 &&
 +      width <= 2048 && height <= 2048 && to_wgpu(format) == wgpu::TextureFormat::RGBA8Unorm) {
 +    CHECK(data.size() == UINT32_MAX || data.size() >= size_t(width) * height * 4, "RGBA mip source truncated");
@@ -228,7 +232,7 @@
  
    uint32_t offset = 0;
    for (uint32_t mip = 0; mip < mips; ++mip) {
-@@ -218,13 +227,22 @@ void write_texture(TextureRef& ref, ArrayRef<uint8_t> data) noexcept {
+@@ -218,13 +231,22 @@
  
    ConvertedTexture converted;
    if (ref.gxFormat != InvalidTextureFormat) {
