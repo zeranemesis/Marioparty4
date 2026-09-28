@@ -206,7 +206,7 @@ sealed class MainForm : Form {
         session=current;lastReport=current.Report;current.Host=create;RefreshLobby();
         current.Report.Write("role="+(create?"host":"guest")+" connection_requested");
         Task.Run(()=>{try{
-            if(create){current.Create(players);UI(()=>{if(session==current && current.Bridge==null){var encoded=current.Invite.Encode();invitation.Text=encoded;PublishInvitation(encoded);RefreshControls();SetStatus(startup.InvitationOut!=null?"Salon créé. Ton launcher a l'invitation : invite tes amis depuis lui. Garde cette fenêtre ouverte.":"Salon créé. Copiez l'invitation et envoyez-la à "+(players>2?"vos amis":"votre ami")+". Vous seul pourrez lancer le jeu.");}});}
+            if(create){current.Create(players);UI(()=>{if(session==current && current.Bridge==null){var encoded=current.Invite.Encode();invitation.Text=encoded;PublishInvitation(encoded);RefreshControls();SetStatus(current.LocalOnly?"Salon ouvert en réseau local seulement : la box n'a pas pu s'ouvrir. Seuls les joueurs de ce réseau peuvent le rejoindre ; pour Internet, choisissez un port fixe et ouvrez-le sur la box.":(startup.InvitationOut!=null?"Salon créé. Ton launcher a l'invitation : invite tes amis depuis lui. Garde cette fenêtre ouverte.":"Salon créé. Copiez l'invitation et envoyez-la à "+(players>2?"vos amis":"votre ami")+". Vous seul pourrez lancer le jeu."));}});}
             else current.Join(invitationText);
         }catch(Exception e){current.Dispose();UI(()=>{if(session==current){Reset();SetStatus(Friendly(e));}});}});
     }

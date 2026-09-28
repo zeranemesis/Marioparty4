@@ -94,6 +94,19 @@ static class Tests {
                 NetworkSettings.PublicAddress=IPAddress.Parse("5.6.7.8");
                 Check(new Gateway(lan,40000,40000,false,silent).AsManual(40000).Address.Equals(IPAddress.Parse("5.6.7.8")),"manual port falls back to the typed address");
                 Check(new Gateway(lan,40000,40000,true,nested).AsManual(40001).Address.Equals(IPAddress.Parse("5.6.7.8")),"a box behind another network is not trusted for the address");
+                // No opening at all: a salon for this network only.
+                var local=new Gateway(lan,40000,40000,false,silent).AsLocal();
+                Check(local.LocalOnly && local.Port==40000 && local.Address.Equals(IPAddress.Parse("192.168.1.2")),"no opening falls back to a local-network salon");
+                local.Renew();local.Dispose();
+                var exposed=new Route{Local=IPAddress.Parse("82.64.1.2"),Router=IPAddress.Parse("192.168.1.1")};
+                Reject(()=>new Gateway(exposed,40000,40000,false,silent).AsLocal(),"no local salon without a private address");
+                var lanInvite=new Invitation{Address=IPAddress.Parse("192.168.1.2"),Port=40000,LocalAddress=IPAddress.Parse("192.168.1.2"),LocalPort=40000,Expires=DateTime.UtcNow.AddMinutes(30),Fingerprint=Wire.Random(16),Token=Wire.Random(16),Build=Wire.Random(32)};
+                var lanDecoded=Invitation.Decode(lanInvite.Encode());
+                Check(lanDecoded.Address.Equals(IPAddress.Parse("192.168.1.2")) && lanDecoded.Port==40000,"a local-network invitation is accepted");
+                lanInvite.Address=IPAddress.Parse("192.168.1.9");
+                Reject(()=>Invitation.Decode(lanInvite.Encode()),"a private address that is not the local path is refused");
+                lanInvite.Address=IPAddress.Parse("192.168.1.2");lanInvite.LocalPort=40002;
+                Reject(()=>Invitation.Decode(lanInvite.Encode()),"a local invitation whose ports disagree is refused");
             } finally {NetworkSettings.Port=savedPort;NetworkSettings.PublicAddress=savedAddress;}
         }
         byte[] key=Wire.Random(12);var request=Gateway.PcpRequest(IPAddress.Parse("192.168.1.2"),key,32000,32000,120);

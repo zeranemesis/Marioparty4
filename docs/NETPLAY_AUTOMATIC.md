@@ -67,6 +67,16 @@ dans l'invitation vient de la box quand elle la donne (NAT-PMP) ; sinon elle doi
 Aucun service extérieur n'est interrogé. Le réglage est enregistré dans
 `%LOCALAPPDATA%\PartyBoard\online-network.txt`.
 
+## Réseau local sans ouverture
+
+Quand aucune ouverture n'est possible (ni automatique, ni port fixe avec une
+adresse publique connue), le salon s'ouvre quand même, **en réseau local
+seulement**, et l'hôte en est averti. L'invitation porte alors l'adresse locale
+comme adresse principale ; elle n'est acceptée que si elle est identique à
+l'adresse locale annoncée, avec le même port, et le certificat de l'hôte reste
+vérifié. Les joueurs du même réseau (même box, même Wi-Fi) peuvent la rejoindre ;
+un ami sur Internet ne le peut pas.
+
 Un partage de connexion de téléphone ne permet pas d'héberger, même avec un port
 fixe : il n'offre pas de redirection de port, et l'opérateur partage l'adresse
 IPv4 publique entre plusieurs abonnés. Rejoindre une partie reste possible.

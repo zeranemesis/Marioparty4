@@ -87,6 +87,8 @@ sealed class Session : IDisposable {
     // Above two, there is no "the guest" to relay for -- every seat, this
     // host's own included, reaches the others through MeshRelay instead, so
     // the UDP mapping below is skipped and OpenMesh() opens its own later.
+    // No opening was possible: the salon is reachable only from this network.
+    public bool LocalOnly {get{return mapping!=null && mapping.LocalOnly;}}
     public void Create(int players=2) {
         if(players<2 || players>Lobby.MaxSeats)throw new IOException("Nombre de joueurs invalide.");
         maxPlayers=players;

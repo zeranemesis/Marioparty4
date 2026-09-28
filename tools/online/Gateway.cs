@@ -216,8 +216,20 @@ sealed class Gateway : IDisposable {
     public static Gateway OpenFor(Route r,int port,int requestedPort,bool datagram) {
         var g=new Gateway(r,port,requestedPort,datagram);
         try {g.Open();return g;}
-        catch(IOException) {if(NetworkSettings.Port==0)throw;}
-        return g.AsManual(requestedPort);
+        catch(IOException) {}
+        if(NetworkSettings.Port!=0) {
+            try {return g.AsManual(requestedPort);} catch(IOException) {}
+        }
+        return g.AsLocal();
+    }
+    // Neither opening is possible: the salon still works on this network. The
+    // invitation then carries the local address as its main one, which
+    // Invitation.Decode accepts only when it equals the local address too.
+    public bool LocalOnly {get{return method=="LOCAL";}}
+    internal Gateway AsLocal() {
+        if(!Private(route.Local))throw new IOException("La box n'a pas autorisé la connexion automatique, et ce PC n'est pas sur un réseau local. Vous pouvez inverser les rôles : votre ami crée la partie.");
+        method="LOCAL";externalPort=internalPort;Address=route.Local;Lifetime=3600;
+        return this;
     }
     // The port is assumed forwarded by hand: nothing to open, renew or close.
     // The address comes from the box when it reports one, else from the player.
@@ -245,7 +257,7 @@ sealed class Gateway : IDisposable {
     }
     public void Renew() {
         int beforePort=externalPort;var beforeAddress=Address;
-        if(method=="MANUAL") return;
+        if(method=="MANUAL" || method=="LOCAL") return;
         if(method=="PCP") Pcp(120);else if(method=="PMP") Pmp(120);else if(method=="UPNP") Upnp(120);else throw new IOException("Connexion temporaire fermée.");
         if(beforePort!=externalPort || !beforeAddress.Equals(Address)) throw new IOException("La connexion de la box a changé. Recréez une partie.");
     }
