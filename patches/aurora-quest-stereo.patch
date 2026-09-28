@@ -293,7 +293,7 @@
        .label = passInfo.label.empty() ? label.c_str() : passInfo.label.c_str(),
 --- /dev/null
 +++ b/lib/gfx/stereo.cpp
-@@ -0,0 +1,613 @@
+@@ -0,0 +1,614 @@
 +#include "stereo.hpp"
 +
 +#include <aurora/stereo.h>
@@ -337,13 +337,14 @@
 +// The eyes' multisampling. On the headset's tiled GPU (Adreno 740) 4x takes
 +// four times the tile memory per pixel: smaller bins, and every draw is
 +// processed again in each bin it touches. For a headset A/B, before starting
-+// the game: `adb shell setprop debug.partyboard.stereo_msaa 2` (1, 2 or 4;
-+// 4 when unset).
++// the game: `adb shell setprop debug.partyboard.stereo_msaa 1` (no MSAA).
++// WebGPU only has 1 and 4 samples: any other value keeps 4 (2x aborted the
++// game on its first eye frame, 2026-09-28).
 +uint32_t stereo_samples() {
 +  static const uint32_t samples = [] {
 +    char value[PROP_VALUE_MAX] = {};
 +    __system_property_get("debug.partyboard.stereo_msaa", value);
-+    const uint32_t chosen = value[0] == '1' ? 1u : value[0] == '2' ? 2u : 4u;
++    const uint32_t chosen = value[0] == '1' && value[1] == '\0' ? 1u : 4u;
 +    Log.info("Stereo: MSAA {}x (debug.partyboard.stereo_msaa={})", chosen, value[0] != '\0' ? value : "unset");
 +    return chosen;
 +  }();

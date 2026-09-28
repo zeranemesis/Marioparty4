@@ -11,8 +11,9 @@ param(
     # cut by a fragment test (the default when unset). Read at startup, so
     # with -RestartGame.
     [ValidateSet('', '0', '1', '2')] [string]$InstancedStereo = '',
-    # The eyes' MSAA: 1, 2 or 4 (the default when unset). Read at startup.
-    [ValidateSet('', '1', '2', '4')] [string]$StereoMsaa = '',
+    # The eyes' MSAA: 1 (none) or 4 (the default when unset); WebGPU has no
+    # 2x. Read at startup.
+    [ValidateSet('', '1', '4')] [string]$StereoMsaa = '',
     [string]$Sdk = "$env:LOCALAPPDATA/Android/Sdk"
 )
 $ErrorActionPreference = 'Stop'
