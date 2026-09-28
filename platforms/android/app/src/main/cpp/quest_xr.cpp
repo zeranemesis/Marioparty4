@@ -26,6 +26,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <limits>
@@ -589,6 +590,35 @@ void set_passthrough(App& app, bool on) {
   }
 }
 
+// The display rate to ask for, among those the headset offers: the fastest,
+// or `adb shell setprop debug.partyboard.display_hz 72` (72, 80, 90, 120: the
+// offered rate closest to it). The game then renders at that rate below
+// 110 Hz, every displayed image a new one, and at half of it from 110 Hz up
+// (src/port/imgui.cpp). At 120 Hz each image is shown twice, and the
+// compositor, which corrects the head's rotation but not its translation,
+// makes a nearby board judder when the head moves (2026-09-28); 72 Hz shows
+// each image once and leaves the compositor half the work.
+float preferred_refresh_rate(const std::vector<float>& rates) {
+  if (rates.empty()) {
+    return 0.0f;
+  }
+  char value[PROP_VALUE_MAX] = {};
+  __system_property_get("debug.partyboard.display_hz", value);
+  const float wanted = static_cast<float>(std::atof(value));
+  float chosen = *std::max_element(rates.begin(), rates.end());
+  if (wanted > 0.0f) {
+    chosen = *std::min_element(rates.begin(), rates.end(), [wanted](float a, float b) {
+      return std::abs(a - wanted) < std::abs(b - wanted);
+    });
+  }
+  static float logged = 0.0f;
+  if (chosen != logged) {
+    LOGI("Display rate %.0f Hz (debug.partyboard.display_hz=%s)", chosen, value[0] != '\0' ? value : "unset");
+    logged = chosen;
+  }
+  return chosen;
+}
+
 void query_refresh_rates(App& app) {
   if (!app.extensions.refreshRate) {
     return;
@@ -605,7 +635,7 @@ void query_refresh_rates(App& app) {
   std::lock_guard lock{g_ratesMutex};
   g_refreshRates = std::move(rates);
   if (!g_refreshRates.empty()) {
-    g_requestedRefreshRate.store(*std::max_element(g_refreshRates.begin(), g_refreshRates.end()));
+    g_requestedRefreshRate.store(preferred_refresh_rate(g_refreshRates));
   }
 }
 
@@ -1565,7 +1595,10 @@ JNIEXPORT jfloatArray JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_nat
 
 JNIEXPORT void JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_nativeRequestRefreshRate(JNIEnv*, jclass,
                                                                                               jfloat rate) {
-  g_requestedRefreshRate.store(rate);
+  // QuestVr asks for the fastest rate: the preferred one wins (a test switch).
+  std::lock_guard lock{g_ratesMutex};
+  const float preferred = preferred_refresh_rate(g_refreshRates);
+  g_requestedRefreshRate.store(preferred > 0.0f ? preferred : rate);
 }
 
 } // extern "C"

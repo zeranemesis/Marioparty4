@@ -8,6 +8,9 @@ param(
     # second at most (0: the display rate; unset: half the display rate from
     # 110 Hz up); the game reads it within 2 s.
     [int]$RenderHz = -1,
+    # The display rate asked of the headset (72, 80, 90 or 120; unset: the
+    # fastest). Read when the XR session starts, so with -RestartGame.
+    [int]$DisplayHz = 0,
     # Eyes: 0 one draw per eye, 1 one draw cut by clip distances, 2 one draw
     # cut by a fragment test (the default when unset). Read at startup, so
     # with -RestartGame.
@@ -27,6 +30,8 @@ if ($GpuTiming -and -not $RestartGame) { throw 'GPU timing is enabled at startup
 if ($StereoMsaa -ne '' -and -not $RestartGame) { throw 'MSAA is chosen at startup; specify -RestartGame with -StereoMsaa.' }
 if ($InstancedStereo -ne '' -and -not $RestartGame) { throw 'Instanced stereo is chosen at startup; specify -RestartGame with -InstancedStereo.' }
 if ($RenderHz -gt 240) { throw 'RenderHz must be 0 (display rate) to 240.' }
+if ($DisplayHz -ne 0 -and -not $RestartGame) { throw 'The display rate is chosen when the session starts; specify -RestartGame with -DisplayHz.' }
+if ($DisplayHz -lt 0 -or $DisplayHz -gt 240) { throw 'DisplayHz must be 72 to 120 (0: unchanged).' }
 $taskAdb = Join-Path $Sdk 'platform-tools/adb.exe'
 if (-not $Serial) {
     $taskDevices = @(& $taskAdb devices | Where-Object { $_ -match '^([^\s]+)\s+device$' })
@@ -39,6 +44,7 @@ $taskPreviousTiming = (& $taskAdb -s $Serial shell getprop debug.partyboard.gpu_
 if ($LASTEXITCODE -ne 0) { throw 'Headset property query failed.' }
 if ($GpuTiming -and $taskPreviousTiming -notin @('', '0', '1')) { throw 'Unexpected existing GPU timing property; preserve it unchanged.' }
 $taskPreviousRenderHz = (& $taskAdb -s $Serial shell getprop debug.partyboard.render_hz).Trim()
+$taskPreviousDisplayHz = (& $taskAdb -s $Serial shell getprop debug.partyboard.display_hz).Trim()
 $taskPreviousInstanced = (& $taskAdb -s $Serial shell getprop debug.partyboard.instanced_stereo).Trim()
 $taskPreviousMsaa = (& $taskAdb -s $Serial shell getprop debug.partyboard.stereo_msaa).Trim()
 function Restore-Property([string]$name, [string]$value) {
@@ -56,6 +62,10 @@ try {
         & $taskAdb -s $Serial shell setprop debug.partyboard.render_hz $RenderHz
         if ($LASTEXITCODE -ne 0) { throw 'Cannot set the render rate cap on this headset.' }
     }
+    if ($DisplayHz -gt 0) {
+        & $taskAdb -s $Serial shell setprop debug.partyboard.display_hz $DisplayHz
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot set the display rate on this headset.' }
+    }
     if ($StereoMsaa -ne '') {
         & $taskAdb -s $Serial shell setprop debug.partyboard.stereo_msaa $StereoMsaa
         if ($LASTEXITCODE -ne 0) { throw 'Cannot set the eyes MSAA on this headset.' }
@@ -70,6 +80,7 @@ try {
         headset = (& $taskAdb -s $Serial shell getprop ro.product.model).Trim()
         durationSeconds = $DurationSeconds; gpuTiming = [bool]$GpuTiming
         renderHz = $(if ($RenderHz -ge 0) { $RenderHz } else { $taskPreviousRenderHz })
+        displayHz = $(if ($DisplayHz -gt 0) { $DisplayHz } elseif ($taskPreviousDisplayHz) { $taskPreviousDisplayHz } else { 'unset (fastest)' })
         stereoMsaa = $(if ($StereoMsaa -ne '') { $StereoMsaa } elseif ($taskPreviousMsaa) { $taskPreviousMsaa } else { 'unset (4)' })
         instancedStereo = $(if ($InstancedStereo -ne '') { $InstancedStereo } elseif ($taskPreviousInstanced) { $taskPreviousInstanced } else { 'unset (2)' })
     } | ConvertTo-Json | Out-File -Encoding utf8 (Join-Path $OutputDirectory 'settings.json')
@@ -103,6 +114,10 @@ try {
         Write-Output 'Previous GPU timing property restored; the running game keeps its startup setting until restarted.'
     }
     if ($RenderHz -ge 0) { Restore-Property debug.partyboard.render_hz $taskPreviousRenderHz }
+    if ($DisplayHz -gt 0) {
+        Restore-Property debug.partyboard.display_hz $taskPreviousDisplayHz
+        Write-Output 'Previous display rate property restored; the running game keeps its rate until the session restarts.'
+    }
     if ($StereoMsaa -ne '') { Restore-Property debug.partyboard.stereo_msaa $taskPreviousMsaa }
     if ($InstancedStereo -ne '') {
         Restore-Property debug.partyboard.instanced_stereo $taskPreviousInstanced
