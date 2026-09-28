@@ -272,7 +272,7 @@
        .label = passInfo.label.empty() ? label.c_str() : passInfo.label.c_str(),
 --- /dev/null
 +++ b/lib/gfx/stereo.cpp
-@@ -0,0 +1,563 @@
+@@ -0,0 +1,576 @@
 +#include "stereo.hpp"
 +
 +#include <aurora/stereo.h>
@@ -292,6 +292,7 @@
 +
 +#if defined(__ANDROID__)
 +#include <android/hardware_buffer.h>
++#include <sys/system_properties.h>
 +#include <unistd.h>
 +#endif
 +
@@ -313,9 +314,21 @@
 +uint32_t g_height = 0;
 +uint32_t g_eyeHeight = 0, g_hudWidth = 0, g_hudHeight = 0;
 +constexpr uint32_t kStereoSamples = 4;
-+// Quest Vulkan fails to create the clip-distance pipeline (VK_ERROR_UNKNOWN);
-+// keep the proven per-eye path until that driver path is validated.
-+constexpr bool kUseInstancedStereo = false;
++// Quest Vulkan failed to create the clip-distance pipeline (VK_ERROR_UNKNOWN,
++// build 88), so each eye is drawn on its own. For a headset test of a driver
++// or shader change, `adb shell setprop debug.partyboard.instanced_stereo 1`
++// before starting the game tries both eyes at once again; a pipeline that
++// fails then still falls back to one draw per eye (gx/pipeline.cpp).
++bool use_instanced_stereo() {
++  static const bool enabled = [] {
++    char value[PROP_VALUE_MAX] = {};
++    __system_property_get("debug.partyboard.instanced_stereo", value);
++    const bool on = value[0] == '1';
++    if (on) Log.warn("Stereo: both-eyes instanced drawing enabled by debug.partyboard.instanced_stereo");
++    return on;
++  }();
++  return enabled;
++}
 +AuroraStereoCallback g_callback = nullptr;
 +void* g_callbackUser = nullptr;
 +
@@ -489,7 +502,7 @@
 +  // Both eyes in one instanced draw once its pipeline is built (the first
 +  // request queues it); until then, and for lines and points, which already
 +  // use instances, one draw per eye.
-+  if (kUseInstancedStereo && webgpu::g_clipDistancesSupported &&
++  if (use_instanced_stereo() && webgpu::g_clipDistancesSupported &&
 +      !g_instancedDisabled.load(std::memory_order_relaxed) &&
 +      info.lineMode == 0 && draw.instanceCount == 1 && gx::stereo_instanced_fits(info)) {
 +    auto instancedConfig = spatialConfig;
@@ -1118,26 +1131,38 @@
  #include "../webgpu/gpu.hpp"
  #include "gx_fmt.hpp"
  #include "shader_info.hpp"
-@@ -10,7 +11,26 @@ static Module Log("aurora::gx");
+@@ -10,7 +11,38 @@ static Module Log("aurora::gx");
  
  wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    ZoneScoped;
 -  const auto shader = build_shader(config.shaderConfig);
 +  if (config.shaderConfig.stereo) {
 +    // A headset's eyes in one instanced draw. Any uncaptured WebGPU error is
-+    // fatal, so this is built in an error scope: should it fail, there is no
-+    // pipeline, and stereo.cpp goes back to drawing each eye on its own.
-+    webgpu::g_device.PushErrorScope(wgpu::ErrorFilter::Validation);
++    // fatal, so this is built in error scopes: should it fail, there is no
++    // pipeline, and stereo.cpp goes back to drawing each eye on its own. A
++    // driver's own failure (Adreno's VK_ERROR_UNKNOWN) is an Internal error,
++    // not a Validation one, so every filter gets a scope.
++    constexpr wgpu::ErrorFilter kFilters[]{wgpu::ErrorFilter::Validation, wgpu::ErrorFilter::OutOfMemory,
++                                           wgpu::ErrorFilter::Internal};
++    for (const auto filter : kFilters) webgpu::g_device.PushErrorScope(filter);
 +    auto pipeline = build_pipeline(config, {}, build_shader(config.shaderConfig), "GX Stereo Pipeline");
-+    bool failed = true;
-+    std::string message = "no answer";
-+    const auto future = webgpu::g_device.PopErrorScope(
-+        wgpu::CallbackMode::WaitAnyOnly,
-+        [&](wgpu::PopErrorScopeStatus status, wgpu::ErrorType type, wgpu::StringView text) {
-+          failed = status != wgpu::PopErrorScopeStatus::Success || type != wgpu::ErrorType::NoError;
-+          message = std::string{text.data != nullptr ? std::string_view{text} : std::string_view{}};
-+        });
-+    if (webgpu::g_instance.WaitAny(future, UINT64_MAX) != wgpu::WaitStatus::Success || failed) {
++    bool failed = false;
++    std::string message;
++    for (size_t i = 0; i < std::size(kFilters); ++i) {
++      bool scopeFailed = true;
++      std::string scopeMessage = "no answer";
++      const auto future = webgpu::g_device.PopErrorScope(
++          wgpu::CallbackMode::WaitAnyOnly,
++          [&](wgpu::PopErrorScopeStatus status, wgpu::ErrorType type, wgpu::StringView text) {
++            scopeFailed = status != wgpu::PopErrorScopeStatus::Success || type != wgpu::ErrorType::NoError;
++            scopeMessage = std::string{text.data != nullptr ? std::string_view{text} : std::string_view{}};
++          });
++      if (webgpu::g_instance.WaitAny(future, UINT64_MAX) != wgpu::WaitStatus::Success || scopeFailed) {
++        failed = true;
++        if (message.empty()) message = scopeMessage;
++      }
++    }
++    if (failed) {
 +      gfx::stereo::instanced_failed(message);
 +      return {};
 +    }

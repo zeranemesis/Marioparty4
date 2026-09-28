@@ -1,11 +1,12 @@
 --- /dev/null
 +++ b/lib/gfx/rgba_mips.hpp
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,169 @@
 +#pragma once
 +
 +#include <algorithm>
 +#include <cmath>
 +#include <cstdint>
++#include <cstring>
 +#include <vector>
 +
 +namespace aurora::gfx {
@@ -14,17 +15,81 @@
 +  uint32_t levels = 1;
 +};
 +
++namespace rgba_mips_detail {
++// The sRGB byte for a linear value: the encoding every mip texel goes through.
++inline uint8_t encode_srgb(float v) {
++  const float encoded = v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
++  return uint8_t(std::clamp(std::lround(encoded * 255), 0l, 255l));
++}
++
++struct SrgbTables {
++  static constexpr unsigned kBucketShift = 15; // [0, 2) in 32768 buckets of float bit patterns
++  static constexpr uint32_t kTwo = 0x40000000u;
++  float linear[256];
++  // threshold[k], 1 <= k <= 255: the bits of the smallest float encode_srgb
++  // takes to k or above; threshold[256] ends the search.
++  uint32_t threshold[257];
++  // The byte at the start of each bucket: at most a step or two below the answer.
++  uint8_t bucket[kTwo >> kBucketShift];
++};
++
++// Built once with this platform's own pow, so a lookup gives exactly the
++// byte encode_srgb would: mip generation runs on the game thread, for every
++// world texture loaded or updated, and pow per texel was most of its cost.
++inline const SrgbTables& srgb_tables() {
++  static const SrgbTables tables = [] {
++    SrgbTables t;
++    for (unsigned i = 0; i < 256; ++i) {
++      const float c = i / 255.0f;
++      t.linear[i] = c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
++    }
++    // Non-negative floats sort like their bit patterns: bisect those.
++    const auto as_float = [](uint32_t bits) { float f; std::memcpy(&f, &bits, sizeof f); return f; };
++    t.threshold[0] = 0;
++    for (unsigned k = 1; k < 256; ++k) {
++      uint32_t lo = 0, hi = SrgbTables::kTwo; // 0 encodes to 0, 2 to 255
++      while (hi - lo > 1) {
++        const uint32_t mid = lo + (hi - lo) / 2;
++        (encode_srgb(as_float(mid)) >= k ? hi : lo) = mid;
++      }
++      t.threshold[k] = hi;
++    }
++    t.threshold[256] = UINT32_MAX;
++    unsigned k = 0;
++    for (uint32_t i = 0; i < std::size(t.bucket); ++i) {
++      while (t.threshold[k + 1] <= i << SrgbTables::kBucketShift) ++k;
++      t.bucket[i] = uint8_t(k);
++    }
++    return t;
++  }();
++  return tables;
++}
++
++inline uint8_t encode_srgb_table(const SrgbTables& t, float v) {
++  uint32_t bits;
++  std::memcpy(&bits, &v, sizeof bits);
++  if (bits >= SrgbTables::kTwo) return bits >> 31 ? 0 : 255; // negative, or 2 and above
++  unsigned k = t.bucket[bits >> SrgbTables::kBucketShift];
++  while (bits >= t.threshold[k + 1]) ++k;
++  return uint8_t(k);
++}
++} // namespace rgba_mips_detail
++
 +// Keep level zero exact. Average sRGB colors in linear light with alpha
 +// weighting so transparent texels cannot introduce colored fringes.
 +inline RgbaMipChain rgba_mip_chain(const uint8_t* pixels, uint32_t width, uint32_t height) {
 +  RgbaMipChain out;
 +  if (!pixels || !width || !height) return out;
-+  out.bytes.assign(pixels, pixels + size_t(width) * height * 4);
-+  float linear[256];
-+  for (unsigned i = 0; i < 256; ++i) {
-+    const float c = i / 255.0f;
-+    linear[i] = c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
++  size_t total = size_t(width) * height * 4;
++  for (uint32_t w = width, h = height; w > 1 || h > 1;) {
++    w = std::max(1u, w / 2);
++    h = std::max(1u, h / 2);
++    total += size_t(w) * h * 4;
 +  }
++  out.bytes.reserve(total);
++  out.bytes.assign(pixels, pixels + size_t(width) * height * 4);
++  const auto& tables = rgba_mips_detail::srgb_tables();
++  const float* linear = tables.linear;
 +  size_t offset = 0;
 +  bool cutout = true;
 +  size_t covered = 0;
@@ -34,10 +99,35 @@
 +  }
 +  const float coverage = float(covered) / (size_t(width) * height);
 +  cutout &= coverage > 0 && coverage < 1;
++  std::vector<uint8_t> next;
 +  while (width > 1 || height > 1) {
 +    const uint32_t nextW = std::max(1u, width / 2), nextH = std::max(1u, height / 2);
-+    std::vector<uint8_t> next(size_t(nextW) * nextH * 4);
-+    for (uint32_t y = 0; y < nextH; ++y) for (uint32_t x = 0; x < nextW; ++x) {
++    next.assign(size_t(nextW) * nextH * 4, 0);
++    // Even sizes (the usual case): each texel is a whole 2x2 (or 2x1) block,
++    // every weight exactly 1. Same sums in the same order as the general
++    // loop below, so the same bytes; each product is its own statement so the
++    // compiler cannot fuse it differently from there.
++    const uint32_t spanX = width == 1 ? 1 : 2, spanY = height == 1 ? 1 : 2;
++    const bool halves = (width == 1 || width % 2 == 0) && (height == 1 || height % 2 == 0);
++    if (halves) for (uint32_t y = 0; y < nextH; ++y) for (uint32_t x = 0; x < nextW; ++x) {
++      float rgb[3]{}, alpha = 0, weight = 0;
++      for (uint32_t dy = 0; dy < spanY; ++dy)
++        for (uint32_t dx = 0; dx < spanX; ++dx) {
++          const auto* p = out.bytes.data() + offset + (size_t(y * spanY + dy) * width + x * spanX + dx) * 4;
++          const float a = p[3] / 255.0f;
++          for (unsigned c = 0; c < 3; ++c) {
++            const float term = linear[p[c]] * a;
++            rgb[c] += term;
++          }
++          alpha += a;
++          weight += 1.0f;
++        }
++      auto* p = next.data() + (size_t(y) * nextW + x) * 4;
++      for (unsigned c = 0; c < 3; ++c)
++        p[c] = rgba_mips_detail::encode_srgb_table(tables, alpha > 0 ? rgb[c] / alpha : 0);
++      p[3] = uint8_t(std::clamp(std::lround(alpha / weight * 255), 0l, 255l));
++    }
++    else for (uint32_t y = 0; y < nextH; ++y) for (uint32_t x = 0; x < nextW; ++x) {
 +      const float x0 = float(x) * width / nextW, x1 = float(x + 1) * width / nextW;
 +      const float y0 = float(y) * height / nextH, y1 = float(y + 1) * height / nextH;
 +      float rgb[3]{}, alpha = 0, weight = 0;
@@ -52,11 +142,8 @@
 +          weight += w;
 +        }
 +      auto* p = next.data() + (size_t(y) * nextW + x) * 4;
-+      for (unsigned c = 0; c < 3; ++c) {
-+        const float v = alpha > 0 ? rgb[c] / alpha : 0;
-+        const float encoded = v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
-+        p[c] = uint8_t(std::clamp(std::lround(encoded * 255), 0l, 255l));
-+      }
++      for (unsigned c = 0; c < 3; ++c)
++        p[c] = rgba_mips_detail::encode_srgb_table(tables, alpha > 0 ? rgb[c] / alpha : 0);
 +      p[3] = uint8_t(std::clamp(std::lround(alpha / weight * 255), 0l, 255l));
 +    }
 +    // Preserve the closest representable cutout coverage at the common 0.5

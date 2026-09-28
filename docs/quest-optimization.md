@@ -26,6 +26,25 @@ Le script conserve logcat, summary.json et world-windows.csv. Il ne vide pas les
 
 Dans le menu de placement : frequence XR, resolution effective par oeil, nouvelles images 3D/s, CPU/GPU et images en retard. OVR Metrics Tool et RenderDoc restent necessaires pour localiser les passes couteuses et mesurer la consommation memoire.
 
+### Comparaisons A/B sur casque
+
+Deux proprietes de diagnostic, absentes par defaut (comportement inchange), servent a trancher entre les postes probables. Le script les pose, note les reglages dans `settings.json` et restaure les valeurs precedentes.
+
+- `debug.partyboard.render_hz` plafonne les nouvelles images du jeu (lu toutes les 2 s). L'affichage XR garde sa frequence et remontre la derniere image avec ses poses. Hypothese a verifier : le thread du jeu, qui simule et enregistre les deux yeux, vise 120 images/s et plafonne sous 60 sur le plateau Toad.
+- `debug.partyboard.instanced_stereo=1` reessaie les deux yeux en un seul draw instancie (lu au demarrage). L'echec du pipeline est desormais capture aussi comme erreur Internal ou OutOfMemory, ce qui doit ramener au rendu par oeil. Si Dawn traite l'erreur Adreno comme une perte d'appareil, le jeu s'arretera quand meme : lire le logcat.
+
+```powershell
+# Meme parcours, trois fois chacun, apres chauffe :
+./tools/collect_quest_performance.ps1 -DurationSeconds 120               # reference
+./tools/collect_quest_performance.ps1 -DurationSeconds 120 -RenderHz 72  # cadence 72
+./tools/collect_quest_performance.ps1 -DurationSeconds 120 -RenderHz 60  # cadence 60
+./tools/collect_quest_performance.ps1 -DurationSeconds 120 -RestartGame -InstancedStereo
+```
+
+`summary.json` ajoute `game` et `game_by_scene` (images/s du thread du jeu, temps d'enregistrement, saccades), `draws` (draws du monde par oeil, part instanciee) et `memory` (memoire residente, memoire disponible du systeme, croissance sur la capture ; ligne `Memory:` du journal toutes les 5 s). La memoire residente n'est pas le PSS : elle suit la croissance, `dumpsys meminfo` reste la reference ponctuelle.
+
+La generation des mipmaps du monde (thread du jeu, a chaque chargement ou mise a jour de texture) n'appelle plus `pow` par texel : table construite avec le `pow` de la plateforme, et chemin 2x2 pour les tailles paires. Les octets sont identiques, ce que verifient `tools/test_quest_quality.ps1` (encodage compare autour de chaque seuil, textures comparees a `tools/tests/rgba_mips_reference.hpp`) et une compilation clang avec FMA. Sur PC, une texture 512x512 passe d'environ 5,5 ms a 2 ms ; le gain sur Quest reste a mesurer.
+
 ## Verification locale
 
 ```powershell
