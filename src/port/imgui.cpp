@@ -328,7 +328,7 @@ int headset_render_cap()
         checkedAt = now;
         char value[PROP_VALUE_MAX] = {};
         __system_property_get("debug.partyboard.render_hz", value);
-        cap = std::max(0, std::atoi(value));
+        cap = (std::max)(0, std::atoi(value));
     }
     return cap;
 #else
@@ -340,7 +340,7 @@ int target_frame_rate()
 {
     int headsetRate = partyboard::display::headset_frame_rate();
     const int cap = headsetRate > 0 ? headset_render_cap() : 0;
-    if (cap > 0 && cap < headsetRate) headsetRate = std::max(cap, kOriginalSimulationRate);
+    if (cap > 0 && cap < headsetRate) headsetRate = (std::max)(cap, kOriginalSimulationRate);
     static int lastHeadsetRate = 0;
     if (headsetRate != lastHeadsetRate) {
         SDL_Log("Quest render target: %d FPS (simulation 60 Hz, netplay %s%s)",
