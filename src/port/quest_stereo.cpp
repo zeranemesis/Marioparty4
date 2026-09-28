@@ -337,8 +337,8 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
                 const float pos[3]{space->pos.x, space->pos.y, space->pos.z};
                 if (!std::isfinite(pos[0]) || !std::isfinite(pos[1]) || !std::isfinite(pos[2])) continue;
                 for (int axis = 0; axis < 3; ++axis) {
-                    minimum[axis] = std::min(minimum[axis], pos[axis]);
-                    maximum[axis] = std::max(maximum[axis], pos[axis]);
+                    minimum[axis] = (std::min)(minimum[axis], pos[axis]);
+                    maximum[axis] = (std::max)(maximum[axis], pos[axis]);
                 }
                 ++playable;
             }
@@ -501,13 +501,13 @@ extern "C" void PartyBoard_StereoObserveBounds(Mtx modelView, const HuVecF *min,
         for (int r = 0; r < 3; ++r) {
             world[r] = sViewToWorld.m[r][0] * view[0] + sViewToWorld.m[r][1] * view[1]
                 + sViewToWorld.m[r][2] * view[2] + sViewToWorld.m[r][3];
-            low[r] = std::min(low[r], world[r]);
-            high[r] = std::max(high[r], world[r]);
-            viewLow[r] = std::min(viewLow[r], view[r]);
-            viewHigh[r] = std::max(viewHigh[r], view[r]);
+            low[r] = (std::min)(low[r], world[r]);
+            high[r] = (std::max)(high[r], world[r]);
+            viewLow[r] = (std::min)(viewLow[r], view[r]);
+            viewHigh[r] = (std::max)(viewHigh[r], view[r]);
         }
     }
-    if (!std::isfinite(low[1]) || std::max(high[0] - low[0], high[2] - low[2]) < kFloorSpan * sSceneExtent) {
+    if (!std::isfinite(low[1]) || (std::max)(high[0] - low[0], high[2] - low[2]) < kFloorSpan * sSceneExtent) {
         return; // too small to be the ground
     }
     float center[3], radius2 = 0.0f;
@@ -519,7 +519,7 @@ extern "C" void PartyBoard_StereoObserveBounds(Mtx modelView, const HuVecF *min,
     if (PartyBoard_StereoBackdrop(center[0], center[1], center[2], std::sqrt(radius2))) {
         return; // the sky is not the floor
     }
-    sFloorY = std::min(sFloorY, low[1]);
+    sFloorY = (std::min)(sFloorY, low[1]);
 }
 
 extern "C" BOOL PartyBoard_StereoSphereVisible(float x, float y, float z, float radius)
