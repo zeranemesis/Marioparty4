@@ -25,8 +25,10 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -180,6 +182,9 @@ struct App {
   // of the player for this session, until a new placement or calibration.
   bool savedPlaceIgnored = false;
   XrTime firstFrameTime = 0;
+  // The eyes' height (STAGE) the flat screen is raised to at least: taken
+  // while placing or calibrating, and once at startup (NaN until then).
+  float screenEyeHeight = std::numeric_limits<float>::quiet_NaN();
   bool calibrating = false;
   bool calibrationConfirmed = false;
   bool calibrationConfirmArmed = false;
@@ -1138,6 +1143,9 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   if (!app.poseKnown && haveHead) {
     default_pose(app, head);
   }
+  if (haveHead && (!std::isfinite(app.screenEyeHeight) || app.placing)) {
+    app.screenEyeHeight = head.position.y;
+  }
   // Out of reach at startup: in front of the player instead, for this
   // session only. The saved place stays saved (it may be another room's
   // table) until the player places or calibrates the table again.
@@ -1277,6 +1285,14 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
     onTable.position.z = -kScreenBehindModelMeters;
   }
   screen.pose = compose(app.pose, onTable);
+  // Behind the board, but never below the eyes' comfortable level: standing
+  // on the table, a low table (or one placed on the floor, 0.04 m on
+  // 2026-09-28) took the menus, instructions and results down with it. The
+  // eyes' height is the one measured while placing (or first seen), not the
+  // live head, so the screen does not bob as the player moves.
+  if (std::isfinite(app.screenEyeHeight)) {
+    screen.pose.position.y = std::max(screen.pose.position.y, app.screenEyeHeight - kDefaultDropMeters);
+  }
   screen.size = {screenWidth, screenHeight};
   const bool screenShown = app.poseKnown && (!modelLayer || !app.stereo.world_visible() || app.placing);
   if (screenShown) {
