@@ -358,7 +358,7 @@
  #ifdef AURORA_ENABLE_RMLUI
 --- /dev/null
 +++ b/lib/gfx/stereo.cpp
-@@ -0,0 +1,711 @@
+@@ -0,0 +1,735 @@
 +#include "stereo.hpp"
 +
 +#include <aurora/stereo.h>
@@ -479,13 +479,22 @@
 +// Headset A/B switches, read again every 2 s so a capture can flip them
 +// without restarting the game:
 +//   debug.partyboard.sort_opaque 1       opaque draws of objects front to back
-+//   debug.partyboard.stereo_crossing 1   an object that reaches both eyes is
-+//                                        drawn once per eye instead of cut by a
-+//                                        fragment test (which costs the GPU its
-+//                                        early depth rejection)
++//   debug.partyboard.stereo_crossing 0   an object that reaches both eyes is
++//                                        one instanced draw cut by a fragment
++//                                        test; by default it is drawn once per
++//                                        eye, which keeps the GPU's early depth
++//                                        rejection: 11% fewer fragments shaded
++//                                        per image on the Toad board (Quest 3,
++//                                        build 117, 2026-09-28)
++//   debug.partyboard.opaque_blend off    measurement only: the game's opaque
++//                                        objects drawn without their alpha blend,
++//                                        which the Adreno's early depth rejection
++//                                        may not take; edges of translucent
++//                                        textures turn hard
 +struct Switches {
 +  bool sortOpaque = false;
-+  bool crossingPerEye = false;
++  bool crossingPerEye = true;
++  bool opaqueBlendOff = false;
 +};
 +Switches g_switches;
 +std::chrono::steady_clock::time_point g_switchesAt{};
@@ -502,10 +511,16 @@
 +  read.sortOpaque = value[0] == '1';
 +  value[0] = '\0';
 +  __system_property_get("debug.partyboard.stereo_crossing", value);
-+  read.crossingPerEye = value[0] == '1';
-+  if (read.sortOpaque != g_switches.sortOpaque || read.crossingPerEye != g_switches.crossingPerEye) {
-+    Log.info("Stereo switches: sort_opaque={} stereo_crossing={}", read.sortOpaque ? 1 : 0,
-+             read.crossingPerEye ? 1 : 0);
++  read.crossingPerEye = value[0] != '0';
++  value[0] = '\0';
++  __system_property_get("debug.partyboard.opaque_blend", value);
++  read.opaqueBlendOff = std::string_view{value} == "off";
++  static bool logged = false;
++  if (!logged || read.sortOpaque != g_switches.sortOpaque || read.crossingPerEye != g_switches.crossingPerEye ||
++      read.opaqueBlendOff != g_switches.opaqueBlendOff) {
++    logged = true;
++    Log.info("Stereo switches: sort_opaque={} stereo_crossing={} opaque_blend={}", read.sortOpaque ? 1 : 0,
++             read.crossingPerEye ? 1 : 0, read.opaqueBlendOff ? "off" : "on");
 +  }
 +  g_switches = read;
 +}
@@ -672,10 +687,19 @@
 +  const DrawOrder order{
 +      .key = g_sortKey,
 +      .object = g_sortObject,
-+      .sortable = inObject && config.blendMode == GX_BM_NONE && config.depthCompare && config.depthUpdate &&
-+                  (config.depthFunc == GX_LESS || config.depthFunc == GX_LEQUAL) && config.colorUpdate,
++      // The game draws its opaque objects with the usual alpha blend on
++      // (hsfdraw.c's SetBlendMode); its translucent ones go through its own
++      // back-to-front pass, outside ObjDraw. Additive and other blends stay put.
++      .sortable = inObject && config.depthCompare && config.depthUpdate &&
++                  (config.depthFunc == GX_LESS || config.depthFunc == GX_LEQUAL) && config.colorUpdate &&
++                  (config.blendMode == GX_BM_NONE ||
++                   (config.blendMode == GX_BM_BLEND && config.blendFacSrc == GX_BL_SRCALPHA &&
++                    config.blendFacDst == GX_BL_INVSRCALPHA)),
 +  };
 +  g_statSortable += order.sortable;
++  if (g_switches.opaqueBlendOff && order.sortable && spatialConfig.blendMode == GX_BM_BLEND) {
++    spatialConfig.blendMode = GX_BM_NONE;
++  }
 +  // An object that reaches both eyes, drawn once per eye when asked: no
 +  // fragment test, so the GPU keeps rejecting its hidden fragments early.
 +  const bool crossingPerEye = g_switches.crossingPerEye && inObject && !g_uncut;
