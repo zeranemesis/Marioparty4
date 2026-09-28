@@ -337,6 +337,13 @@ bool create_instance(App& app) {
     ext.sceneCapture = ext.scene && optional(TableScene::kCaptureExtension);
   }
 
+  // Not enabled: whether the runtime could take the eyes' depth (reprojection
+  // of the head's translation) or motion vectors (Application SpaceWarp), the
+  // next step against judder if 72 Hz cannot hold (docs/quest-optimization.md).
+  LOGI("Reprojection: depth submission %s, space warp %s",
+       has_extension(available, XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME) ? "offered" : "not offered",
+       has_extension(available, XR_FB_SPACE_WARP_EXTENSION_NAME) ? "offered" : "not offered");
+
   XrInstanceCreateInfoAndroidKHR android{XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
   android.applicationVM = g_java.vm;
   android.applicationActivity = g_java.activity;

@@ -67,6 +67,19 @@ Un changement de resolution ne recree plus forcement les images des yeux. Les re
 
 Sur casque, les images du jeu demarrent maintenant au rythme de l'ecran. Avant, le jeu suivait sa propre horloge a 60 Hz, qui glisse par rapport aux 120 Hz du casque. Une image terminee juste au moment ou le thread XR en cherche une restait affichee une trame, la suivante trois. Les poses des yeux, prevues pour le delai moyen, se trompaient alors d'une trame pour les deux images : le plateau saccadait, surtout quand la tete bouge. Desormais, chaque image demarre a un temps fixe apres un de ces passages du thread XR. Ce temps est choisi d'apres l'heure reelle de fin du GPU (horodatage de la fence) : 95 % des images finissent 1,5 ms avant le passage qui les montre. Une simulation (`tools/test_quest_quality.ps1`) le verifie : sans ce calage, contre un ecran a 119,88 Hz, des images restent 1 ou 3 trames ; avec, toutes en restent 2. Pas en netplay. Pour un A/B sans redemarrer : `adb shell setprop debug.partyboard.xr_pacing 0` (lu toutes les 2 s). Dans le journal `Stereo perf` : `holds=a/b/c/d` (images restees 1, 2, 3, 4 trames ou plus), `latencyMin`/`latencyMax`, `paced`, `paceWork` (95e centile du debut de l'image a la fin du GPU), `paceLooks` et `pacePhase`. `summary.json` en tire `off_cadence_percent`, la part des images hors du rythme habituel de la fenetre.
 
+### Profondeur pour le compositeur (piste E) : conception, pas encore faite
+
+A 120 Hz, chaque image du jeu est montree deux fois. La seconde fois, le compositeur ne corrige que la rotation de la tete. Il faudrait la profondeur des yeux pour corriger aussi la translation (`XR_KHR_composition_layer_depth`), et en plus des vecteurs de mouvement pour Application SpaceWarp (`XR_FB_space_warp`). Le journal indique au demarrage ce que le casque propose (`Reprojection: depth submission ..., space warp ...`).
+
+Ce que ca demanderait :
+
+1. Aujourd'hui, la profondeur des yeux (Depth32Float, MSAA 4x) est transitoire : elle ne sort jamais de la memoire de tuile. L'ecrire en memoire couterait environ 95 Mo par image, et WebGPU ne sait pas resoudre une profondeur. La voie raisonnable : une seconde sortie couleur R16Float dans les shaders GX des yeux (profondeur lineaire, resolue comme la couleur), soit 2 octets par pixel en plus. Il faut toucher `lib/gx/shader.cpp`, les pipelines stereo (deux cibles) et leur cle de cache.
+2. Une seconde image partagee par emplacement de l'anneau (AHardwareBuffer R16F), importee par Aurora comme les images couleur.
+3. Cote XR, une swapchain de profondeur (`GL_DEPTH_COMPONENT16`) et une passe GL qui ecrit `gl_FragDepth` depuis l'image R16F. Une copie directe est impossible entre couleur et profondeur. Cout estime : 0,2 a 0,4 ms de GPU par image.
+4. `XrCompositionLayerDepthInfoKHR` chaine a chaque vue, avec `nearZ`/`farZ` en metres (`kNear`/`kFar` de `stereo_view.cpp`, l'espace des yeux etant en metres de la piece). Les pixels sans monde (la piece en transparence) restent au plus loin.
+
+Critere de decision : d'abord mesurer `-DisplayHz 72` (chaque image montree une seule fois, donc aucune translation a corriger) avec le calage sur l'ecran. On ne lance E que si 72 i/s ne tiennent pas sur le plateau et qu'a 120 Hz la saccade en translation reste visible avec des `holds` reguliers.
+
 La generation des mipmaps du monde (thread du jeu, a chaque chargement ou mise a jour de texture) n'appelle plus `pow` par texel : table construite avec le `pow` de la plateforme, et chemin 2x2 pour les tailles paires. Les octets sont identiques, ce que verifient `tools/test_quest_quality.ps1` (encodage compare autour de chaque seuil, textures comparees a `tools/tests/rgba_mips_reference.hpp`) et une compilation clang avec FMA. Sur PC, une texture 512x512 passe d'environ 5,5 ms a 2 ms ; le gain sur Quest reste a mesurer.
 
 ## Verification locale
