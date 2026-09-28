@@ -60,11 +60,21 @@ public:
     // counters cannot tell (they miss the game's Vulkan work): on the Toad
     // board, 414 draws per eye kept 43-45 images/s from 80% down to 70%.
     // So a lowering is a trial: the window right after it drains the ring
-    // for the new images and is skipped; the next one must bring clearly
-    // more images, or the pixels come back and stay for kHoldWindows.
+    // for the new images and is skipped; the two next ones must bring, on
+    // average, clearly more images than the two before it, or the pixels
+    // come back and stay for kHoldWindows. One window each way was too
+    // noisy: while the board's intro camera moved, three lowerings in 16 s
+    // passed and the eyes sat at 65% for the rest of the game (120 Hz,
+    // 2026-09-28).
+    const unsigned previousDelivered = mLastDelivered;
+    mLastDelivered = delivered;
     if (mTrial.active) {
-      if (++mTrial.windows < 2) return mScale;
-      const bool helped = static_cast<float>(delivered) >= 1.05f * static_cast<float>(mTrial.deliveredBefore) + 1.0f;
+      ++mTrial.windows;
+      if (mTrial.windows < 2) return mScale;
+      mTrial.deliveredAfter += delivered;
+      if (mTrial.windows < 3) return mScale;
+      const float after = static_cast<float>(mTrial.deliveredAfter) / 2.0f;
+      const bool helped = after >= 1.08f * mTrial.deliveredBefore + 1.0f;
       mTrial.active = false;
       if (pressure && !helped) {
         mScale = mTrial.scaleBefore;
@@ -75,7 +85,9 @@ public:
       }
     }
     if (pressure && mHold == 0 && mScale > 0.65f) {
-      mTrial = {true, mScale, delivered, 0};
+      const float before = previousDelivered != 0 ? (delivered + previousDelivered) / 2.0f
+                                                  : static_cast<float>(delivered);
+      mTrial = {true, mScale, before, 0, 0};
       mScale = std::max(0.65f, mScale - 0.05f);
       mCalm = 0;
       mDecision = Decision::Lowered;
@@ -100,13 +112,15 @@ private:
   struct Trial {
     bool active = false;
     float scaleBefore = 1.0f;
-    unsigned deliveredBefore = 0;
+    float deliveredBefore = 0;  // average of the two windows before lowering
     unsigned windows = 0;
+    unsigned deliveredAfter = 0; // sum of the two judged windows
   };
   float mScale = 1.0f, mCap = 1.25f;
   uint64_t mSequence = 0;
   unsigned mCalm = 0;
   unsigned mHold = 0;
+  unsigned mLastDelivered = 0;
   Trial mTrial;
   Decision mDecision = Decision::Kept;
 };
