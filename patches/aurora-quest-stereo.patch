@@ -10,7 +10,7 @@
          lib/gfx/tex_palette_conv.cpp
 --- /dev/null
 +++ b/include/aurora/stereo.h
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,59 @@
 +#ifndef AURORA_STEREO_H
 +#define AURORA_STEREO_H
 +
@@ -60,6 +60,10 @@
 +// bounds): drawn for both eyes at once, they skip the cut at the eye's edge,
 +// which costs the GPU its early depth rejection. Back to false after them.
 +void AuroraStereoSetUncut(bool uncut);
++// The draws being recorded belong to one object, at this distance from the
++// eyes (any unit, the same for every object); < 0: outside any object. Opaque
++// draws of objects can then go to the GPU front to back (debug.partyboard.sort_opaque).
++void AuroraStereoSetSortKey(float key);
 +
 +#ifdef __cplusplus
 +}
@@ -132,7 +136,7 @@
  #include "tex_copy_conv.hpp"
  #include "tex_palette_conv.hpp"
  #include "texture_replacement.hpp"
-@@ -182,6 +183,10 @@
+@@ -182,6 +183,10 @@ struct RenderPass {
    bool captureDepthSnapshot = false;
    bool sealed = false;
    std::vector<tex_palette_conv::ConvRequest> paletteConvs;
@@ -143,7 +147,7 @@
  };
  
  struct TextureCopy {
-@@ -495,6 +500,8 @@
+@@ -495,6 +500,8 @@ void end_color_pass() {
  }
  
  static inline void push_command(CommandType type, const Command::Data& data) {
@@ -152,7 +156,7 @@
    if (g_currentRenderPass == UINT32_MAX)
      UNLIKELY {
        Log.warn("Dropping command {}", magic_enum::enum_name(type));
-@@ -1119,6 +1126,7 @@
+@@ -1119,6 +1126,7 @@ bool begin_frame() {
  
  void finish() {
    ZoneScoped;
@@ -160,7 +164,7 @@
    if (g_recordingFrame == nullptr) {
      return;
    }
-@@ -1127,11 +1135,122 @@
+@@ -1127,11 +1135,132 @@ void finish() {
      auto& frame = current_frame_packet();
      frame.uniforms.append_zeroes(gx::MaxUniformSize); // Pad the end of the GX uniform buffer slice.
      auto& pass = frame.renderPasses[g_currentRenderPass];
@@ -235,34 +239,44 @@
 +        .data = {.draw = ShaderDrawCommand{.type = ShaderType::GX, .gx = draw}},
 +    });
 +  };
-+  // In recording order. A run of per-eye draws goes to the left eye, then the
++  // In recording order, or with the opaque draws of objects front to back
++  // (stereo_order.hpp). A run of per-eye draws goes to the left eye, then the
 +  // same run to the right eye, so the viewport changes per run, not per draw.
 +  const auto& leftDraws = *desc.eyes[0];
 +  const auto& rightDraws = *desc.eyes[1];
 +  const auto instanced = [&](size_t i) {
 +    return desc.instanced != nullptr && i < desc.instanced->size() && (*desc.instanced)[i] != 0;
 +  };
-+  for (size_t i = 0; i < leftDraws.size();) {
-+    if (instanced(i)) {
++  std::vector<uint32_t> sequence;
++  if (desc.order != nullptr && desc.order->size() == leftDraws.size()) {
++    sequence = stereo::draw_sequence(*desc.order, desc.sortOpaque);
++  } else {
++    sequence.resize(leftDraws.size());
++    std::iota(sequence.begin(), sequence.end(), 0u);
++  }
++  for (size_t p = 0; p < sequence.size();) {
++    if (instanced(sequence[p])) {
 +      set_view(2);
-+      auto draw = leftDraws[i++];
++      auto draw = leftDraws[sequence[p++]];
 +      draw.instanceCount = 2;
 +      push_gx(draw);
 +      continue;
 +    }
-+    size_t end = i;
-+    while (end < leftDraws.size() && !instanced(end)) {
++    size_t end = p;
++    while (end < sequence.size() && !instanced(sequence[end])) {
 +      ++end;
 +    }
 +    set_view(0);
-+    for (size_t j = i; j < end; ++j) {
-+      push_gx(leftDraws[j]);
++    for (size_t q = p; q < end; ++q) {
++      push_gx(leftDraws[sequence[q]]);
 +    }
 +    set_view(1);
-+    for (size_t j = i; j < end && j < rightDraws.size(); ++j) {
-+      push_gx(rightDraws[j]);
++    for (size_t q = p; q < end; ++q) {
++      if (sequence[q] < rightDraws.size()) {
++        push_gx(rightDraws[sequence[q]]);
++      }
 +    }
-+    i = end;
++    p = end;
 +  }
 +  pass.commands.push_back({
 +      .type = CommandType::SetViewport,
@@ -285,7 +299,7 @@
  }
  
  void end_frame(EndFrameCallback callback) {
-@@ -1323,6 +1442,9 @@
+@@ -1323,6 +1452,9 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
      };
      depthStencilAttachmentPtr = &depthStencilAttachment;
    }
@@ -295,9 +309,56 @@
    const auto label = fmt::format("Render pass {}", passIndex);
    const wgpu::RenderPassDescriptor renderPassDescriptor{
        .label = passInfo.label.empty() ? label.c_str() : passInfo.label.c_str(),
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -930,7 +930,7 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
+     return 0;
+   }
+ 
+-  size_t acceptedRows = 0;
++  size_t acceptedRows = 0, invalidRows = 0;
+   while ((ret = sqlite3_step(g_pipelineCacheLoadStmt)) == SQLITE_ROW) {
+     const auto* configBlob = static_cast<const uint8_t*>(sqlite3_column_blob(g_pipelineCacheLoadStmt, 0));
+     const auto configSize = sqlite3_column_bytes(g_pipelineCacheLoadStmt, 0);
+@@ -944,10 +944,22 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
+     if (config.version != configVersion) {
+       continue;
+     }
++    // WebGPU has 1 or 4 samples. Rows with another count (a headset's MSAA 2x
++    // test wrote some on 2026-09-28) made the driver abort while they were
++    // built at every startup, so the game could not start again. Skip them.
++    if constexpr (requires { config.msaaSamples; }) {
++      if (config.msaaSamples != 1 && config.msaaSamples != 4) {
++        ++invalidRows;
++        continue;
++      }
++    }
+ 
+     find_pipeline_impl(type, config, [=] { return create(config); }, false, firstFrameUsed);
+     ++acceptedRows;
+   }
++  if (invalidRows != 0) {
++    Log.warn("Skipped {} cached pipelines with an invalid sample count", invalidRows);
++  }
+ 
+   if (ret != SQLITE_DONE) {
+     Log.error("Failed to read pipeline cache rows: {}", sqlite3_errmsg(g_pipelineCacheDb));
+@@ -1017,7 +1029,11 @@ PipelineRef find_pipeline(ShaderType type, const clear::PipelineConfig& config,
+ 
+ template <>
+ PipelineRef find_pipeline(ShaderType type, const gx::PipelineConfig& config, NewPipelineCallback&& cb) {
+-  return find_pipeline_impl(type, config, std::move(cb), true, std::nullopt);
++  // A headset's both-eyes pipelines are built when first drawn, never at
++  // startup from the cache: one a driver cannot build (Adreno lost the device
++  // on a clip-distance pipeline) must not be retried on every launch.
++  const bool persist = config.shaderConfig.stereo == gx::StereoOff;
++  return find_pipeline_impl(type, config, std::move(cb), persist, std::nullopt);
+ }
+ 
+ #ifdef AURORA_ENABLE_RMLUI
 --- /dev/null
 +++ b/lib/gfx/stereo.cpp
-@@ -0,0 +1,632 @@
+@@ -0,0 +1,711 @@
 +#include "stereo.hpp"
 +
 +#include <aurora/stereo.h>
@@ -409,6 +470,45 @@
 +// An instanced pipeline failed to build: every eye drawn on its own from then on.
 +std::atomic_bool g_instancedDisabled = false;
 +uint64_t g_statInstanced = 0, g_statPerEye = 0;
++// The object the draws being recorded belong to (AuroraStereoSetSortKey), and
++// per world draw its object and whether it may move (stereo_order.hpp).
++float g_sortKey = -1.f;
++uint32_t g_sortObject = 0;
++std::vector<DrawOrder> g_eyeOrder;
++uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
++// Headset A/B switches, read again every 2 s so a capture can flip them
++// without restarting the game:
++//   debug.partyboard.sort_opaque 1       opaque draws of objects front to back
++//   debug.partyboard.stereo_crossing 1   an object that reaches both eyes is
++//                                        drawn once per eye instead of cut by a
++//                                        fragment test (which costs the GPU its
++//                                        early depth rejection)
++struct Switches {
++  bool sortOpaque = false;
++  bool crossingPerEye = false;
++};
++Switches g_switches;
++std::chrono::steady_clock::time_point g_switchesAt{};
++
++void refresh_switches() {
++  const auto now = std::chrono::steady_clock::now();
++  if (g_switchesAt != std::chrono::steady_clock::time_point{} && now - g_switchesAt < std::chrono::seconds(2)) {
++    return;
++  }
++  g_switchesAt = now;
++  char value[PROP_VALUE_MAX] = {};
++  Switches read;
++  __system_property_get("debug.partyboard.sort_opaque", value);
++  read.sortOpaque = value[0] == '1';
++  value[0] = '\0';
++  __system_property_get("debug.partyboard.stereo_crossing", value);
++  read.crossingPerEye = value[0] == '1';
++  if (read.sortOpaque != g_switches.sortOpaque || read.crossingPerEye != g_switches.crossingPerEye) {
++    Log.info("Stereo switches: sort_opaque={} stereo_crossing={}", read.sortOpaque ? 1 : 0,
++             read.crossingPerEye ? 1 : 0);
++  }
++  g_switches = read;
++}
 +// Instanced pipelines seen built (game thread): asking the cache again would
 +// take its lock on every draw.
 +std::unordered_set<PipelineRef> g_readyInstanced;
@@ -567,7 +667,20 @@
 +  // Both eyes in one instanced draw once its pipeline is built (the first
 +  // request queues it); until then, and for lines and points, which already
 +  // use instances, one draw per eye.
-+  if (const uint8_t mode = instanced_stereo_mode(); mode != gx::StereoOff &&
++  // An opaque draw of an object may go to the GPU in front-to-back order.
++  const bool inObject = g_sortKey >= 0.f;
++  const DrawOrder order{
++      .key = g_sortKey,
++      .object = g_sortObject,
++      .sortable = inObject && config.blendMode == GX_BM_NONE && config.depthCompare && config.depthUpdate &&
++                  (config.depthFunc == GX_LESS || config.depthFunc == GX_LEQUAL) && config.colorUpdate,
++  };
++  g_statSortable += order.sortable;
++  // An object that reaches both eyes, drawn once per eye when asked: no
++  // fragment test, so the GPU keeps rejecting its hidden fragments early.
++  const bool crossingPerEye = g_switches.crossingPerEye && inObject && !g_uncut;
++  g_statCrossingPerEye += crossingPerEye;
++  if (const uint8_t mode = instanced_stereo_mode(); mode != gx::StereoOff && !crossingPerEye &&
 +      !g_instancedDisabled.load(std::memory_order_relaxed) &&
 +      info.lineMode == 0 && draw.instanceCount == 1 && gx::stereo_instanced_fits(info)) {
 +    auto instancedConfig = spatialConfig;
@@ -590,6 +703,7 @@
 +      g_eyeDraws[0].push_back(draw);
 +      g_eyeDraws[1].push_back(draw);
 +      g_eyeInstanced.push_back(1);
++      g_eyeOrder.push_back(order);
 +      ++g_statInstanced;
 +      g_worldMergeable = true;
 +      return true;
@@ -597,6 +711,7 @@
 +  }
 +  ++g_statPerEye;
 +  g_eyeInstanced.push_back(0);
++  g_eyeOrder.push_back(order);
 +  draw.pipeline = pipeline_ref(spatialConfig);
 +  // One uniform build for both eyes: only the projection differs.
 +  const auto uniforms = gx::build_uniform_stereo(info, vtxStart, ranges, g_clip[0], g_clip[1]);
@@ -642,6 +757,7 @@
 +      g_eyeDraws[0].clear();
 +      g_eyeDraws[1].clear();
 +      g_eyeInstanced.clear();
++  g_eyeOrder.clear();
 +      g_hudDraws.clear();
 +      return;
 +    }
@@ -678,6 +794,8 @@
 +      .hasWorld = hasWorld,
 +      .eyes = {&g_eyeDraws[0], &g_eyeDraws[1]},
 +      .instanced = &g_eyeInstanced,
++      .order = &g_eyeOrder,
++      .sortOpaque = g_switches.sortOpaque,
 +      .hud = &g_hudDraws,
 +  };
 +  enqueue_pass(desc);
@@ -696,11 +814,14 @@
 +  statHud += g_hudDraws.size();
 +  statWorldMax = std::max(statWorldMax, worldDraws);
 +  if (const auto now = std::chrono::steady_clock::now(); now - statsAt >= std::chrono::seconds(5)) {
-+    Log.info("Stereo draws: {} frames, world {} avg / {} max per eye ({}% both eyes at once), HUD {} avg, {}x{} image",
++    const uint64_t recorded = g_statInstanced + g_statPerEye;
++    Log.info("Stereo draws: {} frames, world {} avg / {} max per eye ({}% both eyes at once), HUD {} avg, {}x{} image, "
++             "sortable {}%{}, crossing per eye {}%",
 +             statFrames, statWorld / statFrames, statWorldMax,
-+             g_statInstanced + g_statPerEye != 0 ? g_statInstanced * 100 / (g_statInstanced + g_statPerEye) : 0,
-+             statHud / statFrames, g_width, g_height);
-+    g_statInstanced = g_statPerEye = 0;
++             recorded != 0 ? g_statInstanced * 100 / recorded : 0, statHud / statFrames, g_width, g_height,
++             recorded != 0 ? g_statSortable * 100 / recorded : 0, g_switches.sortOpaque ? " (sorted)" : "",
++             recorded != 0 ? g_statCrossingPerEye * 100 / recorded : 0);
++    g_statInstanced = g_statPerEye = g_statSortable = g_statCrossingPerEye = 0;
 +    statsAt = now;
 +    statFrames = statWorld = statHud = 0;
 +    statWorldMax = 0;
@@ -708,6 +829,7 @@
 +  g_eyeDraws[0].clear();
 +  g_eyeDraws[1].clear();
 +  g_eyeInstanced.clear();
++  g_eyeOrder.clear();
 +  g_hudDraws.clear();
 +  g_image = -1;
 +#endif
@@ -858,6 +980,7 @@
 +  // with its existing clip matrices before switching to this camera/view.
 +  gx::fifo::drain();
 +  g_worldMergeable = false;
++  refresh_switches();
 +  g_clip[0] = to_mat(clip[0]);
 +  g_clip[1] = to_mat(clip[1]);
 +  g_image = static_cast<int32_t>(image);
@@ -906,6 +1029,23 @@
 +#endif
 +}
 +
++extern "C" void AuroraStereoSetSortKey(float key) {
++#if defined(__ANDROID__)
++  using namespace aurora::gfx::stereo;
++  if (key < 0.f && g_sortKey < 0.f) {
++    return;
++  }
++  // The FIFO is deferred: its draws so far belong to the previous object.
++  aurora::gx::fifo::drain();
++  g_sortKey = key < 0.f ? -1.f : key;
++  if (key >= 0.f) {
++    ++g_sortObject;
++  }
++#else
++  (void)key;
++#endif
++}
++
 +extern "C" void AuroraStereoSetUncut(bool uncut) {
 +#if defined(__ANDROID__)
 +  if (aurora::gfx::stereo::g_uncut == uncut) {
@@ -932,7 +1072,7 @@
 +}
 --- /dev/null
 +++ b/lib/gfx/stereo.hpp
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,90 @@
 +#pragma once
 +
 +// Stereo rendering for a VR headset (include/aurora/stereo.h).
@@ -940,6 +1080,7 @@
 +#include "common.hpp"
 +#include "../gx/gx.hpp"
 +#include "../gx/pipeline.hpp"
++#include "stereo_order.hpp"
 +
 +#include <string>
 +#include <vector>
@@ -1013,9 +1154,70 @@
 +  const std::vector<gx::DrawData>* eyes[2]{};
 +  // Per world draw: 1 when eyes[0]'s draw covers both eyes (two instances).
 +  const std::vector<uint8_t>* instanced = nullptr;
++  // Per world draw: its object and whether it may move (stereo_order.hpp);
++  // sortOpaque sends the sortable runs front to back.
++  const std::vector<DrawOrder>* order = nullptr;
++  bool sortOpaque = false;
 +  const std::vector<gx::DrawData>* hud = nullptr;
 +};
 +void enqueue_pass(const PassDesc& desc) noexcept; // common.cpp
++
++} // namespace aurora::gfx::stereo
+--- /dev/null
++++ b/lib/gfx/stereo_order.hpp
+@@ -0,0 +1,54 @@
++#pragma once
++
++// The order the eyes' world draws go to the GPU in (gfx/common.cpp), kept
++// free of Aurora's types so tools/tests can check it.
++//
++// A tiled GPU (the headset's Adreno) rejects hidden fragments early only
++// behind depth already written (LRZ), so opaque draws are best sent front to
++// back. The game sends them in its models' order. Only a run of consecutive
++// sortable draws is reordered: an opaque, depth-tested, depth-writing draw of
++// an object (stereo.cpp decides). Anything else stays where it is and ends
++// the run: blended draws, draws outside an object (particles, sprites), and
++// the game's own back-to-front pass. Within a run, draws go by the distance of
++// their object from the eyes, and an object's draws stay together, in order.
++
++#include <algorithm>
++#include <cstdint>
++#include <numeric>
++#include <vector>
++
++namespace aurora::gfx::stereo {
++
++struct DrawOrder {
++  float key = -1.f;     // the object's distance from the eyes; < 0: not in an object
++  uint32_t object = 0;  // which object, in the order the game drew them
++  bool sortable = false;
++};
++
++// The draws' indices in the order to draw them.
++inline std::vector<uint32_t> draw_sequence(const std::vector<DrawOrder>& order, bool sortOpaque) {
++  std::vector<uint32_t> sequence(order.size());
++  std::iota(sequence.begin(), sequence.end(), 0u);
++  if (!sortOpaque) {
++    return sequence;
++  }
++  for (size_t start = 0; start < sequence.size();) {
++    if (!order[start].sortable) {
++      ++start;
++      continue;
++    }
++    size_t end = start;
++    while (end < sequence.size() && order[end].sortable) {
++      ++end;
++    }
++    std::stable_sort(sequence.begin() + start, sequence.begin() + end, [&](uint32_t a, uint32_t b) {
++      const auto& x = order[a];
++      const auto& y = order[b];
++      return x.key < y.key || (x.key == y.key && x.object < y.object);
++    });
++    start = end;
++  }
++  return sequence;
++}
 +
 +} // namespace aurora::gfx::stereo
 --- a/lib/gx/command_processor.cpp
@@ -1193,7 +1395,7 @@
    } else if (maxAnisotropy > 1) {
 --- a/lib/gx/gx.hpp
 +++ b/lib/gx/gx.hpp
-@@ -456,6 +456,8 @@
+@@ -456,6 +456,8 @@ struct AttrConfig {
    bool le = true;
    bool nbt3 = false;     // GX_NRM_NBT3
  };
@@ -1202,7 +1404,7 @@
  struct ShaderConfig {
    u8 fogType = GX_FOG_NONE;
    u8 vtxStride = 0;
-@@ -465,7 +467,14 @@
+@@ -465,7 +467,14 @@ struct ShaderConfig {
    // recorded before this stay valid and the shipped cache seed is unaffected.
    u8 ztexOp : 2 = 0;
    u8 ztexFmt : 2 = 0;
@@ -1267,9 +1469,20 @@
    return build_pipeline(config, {}, shader, "GX Pipeline");
  }
  
+--- a/lib/gx/pipeline.hpp
++++ b/lib/gx/pipeline.hpp
+@@ -16,7 +16,7 @@ struct DrawData {
+   uint32_t dstAlpha;
+ };
+ 
+-constexpr uint32_t GXPipelineConfigVersion = 13;
++constexpr uint32_t GXPipelineConfigVersion = 14;
+ struct PipelineConfig {
+   uint32_t version = GXPipelineConfigVersion;
+   uint32_t msaaSamples = 1;
 --- a/lib/gx/shader.cpp
 +++ b/lib/gx/shader.cpp
-@@ -851,6 +851,40 @@
+@@ -851,6 +851,40 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8
                       alpha ? "a"sv : ""sv);
  }
  
@@ -1310,7 +1523,7 @@
  std::string build_shader_source(const ShaderConfig& config) noexcept {
    ZoneScoped;
    const auto hash = xxh3_hash(config);
-@@ -1003,7 +1037,29 @@
+@@ -1003,7 +1037,29 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
                                    attr_load_nbt_slice(config, NbtSlice::T, vidxAttr));
    }
  
@@ -1341,7 +1554,7 @@
      vtxXfrAttrsPre += fmt::format(
          "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
          "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;",
-@@ -1051,6 +1107,13 @@
+@@ -1051,6 +1107,13 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
    }
  
    uniBufAttrs += "\n    proj: mat4x4f,";
@@ -1355,7 +1568,7 @@
    uniBufAttrs += fmt::format("\n    postex_mtx: array<mat3x4f, {}>,", MaxPnMtx + MaxTexMtx);
    uniBufAttrs += fmt::format("\n    nrm_mtx: array<mat3x4f, {}>,", MaxPnMtx);
    std::string fragmentFnPre;
-@@ -1632,7 +1695,7 @@
+@@ -1632,7 +1695,7 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
      fragmentFn += "\n    prev = vec4f(in.nrm, prev.a);";
    }
  
@@ -1364,7 +1577,7 @@
  fn bswap32(v: u32, le: bool) -> u32 {{
    if (le) {{
      return v;
-@@ -1997,6 +2060,11 @@
+@@ -1997,6 +2060,11 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
                                          uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn,
                                          fragmentFnPre, vtxXfrAttrsPre, uniformPre, fragOutStruct, fragRetType,
                                          fragRetStmt);
@@ -1542,56 +1755,3 @@
  
  bool initialize(AuroraBackend backend, bool allowCpu);
  void shutdown();
---- a/lib/gx/pipeline.hpp
-+++ b/lib/gx/pipeline.hpp
-@@ -19,2 +19,2 @@
--constexpr uint32_t GXPipelineConfigVersion = 13;
-+constexpr uint32_t GXPipelineConfigVersion = 14;
- struct PipelineConfig {
---- a/lib/gfx/pipeline_cache.cpp
-+++ b/lib/gfx/pipeline_cache.cpp
-@@ -930,7 +930,7 @@
-     return 0;
-   }
- 
--  size_t acceptedRows = 0;
-+  size_t acceptedRows = 0, invalidRows = 0;
-   while ((ret = sqlite3_step(g_pipelineCacheLoadStmt)) == SQLITE_ROW) {
-     const auto* configBlob = static_cast<const uint8_t*>(sqlite3_column_blob(g_pipelineCacheLoadStmt, 0));
-     const auto configSize = sqlite3_column_bytes(g_pipelineCacheLoadStmt, 0);
-@@ -944,10 +944,22 @@
-     if (config.version != configVersion) {
-       continue;
-     }
-+    // WebGPU has 1 or 4 samples. Rows with another count (a headset's MSAA 2x
-+    // test wrote some on 2026-09-28) made the driver abort while they were
-+    // built at every startup, so the game could not start again. Skip them.
-+    if constexpr (requires { config.msaaSamples; }) {
-+      if (config.msaaSamples != 1 && config.msaaSamples != 4) {
-+        ++invalidRows;
-+        continue;
-+      }
-+    }
- 
-     find_pipeline_impl(type, config, [=] { return create(config); }, false, firstFrameUsed);
-     ++acceptedRows;
-   }
-+  if (invalidRows != 0) {
-+    Log.warn("Skipped {} cached pipelines with an invalid sample count", invalidRows);
-+  }
- 
-   if (ret != SQLITE_DONE) {
-     Log.error("Failed to read pipeline cache rows: {}", sqlite3_errmsg(g_pipelineCacheDb));
-@@ -1017,7 +1029,11 @@
- 
- template <>
- PipelineRef find_pipeline(ShaderType type, const gx::PipelineConfig& config, NewPipelineCallback&& cb) {
--  return find_pipeline_impl(type, config, std::move(cb), true, std::nullopt);
-+  // A headset's both-eyes pipelines are built when first drawn, never at
-+  // startup from the cache: one a driver cannot build (Adreno lost the device
-+  // on a clip-distance pipeline) must not be retried on every launch.
-+  const bool persist = config.shaderConfig.stereo == gx::StereoOff;
-+  return find_pipeline_impl(type, config, std::move(cb), persist, std::nullopt);
- }
- 
- #ifdef AURORA_ENABLE_RMLUI

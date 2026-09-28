@@ -1,6 +1,7 @@
 #include "../../platforms/android/app/src/main/cpp/adaptive_quality.hpp"
 #include "../../platforms/android/app/src/main/cpp/frame_pacing.hpp"
 #include "../../extern/aurora/lib/gfx/rgba_mips.hpp"
+#include "../../extern/aurora/lib/gfx/stereo_order.hpp"
 #include "rgba_mips_reference.hpp"
 #include "../../include/port/quest_scene_fit.hpp"
 #include <cassert>
@@ -73,8 +74,27 @@ size_t off_cadence(const std::vector<int64_t>& holds) {
 }
 } // namespace
 
+// The eyes' draw order (Aurora's stereo_order.hpp): opaque draws of objects
+// front to back, everything else where the game put it.
+static void test_draw_order() {
+  using aurora::gfx::stereo::DrawOrder;
+  using aurora::gfx::stereo::draw_sequence;
+  // Objects: 1 at 5 (two draws), 2 at 1, a blended draw, 3 at 3, 4 at 2, a
+  // draw outside any object, then 5 at 0.5 and 6 at 0.5.
+  const std::vector<DrawOrder> order{
+      {5.f, 1, true}, {5.f, 1, true}, {1.f, 2, true}, {4.f, 9, false}, {3.f, 3, true},
+      {2.f, 4, true}, {-1.f, 0, false}, {0.5f, 6, true}, {0.5f, 5, true},
+  };
+  const auto kept = draw_sequence(order, false);
+  for (uint32_t i = 0; i < kept.size(); ++i) assert(kept[i] == i); // switch off: the game's order
+  const auto sorted = draw_sequence(order, true);
+  const std::vector<uint32_t> expected{2, 0, 1, 3, 5, 4, 6, 8, 7};
+  assert(sorted == expected); // runs sorted, object 1's draws together and in order, barriers fixed
+  assert(draw_sequence({}, true).empty());
+}
+
 int main() {
-  quest::AdaptiveQuality gpu;
+  test_draw_order();  quest::AdaptiveQuality gpu;
   quest::QualitySample sample{1, 120, 8, 2, 1, 4};
   assert(std::abs(gpu.update(sample, 120, 20) - 0.95f) < 0.0001f);
   assert(std::abs(gpu.update(sample, 120, 20) - 0.95f) < 0.0001f); // stale sample
@@ -307,6 +327,6 @@ int main() {
   assert(rates.next_start(1'001'000'000, 72.0f) == 0);  // not 120 divided by a whole number
   assert(rates.next_start(1'001'000'000, 120.0f) != 0);
   assert(rates.next_start(1'200'000'000, 60.0f) == 0);  // no look for 200 ms: the game's clock
-  std::puts("PASS: GPU/CPU decisions, freshness, recovery, profile bounds, gamma, alpha and NPOT mipmaps, image sizes, "
+  std::puts("PASS: eyes' draw order, GPU/CPU decisions, freshness, recovery, profile bounds, gamma, alpha and NPOT mipmaps, image sizes, "
             "frame pacing");
 }

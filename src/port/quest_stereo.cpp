@@ -642,11 +642,20 @@ extern "C" void PartyBoard_StereoObjectBegin(Mtx modelView, const HuVecF *min, c
         radius2 += half * half;
     }
     AuroraStereoSetUncut(partyboard::quest::sphere_inside_eye_sides(sEyeClip, center, std::sqrt(radius2)));
+    // Its distance from between the eyes: opaque objects may go to the GPU
+    // front to back (debug.partyboard.sort_opaque), for its early depth test.
+    float distance2 = 0.0f;
+    for (int r = 0; r < 3; ++r) {
+        const float d = center[r] - (sEyeInView[0][r] + sEyeInView[1][r]) * 0.5f;
+        distance2 += d * d;
+    }
+    AuroraStereoSetSortKey(std::isfinite(distance2) ? std::sqrt(distance2) : -1.0f);
 }
 
 extern "C" void PartyBoard_StereoObjectEnd(void)
 {
     AuroraStereoSetUncut(false);
+    AuroraStereoSetSortKey(-1.0f);
 }
 
 extern "C" BOOL PartyBoard_StereoSphereVisible(float x, float y, float z, float radius)

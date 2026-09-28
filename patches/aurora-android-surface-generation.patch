@@ -1,6 +1,6 @@
 --- a/lib/aurora.cpp
 +++ b/lib/aurora.cpp
-@@ -213,7 +213,7 @@
+@@ -213,7 +213,7 @@ bool begin_frame() noexcept {
      bool presentable;
      {
        window::SurfaceLock probe;
@@ -9,7 +9,7 @@
      }
      if (!presentable) {
        gfx::gpu_synchronize();
-@@ -227,7 +227,7 @@
+@@ -227,7 +227,7 @@ bool begin_frame() noexcept {
      if (window::is_paused()) {
        return false;
      }
@@ -18,7 +18,7 @@
        webgpu::refresh_surface(true);
        if (!g_surface) {
          return false;
-@@ -271,7 +271,7 @@
+@@ -271,7 +271,7 @@ void end_frame() noexcept {
      wgpu::Texture currentTexture;
      wgpu::TextureView currentView;
      auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
@@ -27,7 +27,7 @@
        ZoneScopedN("Acquire texture");
        wgpu::SurfaceTexture surfaceTexture;
        g_surface.GetCurrentTexture(&surfaceTexture);
-@@ -350,7 +350,7 @@
+@@ -350,7 +350,7 @@ void end_frame() noexcept {
          Log.warn("Surface present failed: {}", static_cast<int>(presentStatus));
          webgpu::release_surface();
        }
@@ -36,7 +36,7 @@
        switch (surfaceStatus) {
        case wgpu::SurfaceGetCurrentTextureStatus::Timeout:
          Log.warn("Surface texture acquisition timed out");
-@@ -366,7 +366,10 @@
+@@ -366,7 +366,10 @@ void end_frame() noexcept {
          break;
        case wgpu::SurfaceGetCurrentTextureStatus::Error:
          Log.warn("Surface texture is {}, dropping surface", magic_enum::enum_name(surfaceStatus));
@@ -79,7 +79,7 @@
 +} // namespace aurora::window
 --- a/lib/webgpu/gpu.cpp
 +++ b/lib/webgpu/gpu.cpp
-@@ -36,6 +36,7 @@
+@@ -36,6 +36,7 @@ static Module Log("aurora::gpu");
  wgpu::Device g_device;
  wgpu::Queue g_queue;
  wgpu::Surface g_surface;
@@ -87,7 +87,7 @@
  wgpu::BackendType g_backendType;
  GraphicsConfig g_graphicsConfig;
  TextureWithSampler g_frameBuffer;
-@@ -667,6 +668,28 @@
+@@ -667,6 +668,28 @@ static wgpu::BackendType to_wgpu_backend(AuroraBackend backend) {
    }
  }
  
@@ -116,7 +116,7 @@
  static bool create_surface() {
    SDL_Window* window = window::get_sdl_window();
    if (window == nullptr) {
-@@ -683,11 +706,14 @@
+@@ -683,11 +706,14 @@ static bool create_surface() {
        .label = "Surface",
    };
    release_surface();
@@ -131,7 +131,7 @@
    return true;
  }
  
-@@ -1006,6 +1032,10 @@
+@@ -1006,6 +1032,10 @@ void release_surface() noexcept {
    g_surface = {};
  }
  
@@ -142,7 +142,7 @@
  bool refresh_surface(bool recreate) {
    gfx::gpu_synchronize();
    if (!g_instance || !g_device) {
-@@ -1015,7 +1045,7 @@
+@@ -1015,7 +1045,7 @@ bool refresh_surface(bool recreate) {
      release_surface();
      return false;
    }
@@ -151,7 +151,7 @@
      return false;
    }
    uint32_t width = g_graphicsConfig.surfaceConfiguration.width;
-@@ -1037,9 +1067,13 @@
+@@ -1037,9 +1067,13 @@ bool refresh_surface(bool recreate) {
  
  void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, uint32_t native_height, bool force) {
    gfx::gpu_synchronize();
