@@ -33,6 +33,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -1329,6 +1330,16 @@ bool poll_events(App& app, JNIEnv* env) {
         app.running = check(app.instance, xrBeginSession(app.session, &begin), "xrBeginSession");
         if (app.running) {
           request_performance(app, true);
+          // Back from another immersive app (Space Setup, opened by the table
+          // calibration, on 2026-09-28): the headset had paused the room's
+          // view, and the game came back over black. Start it again.
+          if (app.table.passthrough && passthrough_available(app)) {
+            set_passthrough(app, true);
+            if (auto resume = proc<PFN_xrPassthroughLayerResumeFB>(app.instance, "xrPassthroughLayerResumeFB")) {
+              check(app.instance, resume(app.passthrough.layer), "xrPassthroughLayerResumeFB");
+            }
+            LOGI("Room view started again with the session");
+          }
         }
       } else if (app.state == XR_SESSION_STATE_STOPPING) {
         xrEndSession(app.session);
@@ -1644,6 +1655,34 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
     help.pose.position = kHelpPosition;
     help.size = {kHelpWidthMeters, kHelpWidthMeters * app.help.height / app.help.width};
     layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&help);
+  }
+
+  // What the headset is shown, whenever it changes and every 10 s: which
+  // layers, and how far the screen and the model stand from the head. On
+  // 2026-09-28 the game vanished after Space Setup with nothing in the log
+  // to say where it had gone.
+  {
+    static std::string lastLayers;
+    static auto layersAt = std::chrono::steady_clock::time_point{};
+    const auto distance = [&](const XrVector3f& p) {
+      if (!haveHead) return -1.0f;
+      const float dx = p.x - head.position.x, dy = p.y - head.position.y, dz = p.z - head.position.z;
+      return std::sqrt(dx * dx + dy * dy + dz * dz);
+    };
+    char text[256];
+    std::snprintf(text, sizeof(text),
+                  "Layers: render=%d room=%d screen=%d model=%d help=%d poseKnown=%d placing=%d count=%u",
+                  frame.shouldRender ? 1 : 0, layerCount > 0 && layers[0] == reinterpret_cast<const XrCompositionLayerBaseHeader*>(&room) ? 1 : 0,
+                  screenShown ? 1 : 0, modelLayer ? 1 : 0, app.placing ? 1 : 0, app.poseKnown ? 1 : 0,
+                  app.placing ? 1 : 0, layerCount);
+    const auto now = std::chrono::steady_clock::now();
+    if (lastLayers != text || now - layersAt >= std::chrono::seconds(10)) {
+      LOGI("%s, screen %.2f m and model %.2f m from the head (model at %.2f %.2f %.2f)", text,
+           distance(screen.pose.position), distance(app.pose.position), app.pose.position.x, app.pose.position.y,
+           app.pose.position.z);
+      lastLayers = text;
+      layersAt = now;
+    }
   }
 
   XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
