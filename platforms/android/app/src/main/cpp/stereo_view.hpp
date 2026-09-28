@@ -50,7 +50,10 @@ public:
   // XR thread: the newest image the game drew, copied into the swapchain; the
   // layer showing it (or the previous one), nullptr before the first.
   const XrCompositionLayerBaseHeader* layer(XrSpace space, const void* next);
-  const XrCompositionLayerBaseHeader* hud_layer(XrSpace viewSpace, const void* next);
+  // The game's interface (scores, messages) as a quad at `pose` in `space`:
+  // quest_xr.cpp stands it at the back of the model. nullptr while hidden.
+  const XrCompositionLayerBaseHeader* hud_layer(XrSpace space, const XrPosef& pose, XrExtent2Df size,
+                                                const void* next);
 
   // Game thread (PartyBoardQuest_StereoFrame): an image and the view to draw it with.
   bool game_frame(StereoFrame& out);

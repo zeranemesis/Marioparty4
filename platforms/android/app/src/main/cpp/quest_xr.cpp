@@ -74,6 +74,18 @@ constexpr float kMaxModelScale = 0.002f;
 constexpr float kMinScreenWidth = 0.3f;
 constexpr float kMaxScreenWidth = 4.0f;
 
+// With the model on the table, the game's interface (scores, messages) stands
+// at the back of the model, facing the player: a scoreboard behind the board,
+// where the eyes already look, instead of a panel fixed to the head. A little
+// wider than the scene, its bottom edge just above the table, tilted back
+// toward the eyes above the table.
+constexpr float kHudBehindSceneMeters = 0.05f; // from the scene's far edge
+constexpr float kHudLiftMeters = 0.04f;
+constexpr float kHudTiltRadians = 0.26f; // 15 degrees
+constexpr float kHudWidthPerScene = 1.1f;
+constexpr float kMinHudWidth = 0.7f;
+constexpr float kMaxHudWidth = 1.4f;
+
 // The placement help, drawn by QuestVr.drawHelp, floats below the line of sight.
 constexpr int kHelpWidthPixels = 1024;
 constexpr int kHelpHeightPixels = 640;
@@ -836,6 +848,22 @@ bool table_setup_needed(const App& app) {
   return app.modelAvailable && app.table.diorama && !app.table.calibrated && !app.calibrationSkipped;
 }
 
+// The interface's place at the back of the model standing at `table` (the
+// anchor: +Z toward the player) with `modelScale` meters per game unit. The
+// fitted scene is kSceneExtentUnits across (quest_scene_fit.hpp).
+XrPosef hud_pose(const XrPosef& table, float modelScale, XrExtent2Df& size) {
+  const float sceneRadius = 0.5f * kSceneExtentUnits * modelScale;
+  size.width = std::clamp(2.0f * sceneRadius * kHudWidthPerScene, kMinHudWidth, kMaxHudWidth);
+  size.height = size.width * 0.75f; // the interface is 4:3
+  const float half = size.height * 0.5f;
+  XrPosef local = identity_pose();
+  // Its top leans away from the player: a turn about X, +Y toward -Z.
+  local.orientation = {std::sin(-kHudTiltRadians * 0.5f), 0.0f, 0.0f, std::cos(-kHudTiltRadians * 0.5f)};
+  local.position = {0.0f, kHudLiftMeters + half * std::cos(kHudTiltRadians),
+                    -(sceneRadius + kHudBehindSceneMeters + half * std::sin(kHudTiltRadians))};
+  return compose(table, local);
+}
+
 // Where the screen appears before the first placement: ahead, facing the player.
 void default_pose(App& app, const XrPosef& head) {
   const XrVector3f ahead = rotate(upright(head).orientation, {0.0f, 0.0f, -kDefaultDistanceMeters});
@@ -1461,11 +1489,16 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   app.stereo.set_screen_hidden(app.poseKnown && modelLayer != nullptr && !screenShown);
 
   // The images come from Aurora like the screen's, so they need the same flip.
+  // The interface goes first: it stands behind the board, so the model
+  // (blended by its alpha) hides it only where the board's geometry is.
   if (modelLayer) {
-    layers[layerCount++] = modelLayer;
-    if (const auto* hud = app.stereo.hud_layer(app.view, app.extensions.imageLayout ? &modelFlip : nullptr)) {
+    XrExtent2Df hudSize{};
+    const XrPosef hudPose = hud_pose(app.pose, app.table.modelScale, hudSize);
+    if (const auto* hud =
+            app.stereo.hud_layer(app.stage, hudPose, hudSize, app.extensions.imageLayout ? &modelFlip : nullptr)) {
       layers[layerCount++] = hud;
     }
+    layers[layerCount++] = modelLayer;
   }
 
   XrCompositionLayerQuad help{XR_TYPE_COMPOSITION_LAYER_QUAD};
