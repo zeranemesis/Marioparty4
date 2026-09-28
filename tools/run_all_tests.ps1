@@ -66,6 +66,8 @@ $notApplicableExit = @{
     'test_generate_input'    = 2   # needs a human recording under work/netplay-recordings
     'test_crash_pipeline'    = 2   # needs a configured build tree for nlohmann/json
     'test_audio_wait'        = 2   # needs extern/musyx/test/wait_ms_regression.c, which the MusyX patch creates since 2026-09-17
+    'test_quest_stereo'      = 2   # needs the Android SDK and NDK, and a headset on adb
+    'test_quest_stereo_render' = 2 # needs a configured build/android-arm64-quest
 }
 
 # Most scripts compile and run their own standalone test with cl.exe and never

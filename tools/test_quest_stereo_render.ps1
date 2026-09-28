@@ -14,7 +14,12 @@ $tests = Join-Path $PSScriptRoot 'tests/stereo_render'
 $aurora = Join-Path $repo 'extern/aurora'
 $deps = Join-Path $repo 'build/android-arm64-quest/_deps'
 $out = Join-Path $repo 'build/quest-stereo-render'
-if (-not (Test-Path "$deps/fmt-src")) { throw 'Configure build/android-arm64-quest once: its sources are reused here.' }
+# A missing Quest build tree is a prerequisite this machine lacks, not a
+# failure: exit 2 is run_all_tests.ps1's "this environment cannot run me".
+if (-not (Test-Path "$deps/fmt-src")) {
+    Write-Output 'not applicable: configure build/android-arm64-quest once, its sources are reused here'
+    exit 2
+}
 New-Item -ItemType Directory -Force $out, "$out/shaders", "$out/scene" | Out-Null
 
 $version = (Select-String -Path "$aurora/CMakeLists.txt" -Pattern 'AURORA_DAWN_VERSION "([^"]+)"').Matches[0].Groups[1].Value
