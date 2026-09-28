@@ -41,6 +41,12 @@ constexpr float kScreenLiftMeters = 0.02f;
 // Before any placement: in front of the player, a little below the eyes.
 constexpr float kDefaultDistanceMeters = 1.1f;
 constexpr float kDefaultDropMeters = 0.35f;
+// A saved table farther than this from the player at startup, or this far
+// below the eyes, is out of reach (another room, a reset boundary, a table
+// set on the floor): the screen would stand out of sight, on black.
+constexpr float kReachableTableMeters = 3.0f;
+constexpr float kTableBelowEyesMeters = 1.5f;
+constexpr XrDuration kPlacementCheckDuration = 10'000'000'000; // the anchor loads meanwhile
 // With the model on the table, the flat screen (text, menus, split-screen
 // minigames) stands behind it.
 constexpr float kScreenBehindModelMeters = 0.45f;
@@ -170,6 +176,10 @@ struct App {
   StereoView stereo; // the game's world as a model on the table
   XrPosef pose = identity_pose(); // the anchor point, in STAGE space
   bool poseKnown = false;
+  // The saved place was out of reach at startup: the screen stands in front
+  // of the player for this session, until a new placement or calibration.
+  bool savedPlaceIgnored = false;
+  XrTime firstFrameTime = 0;
   bool calibrating = false;
   bool calibrationConfirmed = false;
   bool calibrationConfirmArmed = false;
@@ -884,6 +894,7 @@ void sample_table_calibration(App& app, const XrPosef* grip, XrTime time, int pr
   if (app.extensions.anchors) {
     app.anchor.place(calibrated, time);
   }
+  app.savedPlaceIgnored = false;
   save_settings(app);
   app.calibrating = false;
   app.calibrationConfirmed = false;
@@ -912,6 +923,7 @@ void end_placement(App& app, JNIEnv* env, XrTime time, int heldButtons) {
   if (app.extensions.anchors) {
     app.anchor.place(app.pose, time);
   }
+  app.savedPlaceIgnored = false; // the new anchor is this place
   save_settings(app);
   notify_placement(app, env);
 }
@@ -1101,12 +1113,31 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   // Where the game stands: the anchor, which follows the real table, unless
   // the player is moving it.
   XrPosef anchored;
-  if (!app.placing && app.anchor.locate(time, anchored)) {
+  if (!app.placing && !app.savedPlaceIgnored && app.anchor.locate(time, anchored)) {
     app.pose = anchored;
     app.poseKnown = true;
   }
   if (!app.poseKnown && haveHead) {
     default_pose(app, head);
+  }
+  // Out of reach at startup: in front of the player instead, for this
+  // session only. The saved place stays saved (it may be another room's
+  // table) until the player places or calibrates the table again.
+  if (app.firstFrameTime == 0) {
+    app.firstFrameTime = time;
+  }
+  if (!app.savedPlaceIgnored && !app.placing && !app.calibrating && app.poseKnown && haveHead &&
+      time - app.firstFrameTime < kPlacementCheckDuration) {
+    const float away = std::hypot(app.pose.position.x - head.position.x, app.pose.position.z - head.position.z);
+    const float below = head.position.y - app.pose.position.y;
+    if (away > kReachableTableMeters || below > kTableBelowEyesMeters) {
+      LOGW("Saved table place out of reach (%.2f m away, %.2f m below the eyes): screen in front for this session",
+           away, below);
+      app.savedPlaceIgnored = true;
+      default_pose(app, head);
+      // The model needs a real table here: the first game world asks for one.
+      app.table.calibrated = false;
+    }
   }
 
   // In placement mode A starts table calibration; the other controls finish it.
