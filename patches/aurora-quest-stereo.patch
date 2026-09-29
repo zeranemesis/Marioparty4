@@ -10,7 +10,7 @@
          lib/gfx/tex_palette_conv.cpp
 --- /dev/null
 +++ b/include/aurora/stereo.h
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,67 @@
 +#ifndef AURORA_STEREO_H
 +#define AURORA_STEREO_H
 +
@@ -57,6 +57,10 @@
 +// Dynamic resolution, before AuroraStereoBegin: the part of each eye's half
 +// drawn this frame, from its top-left corner (0: all of it).
 +void AuroraStereoSetEyeSize(uint32_t width, uint32_t height);
++// Before AuroraStereoBegin: whether this frame draws the HUD image (true until
++// told otherwise). A frame that does not leaves it untouched: the headset
++// copies the HUD only from frames that drew it.
++void AuroraStereoSetHud(bool draw);
 +// The headset does not show the game's own frame (the model replaces it):
 +// the frame is still drawn for the eyes, but not presented to the screen.
 +void AuroraStereoHideScreen(bool hidden);
@@ -140,7 +144,7 @@
  #include "tex_copy_conv.hpp"
  #include "tex_palette_conv.hpp"
  #include "texture_replacement.hpp"
-@@ -182,6 +183,10 @@
+@@ -182,6 +183,11 @@
    bool captureDepthSnapshot = false;
    bool sealed = false;
    std::vector<tex_palette_conv::ConvRequest> paletteConvs;
@@ -148,10 +152,11 @@
 +  int32_t stereoImage = -1;
 +  uint64_t stereoTag = 0;
 +  bool stereoHasWorld = false;
++  bool stereoHud = false; // the HUD image is drawn too, by the pass after this one
  };
  
  struct TextureCopy {
-@@ -495,6 +500,8 @@
+@@ -495,6 +501,8 @@
  }
  
  static inline void push_command(CommandType type, const Command::Data& data) {
@@ -160,7 +165,7 @@
    if (g_currentRenderPass == UINT32_MAX)
      UNLIKELY {
        Log.warn("Dropping command {}", magic_enum::enum_name(type));
-@@ -1119,6 +1126,7 @@
+@@ -1119,6 +1127,7 @@
  
  void finish() {
    ZoneScoped;
@@ -168,7 +173,7 @@
    if (g_recordingFrame == nullptr) {
      return;
    }
-@@ -1127,11 +1135,134 @@
+@@ -1127,11 +1136,135 @@
      auto& frame = current_frame_packet();
      frame.uniforms.append_zeroes(gx::MaxUniformSize); // Pad the end of the GX uniform buffer slice.
      auto& pass = frame.renderPasses[g_currentRenderPass];
@@ -210,6 +215,7 @@
 +      .stereoImage = desc.image,
 +      .stereoTag = desc.tag,
 +      .stereoHasWorld = desc.hasWorld,
++      .stereoHud = desc.drawHud,
 +  };
 +  pass.commands.reserve(desc.eyes[0]->size() + desc.eyes[1]->size() + (desc.hud != nullptr ? desc.hud->size() : 0) + 6);
 +  // With dynamic resolution, each eye draws a smaller rectangle of its half:
@@ -305,12 +311,12 @@
  }
  
  void end_frame(EndFrameCallback callback) {
-@@ -1323,6 +1454,9 @@
+@@ -1323,6 +1456,9 @@
      };
      depthStencilAttachmentPtr = &depthStencilAttachment;
    }
 +  if (passInfo.stereoImage >= 0) {
-+    stereo::begin_access(passInfo.stereoImage, passInfo.stereoTag, passInfo.stereoHasWorld);
++    stereo::begin_access(passInfo.stereoImage, passInfo.stereoTag, passInfo.stereoHasWorld, passInfo.stereoHud);
 +  }
    const auto label = fmt::format("Render pass {}", passIndex);
    const wgpu::RenderPassDescriptor renderPassDescriptor{
@@ -401,7 +407,7 @@
    pipeline = it->second.pipeline;
 --- /dev/null
 +++ b/lib/gfx/stereo.cpp
-@@ -0,0 +1,820 @@
+@@ -0,0 +1,835 @@
 +#include "stereo.hpp"
 +
 +#include <aurora/stereo.h>
@@ -507,6 +513,8 @@
 +bool g_loggedGeometry = false;
 +// Dynamic resolution: the part of each eye's half drawn this frame (0: all of it).
 +uint32_t g_frameEyeWidth = 0, g_frameEyeHeight = 0;
++// Whether this frame draws the HUD image (AuroraStereoSetHud).
++bool g_frameDrawHud = true;
 +// The game's own frame is not on show in the headset (aurora.cpp skips presenting it).
 +std::atomic_bool g_screenHidden = false;
 +// 8x once a headset uses the eyes' images (gx.cpp's samplers read it).
@@ -594,6 +602,7 @@
 +  int32_t image;
 +  uint64_t tag;
 +  bool hasWorld;
++  bool hud; // the HUD image was accessed too
 +};
 +std::vector<Accessed> g_accessed;
 +
@@ -908,11 +917,13 @@
 +      .instanced = &g_eyeInstanced,
 +      .order = &g_eyeOrder,
 +      .sortOpaque = g_switches.sortOpaque,
++      .drawHud = g_frameDrawHud,
 +  };
 +  enqueue_pass(desc);
-+  // The interface, in its own image, every frame (its image's contents are
-+  // not kept from one frame to the next): its pass after the eyes', in the
-+  // same submission. The eyes' pass began the access to both images.
++  // The interface, in its own image, when this frame draws it (its image's
++  // contents are not kept: a frame that draws it draws all of it): its pass
++  // after the eyes', in the same submission. The eyes' pass began the access
++  // to both images.
 +  static const std::vector<gx::DrawData> noDraws;
 +  const PassDesc hud{
 +      .label = "Stereo HUD",
@@ -928,7 +939,9 @@
 +      .eyes = {&noDraws, &noDraws},
 +      .hud = &g_hudDraws,
 +  };
-+  enqueue_pass(hud);
++  if (g_frameDrawHud) {
++    enqueue_pass(hud);
++  }
 +  if (!g_loggedGeometry && hasWorld) {
 +    Log.info("Stereo: first perspective pass ({} world draws per eye, {} HUD draws once, MSAA {}x)",
 +             worldDraws, g_hudDraws.size(), samples);
@@ -966,7 +979,7 @@
 +#endif
 +}
 +
-+void begin_access(int32_t image, uint64_t tag, bool hasWorld) noexcept {
++void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept {
 +#if defined(__ANDROID__)
 +  Image target;
 +  {
@@ -994,11 +1007,11 @@
 +    Log.warn("Stereo image {} not accessible", image);
 +    return;
 +  }
-+  if (target.hudMemory.BeginAccess(target.hudTexture, &begin) != wgpu::Status::Success) {
++  if (hud && target.hudMemory.BeginAccess(target.hudTexture, &begin) != wgpu::Status::Success) {
 +    // Drawn anyway: the eyes' image is what matters; the interface shows its previous one.
 +    Log.warn("Stereo HUD image {} not accessible", image);
 +  }
-+  g_accessed.push_back({image, tag, hasWorld});
++  g_accessed.push_back({image, tag, hasWorld, hud});
 +#endif
 +}
 +
@@ -1036,7 +1049,7 @@
 +      return fd;
 +    };
 +    const int eyesFd = end_access(target.memory, target.texture);
-+    const int fd = merge_fences(eyesFd, end_access(target.hudMemory, target.hudTexture));
++    const int fd = accessed.hud ? merge_fences(eyesFd, end_access(target.hudMemory, target.hudTexture)) : eyesFd;
 +    if (g_callback != nullptr) {
 +      g_callback(static_cast<uint32_t>(accessed.image), accessed.tag, fd, accessed.hasWorld, g_callbackUser);
 +    } else if (fd >= 0) {
@@ -1173,6 +1186,14 @@
 +#endif
 +}
 +
++void AuroraStereoSetHud(bool draw) {
++#if defined(__ANDROID__)
++  g_frameDrawHud = draw;
++#else
++  (void)draw;
++#endif
++}
++
 +void AuroraStereoHideScreen(bool hidden) {
 +#if defined(__ANDROID__)
 +  g_screenHidden.store(hidden, std::memory_order_relaxed);
@@ -1224,7 +1245,7 @@
 +}
 --- /dev/null
 +++ b/lib/gfx/stereo.hpp
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,93 @@
 +#pragma once
 +
 +// Stereo rendering for a VR headset (include/aurora/stereo.h).
@@ -1284,7 +1305,7 @@
 +
 +// On the render thread: the image is about to be drawn (render pass encode),
 +// and the frame using it was just submitted (aurora.cpp).
-+void begin_access(int32_t image, uint64_t tag, bool hasWorld) noexcept;
++void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept;
 +void after_submit() noexcept;
 +
 +// What common.cpp turns into a render pass: the eyes' (hud null), or the
@@ -1305,6 +1326,7 @@
 +  int32_t image = -1;
 +  uint64_t tag = 0;
 +  bool hasWorld = false;
++  bool drawHud = false; // eyes' pass: the HUD pass follows (access to both images)
 +  const std::vector<gx::DrawData>* eyes[2]{};
 +  // Per world draw: 1 when eyes[0]'s draw covers both eyes (two instances).
 +  const std::vector<uint8_t>* instanced = nullptr;

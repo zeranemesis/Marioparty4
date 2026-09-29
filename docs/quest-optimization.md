@@ -191,6 +191,7 @@ Pourcentages du temps GPU par image du jeu au build 119 (yeux a 95 %), sauf ment
 | Optimisation | Gain estime | Sur quoi repose l'estimation | Effort | Etat |
 | --- | --- | --- | --- | --- |
 | HUD dans une image a lui, hors de la passe MSAA des yeux | passe des yeux : 9,95 -> 5,91 M pixels (-41 %) ; pixels effaces et ecrits en tout : 9,95 -> 7,83 M par image (-21 %, -8,5 Mo par image) ; memoire des images partagees : 119 -> 94 Mo (-21 %). Environ 2 a 8 % de GPU | calcul des tailles (3360x2960 contre 3360x1760 et 1600x1200) ; le gain en temps depend du cout d'une tuile vide, a mesurer | fait | a mesurer sur casque |
+| HUD dessine une image sur deux (30 Hz a 60 i/s, sa frequence de copie) | pixels effaces et ecrits par image : 7,83 -> 6,87 M en moyenne (-12 %), la moitie des draws du HUD ; environ 1 a 4 % de GPU | le HUD fait 1,92 M pixels a 4x, un quart des pixels restants | fait (`debug.partyboard.hud_rate full` pour le dessiner a chaque image) | a mesurer (phase `hud-every` de la campagne) |
 | Pipelines des yeux gardes dans le cache | 0 % de GPU ; beaucoup moins d'objets absents a la premiere vue du plateau, demarrage plus long | les dessins sans pipeline sont abandonnes (`bind_pipeline`) | fait | bbe26248, a mesurer (`Pipelines:`) |
 | Filtre du compositeur allege (`layer_filter normal`) | 3 a 10 % du GPU a 120 Hz, 2 a 6 % a 72 Hz | 1,5-2,3 ms par image affichee, dont une partie pour le filtre | fait (interrupteur) | a mesurer |
 | Fusion des draws de meme etat | 5 a 20 % | 414 a 500 draws par oeil, cout presque independant de la resolution ; tres incertain | moyen (Aurora) | a faire si la trace le montre |
@@ -233,7 +234,11 @@ Scenario, si fusion des draws, f16 et filtre donnent chacun le bas de leur fourc
 
 ### 7. HUD hors de la passe des yeux (29/09), a mesurer
 
-Les yeux et le HUD partageaient une image par emplacement de l'anneau : les yeux cote a cote, le HUD dessous, soit 3360x2960 pixels pour 3360x1760 d'yeux et 1600x1200 de HUD. La passe MSAA 4x des yeux effacait, resolvait et ecrivait toute l'image : 41 % de ses pixels etaient le HUD ou rien du tout (la zone a droite du HUD, 1760x1200). Le HUD a maintenant sa propre image partagee et sa propre passe, apres celle des yeux dans la meme soumission ; les deux fences sont fusionnees en une seule pour le casque (`SYNC_IOC_MERGE`). La passe des yeux ne couvre plus que les yeux. Le journal le dit : `Stereo: 3 images of ...x..., HUD ...x... apart`. A verifier sur casque : le HUD s'affiche comme avant, sans image en retard, et le GPU baisse.
+Les yeux et le HUD partageaient une image par emplacement de l'anneau : les yeux cote a cote, le HUD dessous, soit 3360x2960 pixels pour 3360x1760 d'yeux et 1600x1200 de HUD. La passe MSAA 4x des yeux effacait, resolvait et ecrivait toute l'image : 41 % de ses pixels etaient le HUD ou rien du tout (la zone a droite du HUD, 1760x1200). Le HUD a maintenant sa propre image partagee et sa propre passe, apres celle des yeux dans la meme soumission ; les deux fences sont fusionnees en une seule pour le casque (`SYNC_IOC_MERGE`). La passe des yeux ne couvre plus que les yeux. Le journal le dit : `Stereo: 3 images of ...x..., HUD ...x... apart`.
+
+Le casque ne copie le HUD qu'a 30 Hz. Il est donc dessine une image sur deux : le thread XR le demande a une image sur deux qu'il prete au jeu (`drawHud`, `AuroraStereoSetHud`), et ne copie le HUD que depuis ces images. Une image qui ne le dessine pas ne touche pas son image de HUD. `adb shell setprop debug.partyboard.hud_rate full` le fait dessiner a chaque image (relu toutes les 2 s) ; `hudNew` dans `Stereo perf` donne les copies du HUD par seconde (environ 30 attendues). `tools/quest_campaign.ps1` a trois phases de plus : `hud-every`, `pacing-off` (calage coupe) et `filter-normal` (filtre du compositeur allege).
+
+A verifier sur casque : le HUD s'affiche comme avant, a 30 Hz, sans image en retard, et le GPU baisse.
 
 ### 8. Pipelines des yeux (29/09), a mesurer
 

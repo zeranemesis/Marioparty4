@@ -417,6 +417,11 @@ bool StereoView::game_frame(StereoFrame& out) {
   free->startNs = mStartGiven ? mGivenStartNs : 0;
   free->dueNs = mStartGiven ? mGivenDueNs : 0;
   mStartGiven = false;
+  // The interface, every other image: it is copied at 30 Hz, and its pass
+  // (1600x1200 at 4x MSAA) was a fifth of the pixels the GPU cleared and wrote.
+  free->hud = mHudEveryImage || !mHudLastLease;
+  mHudLastLease = free->hud;
+  out.drawHud = free->hud ? 1 : 0;
   out.generation = mGeneration;
   free->state = State::Drawing;
   free->tag = mNextTag++;
@@ -776,7 +781,9 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
     if (keepBoard || acquireImage(mSwapchain, index, 0)) {
       uint32_t hudIndex = 0;
       const auto hudNow = std::chrono::steady_clock::now();
-      const bool copyHud = !mHudShown || hudNow - mHudCopiedAt >= std::chrono::milliseconds(33);
+      // Only from an image that drew it; at every image's rate, 30 Hz at most.
+      const bool copyHud = newest->hud && (!mHudShown || !mHudEveryImage ||
+                                           hudNow - mHudCopiedAt >= std::chrono::milliseconds(33));
       const bool hudReady = copyHud && acquireImage(mHudSwapchain, hudIndex, 1);
       // Acquire both destinations before queuing copies, then flush once.
       if (copyTimer) g_gl.queryCounter(copyTimer->queries[0], GL_TIMESTAMP_EXT);
@@ -891,6 +898,14 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
       char pacing[PROP_VALUE_MAX] = {};
       __system_property_get("debug.partyboard.xr_pacing", pacing);
       mPacing = std::strcmp(pacing, "0") != 0;
+      char hudRate[PROP_VALUE_MAX] = {};
+      __system_property_get("debug.partyboard.hud_rate", hudRate);
+      const bool everyImage = std::strcmp(hudRate, "full") == 0;
+      if (everyImage != mHudEveryImage) {
+        LOGI("Stereo: interface drawn %s (debug.partyboard.hud_rate=%s)", everyImage ? "in every image" : "every other image",
+             hudRate[0] != '\0' ? hudRate : "unset");
+        mHudEveryImage = everyImage;
+      }
       mWorldRate = static_cast<float>(mNewWorldCount / elapsed);
       mStatsAt = now;
       mLeaseCount = mRingFullCount = mPresentedCount = 0;

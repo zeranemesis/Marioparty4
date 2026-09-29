@@ -37,6 +37,7 @@ struct StereoFrame {
   float hudWidth, hudHeight;
   uint32_t eyeWidth, eyeHeight; // drawn part of each eye's half (dynamic resolution)
   uint32_t generation;          // of the images the lease is in
+  uint32_t drawHud;             // 1: draw the interface into its image this frame
 };
 
 class StereoView {
@@ -118,6 +119,7 @@ private:
     XrTime leaseTime = 0;                       // the XR frame the game took it in
     int64_t startNs = 0;                        // its frame's paced start, 0 when not paced
     int64_t dueNs = 0;                          // the look it is for, 0: as soon as finished
+    bool hud = false;                           // its interface image was drawn
   };
 
   // Dynamic resolution, once a second (caller holds mMutex).
@@ -223,6 +225,11 @@ private:
   bool mScreenHidden = false;
   // The interface is copied at 30 Hz: text and scores need no more.
   std::chrono::steady_clock::time_point mHudCopiedAt{};
+  // The interface is drawn every other image the game makes (30 Hz at 60),
+  // the rate it is copied at: `adb shell setprop debug.partyboard.hud_rate
+  // full` draws it in every image (read every 2 s).
+  bool mHudEveryImage = false;
+  bool mHudLastLease = false; // the previous lease drew it
 
   // The last image shown, resubmitted until the game draws the next one.
   uint64_t mPresentedTag = 0;

@@ -53,6 +53,7 @@ struct QuestStereoFrame {
     float hudWidth, hudHeight;
     uint32_t eyeWidth, eyeHeight; // drawn part of each eye's half (dynamic resolution)
     uint32_t generation;          // of the images the lease is in
+    uint32_t drawHud;             // 1: draw the interface into its image this frame
 };
 
 using FrameFn = bool (*)(QuestStereoFrame *frame);
@@ -495,6 +496,7 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
     }
     std::memcpy(sEyeClip, clip, sizeof(sEyeClip));
     AuroraStereoSetEyeSize(sFrame.eyeWidth, sFrame.eyeHeight);
+    AuroraStereoSetHud(sFrame.drawHud != 0);
     AuroraStereoBegin(sFrame.image, clip, sFrame.tag);
     sCameraViewSet = true;
 }
