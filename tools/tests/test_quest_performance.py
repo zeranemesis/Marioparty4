@@ -49,6 +49,15 @@ class PerformanceLogTests(unittest.TestCase):
         self.assertEqual(rows[0]["pace_phase_ms"], 4.3)
         self.assertIsNone(analysis.read_samples("Stereo perf: world=1")[0]["off_cadence_percent"])
 
+    def test_pipeline_drops(self):
+        text = """09-28 12:00:05.000 I Pipelines: 240 draws dropped in the last 5 s, their pipeline not built yet (12 queued, 88 built)
+09-28 12:00:10.000 I Pipelines: 30 draws dropped in the last 5 s, their pipeline not built yet (2 queued, 98 built)
+"""
+        summary = analysis.summarize([], text)
+        self.assertEqual(summary["pipeline_drops"]["total_draws_dropped"], 270)
+        self.assertEqual(summary["pipeline_drops"]["draws_dropped"]["max"], 240)
+        self.assertEqual(analysis.summarize([], "nothing")["pipeline_drops"]["total_draws_dropped"], 0)
+
     def test_legacy_logs_and_missing_data(self):
         rows = analysis.read_samples("Stereo perf: source=60Hz presented=59Hz copyMax=1.0ms world=1")
         self.assertEqual(rows[0]["world_new_hz"], 59)

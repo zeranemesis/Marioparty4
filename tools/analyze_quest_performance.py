@@ -83,6 +83,16 @@ def read_memory(text):
     return rows
 
 
+def read_pipeline_drops(text):
+    """Draws dropped for a pipeline still to be built ("Pipelines:"), per 5 s window; absent when none."""
+    rows = []
+    for line in text.splitlines():
+        match = re.search(r"Pipelines: (\d+) draws dropped in the last 5 s.*\((\d+) queued, (\d+) built\)", line)
+        if match:
+            rows.append({"draws_dropped": int(match[1]), "queued": int(match[2]), "built": int(match[3])})
+    return rows
+
+
 def read_perf_events(text):
     """The headset's throttling notifications ("Perf settings"), in order."""
     events = []
@@ -113,6 +123,9 @@ def summarize(samples, text=None):
                                    for scene in sorted({row["scene"] for row in game})}
         result["draws"] = spread(read_draws(text))
         result["perf_events"] = read_perf_events(text)
+        drops = read_pipeline_drops(text)
+        result["pipeline_drops"] = spread(drops)
+        result["pipeline_drops"]["total_draws_dropped"] = sum(row["draws_dropped"] for row in drops)
         memory = read_memory(text)
         result["memory"] = spread(memory)
         if memory and memory[0]["rss_mb"] >= 0 and memory[-1]["rss_mb"] >= 0:

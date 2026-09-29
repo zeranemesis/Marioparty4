@@ -311,7 +311,7 @@
        .label = passInfo.label.empty() ? label.c_str() : passInfo.label.c_str(),
 --- a/lib/gfx/pipeline_cache.cpp
 +++ b/lib/gfx/pipeline_cache.cpp
-@@ -930,7 +930,7 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
+@@ -930,7 +930,7 @@
      return 0;
    }
  
@@ -320,7 +320,7 @@
    while ((ret = sqlite3_step(g_pipelineCacheLoadStmt)) == SQLITE_ROW) {
      const auto* configBlob = static_cast<const uint8_t*>(sqlite3_column_blob(g_pipelineCacheLoadStmt, 0));
      const auto configSize = sqlite3_column_bytes(g_pipelineCacheLoadStmt, 0);
-@@ -944,10 +944,22 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
+@@ -944,10 +944,22 @@
      if (config.version != configVersion) {
        continue;
      }
@@ -343,19 +343,56 @@
  
    if (ret != SQLITE_DONE) {
      Log.error("Failed to read pipeline cache rows: {}", sqlite3_errmsg(g_pipelineCacheDb));
-@@ -1017,7 +1029,11 @@ PipelineRef find_pipeline(ShaderType type, const clear::PipelineConfig& config,
+@@ -1017,7 +1029,14 @@
  
  template <>
  PipelineRef find_pipeline(ShaderType type, const gx::PipelineConfig& config, NewPipelineCallback&& cb) {
 -  return find_pipeline_impl(type, config, std::move(cb), true, std::nullopt);
-+  // A headset's both-eyes pipelines are built when first drawn, never at
-+  // startup from the cache: one a driver cannot build (Adreno lost the device
-+  // on a clip-distance pipeline) must not be retried on every launch.
-+  const bool persist = config.shaderConfig.stereo == gx::StereoOff;
++  // A headset's both-eyes pipelines, except the clip-distance one, are kept in
++  // the cache too, and built at startup with the others: a draw whose pipeline
++  // is not built yet is dropped (bind_pipeline), so every pipeline first met
++  // on the board made its objects pop in after a wait on the headset. The
++  // clip-distance one is not: a driver cannot build it (Adreno lost the device
++  // on it) and it must not be retried on every launch.
++  const bool persist = config.shaderConfig.stereo != gx::StereoClipDistance;
 +  return find_pipeline_impl(type, config, std::move(cb), persist, std::nullopt);
  }
  
  #ifdef AURORA_ENABLE_RMLUI
+@@ -1146,17 +1165,33 @@
+   }
+ }
+ 
++// Draws dropped since the last report because their pipeline was not built.
++static std::atomic<uint32_t> g_missedPipelineLookups{0};
++
+ void end_pipeline_frame() {
+   g_pipelineFrameActive = false;
+   if (!g_hasPipelineThread) {
+     pipeline_worker();
+   }
++  // Every 5 seconds, when there were any: how many draws were dropped for a
++  // pipeline still to be built (objects missing from the picture meanwhile).
++  static auto reportedAt = std::chrono::steady_clock::now();
++  const auto now = std::chrono::steady_clock::now();
++  if (now - reportedAt >= std::chrono::seconds(5)) {
++    reportedAt = now;
++    const auto missed = g_missedPipelineLookups.exchange(0, std::memory_order_relaxed);
++    if (missed != 0) {
++      Log.info("Pipelines: {} draws dropped in the last 5 s, their pipeline not built yet ({} queued, {} built)",
++               missed, static_cast<size_t>(queuedPipelines.load()), static_cast<size_t>(createdPipelines.load()));
++    }
++  }
+ }
+ 
+ bool get_pipeline(PipelineRef ref, wgpu::RenderPipeline& pipeline) {
+   std::lock_guard guard{g_pipelineMutex};
+   const auto it = g_pipelines.find(ref);
+   if (it == g_pipelines.end()) {
++    g_missedPipelineLookups.fetch_add(1, std::memory_order_relaxed);
+     return false;
+   }
+   pipeline = it->second.pipeline;
 --- /dev/null
 +++ b/lib/gfx/stereo.cpp
 @@ -0,0 +1,740 @@

@@ -67,18 +67,22 @@ Un changement de resolution ne recree plus forcement les images des yeux. Les re
 
 Sur casque, les images du jeu demarrent maintenant au rythme de l'ecran. Avant, le jeu suivait sa propre horloge a 60 Hz, qui glisse par rapport aux 120 Hz du casque. Une image terminee juste au moment ou le thread XR en cherche une restait affichee une trame, la suivante trois. Les poses des yeux, prevues pour le delai moyen, se trompaient alors d'une trame pour les deux images : le plateau saccadait, surtout quand la tete bouge. Desormais, chaque image demarre a un temps fixe apres un de ces passages du thread XR. Ce temps est choisi d'apres l'heure reelle de fin du GPU (horodatage de la fence) : 98 % des images finissent 1,5 ms avant leur passage prevu. Aucune image n'est montree avant ce passage. Mesure du build 112 (Quest 3, plateau Toad, 60 s chacun), ou les images etaient encore montrees des qu'elles etaient finies : sans calage, 17,3 % des images hors rythme et 27,6 ms de latence ; avec calage, 11,3 % et 25,0 ms. Du debut de l'image a la fin du GPU, il s'ecoulait de 18 a 26 ms selon la seconde (95e centile). Ce temps varie de plus d'une trame : une image finie tot passait une trame trop tot. Une simulation (`tools/test_quest_quality.ps1`) reproduit les deux cas. Sans calage contre un ecran a 119,88 Hz, ou avec calage mais sans attendre le passage prevu, des images restent 1 ou 3 trames. En attendant ce passage, toutes en restent 2. Pas en netplay. Pour un A/B sans redemarrer : `adb shell setprop debug.partyboard.xr_pacing 0` (lu toutes les 2 s). Dans le journal `Stereo perf` : `holds=a/b/c/d` (images restees 1, 2, 3, 4 trames ou plus), `latencyMin`/`latencyMax`, `paced`, `paceWork` (95e centile du debut de l'image a la fin du GPU), `paceLooks` et `pacePhase`. `summary.json` en tire `off_cadence_percent`, la part des images hors du rythme habituel de la fenetre.
 
-### Profondeur pour le compositeur (piste E) : conception, pas encore faite
+### Reprojection de la translation (piste E) : conception, pas encore faite
 
-A 120 Hz, chaque image du jeu est montree deux fois. La seconde fois, le compositeur ne corrige que la rotation de la tete. Il faudrait la profondeur des yeux pour corriger aussi la translation (`XR_KHR_composition_layer_depth`), et en plus des vecteurs de mouvement pour Application SpaceWarp (`XR_FB_space_warp`). Le journal indique au demarrage ce que le casque propose (`Reprojection: depth submission ..., space warp ...`).
+A 120 Hz, chaque image du jeu est montree deux fois. La seconde fois, le compositeur ne corrige que la rotation de la tete : le plateau saccade quand la tete se deplace.
+
+**Correction du 29/09.** Ce document disait que soumettre la profondeur des yeux (`XR_KHR_composition_layer_depth`) suffisait a corriger aussi la translation. La documentation de Meta dit le contraire : sur Quest, la correction de position (Positional TimeWarp) n'existe qu'avec Application SpaceWarp (AppSW), qui demande la profondeur et des vecteurs de mouvement (`XR_FB_space_warp`). La profondeur seule ne change rien. En echange, AppSW fait rendre le jeu a la moitie de la frequence de l'ecran et synthetise les images intermediaires, ce qui est deja notre cas a 120 Hz (60 i/s) et ferait passer le 72 Hz a 36 i/s. Limites annoncees par Meta : transparences et particules ambigues, distorsions aux rotations rapides, un seul calque pris en charge (le HUD reste hors AppSW), latence des manettes.
+
+Le journal indique au demarrage ce que le casque propose (`Reprojection: depth submission ..., space warp ...`). Seule la ligne `space warp` compte.
 
 Ce que ca demanderait :
 
-1. Aujourd'hui, la profondeur des yeux (Depth32Float, MSAA 4x) est transitoire : elle ne sort jamais de la memoire de tuile. L'ecrire en memoire couterait environ 95 Mo par image, et WebGPU ne sait pas resoudre une profondeur. La voie raisonnable : une seconde sortie couleur R16Float dans les shaders GX des yeux (profondeur lineaire, resolue comme la couleur), soit 2 octets par pixel en plus. Il faut toucher `lib/gx/shader.cpp`, les pipelines stereo (deux cibles) et leur cle de cache.
-2. Une seconde image partagee par emplacement de l'anneau (AHardwareBuffer R16F), importee par Aurora comme les images couleur.
-3. Cote XR, une swapchain de profondeur (`GL_DEPTH_COMPONENT16`) et une passe GL qui ecrit `gl_FragDepth` depuis l'image R16F. Une copie directe est impossible entre couleur et profondeur. Cout estime : 0,2 a 0,4 ms de GPU par image.
-4. `XrCompositionLayerDepthInfoKHR` chaine a chaque vue, avec `nearZ`/`farZ` en metres (`kNear`/`kFar` de `stereo_view.cpp`, l'espace des yeux etant en metres de la piece). Les pixels sans monde (la piece en transparence) restent au plus loin.
+1. Une seconde et une troisieme sortie dans les shaders GX des yeux : la profondeur lineaire et le vecteur de mouvement de chaque pixel. Aujourd'hui la profondeur (Depth32Float, MSAA 4x) est transitoire, elle ne sort jamais de la memoire de tuile, et WebGPU ne sait pas resoudre une profondeur. Il faut toucher `lib/gx/shader.cpp`, les pipelines stereo (plusieurs cibles) et leur cle de cache.
+2. Le vecteur de mouvement vient de la position de chaque sommet a l'image precedente : le jeu garde deja les transformations precedente et courante de ses objets pour l'interpolation au-dela de 60 Hz (`PartyBoard_FrameInterpolation`). Les objets animes par squelette ou par sommets, et les particules, demandent un traitement a part.
+3. Des images partagees pour ces sorties (AHardwareBuffer) par emplacement de l'anneau, importees par Aurora comme les images couleur.
+4. Cote XR, les swapchains de profondeur et de mouvement, la copie GL vers elles, et `XrCompositionLayerSpaceWarpInfoFB` chaine a chaque vue. Le calque a besoin de ses poses et de son champ de vision pour la reprojection.
 
-Critere de decision : d'abord mesurer `-DisplayHz 72` (chaque image montree une seule fois, donc aucune translation a corriger) avec le calage sur l'ecran. On ne lance E que si 72 i/s ne tiennent pas sur le plateau et qu'a 120 Hz la saccade en translation reste visible avec des `holds` reguliers.
+Critere de decision : d'abord mesurer `-DisplayHz 72` sur le confort. On ne lance E que si le 72 Hz ne tient pas ou ne suffit pas, et si le journal annonce `space warp offered`. Effort : de l'ordre de plusieurs jours, avec des risques visuels (artefacts) qu'on ne juge que sur casque.
 
 La generation des mipmaps du monde (thread du jeu, a chaque chargement ou mise a jour de texture) n'appelle plus `pow` par texel : table construite avec le `pow` de la plateforme, et chemin 2x2 pour les tailles paires. Les octets sont identiques, ce que verifient `tools/test_quest_quality.ps1` (encodage compare autour de chaque seuil, textures comparees a `tools/tests/rgba_mips_reference.hpp`) et une compilation clang avec FMA. Sur PC, une texture 512x512 passe d'environ 5,5 ms a 2 ms ; le gain sur Quest reste a mesurer.
 
@@ -140,11 +144,15 @@ Etat au 29/09/2026, apres le build 119 (`audio-local`, c436ba53). Chaque point s
 - Calage sur l'ecran : 17,3 % d'images hors rythme sans calage, 11,3 % avec (build 112), avant le passage prevu du build 113.
 - Sans effet, ne pas y revenir : niveau GPU boost, priorite haute du contexte de copie, melange coupe, 110 % de resolution.
 
+### Pipelines des yeux (29/09), a mesurer
+
+Un dessin dont le pipeline n'est pas encore construit est abandonne (`bind_pipeline`), pas retarde : les objets manquent de l'image jusqu'a la fin de la construction, et une construction sur Adreno peut prendre des dizaines de millisecondes. Les pipelines des yeux a un seul dessin pour les deux yeux (`StereoDiscard`, `StereoUncut`) n'etaient pas conserves dans le cache disque (seul `StereoOff` l'etait) : ils etaient donc tous construits a la premiere vue, a chaque lancement, sur le plateau. Ils sont conserves desormais (sauf `StereoClipDistance`, que le pilote ne sait pas construire) et reconstruits au demarrage avec les autres. Le journal ecrit, toutes les 5 s quand il y en a, `Pipelines: N draws dropped in the last 5 s ...` ; `summary.json` en tire `pipeline_drops`. A verifier sur casque, deux lancements de suite : la premiere partie remplit le cache, la seconde doit montrer beaucoup moins de dessins abandonnes sur le plateau, mais un demarrage plus long.
+
 ### 1. Session casque (build 119), dans cet ordre
 
 1. **Calage** : `off_cadence_percent` et latence, avec `debug.partyboard.xr_pacing` et sans. Objectif : moins de 3 % d'images hors rythme. Non mesure depuis le build 113.
 2. **72 Hz** (`debug.partyboard.display_hz 72`, avec `-RestartGame`) sur deux scenes : le plateau a 50 M de fragments et une scene plus lourde (71 M). Pour chacune, la resolution a 95 % puis a 80 % (`debug.partyboard.eye_scale`). Relever images/s du jeu, saccades, GPU occupe, latence. Estimation a confirmer : a 50 M le jeu prend environ 8 ms par image, soit un GPU vers 71 % a 72 i/s ; a 71 M, environ 11,4 ms, soit un GPU vers 96 %.
-3. **Confort** : la question qui decide. Le mal des transports disparait-il a 72 Hz, meme a 80 % ? Sinon, le 72 Hz ne sert a rien et on passe a la profondeur pour le compositeur (piste E).
+3. **Confort** : la question qui decide. Le mal des transports disparait-il a 72 Hz, meme a 80 % ? Sinon, le 72 Hz ne sert a rien et on passe a AppSW (piste E : profondeur et vecteurs de mouvement, la profondeur seule ne corrige pas la translation).
 4. **Trace GPU** (`tools/quest_gpu_trace.ps1`), sur la meilleure combinaison. Elle dit ou vont les millisecondes : fragments, sommets, bande passante des textures, nombre de draws. Aucun echantillon de sa sortie n'existe encore : l'analyse se fera sur la premiere capture reelle.
 
 Decision apres 2 et 3 :
@@ -154,7 +162,7 @@ Decision apres 2 et 3 :
 | 72 Hz tient sur les deux scenes | reglage par defaut, puis remonter la resolution |
 | 72 Hz tient sur les scenes legeres seulement | 72 Hz pour les mini-jeux, 120 Hz avec 60 i/s sur le plateau lourd, changement de frequence au changement de scene |
 | 72 Hz ne tient pas | leviers du point 2, selon la trace |
-| 72 Hz ne regle pas le confort | piste E |
+| 72 Hz ne regle pas le confort | piste E, c'est-a-dire AppSW (profondeur et vecteurs de mouvement) |
 
 ### 2. Optimisation qui reste, selon la trace
 
@@ -180,7 +188,7 @@ Ce qu'on sait : le GPU passe 92 a 93 % de son temps sur les fragments (build 100
 
 - Une integration Dawn/Vulkan qui cible directement les images OpenXR, a la place des buffers Android partages et des copies GL. La bibliotheque Dawn precompilee actuelle ne fournit pas le chemin d'import/export necessaire.
 - Le vrai multiview et la foveation dans ce backend, avec detection des capacites et repli Quest 2/3. La foveation doit porter sur la passe 3D couteuse, pas sur une copie de presentation.
-- La profondeur pour le compositeur (piste E, conception plus haut), si le 72 Hz ne suffit pas.
+- AppSW, la reprojection de la translation par profondeur et vecteurs de mouvement (piste E, conception plus haut), si le 72 Hz ne suffit pas.
 - Une reconstruction temporelle, seulement avec des vecteurs de mouvement et un historique coherents (GX n'en fournit pas). Pas d'upscaling IA promis sans implementation ni mesure de cout.
 
 ## Sources Meta du plan
