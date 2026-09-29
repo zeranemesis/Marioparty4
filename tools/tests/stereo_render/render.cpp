@@ -97,9 +97,10 @@ int main(int argc, char** argv) {
     std::printf("no adapter with clip distances\n");
     return 100;
   }
-  wgpu::FeatureName features[] = {wgpu::FeatureName::ClipDistances};
+  const bool f16 = adapter.HasFeature(wgpu::FeatureName::ShaderF16);
+  wgpu::FeatureName features[] = {wgpu::FeatureName::ClipDistances, wgpu::FeatureName::ShaderF16};
   wgpu::DeviceDescriptor deviceDesc{};
-  deviceDesc.requiredFeatureCount = 1;
+  deviceDesc.requiredFeatureCount = f16 ? 2 : 1;
   deviceDesc.requiredFeatures = features;
   int& errors = g_errors;
   deviceDesc.SetUncapturedErrorCallback([](const wgpu::Device&, wgpu::ErrorType, wgpu::StringView message) {
@@ -222,6 +223,60 @@ int main(int argc, char** argv) {
   }
   // The TEV operand wrap left out where it changes nothing (harness.cpp):
   // both shaders, per eye, must give the same image.
+  // One image per eye's pipeline and uniforms, for the comparisons below.
+  const auto draw_single = [&](wgpu::RenderPipeline pipeline, wgpu::BindGroup group) {
+    const unsigned width = eyeWidth;
+    wgpu::TextureDescriptor desc{.usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc,
+                                 .size = {width, height, 1},
+                                 .format = wgpu::TextureFormat::RGBA8Unorm};
+    auto texture = device.CreateTexture(&desc);
+    wgpu::RenderPassColorAttachment color{.view = texture.CreateView(),
+                                          .loadOp = wgpu::LoadOp::Clear,
+                                          .storeOp = wgpu::StoreOp::Store,
+                                          .clearValue = {0, 0, 0, 0}};
+    wgpu::RenderPassDescriptor passDesc{.colorAttachmentCount = 1, .colorAttachments = &color};
+    auto encoder = device.CreateCommandEncoder();
+    auto pass = encoder.BeginRenderPass(&passDesc);
+    pass.SetBindGroup(0, storageGroup);
+    pass.SetPipeline(pipeline);
+    pass.SetBindGroup(1, group);
+    pass.Draw(vertexCount, 1);
+    pass.End();
+    auto commands = encoder.Finish();
+    device.GetQueue().Submit(1, &commands);
+    return read_back(texture, width, height);
+  };
+  // The TEV in half precision (shader.cpp) against f32: at most one 8-bit step
+  // apart, except where a comparison lands on the other side of its threshold.
+  const auto compare_f16 = [&](const char* name, const std::string& file, const std::string& uniforms,
+                               double maxFarPercent) {
+    if (!f16) {
+      std::printf("SKIP %s: no shader-f16 on this adapter\n", name);
+      return;
+    }
+    if (read_bytes(file + ".wgsl").empty() || read_bytes(file + "-f16.wgsl").empty()) return;
+    auto group = uniform_group(uniforms);
+    const auto full = draw_single(make_pipeline(file + ".wgsl", layout), group);
+    const auto half = draw_single(make_pipeline(file + "-f16.wgsl", layout), group);
+    unsigned oneStep = 0, far = 0, maxDelta = 0, drawn = 0;
+    for (size_t i = 0; i < full.size(); i += 4) {
+      unsigned delta = 0;
+      for (int c = 0; c < 4; ++c) delta = std::max<unsigned>(delta, std::abs(full[i + c] - half[i + c]));
+      oneStep += delta == 1;
+      far += delta > 1;
+      maxDelta = std::max(maxDelta, delta);
+      drawn += (full[i] | full[i + 1] | full[i + 2] | full[i + 3]) != 0;
+    }
+    const double farPercent = 100.0 * far / (full.size() / 4);
+    const bool ok = farPercent <= maxFarPercent && drawn > 0 && errors == 0;
+    std::printf("%s %s f16: %u of %zu pixels one step off, %u further (%.2f%%, %.2f%% allowed), max delta %u, drawn %u\n",
+                ok ? "OK  " : "FAIL", name, oneStep, full.size() / 4, far, farPercent, maxFarPercent, maxDelta, drawn);
+    write_ppm(file.substr(0) + "-f32.ppm", full, eyeWidth, height);
+    write_ppm(file.substr(0) + "-f16.ppm", half, eyeWidth, height);
+    failures += !ok;
+  };
+  compare_f16("tev lerp       ", "scene-tev", "scene-tev-left.bin", 0.0);
+  compare_f16("tev three ops  ", "scene-tevops", "scene-tevops-left.bin", 1.0);
   if (!read_bytes("scene-tev.wgsl").empty() && !read_bytes("scene-tev-old.wgsl").empty()) {
     auto wrapped = make_pipeline("scene-tev-old.wgsl", layout);
     auto direct = make_pipeline("scene-tev.wgsl", layout);

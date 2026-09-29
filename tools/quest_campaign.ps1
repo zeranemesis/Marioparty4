@@ -40,7 +40,8 @@ $eye = "$EyeScale"
 $switches = @('debug.partyboard.sort_opaque', 'debug.partyboard.stereo_crossing', 'debug.partyboard.layer_filter',
               'debug.partyboard.gpu_level', 'debug.partyboard.eye_scale', 'debug.partyboard.tev_overflow',
               'debug.partyboard.xr_priority', 'debug.partyboard.stereo_msaa', 'debug.partyboard.opaque_blend',
-              'debug.partyboard.hud_rate', 'debug.partyboard.xr_pacing', 'debug.partyboard.anisotropy')
+              'debug.partyboard.hud_rate', 'debug.partyboard.xr_pacing', 'debug.partyboard.anisotropy',
+              'debug.partyboard.shader_f16')
 $live = @(
     @{ name = 'reference';     props = @{ 'debug.partyboard.eye_scale' = $eye } },
     @{ name = 'sort-off';      props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.sort_opaque' = '0' } },
@@ -60,7 +61,8 @@ $restart = @(
     @{ name = 'restart-reference';   props = @{ 'debug.partyboard.eye_scale' = $eye } },
     @{ name = 'tev-overflow-all';    props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.tev_overflow' = 'all' } },
     @{ name = 'xr-priority-off';     props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.xr_priority' = 'off' } },
-    @{ name = 'msaa-1';              props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.stereo_msaa' = '1' } }
+    @{ name = 'msaa-1';              props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.stereo_msaa' = '1' } },
+    @{ name = 'shader-f16';          props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.shader_f16' = '1' } }
 )
 
 function Adb([string[]]$arguments) { & $adb -s $Serial @arguments }

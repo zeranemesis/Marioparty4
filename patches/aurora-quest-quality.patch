@@ -276,3 +276,60 @@
  TextureHandle new_dynamic_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 gxFormat,
                                       const char* label) noexcept;
  TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept;
+--- a/lib/webgpu/gpu.cpp
++++ b/lib/webgpu/gpu.cpp
+@@ -22,6 +22,9 @@
+ #include "../dawn/BackendBinding.hpp"
+ #include <dawn/native/DawnNative.h>
+ #endif
++#if defined(__ANDROID__)
++#include <sys/system_properties.h>
++#endif
+ 
+ namespace aurora::gx {
+ void clear_copy_texture_cache() noexcept;
+@@ -61,6 +64,7 @@
+ bool g_astcTexturesSupported = false;
+ bool g_textureComponentSwizzleSupported = false;
+ bool g_clipDistancesSupported = false;
++bool g_shaderF16Enabled = false;
+ static std::atomic_bool g_shuttingDown = false;
+ 
+ namespace {
+@@ -839,6 +843,7 @@
+     g_astcTexturesSupported = false;
+     g_textureComponentSwizzleSupported = false;
+     g_clipDistancesSupported = false;
++    g_shaderF16Enabled = false;
+     wgpu::SupportedFeatures supportedFeatures;
+     g_adapter.GetFeatures(&supportedFeatures);
+     for (size_t i = 0; i < supportedFeatures.featureCount; ++i) {
+@@ -866,6 +871,16 @@
+         requiredFeatures.push_back(feature);
+         g_clipDistancesSupported = true;
+       }
++      // The TEV in half precision, for a headset A/B, before starting the
++      // game: `adb shell setprop debug.partyboard.shader_f16 1` (off by default).
++      if (feature == wgpu::FeatureName::ShaderF16) {
++        char value[PROP_VALUE_MAX] = {};
++        __system_property_get("debug.partyboard.shader_f16", value);
++        if (value[0] == '1' && value[1] == '\0') {
++          requiredFeatures.push_back(feature);
++          g_shaderF16Enabled = true;
++        }
++      }
+ #endif
+     }
+ #ifdef WEBGPU_DAWN
+--- a/lib/webgpu/gpu.hpp
++++ b/lib/webgpu/gpu.hpp
+@@ -55,6 +55,9 @@
+ extern bool g_textureComponentSwizzleSupported;
+ // Clip distances: a headset's two eyes drawn in one instanced draw (gfx/stereo.cpp).
+ extern bool g_clipDistancesSupported;
++// The GX shaders' TEV in half precision (gx/shader.cpp): the device has f16
++// and a headset asked for it (debug.partyboard.shader_f16 1).
++extern bool g_shaderF16Enabled;
+ 
+ bool initialize(AuroraBackend backend, bool allowCpu);
+ void shutdown();

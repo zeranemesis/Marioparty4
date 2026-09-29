@@ -195,7 +195,7 @@ Pourcentages du temps GPU par image du jeu au build 119 (yeux a 95 %), sauf ment
 | Pipelines des yeux gardes dans le cache | 0 % de GPU ; beaucoup moins d'objets absents a la premiere vue du plateau, demarrage plus long | les dessins sans pipeline sont abandonnes (`bind_pipeline`) | fait | bbe26248, a mesurer (`Pipelines:`) |
 | Filtre du compositeur allege (`layer_filter normal`) | 3 a 10 % du GPU a 120 Hz, 2 a 6 % a 72 Hz | 1,5-2,3 ms par image affichee, dont une partie pour le filtre | fait (interrupteur) | a mesurer |
 | Regroupement des draws | 5 a 20 % | 414 a 500 draws par oeil, cout presque independant de la resolution ; tres incertain. Aurora fusionne deja les draws consecutifs de meme etat (`command_processor.cpp`) : il faudrait regrouper des draws aux uniformes differents (uniformes par instance), un gros changement | fort (Aurora) | seulement si la trace le montre |
-| Demi-precision (f16) des calculs de couleur | 5 a 15 % | calcul a double debit en f16 sur Adreno, sur la part calcul des fragments seulement | moyen, image a comparer | a faire si la trace le montre |
+| Demi-precision (f16) des calculs du TEV (`debug.partyboard.shader_f16 1`, au demarrage) | 5 a 15 % | calcul a double debit en f16 sur Adreno, sur la part calcul des fragments seulement | fait (interrupteur, desactive par defaut) | verifie sur PC (section 8) ; a mesurer (phase `shader-f16` de la campagne, avec redemarrage) |
 | Filtrage anisotrope 8x -> 4x (`debug.partyboard.anisotropy`, relu toutes les 2 s) | 0 a 8 % de GPU selon l'attente des textures, textures en biais un peu plus floues | le plateau est vu en biais, la ou le 8x lit le plus de texels ; 1x donne le cout maximal des textures | fait (interrupteur) | a mesurer (phases `aniso-4`, `aniso-1`) ; decide aussi de l'ASTC |
 | Textures ASTC au lieu de RGBA8 | 0 a 15 % de GPU selon l'attente des textures ; memoire des textures -75 % (ASTC 4x4) | RGBA8 32 bits par texel contre 8 en ASTC 4x4 | moyen a fort, legere perte de nettete | seulement si la trace montre les textures |
 | Decoupage du rendu des yeux en plusieurs soumissions | 0 % d'images/s ; latence -10 a -30 % | la latence suit la file du GPU | moyen | apres les images/s |
@@ -232,7 +232,7 @@ Scenario, si fusion des draws, f16 et filtre donnent chacun le bas de leur fourc
 | 72 Hz ne tient pas apres l'etape 3 | 72 Hz a 80 %, ou rester a 120 Hz avec 60 i/s |
 | 72 Hz ne regle pas le confort | AppSW (piste E) |
 
-**Etape 5 - Finitions.** Nettete (resolution au-dessus de 95 % avec la marge gagnee), puis la stabilite et le contenu (section 9).
+**Etape 5 - Finitions.** Nettete (resolution au-dessus de 95 % avec la marge gagnee), puis la stabilite et le contenu (section 10).
 
 ### 7. HUD hors de la passe des yeux (29/09), a mesurer
 
@@ -242,11 +242,17 @@ Le casque ne copie le HUD qu'a 30 Hz. Il est donc dessine une image sur deux : l
 
 A verifier sur casque : le HUD s'affiche comme avant, a 30 Hz, sans image en retard, et le GPU baisse.
 
-### 8. Pipelines des yeux (29/09), a mesurer
+### 8. TEV en demi-precision (29/09), a mesurer
+
+`adb shell setprop debug.partyboard.shader_f16 1`, avant de lancer le jeu, fait generer les shaders GX avec le TEV en f16 (`ShaderConfig::halfPrecision`, `lib/gx/shader.cpp`), si le GPU a la fonctionnalite `shader-f16` de WebGPU. Desactive par defaut. Ce qui passe en f16 : les registres du TEV (`prev`, `tevreg0-2`, copies `hprev`, `htevreg0-2`), ses operations (melange, biais, echelle, bornes). Ce qui reste en f32 : textures, couleurs rasterisees et constantes (converties a l'entree du TEV), coordonnees, brouillard, test alpha, profondeur, l'emulation du debordement 8 bits (appliquee en f32 autour des registres) et les comparaisons sur 16 et 24 bits, qui depassent la plage du f16 (65 504). Adreno calcule en f16 a double debit ; les valeurs du TEV sont des couleurs 8 bits entre -4 et 4, ou le f16 garde des pas de 1/1024 a 1, un quart de pas 8 bits.
+
+Verifie sur PC (`tools/test_quest_stereo_render.ps1`, GPU Intel, 29/09) : les 15 variantes f16 generees sont acceptees par Dawn. Contre le f32, une scene a un etage : 450 pixels sur 19 200 (2,3 %) a un pas de 8 bits, aucun au-dela. Une scene a trois etages (constante, biais et echelle x2 sans borne donc debordement du registre relu, soustraction, comparaison 8 bits) : 521 pixels a un pas, 2 (0,01 %) de l'autre cote du seuil de la comparaison. Les pipelines f16 du cache disque sont ignores sur un appareil sans f16 (leur validation echouerait, ce qui est fatal). A mesurer sur casque, phase `shader-f16` de `tools/quest_campaign.ps1 -RestartPhases` : le gain en GPU, et a l'oeil, les degrades et les effets de couleur.
+
+### 9. Pipelines des yeux (29/09), a mesurer
 
 Un dessin dont le pipeline n'est pas encore construit est abandonne (`bind_pipeline`), pas retarde : les objets manquent de l'image jusqu'a la fin de la construction, et une construction sur Adreno peut prendre des dizaines de millisecondes. Les pipelines des yeux a un seul dessin pour les deux yeux (`StereoDiscard`, `StereoUncut`) n'etaient pas conserves dans le cache disque (seul `StereoOff` l'etait) : ils etaient donc tous construits a la premiere vue, a chaque lancement, sur le plateau. Ils sont conserves desormais (sauf `StereoClipDistance`, que le pilote ne sait pas construire) et reconstruits au demarrage avec les autres. Le journal ecrit, toutes les 5 s quand il y en a, `Pipelines: N draws dropped in the last 5 s ...` ; `summary.json` en tire `pipeline_drops`. A verifier sur casque, deux lancements de suite : la premiere partie remplit le cache, la seconde doit montrer beaucoup moins de dessins abandonnes sur le plateau, mais un demarrage plus long.
 
-### 9. Stabilite et contenu
+### 10. Stabilite et contenu
 
 1. Retour au jeu apres une longue pause (le build 109 n'a ete teste que sur cinq retours courts), et reprise apres Space Setup : ligne `Layers:` et garde « table sous le sol ».
 2. Plantage de m440 (SIGSEGV, build 88), a reproduire ; son rapport n'est pas lisible sans acces root.
@@ -255,7 +261,7 @@ Un dessin dont le pipeline n'est pas encore construit est abandonne (`bind_pipel
 5. Hauteur des mini-jeux quand ils sont poses sur la table. Le sol est mesure sur la geometrie des 20 premieres images (`PartyBoard_StereoObserveBounds`). Piste : la hauteur des pieds des personnages, dans `charWork[]` (`src/game/chrman.c`), qui demande un accesseur sous `TARGET_PC`.
 6. Mini-jeux au cas par cas, avec des captures reproductibles. Ne pas modifier le temps de simulation pour obtenir une frequence d'affichage plus haute.
 
-### 10. Long terme : changement de backend
+### 11. Long terme : changement de backend
 
 - Une integration Dawn/Vulkan qui cible directement les images OpenXR, a la place des buffers Android partages et des copies GL. La bibliotheque Dawn precompilee actuelle ne fournit pas le chemin d'import/export necessaire.
 - Le vrai multiview et la foveation dans ce backend, avec detection des capacites et repli Quest 2/3. La foveation doit porter sur la passe 3D couteuse, pas sur une copie de presentation.

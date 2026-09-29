@@ -154,6 +154,48 @@ static int render_scene(const std::string& dir) {
     pushed.clear();
     build_uniform(build_shader_info(tev), 0, ranges);
     write_bytes(dir + "/scene-tev-left.bin", pushed[0].data(), pushed[0].size());
+    // The same TEV in half precision: render.exe compares it with f32.
+    if (!wrapAll) {
+      tev.halfPrecision = 1;
+      write(dir + "/scene-tev-f16.wgsl", build_shader_source(tev));
+    }
+  }
+  // Three TEV stages through what half precision could get wrong: a konst
+  // color, bias and scale without clamping (so the 8-bit wrap of tevreg0 when
+  // it is read back), a subtraction, and an 8-bit comparison. Written in f32
+  // and in f16 for render.exe.
+  {
+    auto ops = config;
+    ops.stereo = 0;
+    ops.tevStageCount = 3;
+    state.kcolors[0] = aurora::Vec4<float>{0.8f, 0.3f, 0.6f, 0.5f};
+    auto& s0 = ops.tevStages[0];
+    s0.colorPass = {GX_CC_RASC, GX_CC_KONST, GX_CC_HALF, GX_CC_ZERO};
+    s0.alphaPass = {GX_CA_RASA, GX_CA_KONST, GX_CA_ZERO, GX_CA_ZERO};
+    s0.kcSel = GX_TEV_KCSEL_K0;
+    s0.kaSel = GX_TEV_KASEL_K0_A;
+    s0.colorOp = {GX_TEV_ADD, GX_TB_SUBHALF, GX_CS_SCALE_2, GX_TEVREG0, false};
+    s0.alphaOp = {GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TEVREG0, true};
+    auto& s1 = ops.tevStages[1];
+    s1 = s0;
+    s1.colorPass = {GX_CC_C0, GX_CC_RASC, GX_CC_RASC, GX_CC_ZERO};
+    s1.alphaPass = {GX_CA_A0, GX_CA_RASA, GX_CA_RASA, GX_CA_ZERO};
+    s1.colorOp = {GX_TEV_SUB, GX_TB_ADDHALF, GX_CS_SCALE_1, GX_TEVPREV, true};
+    s1.alphaOp = {GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TEVPREV, true};
+    auto& s2 = ops.tevStages[2];
+    s2 = s0;
+    s2.colorPass = {GX_CC_CPREV, GX_CC_C0, GX_CC_HALF, GX_CC_CPREV};
+    s2.alphaPass = {GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV};
+    s2.colorOp = {GX_TEV_COMP_RGB8_GT, GX_TB_ZERO, GX_CS_SCALE_1, GX_TEVPREV, true};
+    s2.alphaOp = {GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TEVPREV, true};
+    write(dir + "/scene-tevops.wgsl", build_shader_source(ops));
+    ops.halfPrecision = 1;
+    write(dir + "/scene-tevops-f16.wgsl", build_shader_source(ops));
+    ops.halfPrecision = 0;
+    state.proj = left;
+    pushed.clear();
+    build_uniform(build_shader_info(ops), 0, ranges);
+    write_bytes(dir + "/scene-tevops-left.bin", pushed[0].data(), pushed[0].size());
   }  std::ofstream params(dir + "/scene.txt");
   params << verts.size() / 16 << ' ' << eyeWidth << ' ' << height << ' ' << strides[0] << ' ' << strides[1] << '\n';
   std::printf("scene: %zu vertices\n", verts.size() / 16);
@@ -171,8 +213,17 @@ int main(int argc, char** argv) {
                                         std::pair{StereoDiscard, "-stereo-discard.wgsl"},
                                         std::pair{StereoUncut, "-stereo-uncut.wgsl"}}) {
       config.stereo = stereo;
+      config.halfPrecision = 0;
       write(dir + "/" + name + suffix, build_shader_source(config));
       ++written;
+      // The headset's variants with the TEV in half precision (-f16: validate.exe
+      // needs a device with f16 for them).
+      if (stereo != StereoClipDistance) {
+        config.halfPrecision = 1;
+        const std::string half = std::string{suffix}.replace(std::string{suffix}.rfind(".wgsl"), 5, "-f16.wgsl");
+        write(dir + "/" + name + half, build_shader_source(config));
+        ++written;
+      }
     }
   };
 

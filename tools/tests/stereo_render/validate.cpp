@@ -7,6 +7,8 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <vector>
 
 static std::string read(const char* path) {
   std::ifstream in(path, std::ios::binary);
@@ -45,10 +47,14 @@ int main(int argc, char** argv) {
   std::printf("adapter: %.*s (backend %d), clip distances: %s\n", static_cast<int>(info.device.length), info.device.data,
               static_cast<int>(info.backendType), clip ? "yes" : "no");
 
-  wgpu::FeatureName features[] = {wgpu::FeatureName::ClipDistances};
+  const bool f16 = adapter.HasFeature(wgpu::FeatureName::ShaderF16);
+  std::printf("shader-f16: %s\n", f16 ? "yes" : "no (the -f16 shaders are skipped)");
+  std::vector<wgpu::FeatureName> features;
+  if (clip) features.push_back(wgpu::FeatureName::ClipDistances);
+  if (f16) features.push_back(wgpu::FeatureName::ShaderF16);
   wgpu::DeviceDescriptor deviceDesc{};
-  deviceDesc.requiredFeatureCount = clip ? 1 : 0;
-  deviceDesc.requiredFeatures = features;
+  deviceDesc.requiredFeatureCount = features.size();
+  deviceDesc.requiredFeatures = features.data();
   deviceDesc.SetUncapturedErrorCallback([](const wgpu::Device&, wgpu::ErrorType, wgpu::StringView message) {
     std::printf("  uncaptured: %.*s\n", static_cast<int>(message.length), message.data);
   });
@@ -68,6 +74,10 @@ int main(int argc, char** argv) {
 
   int failed = 0;
   for (int i = 1; i < argc; ++i) {
+    if (!f16 && std::string_view{argv[i]}.find("-f16") != std::string_view::npos) {
+      std::printf("SKIP %s (no shader-f16)\n", argv[i]);
+      continue;
+    }
     const std::string code = read(argv[i]);
     device.PushErrorScope(wgpu::ErrorFilter::Validation);
     wgpu::ShaderSourceWGSL wgsl{};
