@@ -218,10 +218,13 @@ std::pair<uint32_t, uint32_t> StereoView::eye_size(float renderScale) const {
           std::min(mEyeHeight, round8(static_cast<float>(mEyeHeight) * renderScale))};
 }
 
-// The ring's images at the size the game draws (the eyes side by side, the
-// interface below): the GPU writes whole images out at the end of its pass,
-// so a larger image costs bandwidth for pixels nobody drew. A smaller drawn
-// size uses a part of them for a while (ImageSizePolicy).
+// The ring's images at the size the game draws: the eyes side by side, and
+// the interface in an image of its own. The GPU clears and writes whole
+// images out at the end of its pass, so a larger image costs bandwidth for
+// pixels nobody drew: with the interface below the eyes, 41% of the eyes'
+// multisampled pass was the interface or unused (3360x2960 for 3360x1760 of
+// eyes, 2026-09-29). A smaller drawn size uses a part of them for a while
+// (ImageSizePolicy).
 // XR thread, GL context current, every slot free.
 bool StereoView::allocate_images(uint32_t eyeWidth, uint32_t eyeHeight, uint32_t hudWidth) {
   if (!hudWidth) hudWidth = mHudPixelsWidth;
@@ -247,32 +250,39 @@ bool StereoView::allocate_images(uint32_t eyeWidth, uint32_t eyeHeight, uint32_t
       return false;
     }
   }
-  std::array<Slot, 3> replacement;
-  for (auto& slot : replacement) {
+  // A shared buffer, its EGL image and the GL texture the copies read.
+  const auto make = [this](uint32_t width, uint32_t height, AHardwareBuffer*& buffer, EGLImageKHR& eglImage,
+                           GLuint& texture) {
     AHardwareBuffer_Desc desc{};
-    desc.width = std::max(eyeWidth * 2, hudWidth);
-    desc.height = eyeHeight + hudWidth * 3 / 4;
+    desc.width = width;
+    desc.height = height;
     desc.layers = 1;
     desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
     desc.usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
-    if (AHardwareBuffer_allocate(&desc, &slot.buffer) != 0) {
-      LOGW("Stereo: image allocation failed");
-      free_images(replacement);
-      if (hudReplacement != XR_NULL_HANDLE) xrDestroySwapchain(hudReplacement);
+    if (AHardwareBuffer_allocate(&desc, &buffer) != 0) {
+      LOGW("Stereo: image allocation failed (%ux%u)", width, height);
       return false;
     }
     const EGLint attributes[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
-    slot.eglImage = g_gl.createImage(mDisplay, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID,
-                                     g_gl.getNativeClientBuffer(slot.buffer), attributes);
-    if (slot.eglImage == EGL_NO_IMAGE_KHR) {
+    eglImage = g_gl.createImage(mDisplay, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID,
+                                g_gl.getNativeClientBuffer(buffer), attributes);
+    if (eglImage == EGL_NO_IMAGE_KHR) {
+      return false;
+    }
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    g_gl.imageTargetTexture(GL_TEXTURE_2D, static_cast<GLeglImageOES>(eglImage));
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return true;
+  };
+  std::array<Slot, 3> replacement;
+  for (auto& slot : replacement) {
+    if (!make(eyeWidth * 2, eyeHeight, slot.buffer, slot.eglImage, slot.texture) ||
+        !make(hudWidth, hudWidth * 3 / 4, slot.hudBuffer, slot.hudEglImage, slot.hudTexture)) {
       free_images(replacement);
       if (hudReplacement != XR_NULL_HANDLE) xrDestroySwapchain(hudReplacement);
       return false;
     }
-    glGenTextures(1, &slot.texture);
-    glBindTexture(GL_TEXTURE_2D, slot.texture);
-    g_gl.imageTargetTexture(GL_TEXTURE_2D, static_cast<GLeglImageOES>(slot.eglImage));
-    glBindTexture(GL_TEXTURE_2D, 0);
   }
   std::lock_guard lock{mMutex};
   free_images();
@@ -294,19 +304,23 @@ bool StereoView::allocate_images(uint32_t eyeWidth, uint32_t eyeHeight, uint32_t
 void StereoView::free_images() { free_images(mSlots); }
 
 void StereoView::free_images(std::array<Slot, 3>& slots) {
+  const auto release = [this](AHardwareBuffer*& buffer, EGLImageKHR& eglImage, GLuint& texture) {
+    if (texture != 0) {
+      glDeleteTextures(1, &texture);
+      texture = 0;
+    }
+    if (eglImage != EGL_NO_IMAGE_KHR) {
+      g_gl.destroyImage(mDisplay, eglImage);
+      eglImage = EGL_NO_IMAGE_KHR;
+    }
+    if (buffer != nullptr) {
+      AHardwareBuffer_release(buffer); // Dawn keeps its own reference while it uses it
+      buffer = nullptr;
+    }
+  };
   for (auto& slot : slots) {
-    if (slot.texture != 0) {
-      glDeleteTextures(1, &slot.texture);
-      slot.texture = 0;
-    }
-    if (slot.eglImage != EGL_NO_IMAGE_KHR) {
-      g_gl.destroyImage(mDisplay, slot.eglImage);
-      slot.eglImage = EGL_NO_IMAGE_KHR;
-    }
-    if (slot.buffer != nullptr) {
-      AHardwareBuffer_release(slot.buffer); // Dawn keeps its own reference while it uses it
-      slot.buffer = nullptr;
-    }
+    release(slot.buffer, slot.eglImage, slot.texture);
+    release(slot.hudBuffer, slot.hudEglImage, slot.hudTexture);
   }
 }
 
@@ -525,10 +539,10 @@ void StereoView::adapt_resolution() {
   }
 }
 
-bool StereoView::images(void** buffers, uint32_t capacity, uint32_t& count, uint32_t& width, uint32_t& height,
-                        uint32_t& generation, uint32_t& eyeHeight, uint32_t& hudWidth, uint32_t& hudHeight) {
+bool StereoView::images(void** eyeBuffers, void** hudBuffers, uint32_t capacity, uint32_t& count, uint32_t& width,
+                        uint32_t& height, uint32_t& generation, uint32_t& hudWidth, uint32_t& hudHeight) {
   std::lock_guard lock{mMutex};
-  if (capacity < mSlots.size() || mSlots[0].buffer == nullptr) {
+  if (capacity < mSlots.size() || mSlots[0].buffer == nullptr || mSlots[0].hudBuffer == nullptr) {
     return false;
   }
   // Each buffer gets a reference for the caller, who imports it outside this
@@ -538,13 +552,14 @@ bool StereoView::images(void** buffers, uint32_t capacity, uint32_t& count, uint
   // VkFormat 0", Quest 3, 2026-09-28). The caller hands them back with
   // PartyBoardQuest_StereoReleaseImages once imported.
   for (size_t i = 0; i < mSlots.size(); ++i) {
-    buffers[i] = mSlots[i].buffer;
+    eyeBuffers[i] = mSlots[i].buffer;
     AHardwareBuffer_acquire(mSlots[i].buffer);
+    hudBuffers[i] = mSlots[i].hudBuffer;
+    AHardwareBuffer_acquire(mSlots[i].hudBuffer);
   }
   count = static_cast<uint32_t>(mSlots.size());
-  width = std::max(mImageEyeWidth * 2, mHudPixelsWidth);
-  height = mImageEyeHeight + mHudPixelsHeight;
-  eyeHeight = mImageEyeHeight;
+  width = mImageEyeWidth * 2;
+  height = mImageEyeHeight;
   hudWidth = mHudPixelsWidth;
   hudHeight = mHudPixelsHeight;
   generation = mGeneration;
@@ -769,12 +784,11 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
       if (!keepBoard) {
         // Only the drawn part of each eye's half (dynamic resolution): at the
         // left, centered vertically (Aurora's common.cpp draws it there, a
-        // half being the image's width / 2, the eyes' rows above the
-        // interface's). The images are replaced only when every slot is free,
-        // so this slot has the current images' size.
+        // half being the image's width / 2). The images are replaced only
+        // when every slot is free, so this slot has the current images' size.
         const auto y = static_cast<GLint>((mEyeHeight - newest->renderHeight) / 2);
         const auto srcY = static_cast<GLint>((mImageEyeHeight - newest->renderHeight) / 2);
-        const uint32_t srcStride = std::max(mImageEyeWidth * 2, mHudPixelsWidth) / 2;
+        const uint32_t srcStride = mImageEyeWidth;
         for (uint32_t eye = 0; eye < 2; ++eye) {
           g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, static_cast<GLint>(eye * srcStride), srcY, 0,
                          mSwapchainImages[index].image, GL_TEXTURE_2D, 0, static_cast<GLint>(eye * mEyeWidth), y, 0,
@@ -783,7 +797,7 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
       }
       if (hudReady) {
         mHudCopiedAt = hudNow;
-        g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, 0, static_cast<GLint>(mImageEyeHeight), 0,
+        g_gl.copyImage(newest->hudTexture, GL_TEXTURE_2D, 0, 0, 0, 0,
                       mHudImages[hudIndex].image, GL_TEXTURE_2D, 0, 0, 0, 0,
                       static_cast<GLsizei>(mHudPixelsWidth), static_cast<GLsizei>(mHudPixelsHeight), 1);
 
@@ -1040,13 +1054,16 @@ __attribute__((visibility("default"))) bool PartyBoardQuest_StereoFrame(quest::S
   return view != nullptr && out != nullptr && view->game_frame(*out);
 }
 
-__attribute__((visibility("default"))) bool PartyBoardQuest_StereoImages(void** buffers, uint32_t capacity,
-                                                                         uint32_t* count, uint32_t* width,
-                                                                         uint32_t* height, uint32_t* generation,
-                                                                         uint32_t* eyeHeight, uint32_t* hudWidth, uint32_t* hudHeight) {
+// Game thread: `capacity` eye buffers and as many HUD buffers, each with a
+// reference the caller gives back (PartyBoardQuest_StereoReleaseImages).
+__attribute__((visibility("default"))) bool PartyBoardQuest_StereoImages(void** eyeBuffers, void** hudBuffers,
+                                                                         uint32_t capacity, uint32_t* count,
+                                                                         uint32_t* width, uint32_t* height,
+                                                                         uint32_t* generation, uint32_t* hudWidth,
+                                                                         uint32_t* hudHeight) {
   quest::StereoView* view = quest::g_stereoView;
-  return view != nullptr && view->images(buffers, capacity, *count, *width, *height, *generation,
-                                        *eyeHeight, *hudWidth, *hudHeight);
+  return view != nullptr && view->images(eyeBuffers, hudBuffers, capacity, *count, *width, *height, *generation,
+                                        *hudWidth, *hudHeight);
 }
 
 // Game thread: the references PartyBoardQuest_StereoImages gave, once imported.

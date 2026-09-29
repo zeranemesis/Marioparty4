@@ -190,6 +190,7 @@ Pourcentages du temps GPU par image du jeu au build 119 (yeux a 95 %), sauf ment
 
 | Optimisation | Gain estime | Sur quoi repose l'estimation | Effort | Etat |
 | --- | --- | --- | --- | --- |
+| HUD dans une image a lui, hors de la passe MSAA des yeux | passe des yeux : 9,95 -> 5,91 M pixels (-41 %) ; pixels effaces et ecrits en tout : 9,95 -> 7,83 M par image (-21 %, -8,5 Mo par image) ; memoire des images partagees : 119 -> 94 Mo (-21 %). Environ 2 a 8 % de GPU | calcul des tailles (3360x2960 contre 3360x1760 et 1600x1200) ; le gain en temps depend du cout d'une tuile vide, a mesurer | fait | a mesurer sur casque |
 | Pipelines des yeux gardes dans le cache | 0 % de GPU ; beaucoup moins d'objets absents a la premiere vue du plateau, demarrage plus long | les dessins sans pipeline sont abandonnes (`bind_pipeline`) | fait | bbe26248, a mesurer (`Pipelines:`) |
 | Filtre du compositeur allege (`layer_filter normal`) | 3 a 10 % du GPU a 120 Hz, 2 a 6 % a 72 Hz | 1,5-2,3 ms par image affichee, dont une partie pour le filtre | fait (interrupteur) | a mesurer |
 | Fusion des draws de meme etat | 5 a 20 % | 414 a 500 draws par oeil, cout presque independant de la resolution ; tres incertain | moyen (Aurora) | a faire si la trace le montre |
@@ -228,13 +229,17 @@ Scenario, si fusion des draws, f16 et filtre donnent chacun le bas de leur fourc
 | 72 Hz ne tient pas apres l'etape 3 | 72 Hz a 80 %, ou rester a 120 Hz avec 60 i/s |
 | 72 Hz ne regle pas le confort | AppSW (piste E) |
 
-**Etape 5 - Finitions.** Nettete (resolution au-dessus de 95 % avec la marge gagnee), puis la stabilite et le contenu (section 8).
+**Etape 5 - Finitions.** Nettete (resolution au-dessus de 95 % avec la marge gagnee), puis la stabilite et le contenu (section 9).
 
-### 7. Pipelines des yeux (29/09), a mesurer
+### 7. HUD hors de la passe des yeux (29/09), a mesurer
+
+Les yeux et le HUD partageaient une image par emplacement de l'anneau : les yeux cote a cote, le HUD dessous, soit 3360x2960 pixels pour 3360x1760 d'yeux et 1600x1200 de HUD. La passe MSAA 4x des yeux effacait, resolvait et ecrivait toute l'image : 41 % de ses pixels etaient le HUD ou rien du tout (la zone a droite du HUD, 1760x1200). Le HUD a maintenant sa propre image partagee et sa propre passe, apres celle des yeux dans la meme soumission ; les deux fences sont fusionnees en une seule pour le casque (`SYNC_IOC_MERGE`). La passe des yeux ne couvre plus que les yeux. Le journal le dit : `Stereo: 3 images of ...x..., HUD ...x... apart`. A verifier sur casque : le HUD s'affiche comme avant, sans image en retard, et le GPU baisse.
+
+### 8. Pipelines des yeux (29/09), a mesurer
 
 Un dessin dont le pipeline n'est pas encore construit est abandonne (`bind_pipeline`), pas retarde : les objets manquent de l'image jusqu'a la fin de la construction, et une construction sur Adreno peut prendre des dizaines de millisecondes. Les pipelines des yeux a un seul dessin pour les deux yeux (`StereoDiscard`, `StereoUncut`) n'etaient pas conserves dans le cache disque (seul `StereoOff` l'etait) : ils etaient donc tous construits a la premiere vue, a chaque lancement, sur le plateau. Ils sont conserves desormais (sauf `StereoClipDistance`, que le pilote ne sait pas construire) et reconstruits au demarrage avec les autres. Le journal ecrit, toutes les 5 s quand il y en a, `Pipelines: N draws dropped in the last 5 s ...` ; `summary.json` en tire `pipeline_drops`. A verifier sur casque, deux lancements de suite : la premiere partie remplit le cache, la seconde doit montrer beaucoup moins de dessins abandonnes sur le plateau, mais un demarrage plus long.
 
-### 8. Stabilite et contenu
+### 9. Stabilite et contenu
 
 1. Retour au jeu apres une longue pause (le build 109 n'a ete teste que sur cinq retours courts), et reprise apres Space Setup : ligne `Layers:` et garde « table sous le sol ».
 2. Plantage de m440 (SIGSEGV, build 88), a reproduire ; son rapport n'est pas lisible sans acces root.
@@ -243,7 +248,7 @@ Un dessin dont le pipeline n'est pas encore construit est abandonne (`bind_pipel
 5. Hauteur des mini-jeux quand ils sont poses sur la table. Le sol est mesure sur la geometrie des 20 premieres images (`PartyBoard_StereoObserveBounds`). Piste : la hauteur des pieds des personnages, dans `charWork[]` (`src/game/chrman.c`), qui demande un accesseur sous `TARGET_PC`.
 6. Mini-jeux au cas par cas, avec des captures reproductibles. Ne pas modifier le temps de simulation pour obtenir une frequence d'affichage plus haute.
 
-### 9. Long terme : changement de backend
+### 10. Long terme : changement de backend
 
 - Une integration Dawn/Vulkan qui cible directement les images OpenXR, a la place des buffers Android partages et des copies GL. La bibliotheque Dawn precompilee actuelle ne fournit pas le chemin d'import/export necessaire.
 - Le vrai multiview et la foveation dans ce backend, avec detection des capacites et repli Quest 2/3. La foveation doit porter sur la passe 3D couteuse, pas sur une copie de presentation.

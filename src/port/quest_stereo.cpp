@@ -56,8 +56,8 @@ struct QuestStereoFrame {
 };
 
 using FrameFn = bool (*)(QuestStereoFrame *frame);
-using ImagesFn = bool (*)(void **buffers, uint32_t capacity, uint32_t *count, uint32_t *width, uint32_t *height,
-    uint32_t *generation, uint32_t *eyeHeight, uint32_t *hudWidth, uint32_t *hudHeight);
+using ImagesFn = bool (*)(void **eyeBuffers, void **hudBuffers, uint32_t capacity, uint32_t *count, uint32_t *width,
+    uint32_t *height, uint32_t *generation, uint32_t *hudWidth, uint32_t *hudHeight);
 using SubmittedFn = void (*)(uint32_t image, uint64_t tag, int syncFd, bool hasWorld, void *user);
 using GenerationFn = uint32_t (*)(void);
 using WorldOnlyFn = bool (*)();
@@ -224,24 +224,29 @@ bool register_images()
     if (generation == sQuest.registeredGeneration) {
         return true;
     }
-    void *buffers[8] {};
+    // The eyes' images and, apart, the interface's: one of each per ring slot.
+    void *eyeBuffers[8] {};
+    void *hudBuffers[8] {};
     uint32_t count = 0, width = 0, height = 0, imagesGeneration = 0;
-    uint32_t eyeHeight = 0, hudWidth = 0, hudHeight = 0;
-    if (!sQuest.images(buffers, 8, &count, &width, &height, &imagesGeneration, &eyeHeight, &hudWidth, &hudHeight) || count == 0) {
+    uint32_t hudWidth = 0, hudHeight = 0;
+    if (!sQuest.images(eyeBuffers, hudBuffers, 8, &count, &width, &height, &imagesGeneration, &hudWidth, &hudHeight)
+        || count == 0) {
         return false;
     }
     // Dawn takes its own references when it imports the buffers; the ones
     // images() gave for the import go back either way.
-    const bool registered =
-        AuroraStereoRegisterImages(buffers, count, width, height, eyeHeight, hudWidth, hudHeight, sQuest.submitted, nullptr);
-    sQuest.releaseImages(buffers, count);
+    const bool registered = AuroraStereoRegisterImages(eyeBuffers, hudBuffers, count, width, height, hudWidth, hudHeight,
+        sQuest.submitted, nullptr);
+    sQuest.releaseImages(eyeBuffers, count);
+    sQuest.releaseImages(hudBuffers, count);
     if (!registered) {
         return false;
     }
     sQuest.registeredGeneration = imagesGeneration;
 #if defined(__ANDROID__)
-    __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Stereo bridge: imported %u images (%ux%u), generation %u",
-        count, width, height, imagesGeneration);
+    __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest",
+        "Stereo bridge: imported %u images (%ux%u, HUD %ux%u apart), generation %u", count, width, height, hudWidth,
+        hudHeight, imagesGeneration);
 #endif
     return true;
 }

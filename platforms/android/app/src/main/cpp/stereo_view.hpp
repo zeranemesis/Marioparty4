@@ -64,9 +64,10 @@ public:
 
   // Game thread (PartyBoardQuest_StereoFrame): an image and the view to draw it with.
   bool game_frame(StereoFrame& out);
-  // Game thread: the images, to register with Aurora.
-  bool images(void** buffers, uint32_t capacity, uint32_t& count, uint32_t& width, uint32_t& height,
-              uint32_t& generation, uint32_t& eyeHeight, uint32_t& hudWidth, uint32_t& hudHeight);
+  // Game thread: the images, to register with Aurora: `count` eye images
+  // (width x height, the eyes side by side) and as many HUD images.
+  bool images(void** eyeBuffers, void** hudBuffers, uint32_t capacity, uint32_t& count, uint32_t& width,
+              uint32_t& height, uint32_t& generation, uint32_t& hudWidth, uint32_t& hudHeight);
   uint32_t generation() const;
   // Aurora's render thread: the frame drawing `image` went to the GPU.
   void submitted(uint32_t image, uint64_t tag, int syncFd, bool hasWorld = false);
@@ -100,9 +101,12 @@ private:
   friend struct StereoViewTestAccess;
   enum class State { Free, Drawing, Ready, Copying };
   struct Slot {
-    AHardwareBuffer* buffer = nullptr;
+    AHardwareBuffer* buffer = nullptr; // the eyes, side by side
     EGLImageKHR eglImage = EGL_NO_IMAGE_KHR;
     GLuint texture = 0;
+    AHardwareBuffer* hudBuffer = nullptr; // the interface, drawn by the same frame
+    EGLImageKHR hudEglImage = EGL_NO_IMAGE_KHR;
+    GLuint hudTexture = 0;
     State state = State::Free;
     uint64_t tag = 0;
     int fence = -1;
