@@ -407,7 +407,7 @@
    pipeline = it->second.pipeline;
 --- /dev/null
 +++ b/lib/gfx/stereo.cpp
-@@ -0,0 +1,835 @@
+@@ -0,0 +1,853 @@
 +#include "stereo.hpp"
 +
 +#include <aurora/stereo.h>
@@ -517,8 +517,10 @@
 +bool g_frameDrawHud = true;
 +// The game's own frame is not on show in the headset (aurora.cpp skips presenting it).
 +std::atomic_bool g_screenHidden = false;
-+// 8x once a headset uses the eyes' images (gx.cpp's samplers read it).
++// 8x once a headset uses the eyes' images (gx.cpp's samplers read it), or
++// debug.partyboard.anisotropy (Switches).
 +std::atomic<uint16_t> g_forcedAnisotropy{1};
++std::atomic_bool g_imagesRegistered = false;
 +std::array<Mat4x4<float>, 2> g_clip{};
 +std::array<std::vector<gx::DrawData>, 2> g_eyeDraws;
 +// Per world draw: 1 when both eyes are one instanced draw (g_eyeDraws[0]
@@ -556,10 +558,17 @@
 +//                                        textures turn hard). Build 119 found no
 +//                                        gain over keeping it with the sort on,
 +//                                        so it stays on by default
++//   debug.partyboard.anisotropy 1|2|4    the anisotropic filtering forced on the
++//                                        eyes' 3D textures (8 by default, 16 at
++//                                        most). The board is seen at a slant
++//                                        across the table, where 8x reads the
++//                                        most texels: an A/B tells what the
++//                                        textures cost before compressing them
 +struct Switches {
 +  bool sortOpaque = true;
 +  bool crossingPerEye = true;
 +  bool opaqueBlendOff = false;
++  uint16_t anisotropy = 8;
 +};
 +Switches g_switches;
 +std::chrono::steady_clock::time_point g_switchesAt{};
@@ -580,14 +589,22 @@
 +  value[0] = '\0';
 +  __system_property_get("debug.partyboard.opaque_blend", value);
 +  read.opaqueBlendOff = std::string_view{value} == "off";
++  value[0] = '\0';
++  __system_property_get("debug.partyboard.anisotropy", value);
++  const std::string_view anisotropy{value};
++  read.anisotropy = anisotropy == "1" ? 1 : anisotropy == "2" ? 2 : anisotropy == "4" ? 4 : anisotropy == "16" ? 16 : 8;
 +  static bool logged = false;
 +  if (!logged || read.sortOpaque != g_switches.sortOpaque || read.crossingPerEye != g_switches.crossingPerEye ||
-+      read.opaqueBlendOff != g_switches.opaqueBlendOff) {
++      read.opaqueBlendOff != g_switches.opaqueBlendOff || read.anisotropy != g_switches.anisotropy) {
 +    logged = true;
-+    Log.info("Stereo switches: sort_opaque={} stereo_crossing={} opaque_blend={}", read.sortOpaque ? 1 : 0,
-+             read.crossingPerEye ? 1 : 0, read.opaqueBlendOff ? "off" : "on");
++    Log.info("Stereo switches: sort_opaque={} stereo_crossing={} opaque_blend={} anisotropy={}x", read.sortOpaque ? 1 : 0,
++             read.crossingPerEye ? 1 : 0, read.opaqueBlendOff ? "off" : "on", read.anisotropy);
 +  }
 +  g_switches = read;
++  // New samplers from the next draw on (gx.cpp builds them per descriptor).
++  if (g_imagesRegistered.load(std::memory_order_relaxed)) {
++    g_forcedAnisotropy.store(read.anisotropy, std::memory_order_relaxed);
++  }
 +}
 +// Instanced pipelines seen built (game thread): asking the cache again would
 +// take its lock on every draw.
@@ -1122,7 +1139,8 @@
 +  g_callback = callback;
 +  g_callbackUser = user;
 +  g_loggedGeometry = false;
-+  g_forcedAnisotropy.store(8, std::memory_order_relaxed);
++  g_forcedAnisotropy.store(g_switches.anisotropy, std::memory_order_relaxed);
++  g_imagesRegistered.store(true, std::memory_order_relaxed);
 +  Log.info("Stereo: {} images of {}x{}, HUD {}x{} apart", count, width, height, hudWidth, hudHeight);
 +  return true;
 +#else

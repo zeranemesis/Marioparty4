@@ -40,7 +40,7 @@ $eye = "$EyeScale"
 $switches = @('debug.partyboard.sort_opaque', 'debug.partyboard.stereo_crossing', 'debug.partyboard.layer_filter',
               'debug.partyboard.gpu_level', 'debug.partyboard.eye_scale', 'debug.partyboard.tev_overflow',
               'debug.partyboard.xr_priority', 'debug.partyboard.stereo_msaa', 'debug.partyboard.opaque_blend',
-              'debug.partyboard.hud_rate', 'debug.partyboard.xr_pacing')
+              'debug.partyboard.hud_rate', 'debug.partyboard.xr_pacing', 'debug.partyboard.anisotropy')
 $live = @(
     @{ name = 'reference';     props = @{ 'debug.partyboard.eye_scale' = $eye } },
     @{ name = 'sort-off';      props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.sort_opaque' = '0' } },
@@ -50,6 +50,8 @@ $live = @(
     @{ name = 'hud-every';     props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.hud_rate' = 'full' } },
     @{ name = 'pacing-off';    props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.xr_pacing' = '0' } },
     @{ name = 'filter-normal'; props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.layer_filter' = 'normal' } },
+    @{ name = 'aniso-4';       props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.anisotropy' = '4' } },
+    @{ name = 'aniso-1';       props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.anisotropy' = '1' } },
     @{ name = 'res-80';        props = @{ 'debug.partyboard.eye_scale' = '80' } },
     @{ name = 'res-110';       props = @{ 'debug.partyboard.eye_scale' = '110' } },
     @{ name = 'reference-end'; props = @{ 'debug.partyboard.eye_scale' = $eye } }
