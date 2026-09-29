@@ -194,7 +194,7 @@ Pourcentages du temps GPU par image du jeu au build 119 (yeux a 95 %), sauf ment
 | HUD dessine une image sur deux (30 Hz a 60 i/s, sa frequence de copie) | pixels effaces et ecrits par image : 7,83 -> 6,87 M en moyenne (-12 %), la moitie des draws du HUD ; environ 1 a 4 % de GPU | le HUD fait 1,92 M pixels a 4x, un quart des pixels restants | fait (`debug.partyboard.hud_rate full` pour le dessiner a chaque image) | a mesurer (phase `hud-every` de la campagne) |
 | Pipelines des yeux gardes dans le cache | 0 % de GPU ; beaucoup moins d'objets absents a la premiere vue du plateau, demarrage plus long | les dessins sans pipeline sont abandonnes (`bind_pipeline`) | fait | bbe26248, a mesurer (`Pipelines:`) |
 | Filtre du compositeur allege (`layer_filter normal`) | 3 a 10 % du GPU a 120 Hz, 2 a 6 % a 72 Hz | 1,5-2,3 ms par image affichee, dont une partie pour le filtre | fait (interrupteur) | a mesurer |
-| Fusion des draws de meme etat | 5 a 20 % | 414 a 500 draws par oeil, cout presque independant de la resolution ; tres incertain | moyen (Aurora) | a faire si la trace le montre |
+| Regroupement des draws | 5 a 20 % | 414 a 500 draws par oeil, cout presque independant de la resolution ; tres incertain. Aurora fusionne deja les draws consecutifs de meme etat (`command_processor.cpp`) : il faudrait regrouper des draws aux uniformes differents (uniformes par instance), un gros changement | fort (Aurora) | seulement si la trace le montre |
 | Demi-precision (f16) des calculs de couleur | 5 a 15 % | calcul a double debit en f16 sur Adreno, sur la part calcul des fragments seulement | moyen, image a comparer | a faire si la trace le montre |
 | Filtrage anisotrope 8x -> 4x (`debug.partyboard.anisotropy`, relu toutes les 2 s) | 0 a 8 % de GPU selon l'attente des textures, textures en biais un peu plus floues | le plateau est vu en biais, la ou le 8x lit le plus de texels ; 1x donne le cout maximal des textures | fait (interrupteur) | a mesurer (phases `aniso-4`, `aniso-1`) ; decide aussi de l'ASTC |
 | Textures ASTC au lieu de RGBA8 | 0 a 15 % de GPU selon l'attente des textures ; memoire des textures -75 % (ASTC 4x4) | RGBA8 32 bits par texel contre 8 en ASTC 4x4 | moyen a fort, legere perte de nettete | seulement si la trace montre les textures |
@@ -215,7 +215,8 @@ Scenario, si fusion des draws, f16 et filtre donnent chacun le bas de leur fourc
 | Calage avec et sans (`debug.partyboard.xr_pacing`) | moins de 3 % d'images hors rythme | augmenter la marge du calage |
 | 72 Hz sur la scene legere, 95 % puis 80 % | 72 i/s tenus 60 s | etape 2 |
 | 72 Hz sur la scene lourde, 95 % puis 80 % | 72 i/s tenus 60 s | 72 Hz pour les scenes legeres seulement |
-| Filtre du compositeur (`layer_filter`), dans `tools/quest_campaign.ps1` | gain sans perte de nettete visible | garder le filtre actuel |
+| HUD apart et une image sur deux (builds 121 et suivants) : HUD visible, `hudNew` vers 30, GPU contre `hud-every` | HUD identique, GPU en baisse | `debug.partyboard.hud_rate full`, puis revoir |
+| `tools/quest_campaign.ps1` : phases `filter-normal`, `aniso-4`, `aniso-1`, `hud-every`, `pacing-off` contre la reference | chaque gain chiffre, sans perte de nettete visible | garder le reglage actuel |
 | Ressenti du joueur a 72 Hz | plus de mal des transports | etape 4, AppSW |
 
 **Etape 2 - Trace GPU (15 min de casque).** `tools/quest_gpu_trace.ps1` sur la meilleure combinaison de l'etape 1. Elle dit ou vont les millisecondes (calcul des pixels, sommets, textures, draws) et fixe l'ordre de l'etape 3.
