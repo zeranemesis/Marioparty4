@@ -133,58 +133,117 @@ Plan suivant :
 2. 72 Hz natif (`debug.partyboard.display_hz 72`) maintenant que le GPU a de la marge.
 3. Plus de nettete : remonter la resolution par defaut si 72 ou 120 Hz tient.
 4. Reprise apres Space Setup : verifier la ligne `Layers:` et la garde "table sous le sol".
-## Ce qui reste a faire
+## Plan d'optimisation (29/09/2026, apres le build 119)
 
-Etat au 29/09/2026, apres le build 119 (`audio-local`, c436ba53). Chaque point se mesure seul, sur le meme parcours (plateau Toad, scene 89) : `tools/quest_campaign.ps1` pour les interrupteurs, `tools/collect_quest_performance.ps1` pour une capture simple.
+Quest 3, plateau Toad (scene 89), sauf mention. Les gains **mesures** viennent des captures sur casque. Les gains **estimes** sont des ordres de grandeur a verifier : chaque ligne dit sur quoi repose l'estimation.
 
-### Acquis (mesures des 28/09, builds 100 a 119)
+### 1. Mesures cles
 
-- Plateau Toad, yeux a 95 % : 78 M puis 50 M de fragments par image, GPU 81 % puis 71 %, 12 puis 0 saccade du jeu (tri avant vers arriere, objets a cheval par oeil, TEV reduit).
-- Resolution : les changements ne recreent plus les images des yeux (0 recreation sur 13 changements, build 112).
-- Calage sur l'ecran : 17,3 % d'images hors rythme sans calage, 11,3 % avec (build 112), avant le passage prevu du build 113.
-- Sans effet, ne pas y revenir : niveau GPU boost, priorite haute du contexte de copie, melange coupe, 110 % de resolution.
+| Build | Mesure | Resultat |
+| --- | --- | --- |
+| 88 | 120 Hz | 47-57 i/s a 65 % de resolution (objectif 60) |
+| 89 | 72 Hz, 414 draws par oeil | 43-45 i/s, GPU 88-92 % ; de 80 a 70 % de resolution, rien ne change |
+| 100 | 120 Hz, jeu plafonne a 60 i/s | 60 i/s stables, 0-2 images en retard par 5 s, 75-80 % de resolution ; 13-15 ms de GPU par image, presque independantes de la resolution ; compositeur environ 2 ms par image affichee |
+| 100 | GPU | 92-93 % du temps sur les fragments, 6 a 7 fragments par pixel ; niveau 2, 640 MHz au plus |
+| 110 | Mode sans coupe des yeux | -6 % de fragments par pixel |
+| 112 | Calage sur l'ecran | 17,3 % puis 11,3 % d'images hors rythme ; latence des yeux 27,6 puis 25,0 ms |
+| 112 | Changements de resolution | 13 changements, 0 recreation des images |
+| 112 | 72 Hz | 49-72 i/s, 27 % d'images hors rythme, GPU 456-640 MHz |
+| 117-119 | Lot 1 (tri avant vers arriere, objets a cheval par oeil, TEV reduit), yeux a 95 % | 78 M puis 50 M de fragments par image, GPU 81 puis 71 %, 12 puis 0 saccade, latence 66 puis 60 ms |
+| 117-119 | Resolution 80 % | 37 M de fragments, GPU 51 % |
+| 117-119 | MSAA 1x | -20 % de fragments, crenelage visible (refuse) |
+| 117-119 | Sans effet | niveau GPU boost (reste a 640 MHz), priorite haute de la copie, melange coupe, 110 % de resolution |
+| 117-119 | Variation selon la scene | meme reglage : 50 M puis 71 M de fragments (+40 %) |
 
-### Pipelines des yeux (29/09), a mesurer
+### 2. Ce que les mesures disent
 
-Un dessin dont le pipeline n'est pas encore construit est abandonne (`bind_pipeline`), pas retarde : les objets manquent de l'image jusqu'a la fin de la construction, et une construction sur Adreno peut prendre des dizaines de millisecondes. Les pipelines des yeux a un seul dessin pour les deux yeux (`StereoDiscard`, `StereoUncut`) n'etaient pas conserves dans le cache disque (seul `StereoOff` l'etait) : ils etaient donc tous construits a la premiere vue, a chaque lancement, sur le plateau. Ils sont conserves desormais (sauf `StereoClipDistance`, que le pilote ne sait pas construire) et reconstruits au demarrage avec les autres. Le journal ecrit, toutes les 5 s quand il y en a, `Pipelines: N draws dropped in the last 5 s ...` ; `summary.json` en tire `pipeline_drops`. A verifier sur casque, deux lancements de suite : la premiere partie remplit le cache, la seconde doit montrer beaucoup moins de dessins abandonnes sur le plateau, mais un demarrage plus long.
+1. Le GPU limite, et dans le GPU, les fragments. Le lot 1 l'a confirme : -36 % de fragments ont donne -10 points de GPU et plus aucune saccade.
+2. Le cout ne depend pas que du nombre de pixels : 13-15 ms par image presque independantes de la resolution (build 100), rien de gagne de 80 a 70 % (build 89). Le reste vient probablement du nombre de draws (414 a 500 par oeil, chacun retraite dans chaque tuile touchee) ou de la lecture des textures. La trace GPU doit trancher.
+3. Le GPU ne montera pas plus haut en frequence : le boost ne change rien. Tout gain vient de travail en moins.
+4. La charge varie de 40 % selon la scene : une mesure seule ne vaut rien, il faut des phases courtes alternees (A/B/A/B de 20 s), resolution figee (`debug.partyboard.eye_scale`), meme vue.
+5. La latence suit la charge du GPU : 17 ms en menus, 53 a 68 ms sur le plateau (campagne du 28/09).
+6. Le compositeur coute 1,5 a 2,3 ms par image affichee : environ un quart du GPU a 120 Hz, environ 14 % a 72 Hz.
 
-### 1. Session casque (build 119), dans cet ordre
+### 3. Objectif chiffre
 
-1. **Calage** : `off_cadence_percent` et latence, avec `debug.partyboard.xr_pacing` et sans. Objectif : moins de 3 % d'images hors rythme. Non mesure depuis le build 113.
-2. **72 Hz** (`debug.partyboard.display_hz 72`, avec `-RestartGame`) sur deux scenes : le plateau a 50 M de fragments et une scene plus lourde (71 M). Pour chacune, la resolution a 95 % puis a 80 % (`debug.partyboard.eye_scale`). Relever images/s du jeu, saccades, GPU occupe, latence. Estimation a confirmer : a 50 M le jeu prend environ 8 ms par image, soit un GPU vers 71 % a 72 i/s ; a 71 M, environ 11,4 ms, soit un GPU vers 96 %.
-3. **Confort** : la question qui decide. Le mal des transports disparait-il a 72 Hz, meme a 80 % ? Sinon, le 72 Hz ne sert a rien et on passe a AppSW (piste E : profondeur et vecteurs de mouvement, la profondeur seule ne corrige pas la translation).
-4. **Trace GPU** (`tools/quest_gpu_trace.ps1`), sur la meilleure combinaison. Elle dit ou vont les millisecondes : fragments, sommets, bande passante des textures, nombre de draws. Aucun echantillon de sa sortie n'existe encore : l'analyse se fera sur la premiere capture reelle.
+- **72 Hz** : 13,9 ms par trame, compositeur compris. Le jeu doit tenir sous environ 10 ms de GPU par image pour garder de la marge.
+- Estimation, en supposant que les 71 % du build 119 comprennent le compositeur (24 % a 120 Hz) : environ 7,8 ms par image du jeu sur la scene legere (50 M), soit un GPU vers 70 % a 72 Hz, qui tiendrait. Sur la scene lourde (71 M), environ 11 ms, soit un GPU vers 94 %, qui ne tiendrait pas sans environ 12 % de gain ou une resolution a 80 %.
+- **120 Hz avec 60 i/s** : deja tenu. Reste a rendre le rythme regulier, moins de 3 % d'images hors rythme.
 
-Decision apres 2 et 3 :
+### 4. Gains mesures, par optimisation
+
+| Optimisation | Build | Gain mesure |
+| --- | --- | --- |
+| Ecran plat 4K plus dessine pendant la vue des yeux (cause probable) | 89 -> 100 | 44 -> 57 i/s dans la vue la plus chargee, environ +30 % |
+| Jeu plafonne a 60 i/s a 120 Hz | 100 | images en retard 50-80 -> 0-2 par 5 s (environ -97 %), resolution 65 -> 75-80 % |
+| Un draw pour les deux yeux au lieu d'un par oeil | 100 | 55,0 -> 57,2 i/s, environ +4 % |
+| Mode sans coupe pour les objets d'un seul oeil | 110 | -6 % de fragments par pixel |
+| Calage des images sur l'ecran | 112 | images hors rythme -35 % (17,3 -> 11,3 %), latence -9 % (27,6 -> 25,0 ms) |
+| Pas de recreation des images a chaque changement de resolution | 112 | 0 recreation sur 13 changements (-100 % des gels lies) |
+| Lot 1 : tri avant vers arriere, objets a cheval par oeil, TEV reduit | 117-119 | fragments -36 %, GPU -12 % (81 -> 71 %), saccades -100 % (12 -> 0), latence -9 % (66 -> 60 ms) |
+| Resolution 80 % au lieu de 95 % (reglage, pas une optimisation) | 117-119 | fragments -26 %, GPU -28 % (71 -> 51 %), au prix de la nettete |
+| Mipmaps du monde par table au lieu de `pow` | PC | texture 512x512 : 5,5 -> 2 ms (-64 %) au chargement ; non mesure sur casque |
+
+### 5. Gains estimes, par optimisation restante
+
+Pourcentages du temps GPU par image du jeu au build 119 (yeux a 95 %), sauf mention. A confirmer par la trace GPU puis par une mesure A/B.
+
+| Optimisation | Gain estime | Sur quoi repose l'estimation | Effort | Etat |
+| --- | --- | --- | --- | --- |
+| Pipelines des yeux gardes dans le cache | 0 % de GPU ; beaucoup moins d'objets absents a la premiere vue du plateau, demarrage plus long | les dessins sans pipeline sont abandonnes (`bind_pipeline`) | fait | bbe26248, a mesurer (`Pipelines:`) |
+| Filtre du compositeur allege (`layer_filter normal`) | 3 a 10 % du GPU a 120 Hz, 2 a 6 % a 72 Hz | 1,5-2,3 ms par image affichee, dont une partie pour le filtre | fait (interrupteur) | a mesurer |
+| Fusion des draws de meme etat | 5 a 20 % | 414 a 500 draws par oeil, cout presque independant de la resolution ; tres incertain | moyen (Aurora) | a faire si la trace le montre |
+| Demi-precision (f16) des calculs de couleur | 5 a 15 % | calcul a double debit en f16 sur Adreno, sur la part calcul des fragments seulement | moyen, image a comparer | a faire si la trace le montre |
+| Textures ASTC au lieu de RGBA8 | 0 a 15 % de GPU selon l'attente des textures ; memoire des textures -75 % (ASTC 4x4) | RGBA8 32 bits par texel contre 8 en ASTC 4x4 | moyen a fort, legere perte de nettete | seulement si la trace montre les textures |
+| Decoupage du rendu des yeux en plusieurs soumissions | 0 % d'images/s ; latence -10 a -30 % | la latence suit la file du GPU | moyen | apres les images/s |
+| 72 Hz au lieu de 120 Hz / 60 i/s | +20 % d'images neuves par seconde (60 -> 72), trame -17 % (16,7 -> 13,9 ms), compositeur -40 % (120 -> 72 compositions/s) ; GPU du jeu +20 % | arithmetique des frequences | fait (interrupteur) | a mesurer, et le confort a juger |
+| AppSW (profondeur et vecteurs de mouvement) | GPU du jeu environ -50 % (rendu a la moitie de la frequence) ; Meta annonce jusqu'a +70 % de performance au mieux | documentation Meta | fort (plusieurs jours), artefacts possibles | seulement si le 72 Hz ne suffit pas |
+| Resolution 95 -> 100 % (nettete) | cout : +11 % de pixels, environ +8 a 10 % de GPU | proportion pixels / fragments | reglage | a faire avec la marge gagnee |
+
+Scenario, si fusion des draws, f16 et filtre donnent chacun le bas de leur fourchette (5 + 5 + 3 %, environ -13 % en tout) : la scene lourde passerait d'environ 94 % a environ 83 % de GPU a 72 Hz, a la limite. Avec le milieu des fourchettes (environ -25 %), vers 73 %, avec de la marge. Ce n'est qu'un ordre de grandeur.
+
+### 6. Etapes
+
+**Etape 1 - Session casque de validation (45 min, build 120).**
+
+| Mesure | Objectif | Si c'est rate |
+| --- | --- | --- |
+| Deux lancements de suite, dessins abandonnes (`Pipelines:`) | beaucoup moins au second | revoir les pipelines conserves |
+| Calage avec et sans (`debug.partyboard.xr_pacing`) | moins de 3 % d'images hors rythme | augmenter la marge du calage |
+| 72 Hz sur la scene legere, 95 % puis 80 % | 72 i/s tenus 60 s | etape 2 |
+| 72 Hz sur la scene lourde, 95 % puis 80 % | 72 i/s tenus 60 s | 72 Hz pour les scenes legeres seulement |
+| Filtre du compositeur (`layer_filter`), dans `tools/quest_campaign.ps1` | gain sans perte de nettete visible | garder le filtre actuel |
+| Ressenti du joueur a 72 Hz | plus de mal des transports | etape 4, AppSW |
+
+**Etape 2 - Trace GPU (15 min de casque).** `tools/quest_gpu_trace.ps1` sur la meilleure combinaison de l'etape 1. Elle dit ou vont les millisecondes (calcul des pixels, sommets, textures, draws) et fixe l'ordre de l'etape 3.
+
+**Etape 3 - Leviers, un seul a la fois**, dans l'ordre de la trace : fusion des draws, f16, ASTC, decoupage du rendu. Chacun mesure en A/B/A/B de 20 s, resolution figee, meme vue.
+
+**Etape 4 - Decision sur la frequence.**
 
 | Resultat | Suite |
 | --- | --- |
-| 72 Hz tient sur les deux scenes | reglage par defaut, puis remonter la resolution |
-| 72 Hz tient sur les scenes legeres seulement | 72 Hz pour les mini-jeux, 120 Hz avec 60 i/s sur le plateau lourd, changement de frequence au changement de scene |
-| 72 Hz ne tient pas | leviers du point 2, selon la trace |
-| 72 Hz ne regle pas le confort | piste E, c'est-a-dire AppSW (profondeur et vecteurs de mouvement) |
+| 72 Hz tient partout | 72 Hz par defaut, puis remonter la resolution |
+| 72 Hz tient sur les scenes legeres | 72 Hz pour les mini-jeux et les scenes legeres, 120 Hz avec 60 i/s sur le plateau lourd, changement au changement de scene |
+| 72 Hz ne tient pas apres l'etape 3 | 72 Hz a 80 %, ou rester a 120 Hz avec 60 i/s |
+| 72 Hz ne regle pas le confort | AppSW (piste E) |
 
-### 2. Optimisation qui reste, selon la trace
+**Etape 5 - Finitions.** Nettete (resolution au-dessus de 95 % avec la marge gagnee), puis la stabilite et le contenu (section 8).
 
-Ce qu'on sait : le GPU passe 92 a 93 % de son temps sur les fragments (build 100). Or 13 a 15 ms par image y etaient presque independantes de la resolution : le cout n'est pas que le nombre de pixels, d'ou la trace avant de choisir.
+### 7. Pipelines des yeux (29/09), a mesurer
 
-5. **Nombre de draws** : 414 a 500 par oeil sur le plateau, et le GPU a tuiles retraite chaque draw dans chaque tuile qu'il touche. Piste : fusionner les draws successifs de meme etat (meme pipeline, textures et uniformes).
-6. **A : demi-precision (f16)** pour les calculs de couleur. Il faut la fonctionnalite `ShaderF16` de Dawn, que `lib/webgpu/gpu.cpp` ne demande pas, et comparer l'image au rendu actuel (`tools/test_quest_stereo_render.ps1`, avec une tolerance).
-7. **B : textures compressees**. Toutes les textures couleur, CMPR compris, sont decodees en RGBA8 sur casque (`lib/gfx/texture.cpp`), soit huit fois la taille du CMPR. Adreno accepte l'ASTC. A ne faire que si la trace montre que la bande passante des textures limite : recompresser des textures deja compressees en baisse la nettete.
-8. **Compositeur** : 1,5 a 2,3 ms de GPU par image affichee a 120 Hz (`compositor/gpu_frametime`). L'A/B `debug.partyboard.layer_filter` (`normal`, `none`) est dans `tools/quest_campaign.ps1`.
-9. **Latence sur le plateau** : 53 a 68 ms contre 17 ms dans les menus. Elle suit la charge GPU. Piste : decouper le rendu des yeux en plusieurs soumissions, ou une priorite de file Vulkan si Dawn l'expose.
-10. **Nettete** : remonter la resolution par defaut (95 % aujourd'hui) si 72 ou 120 Hz tient. Le MSAA 1x retire 20 % de fragments mais le crenelage se voit.
+Un dessin dont le pipeline n'est pas encore construit est abandonne (`bind_pipeline`), pas retarde : les objets manquent de l'image jusqu'a la fin de la construction, et une construction sur Adreno peut prendre des dizaines de millisecondes. Les pipelines des yeux a un seul dessin pour les deux yeux (`StereoDiscard`, `StereoUncut`) n'etaient pas conserves dans le cache disque (seul `StereoOff` l'etait) : ils etaient donc tous construits a la premiere vue, a chaque lancement, sur le plateau. Ils sont conserves desormais (sauf `StereoClipDistance`, que le pilote ne sait pas construire) et reconstruits au demarrage avec les autres. Le journal ecrit, toutes les 5 s quand il y en a, `Pipelines: N draws dropped in the last 5 s ...` ; `summary.json` en tire `pipeline_drops`. A verifier sur casque, deux lancements de suite : la premiere partie remplit le cache, la seconde doit montrer beaucoup moins de dessins abandonnes sur le plateau, mais un demarrage plus long.
 
-### 3. Stabilite et contenu
+### 8. Stabilite et contenu
 
-11. Retour au jeu apres une longue pause (le build 109 n'a ete teste que sur cinq retours courts), et reprise apres Space Setup : ligne `Layers:` et garde « table sous le sol ».
-12. Plantage de m440 (SIGSEGV, build 88), a reproduire ; son rapport n'est pas lisible sans acces root.
-13. Parcours plateau, m428, retour au plateau, en suivant la memoire (`Memory:` : 611 a 634 Mo residents sur le plateau au build 112).
-14. Controles visuels : bords des yeux avec le mode sans coupe, plateau fixe, HUD en ecran de stade, mini-jeux en maquette inclinee (le grip gauche bascule ce mode), table du scan de la piece (aucune table scannee le 28/09).
-15. Hauteur des mini-jeux quand ils sont poses sur la table. Le sol est mesure sur la geometrie des 20 premieres images (`PartyBoard_StereoObserveBounds`). Piste : la hauteur des pieds des personnages, dans `charWork[]` (`src/game/chrman.c`), qui demande un accesseur sous `TARGET_PC`.
-16. Mini-jeux au cas par cas, avec des captures reproductibles. Ne pas modifier le temps de simulation pour obtenir une frequence d'affichage plus haute.
+1. Retour au jeu apres une longue pause (le build 109 n'a ete teste que sur cinq retours courts), et reprise apres Space Setup : ligne `Layers:` et garde « table sous le sol ».
+2. Plantage de m440 (SIGSEGV, build 88), a reproduire ; son rapport n'est pas lisible sans acces root.
+3. Parcours plateau, m428, retour au plateau, en suivant la memoire (`Memory:` : 611 a 634 Mo residents sur le plateau au build 112).
+4. Controles visuels : bords des yeux avec le mode sans coupe, plateau fixe, HUD en ecran de stade, mini-jeux en maquette inclinee (le grip gauche bascule ce mode), table du scan de la piece (aucune table scannee le 28/09).
+5. Hauteur des mini-jeux quand ils sont poses sur la table. Le sol est mesure sur la geometrie des 20 premieres images (`PartyBoard_StereoObserveBounds`). Piste : la hauteur des pieds des personnages, dans `charWork[]` (`src/game/chrman.c`), qui demande un accesseur sous `TARGET_PC`.
+6. Mini-jeux au cas par cas, avec des captures reproductibles. Ne pas modifier le temps de simulation pour obtenir une frequence d'affichage plus haute.
 
-### 4. Long terme : changement de backend
+### 9. Long terme : changement de backend
 
 - Une integration Dawn/Vulkan qui cible directement les images OpenXR, a la place des buffers Android partages et des copies GL. La bibliotheque Dawn precompilee actuelle ne fournit pas le chemin d'import/export necessaire.
 - Le vrai multiview et la foveation dans ce backend, avec detection des capacites et repli Quest 2/3. La foveation doit porter sur la passe 3D couteuse, pas sur une copie de presentation.
@@ -198,5 +257,6 @@ Ce qu'on sait : le GPU passe 92 a 93 % de son temps sur les fragments (build 100
 - [Analyse MSAA](https://developers.meta.com/horizon/documentation/native/android/mobile-msaa-analysis/)
 - [Super-resolution et qualite](https://developers.meta.com/horizon/blog/vr-image-quality-meta-quest-super-resolution/)
 - [Multiview](https://developers.meta.com/horizon/documentation/unity/enable-multiview/)
+- [Application SpaceWarp](https://developers.meta.com/horizon/documentation/unity/os-app-spacewarp/)
 - [Foveation fixe native](https://developers.meta.com/horizon/documentation/native/android/os-fixed-foveated-rendering/)
 - [Projection symetrique](https://developers.meta.com/horizon/documentation/native/android/os-symmetric-projection/)
