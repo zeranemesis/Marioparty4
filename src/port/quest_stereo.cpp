@@ -39,6 +39,7 @@ extern "C" {
 #if defined(__ANDROID__)
 #include <dlfcn.h>
 #include <android/log.h>
+#include <sys/system_properties.h>
 #endif
 
 namespace {
@@ -69,6 +70,7 @@ using ReleaseImagesFn = void (*)(void **buffers, uint32_t count);
 using ScreenHiddenFn = bool (*)();
 using TableSetupHoldFn = bool (*)();
 using FollowCameraFn = bool (*)();
+using HiddenAreaFn = uint32_t (*)(uint32_t eye, float *rects, uint32_t capacity, uint32_t *version);
 
 struct Quest {
     bool looked = false;
@@ -84,7 +86,9 @@ struct Quest {
     ScreenHiddenFn screenHidden = nullptr; // optional: an older library has none
     TableSetupHoldFn tableSetupHold = nullptr; // optional
     FollowCameraFn followCamera = nullptr;     // optional: following by default
+    HiddenAreaFn hiddenArea = nullptr;         // optional: every pixel drawn
     uint32_t registeredGeneration = 0;
+    uint32_t hiddenVersion = 0;
 };
 
 Quest sQuest;
@@ -198,6 +202,7 @@ bool find_quest()
             sQuest.screenHidden = reinterpret_cast<ScreenHiddenFn>(dlsym(lib, "PartyBoardQuest_StereoScreenHidden"));
             sQuest.tableSetupHold = reinterpret_cast<TableSetupHoldFn>(dlsym(lib, "PartyBoardQuest_TableSetupHold"));
             sQuest.followCamera = reinterpret_cast<FollowCameraFn>(dlsym(lib, "PartyBoardQuest_StereoFollowCamera"));
+            sQuest.hiddenArea = reinterpret_cast<HiddenAreaFn>(dlsym(lib, "PartyBoardQuest_StereoHiddenArea"));
             __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Stereo bridge: symbols %s",
                 sQuest.frame && sQuest.images && sQuest.releaseImages && sQuest.submitted && sQuest.generation
                     && sQuest.cancelled ? "ready" : "missing");
@@ -216,8 +221,29 @@ bool find_quest()
 }
 
 // The shared images, once and again whenever the headset makes new ones.
+// The pixels the lenses never show, whenever the headset has (new) ones:
+// Aurora fills them with the nearest depth before each eye's draws.
+void update_hidden_area()
+{
+    uint32_t version = 0;
+    if (sQuest.hiddenArea == nullptr) {
+        return;
+    }
+    sQuest.hiddenArea(0, nullptr, 0, &version);
+    if (version == sQuest.hiddenVersion) {
+        return;
+    }
+    static float rects[512 * 4];
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        const uint32_t count = std::min<uint32_t>(sQuest.hiddenArea(eye, rects, 512, &version), 512);
+        AuroraStereoSetHiddenArea(eye, rects, count);
+    }
+    sQuest.hiddenVersion = version;
+}
+
 bool register_images()
 {
+    update_hidden_area();
     const uint32_t generation = sQuest.generation();
     if (generation == 0) {
         return false;
@@ -657,6 +683,33 @@ extern "C" void PartyBoard_StereoObjectBegin(Mtx modelView, const HuVecF *min, c
         distance2 += d * d;
     }
     AuroraStereoSetSortKey(std::isfinite(distance2) ? std::sqrt(distance2) : -1.0f);
+}
+
+// debug.partyboard.freeze 1 (read every second): main.c consumes the
+// simulation's ticks without playing them, so the game holds one image and
+// every phase of a headset A/B (tools/quest_campaign.ps1) draws exactly the
+// same frame; the board's own motion no longer swamps a few percent.
+extern "C" bool PartyBoard_DebugFreeze(void)
+{
+#if defined(__ANDROID__)
+    static bool frozen = false;
+    static auto readAt = std::chrono::steady_clock::time_point {};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - readAt >= std::chrono::seconds(1)) {
+        readAt = now;
+        char value[PROP_VALUE_MAX] = {};
+        __system_property_get("debug.partyboard.freeze", value);
+        const bool wanted = value[0] == '1';
+        if (wanted != frozen) {
+            __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Simulation %s (debug.partyboard.freeze)",
+                wanted ? "frozen" : "running");
+        }
+        frozen = wanted;
+    }
+    return frozen;
+#else
+    return false;
+#endif
 }
 
 extern "C" void PartyBoard_StereoObjectEnd(void)

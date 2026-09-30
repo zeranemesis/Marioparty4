@@ -179,6 +179,7 @@ struct Extensions {
   bool perfMetrics = false;
   bool scene = false;        // the room scan's tables
   bool sceneCapture = false; // opening Space Setup from the game
+  bool visibilityMask = false; // the lenses' hidden pixels, skipped by the eyes' draws
 };
 
 struct App {
@@ -337,6 +338,7 @@ bool create_instance(App& app) {
   ext.performance = optional(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
   ext.imageLayout = optional(XR_FB_COMPOSITION_LAYER_IMAGE_LAYOUT_EXTENSION_NAME);
   ext.perfMetrics = optional(PerfMetrics::kExtension);
+  ext.visibilityMask = optional(XR_KHR_VISIBILITY_MASK_EXTENSION_NAME);
   ext.anchors = std::ranges::all_of(TableAnchor::kExtensions,
                                     [&](const char* name) { return has_extension(available, name); });
   if (ext.anchors) {
@@ -1357,6 +1359,9 @@ bool poll_events(App& app, JNIEnv* env) {
       clear_exception(env);
       break;
     }
+    case XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR:
+      if (app.modelAvailable) app.stereo.load_hidden_area(app.extensions.visibilityMask);
+      break;
     case XR_TYPE_EVENT_DATA_PERF_SETTINGS_EXT: {
       // The headset warning that it cannot hold the work (compositing,
       // rendering) or is heating (thermal): the log ("Perf settings") shows
@@ -1725,6 +1730,8 @@ bool set_up(App& app, JNIEnv* env) {
   app.modelAvailable = app.stereo.init(app.instance, app.session, app.system, app.egl.display, eyeScale);
   if (!app.modelAvailable) {
     LOGW("No model on the table: the game stays on its screen");
+  } else {
+    app.stereo.load_hidden_area(app.extensions.visibilityMask);
   }
   g_followCamera.store(app.table.followCamera, std::memory_order_relaxed);
   app.stereo.set_quality_cap(quality_cap(app.table.resolution));

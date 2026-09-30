@@ -47,6 +47,8 @@ bool PartyBoard_IsShuttingDown = FALSE;
 bool PartyBoard_IsGameLaunched = FALSE;
 bool PartyBoard_RestartRequested = FALSE;
 bool PartyBoard_IsSimulationTick = TRUE;
+// src/port/quest_stereo.cpp: the game held on one image for headset measurements.
+bool PartyBoard_DebugFreeze(void);
 int PartyBoard_SimulationTicksThisFrame = 1;
 
 bool disableFrameLimiter = FALSE;
@@ -272,6 +274,11 @@ void main(void)
                 finalizedTicks++;
             }
             simulationAllowed = HuPadPollSimulationTick();
+            // Headset measurements (debug.partyboard.freeze 1): ticks consumed,
+            // none played, so every phase of an A/B draws the very same image.
+            if (PartyBoard_DebugFreeze()) {
+                simulationAllowed = FALSE;
+            }
             if (simulationAllowed) {
 #endif
                 HuPadRead();

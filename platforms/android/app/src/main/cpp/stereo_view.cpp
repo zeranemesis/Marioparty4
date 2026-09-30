@@ -373,10 +373,165 @@ void StereoView::destroy() {
   mPresentedTag = 0;
 }
 
+void StereoView::load_hidden_area(bool available) {
+  if (!available) {
+    LOGI("Hidden area: XR_KHR_visibility_mask unavailable, every pixel is drawn");
+    return;
+  }
+  PFN_xrGetVisibilityMaskKHR getMask = nullptr;
+  if (XR_FAILED(xrGetInstanceProcAddr(mInstance, "xrGetVisibilityMaskKHR",
+                                      reinterpret_cast<PFN_xrVoidFunction*>(&getMask))) ||
+      getMask == nullptr) {
+    LOGW("Hidden area: xrGetVisibilityMaskKHR missing");
+    return;
+  }
+  std::vector<XrVector2f> outline[2];
+  for (uint32_t eye = 0; eye < 2; ++eye) {
+    // The visible area's outline: whatever is outside it is hidden.
+    XrVisibilityMaskKHR mask{XR_TYPE_VISIBILITY_MASK_KHR};
+    if (XR_FAILED(getMask(mSession, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, eye,
+                          XR_VISIBILITY_MASK_TYPE_LINE_LOOP_KHR, &mask)) ||
+        mask.vertexCountOutput < 3) {
+      LOGW("Hidden area: no visible outline for eye %u", eye);
+      return;
+    }
+    outline[eye].resize(mask.vertexCountOutput);
+    std::vector<uint32_t> indices(mask.indexCountOutput);
+    mask.vertexCapacityInput = mask.vertexCountOutput;
+    mask.vertices = outline[eye].data();
+    mask.indexCapacityInput = mask.indexCountOutput;
+    mask.indices = indices.data();
+    if (XR_FAILED(getMask(mSession, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, eye,
+                          XR_VISIBILITY_MASK_TYPE_LINE_LOOP_KHR, &mask))) {
+      LOGW("Hidden area: outline of eye %u unreadable", eye);
+      return;
+    }
+    // A line loop's indices give its vertices' order.
+    if (!indices.empty()) {
+      std::vector<XrVector2f> ordered;
+      ordered.reserve(indices.size());
+      for (const uint32_t index : indices) {
+        if (index < outline[eye].size()) ordered.push_back(outline[eye][index]);
+      }
+      outline[eye] = std::move(ordered);
+    }
+  }
+  std::lock_guard lock{mMutex};
+  mVisibleOutline[0] = std::move(outline[0]);
+  mVisibleOutline[1] = std::move(outline[1]);
+  mHiddenPending = true;
+}
+
+namespace {
+
+// Rectangles of an eye's image (0..1, from its top-left) wholly outside the
+// lenses' visible outline, on a grid: a cell counts when no edge of the
+// outline crosses it and its center is outside. Each row's runs of such
+// cells are one rectangle, and a run equal to the one above extends it.
+std::vector<float> hidden_rects(const std::vector<XrVector2f>& outline, const XrFovf& fov, float& hiddenPart) {
+  constexpr int kGrid = 48;
+  const float l = std::tan(fov.angleLeft), r = std::tan(fov.angleRight);
+  const float d = std::tan(fov.angleDown), u = std::tan(fov.angleUp);
+  std::vector<std::array<float, 2>> points;
+  points.reserve(outline.size());
+  for (const auto& v : outline) points.push_back({(v.x - l) / (r - l), (u - v.y) / (u - d)});
+  const auto inside = [&](float x, float y) {
+    bool in = false;
+    for (size_t i = 0, j = points.size() - 1; i < points.size(); j = i++) {
+      const auto& a = points[i];
+      const auto& b = points[j];
+      if ((a[1] > y) != (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]) in = !in;
+    }
+    return in;
+  };
+  // Liang-Barsky: whether segment a-b reaches the box.
+  const auto crosses = [](const std::array<float, 2>& a, const std::array<float, 2>& b, float x0, float y0, float x1,
+                          float y1) {
+    float t0 = 0.f, t1 = 1.f;
+    const float dx = b[0] - a[0], dy = b[1] - a[1];
+    const float p[4] = {-dx, dx, -dy, dy};
+    const float q[4] = {a[0] - x0, x1 - a[0], a[1] - y0, y1 - a[1]};
+    for (int k = 0; k < 4; ++k) {
+      if (p[k] == 0.f) {
+        if (q[k] < 0.f) return false;
+      } else {
+        const float t = q[k] / p[k];
+        if (p[k] < 0.f) t0 = std::max(t0, t);
+        else t1 = std::min(t1, t);
+        if (t0 > t1) return false;
+      }
+    }
+    return true;
+  };
+  std::vector<float> rects;
+  std::vector<std::array<int, 2>> above;
+  std::vector<size_t> aboveRect;
+  int hiddenCells = 0;
+  for (int row = 0; row < kGrid; ++row) {
+    const float y0 = static_cast<float>(row) / kGrid, y1 = static_cast<float>(row + 1) / kGrid;
+    std::vector<std::array<int, 2>> runs;
+    int start = -1;
+    for (int col = 0; col <= kGrid; ++col) {
+      bool hidden = false;
+      if (col < kGrid) {
+        const float x0 = static_cast<float>(col) / kGrid, x1 = static_cast<float>(col + 1) / kGrid;
+        hidden = !inside((x0 + x1) * 0.5f, (y0 + y1) * 0.5f);
+        for (size_t i = 0, j = points.size() - 1; hidden && i < points.size(); j = i++) {
+          hidden = !crosses(points[j], points[i], x0, y0, x1, y1);
+        }
+        hiddenCells += hidden;
+      }
+      if (hidden && start < 0) start = col;
+      if (!hidden && start >= 0) {
+        runs.push_back({start, col});
+        start = -1;
+      }
+    }
+    std::vector<size_t> runRect;
+    for (const auto& run : runs) {
+      const auto same = std::ranges::find(above, run);
+      if (same != above.end()) {
+        const size_t index = aboveRect[same - above.begin()];
+        rects[index + 3] = y1;
+        runRect.push_back(index);
+      } else {
+        runRect.push_back(rects.size());
+        rects.insert(rects.end(), {static_cast<float>(run[0]) / kGrid, y0, static_cast<float>(run[1]) / kGrid, y1});
+      }
+    }
+    above = std::move(runs);
+    aboveRect = std::move(runRect);
+  }
+  hiddenPart = static_cast<float>(hiddenCells) / (kGrid * kGrid);
+  return rects;
+}
+
+} // namespace
+
+uint32_t StereoView::hidden_area(uint32_t eye, float* rects, uint32_t capacity, uint32_t& version) const {
+  std::lock_guard lock{mMutex};
+  version = mHiddenVersion;
+  if (eye > 1) return 0;
+  const auto& all = mHiddenRects[eye];
+  const uint32_t count = static_cast<uint32_t>(all.size() / 4);
+  if (rects != nullptr) std::copy_n(all.begin(), std::min(count, capacity) * 4, rects);
+  return count;
+}
+
 void StereoView::update(const XrView (&views)[2], const XrPosef& world, float scale, bool enabled, float hudWidth, float hudHeight) {
   std::lock_guard lock{mMutex};
   mViews[0] = views[0];
   mViews[1] = views[1];
+  if (mHiddenPending && views[0].fov.angleRight > views[0].fov.angleLeft &&
+      views[1].fov.angleRight > views[1].fov.angleLeft) {
+    mHiddenPending = false;
+    float part[2]{};
+    for (int eye = 0; eye < 2; ++eye) mHiddenRects[eye] = hidden_rects(mVisibleOutline[eye], views[eye].fov, part[eye]);
+    ++mHiddenVersion;
+    LOGI("Hidden area: left %zu rectangles (%.1f%% of the eye), right %zu (%.1f%%), outline %zu/%zu points",
+         mHiddenRects[0].size() / 4, part[0] * 100.f, mHiddenRects[1].size() / 4, part[1] * 100.f,
+         mVisibleOutline[0].size(), mVisibleOutline[1].size());
+  }
   pose_matrix(world, scale, mWorld);
   mEnabled = enabled && mSwapchain != XR_NULL_HANDLE;
   mHudWidth = hudWidth;
@@ -1095,6 +1250,15 @@ __attribute__((visibility("default"))) void PartyBoardQuest_StereoReleaseImages(
 __attribute__((visibility("default"))) int64_t PartyBoardQuest_NextFrameStart(int64_t nowNs, float targetHz) {
   quest::StereoView* view = quest::g_stereoView;
   return view != nullptr ? view->next_frame_start(nowNs, targetHz) : 0;
+}
+
+__attribute__((visibility("default"))) uint32_t PartyBoardQuest_StereoHiddenArea(uint32_t eye, float* rects,
+                                                                                uint32_t capacity, uint32_t* version) {
+  quest::StereoView* view = quest::g_stereoView;
+  uint32_t current = 0;
+  const uint32_t count = view != nullptr ? view->hidden_area(eye, rects, capacity, current) : 0;
+  if (version != nullptr) *version = current;
+  return count;
 }
 
 __attribute__((visibility("default"))) uint32_t PartyBoardQuest_StereoGeneration(void) {

@@ -3,14 +3,19 @@
 # keeps the game's log and the GPU's counters of each phase apart, and
 # prints one row per phase.
 #
-#   ./tools/quest_campaign.ps1                  # live phases, about 6 minutes
+#   ./tools/quest_campaign.ps1                  # live phases, about 16 minutes
 #   ./tools/quest_campaign.ps1 -RestartPhases   # then the startup switches:
 #                                               # the game restarts, the player
 #                                               # goes back to the board each time
 #
 # Live phases use switches the game reads while running; the eyes'
 # resolution is pinned (debug.partyboard.eye_scale) so every phase draws the
-# same pixels. Per phase, the first -SettleSeconds are left out. Every
+# same pixels, and the game is frozen on one image (debug.partyboard.freeze)
+# so every phase draws the same scene; a reference phase runs before each
+# tested one and the tested phase is compared with it (delta_* columns), so
+# heat and clocks drifting over the session cancel out (-NoAlternate: one
+# reference only, -NoFreeze: the game keeps playing). Per phase, the first
+# -SettleSeconds are left out. Every
 # switch is restored afterwards. Output in build/quest-campaign/<time>: the
 # whole log and GPU counters, one folder per phase (phase.log, gpu.log,
 # summary.json from analyze_quest_performance.py) and campaign.csv.
@@ -20,6 +25,8 @@ param(
     [int]$SettleSeconds = 10,
     [int]$EyeScale = 95,
     [switch]$RestartPhases,
+    [switch]$NoFreeze,
+    [switch]$NoAlternate,
     # The scene the restart phases wait for (89: the Toad board), and how long.
     [int]$Scene = 89,
     [int]$SceneWaitSeconds = 300,
@@ -41,7 +48,8 @@ $switches = @('debug.partyboard.sort_opaque', 'debug.partyboard.stereo_crossing'
               'debug.partyboard.gpu_level', 'debug.partyboard.eye_scale', 'debug.partyboard.tev_overflow',
               'debug.partyboard.xr_priority', 'debug.partyboard.stereo_msaa', 'debug.partyboard.opaque_blend',
               'debug.partyboard.hud_rate', 'debug.partyboard.xr_pacing', 'debug.partyboard.anisotropy',
-              'debug.partyboard.shader_f16')
+              'debug.partyboard.shader_f16', 'debug.partyboard.freeze', 'debug.partyboard.visibility_mask')
+$freeze = if ($NoFreeze) { '' } else { '1' }
 $live = @(
     @{ name = 'reference';     props = @{ 'debug.partyboard.eye_scale' = $eye } },
     @{ name = 'sort-off';      props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.sort_opaque' = '0' } },
@@ -55,8 +63,18 @@ $live = @(
     @{ name = 'aniso-1';       props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.anisotropy' = '1' } },
     @{ name = 'res-80';        props = @{ 'debug.partyboard.eye_scale' = '80' } },
     @{ name = 'res-110';       props = @{ 'debug.partyboard.eye_scale' = '110' } },
+    @{ name = 'mask-off';      props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.visibility_mask' = '0' } },
     @{ name = 'reference-end'; props = @{ 'debug.partyboard.eye_scale' = $eye } }
 )
+foreach ($phase in $live) { $phase.props['debug.partyboard.freeze'] = $freeze }
+if (-not $NoAlternate) {
+    # ref-<name> before each tested phase: A B A C A D ... A.
+    $tested = @($live | Where-Object { $_.name -notlike 'reference*' })
+    $live = @(foreach ($phase in $tested) {
+        @{ name = "ref-$($phase.name)"; props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.freeze' = $freeze } }
+        $phase
+    }) + @(@{ name = 'reference-end'; props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.freeze' = $freeze } })
+}
 $restart = @(
     @{ name = 'restart-reference';   props = @{ 'debug.partyboard.eye_scale' = $eye } },
     @{ name = 'tev-overflow-all';    props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.tev_overflow' = 'all' } },
@@ -140,6 +158,7 @@ if ($AnalyzeDirectory) {
                 Write-Output ("{0:HH:mm:ss} {1,-18} game restarted: go back to scene {2}, then stay still" -f (Get-Date), $phase.name, $Scene)
                 if (-not (Wait-Scene $logPath $since)) { Write-Warning "Scene $Scene not reached for $($phase.name); skipped."; continue }
                 Start-Sleep -Seconds 20 # the board's intro camera
+                if ($freeze) { Set-Switch 'debug.partyboard.freeze' $freeze; Start-Sleep -Seconds 2 }
                 Mark "phase=$($phase.name) start"
                 Write-Output ("{0:HH:mm:ss} {1,-18} {2} s (stay still, same view)" -f (Get-Date), $phase.name, $PhaseSeconds)
                 Start-Sleep -Seconds $PhaseSeconds
@@ -208,7 +227,19 @@ foreach ($name in $marks) {
         draws_eye        = & $median $summary.draws 'world_draws_avg'
     }
 }
+# Each tested phase against the reference just before it (ref-<name>), else
+# against the first reference: relative change of the costs.
+$byName = @{}; foreach ($row in $rows) { $byName[$row.phase] = $row }
+$firstRef = $rows | Where-Object { $_.phase -like 'ref*' -or $_.phase -like 'reference*' -or $_.phase -like 'restart-reference' } | Select-Object -First 1
+function Delta($value, $base) { if ($null -ne $value -and $base) { [math]::Round(100.0 * ($value - $base) / $base, 1) } else { $null } }
+foreach ($row in $rows) {
+    $ref = if ($byName.ContainsKey("ref-$($row.phase)")) { $byName["ref-$($row.phase)"] } elseif ($row.phase -notlike 'ref*') { $firstRef } else { $null }
+    $row | Add-Member -NotePropertyName delta_frag_pct -NotePropertyValue $(if ($ref) { Delta $row.frag_M_image $ref.frag_M_image } else { $null })
+    $row | Add-Member -NotePropertyName delta_gpu_pct -NotePropertyValue $(if ($ref) { Delta $row.gpu_util_pct $ref.gpu_util_pct } else { $null })
+    $row | Add-Member -NotePropertyName delta_m2p_pct -NotePropertyValue $(if ($ref) { Delta $row.motion_photon_ms $ref.motion_photon_ms } else { $null })
+}
 $rows | Export-Csv -Path (Join-Path $OutputDirectory 'campaign.csv') -NoTypeInformation -Encoding UTF8
 $rows | Format-Table phase, images_s, stutters, off_cadence_pct, res_pct, frag_M_image, gpu_util_pct, gpu_MHz -AutoSize | Out-String
 $rows | Format-Table phase, tex_stall_pct, mem_stall_pct, read_GB_s, compositor_ms, motion_photon_ms, predicted_ms, draws_eye -AutoSize | Out-String
+$rows | Where-Object { $_.phase -notlike 'ref-*' } | Format-Table phase, delta_frag_pct, delta_gpu_pct, delta_m2p_pct -AutoSize | Out-String
 Write-Output "Output: $OutputDirectory"

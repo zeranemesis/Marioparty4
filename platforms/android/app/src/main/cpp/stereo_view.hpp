@@ -70,6 +70,15 @@ public:
   bool images(void** eyeBuffers, void** hudBuffers, uint32_t capacity, uint32_t& count, uint32_t& width,
               uint32_t& height, uint32_t& generation, uint32_t& hudWidth, uint32_t& hudHeight);
   uint32_t generation() const;
+  // XR thread, at start and when the runtime says it changed: the lenses'
+  // visible outline (XR_KHR_visibility_mask), turned into rectangles of the
+  // eyes' images the lenses never show at the next update() (it needs the
+  // eyes' fields of view).
+  void load_hidden_area(bool available);
+  // Game thread: eye's hidden rectangles ({x0, y0, x1, y1}, 0..1 of the
+  // eye's rectangle from its top-left); returns their count, and `version`,
+  // which changes with them. capacity 0: the version only.
+  uint32_t hidden_area(uint32_t eye, float* rects, uint32_t capacity, uint32_t& version) const;
   // Aurora's render thread: the frame drawing `image` went to the GPU.
   void submitted(uint32_t image, uint64_t tag, int syncFd, bool hasWorld = false);
   void set_screen_required(bool required);
@@ -190,6 +199,12 @@ private:
   bool mShownIsBoard = false;
   float mHudWidth = 0.76f, mHudHeight = 0.57f;
   XrView mViews[2]{};
+  // The lenses' visible outline per eye (tangents at z = -1), waiting for the
+  // eyes' fields of view; then the hidden rectangles (hidden_area()).
+  std::vector<XrVector2f> mVisibleOutline[2];
+  bool mHiddenPending = false;
+  std::vector<float> mHiddenRects[2];
+  uint32_t mHiddenVersion = 0;
   float mWorld[16]{};
 
   // Dynamic resolution: the drawn part of the eyes' images, 0.5 to 1 of
