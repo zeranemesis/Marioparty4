@@ -3,6 +3,8 @@
 #include <cstdlib>
 
 #include <EGL/egl.h>
+#include <glad/glad.h>
+#include <switch.h>
 #include <dawn/native/DawnNative.h>
 #include <dawn/native/OpenGLBackend.h>
 #include <webgpu/webgpu_cpp.h>
@@ -122,6 +124,10 @@ bool runDawnProbe() {
 int main(int, char**) {
     if (!PartyBoardSwitch_EglInitialize())
         return EXIT_FAILURE;
+    if (!gladLoadGL()) {
+        PartyBoardSwitch_EglShutdown();
+        return EXIT_FAILURE;
+    }
 
     const bool ok = runDawnProbe();
 
