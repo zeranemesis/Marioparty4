@@ -12,8 +12,6 @@
 
 namespace partyboard::launcher {
 
-enum class FontWeight : unsigned char { Regular, Bold };
-
 struct Glyph {
     float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
     float width = 0, height = 0;     // bitmap size, physical pixels
@@ -39,7 +37,8 @@ public:
 
     // `beforeReset` runs before the atlas is wiped when it fills up, so the
     // renderer can flush quads that still point at the old glyphs.
-    bool init(const FontBlob& regular, const FontBlob& bold, std::function<void()> beforeReset);
+    bool init(const FontBlob& regular, const FontBlob& bold, const FontBlob& display,
+              std::function<void()> beforeReset);
     void shutdown();
 
     const Glyph& glyph(FontWeight weight, int pixelSize, uint32_t codepoint);
@@ -52,11 +51,14 @@ private:
     struct Face;
 
     Face* face(FontWeight weight);
+    // The face that actually has `codepoint`, trying the others in turn.
+    Face* faceFor(FontWeight weight, uint32_t codepoint, unsigned& index);
     bool setSize(Face& face, int pixelSize);
     void reset();
 
     void* m_library = nullptr; // FT_Library, kept opaque to spare includes
-    Face* m_faces[2] = {};
+    static constexpr int kFaces = 3;
+    Face* m_faces[kFaces] = {};
     unsigned m_texture = 0;
     int m_penX = 1;
     int m_penY = 1;

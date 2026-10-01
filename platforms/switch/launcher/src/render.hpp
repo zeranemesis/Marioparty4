@@ -50,7 +50,7 @@ public:
     static constexpr float kWidth = 1280.0f;
     static constexpr float kHeight = 720.0f;
 
-    bool init(const char* shaderHeader, const FontBlob& regular, const FontBlob& bold);
+    bool init(const char* shaderHeader, const FontBlob& regular, const FontBlob& bold, const FontBlob& display);
     void shutdown();
 
     void beginFrame(int framebufferWidth, int framebufferHeight, unsigned presentFramebuffer, float time);
@@ -72,8 +72,17 @@ public:
     // Arbitrary convex quad (clockwise), e.g. the faces of a 2D isometric cube.
     void quad(const float xy[8], Color c);
     void triangle(float x0, float y0, float x1, float y1, float x2, float y2, Color c);
+    // `blur` biases the mip level: 0 is sharp, ~3 is a soft backdrop
+    // (the texture needs mipmaps).
     void image(const Texture& texture, float x, float y, float w, float h, Color tint = {}, float radius = 0.0f,
-               float u0 = 0.0f, float v0 = 0.0f, float u1 = 1.0f, float v1 = 1.0f);
+               float u0 = 0.0f, float v0 = 0.0f, float u1 = 1.0f, float v1 = 1.0f, float blur = 0.0f);
+    // Draws `texture` so it covers the box, cropping the overflow around
+    // (focusX, focusY) in texture space [0, 1].
+    void imageCover(const Texture& texture, float x, float y, float w, float h, float focusX, float focusY,
+                    Color tint = {}, float radius = 0.0f, float blur = 0.0f);
+    // Axis-aligned rectangle with one colour per corner (clockwise from top-left).
+    void gradientRect(float x, float y, float w, float h, Color topLeft, Color topRight, Color bottomRight,
+                      Color bottomLeft);
     // Full-screen gradient with the drifting cube lattice of the shelf.
     void background(Color top, Color bottom, float pattern);
 
@@ -81,6 +90,10 @@ public:
     // `y` is the top of the line box. Returns the advance width.
     float text(FontWeight weight, float size, float x, float y, std::string_view s, Color c,
                Align align = Align::Left, float tracking = 0.0f);
+    // Same as text(), but centres capital letters on `centerY` whatever the
+    // face's line gap (Rodin and N64 Party have very different metrics).
+    float textMiddle(FontWeight weight, float size, float x, float centerY, std::string_view s, Color c,
+                     Align align = Align::Left, float tracking = 0.0f);
     float measure(FontWeight weight, float size, std::string_view s, float tracking = 0.0f);
     float lineHeight(FontWeight weight, float size);
     std::vector<std::string> wrap(FontWeight weight, float size, std::string_view s, float maxWidth);

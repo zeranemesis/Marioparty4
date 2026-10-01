@@ -34,6 +34,12 @@ struct BootFrame {
     float blackout = 0.0f; // final fade to black
 };
 
+// PartyBoard branding shown under the finished emblem.
+struct BootBranding {
+    const Texture* logo = nullptr; // res/logo.png; text is drawn when absent
+    const char* presents = "";     // "Mario Party R&D presents", as on the PC screen
+};
+
 struct BootCue {
     double time;
     Sound sound;
@@ -49,7 +55,7 @@ public:
     void start(double now);
     // Holding ZR before the slam switches to the playful variant.
     void update(double now, bool alternateHeld, Platform& platform);
-    void draw(Renderer& renderer, double now) const;
+    void draw(Renderer& renderer, double now, const BootBranding& branding) const;
     void skip(double now);
 
     bool finished(double now) const { return now - m_start >= kDuration; }

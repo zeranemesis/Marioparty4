@@ -50,6 +50,10 @@ struct SystemStatus {
     bool charging = false;
 };
 
+// Regular: body text. Bold: titles (FOT-NewRodin, as on the PC pre-launch
+// screen). Display: the N64 Party face used by PartyBoard's menus.
+enum class FontWeight : unsigned char { Regular, Bold, Display };
+
 struct FontBlob {
     const uint8_t* data = nullptr;
     size_t size = 0;
@@ -81,8 +85,12 @@ public:
     virtual unsigned presentFramebuffer() const = 0;
     virtual const char* shaderHeader() const = 0;
 
-    virtual FontBlob font(bool bold) = 0;
+    // An empty blob falls back to the regular face (emboldened for Bold).
+    virtual FontBlob font(FontWeight weight) = 0;
     virtual Language systemLanguage() = 0;
+
+    // Bundled PartyBoard artwork (res/ in the repository, romfs:/ on Switch).
+    virtual std::string resourcePath(const std::string& name) = 0;
 
     virtual std::vector<std::string> gameDirectories() = 0;
     virtual std::string coversDirectory() = 0;

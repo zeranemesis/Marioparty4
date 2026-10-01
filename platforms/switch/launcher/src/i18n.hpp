@@ -97,6 +97,7 @@ enum class Str : unsigned short {
     EngineLabel,
     EngineInstalled,
     EngineMissing,
+    BootPresents,
 
     Count,
 };

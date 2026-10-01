@@ -184,7 +184,7 @@ void BootAnimation::update(double now, bool alternateHeld, Platform& platform) {
     m_lastT = t;
 }
 
-void BootAnimation::draw(Renderer& renderer, double now) const {
+void BootAnimation::draw(Renderer& renderer, double now, const BootBranding& branding) const {
     const double t = elapsed(now);
     const BootFrame frame = evaluate(t, m_alternate, Renderer::kWidth / Renderer::kHeight);
     constexpr float W = Renderer::kWidth;
@@ -203,10 +203,18 @@ void BootAnimation::draw(Renderer& renderer, double now) const {
 
     if (frame.logoAlpha > 0.0f) {
         const float rise = (1.0f - frame.logoAlpha) * 14.0f;
-        renderer.text(FontWeight::Bold, 66.0f, W * 0.5f, 478.0f + rise, "PartyBoard", withAlpha(rgb(0xFFFFFF), frame.logoAlpha),
-                      Align::Center, 1.5f);
-        renderer.text(FontWeight::Bold, 22.0f, W * 0.5f, 562.0f + rise, "GAMECUBE", withAlpha(rgb(0xB9B0FF), frame.logoAlpha),
-                      Align::Center, 9.0f);
+        const Color soft = withAlpha(rgb(0xB9B0FF), frame.logoAlpha);
+        renderer.text(FontWeight::Display, 20.0f, W * 0.5f, 452.0f + rise, branding.presents, soft, Align::Center, 1.0f);
+        if (branding.logo && *branding.logo) {
+            const float lw = 560.0f;
+            const float lh = lw * static_cast<float>(branding.logo->height) / static_cast<float>(branding.logo->width);
+            renderer.image(*branding.logo, W * 0.5f - lw * 0.5f, 484.0f + rise, lw, lh,
+                           withAlpha(rgb(0xFFFFFF), frame.logoAlpha));
+        } else {
+            renderer.text(FontWeight::Display, 66.0f, W * 0.5f, 482.0f + rise, "PartyBoard",
+                          withAlpha(rgb(0xFFFFFF), frame.logoAlpha), Align::Center, 1.5f);
+        }
+        renderer.text(FontWeight::Display, 22.0f, W * 0.5f, 596.0f + rise, "GAMECUBE", soft, Align::Center, 9.0f);
     }
 
     if (frame.flash > 0.0f) {

@@ -87,7 +87,7 @@ void main() {
         coverage = clamp(0.5 - d / aa, 0.0, 1.0);
     }
     if (kind == 1) {
-        color *= texture(uTex, vUV);
+        color *= texture(uTex, vUV, vParams.y);
     } else if (kind == 2) {
         color.a *= texture(uTex, vUV).r;
     } else if (kind == 4) {
@@ -214,7 +214,7 @@ std::vector<float> cubeMesh() {
 
 } // namespace
 
-bool Renderer::init(const char* shaderHeader, const FontBlob& regular, const FontBlob& bold) {
+bool Renderer::init(const char* shaderHeader, const FontBlob& regular, const FontBlob& bold, const FontBlob& display) {
     m_program2D = link(shaderHeader, kVertex2D, kFragment2D);
     m_program3D = link(shaderHeader, kVertex3D, kFragment3D);
     if (!m_program2D || !m_program3D)
@@ -278,7 +278,7 @@ bool Renderer::init(const char* shaderHeader, const FontBlob& regular, const Fon
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     m_boundTexture = m_whiteTexture;
 
-    if (!m_fonts.init(regular, bold, [this] { flush(); }))
+    if (!m_fonts.init(regular, bold, display, [this] { flush(); }))
         return false;
 
     m_vertices.reserve(kMaxQuads * 4);
@@ -495,11 +495,39 @@ void Renderer::triangle(float x0, float y0, float x1, float y1, float x2, float 
 }
 
 void Renderer::image(const Texture& texture, float x, float y, float w, float h, Color tint, float radius, float u0,
-                     float v0, float u1, float v1) {
+                     float v0, float u1, float v1, float blur) {
     if (!texture)
         return;
     bindTexture(texture.id);
-    boxQuad(x, y, w, h, tint, tint, radius, kImage, 0.0f, 0.0f, u0, v0, u1, v1);
+    boxQuad(x, y, w, h, tint, tint, radius, kImage, blur, 0.0f, u0, v0, u1, v1);
+}
+
+void Renderer::imageCover(const Texture& texture, float x, float y, float w, float h, float focusX, float focusY,
+                          Color tint, float radius, float blur) {
+    if (!texture || w <= 0.0f || h <= 0.0f)
+        return;
+    const float textureAspect = static_cast<float>(texture.width) / static_cast<float>(texture.height);
+    const float boxAspect = w / h;
+    float u0 = 0, v0 = 0, u1 = 1, v1 = 1;
+    if (textureAspect > boxAspect) {
+        const float keep = boxAspect / textureAspect;
+        u0 = std::clamp(focusX - keep * 0.5f, 0.0f, 1.0f - keep);
+        u1 = u0 + keep;
+    } else {
+        const float keep = textureAspect / boxAspect;
+        v0 = std::clamp(focusY - keep * 0.5f, 0.0f, 1.0f - keep);
+        v1 = v0 + keep;
+    }
+    image(texture, x, y, w, h, tint, radius, u0, v0, u1, v1, blur);
+}
+
+void Renderer::gradientRect(float x, float y, float w, float h, Color topLeft, Color topRight, Color bottomRight,
+                            Color bottomLeft) {
+    const float pos[8] = {x, y, x + w, y, x + w, y + h, x, y + h};
+    const float uv[8] = {};
+    const float local[8] = {};
+    const Color colors[4] = {topLeft, topRight, bottomRight, bottomLeft};
+    pushQuad(pos, uv, colors, local, ShapeParams{kHuge, kHuge, 0.0f, 0.0f, 0.0f, kShape});
 }
 
 void Renderer::background(Color top, Color bottom, float pattern) {
@@ -566,6 +594,14 @@ float Renderer::text(FontWeight weight, float size, float x, float y, std::strin
         previous = cp;
     }
     return width;
+}
+
+float Renderer::textMiddle(FontWeight weight, float size, float x, float centerY, std::string_view s, Color c,
+                           Align align, float tracking) {
+    const int px = std::max(1, static_cast<int>(std::lround(size * m_scale)));
+    const float ascender = m_fonts.metrics(weight, px).ascender / m_scale;
+    const float capHeight = m_fonts.glyph(weight, px, 'H').bearingY / m_scale;
+    return text(weight, size, x, centerY + capHeight * 0.5f - ascender, s, c, align, tracking);
 }
 
 std::vector<std::string> Renderer::wrap(FontWeight weight, float size, std::string_view s, float maxWidth) {

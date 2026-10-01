@@ -6,6 +6,8 @@
 
 #include <atomic>
 #include <cstdio>
+#include <fstream>
+#include <iterator>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -39,6 +41,13 @@ public:
             m_selfPath = m_layout.launcherPath;
 
         m_tickStart = armGetSystemTick();
+
+        // PartyBoard's artwork and fonts (res/ in the repository) ship in romfs.
+        m_romfsReady = R_SUCCEEDED(romfsInit());
+        if (m_romfsReady) {
+            m_bold = readFile("romfs:/rodin-db.otf");
+            m_display = readFile("romfs:/n64party.otf");
+        }
 
         padConfigureInput(8, HidNpadStyleSet_NpadStandard | HidNpadStyleTag_NpadGc);
         padInitializeAny(&m_pad);
@@ -75,6 +84,8 @@ public:
             psmExit();
         if (m_plReady)
             plExit();
+        if (m_romfsReady)
+            romfsExit();
     }
 
     bool beginFrame() override { return appletMainLoop(); }
@@ -126,14 +137,22 @@ public:
     unsigned presentFramebuffer() const override { return 0; }
     const char* shaderHeader() const override { return "#version 330 core\n"; }
 
-    FontBlob font(bool bold) override {
-        if (!m_plReady)
-            return {};
-        // The shared Standard font has a single weight; bold is synthesised.
-        if (bold)
-            return {};
-        return {static_cast<const uint8_t*>(m_font.address), m_font.size, false};
+    FontBlob font(FontWeight weight) override {
+        switch (weight) {
+        case FontWeight::Regular:
+            // Body text in the console's own shared font.
+            if (!m_plReady)
+                return {};
+            return {static_cast<const uint8_t*>(m_font.address), m_font.size, false};
+        case FontWeight::Bold:
+            return m_bold.empty() ? FontBlob{} : FontBlob{m_bold.data(), m_bold.size(), false};
+        case FontWeight::Display:
+            return m_display.empty() ? FontBlob{} : FontBlob{m_display.data(), m_display.size(), false};
+        }
+        return {};
     }
+
+    std::string resourcePath(const std::string& name) override { return "romfs:/" + name; }
 
     Language systemLanguage() override {
         if (!m_setReady)
@@ -180,6 +199,11 @@ public:
     }
 
 private:
+    static std::vector<uint8_t> readFile(const char* path) {
+        std::ifstream in(path, std::ios::binary);
+        return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    }
+
     static uint32_t mapButtons(u64 buttons) {
         uint32_t out = 0;
         const struct {
@@ -275,7 +299,10 @@ private:
     PadState m_pad{};
     PlFontData m_font{};
     bool m_plReady = false;
+    bool m_romfsReady = false;
     bool m_psmReady = false;
+    std::vector<uint8_t> m_bold;    // FOT-NewRodin Pro DB
+    std::vector<uint8_t> m_display; // N64 Party
     bool m_setReady = false;
     int m_width = 1280;
     int m_height = 720;
@@ -303,7 +330,8 @@ int main(int argc, char** argv) {
     }
 
     Renderer renderer;
-    if (!renderer.init(platform.shaderHeader(), platform.font(false), platform.font(true))) {
+    if (!renderer.init(platform.shaderHeader(), platform.font(FontWeight::Regular), platform.font(FontWeight::Bold),
+                       platform.font(FontWeight::Display))) {
         renderer.shutdown();
         platform.shutdown();
         return EXIT_FAILURE;

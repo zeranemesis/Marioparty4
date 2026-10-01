@@ -20,7 +20,8 @@ struct FontCache::Face {
 
 FontCache::~FontCache() { shutdown(); }
 
-bool FontCache::init(const FontBlob& regular, const FontBlob& bold, std::function<void()> beforeReset) {
+bool FontCache::init(const FontBlob& regular, const FontBlob& bold, const FontBlob& display,
+                     std::function<void()> beforeReset) {
     m_beforeReset = std::move(beforeReset);
 
     FT_Library library = nullptr;
@@ -29,20 +30,22 @@ bool FontCache::init(const FontBlob& regular, const FontBlob& bold, std::functio
         return false;
     }
     m_library = library;
+    if (!regular.data)
+        return false;
 
-    const FontBlob* blobs[2] = {&regular, &bold};
-    for (int i = 0; i < 2; ++i) {
-        const FontBlob& blob = blobs[i]->data ? *blobs[i] : regular;
-        if (!blob.data)
-            return false;
+    // Missing faces fall back: Bold to an emboldened Regular, Display to Bold.
+    const FontBlob* blobs[kFaces] = {&regular, bold.data ? &bold : &regular,
+                                     display.data ? &display : (bold.data ? &bold : &regular)};
+    const bool synthesize[kFaces] = {regular.synthesizeBold, bold.data ? bold.synthesizeBold : true,
+                                     display.data ? display.synthesizeBold : !bold.data};
+    for (int i = 0; i < kFaces; ++i) {
         auto* face = new Face();
-        if (FT_New_Memory_Face(library, blob.data, static_cast<FT_Long>(blob.size), 0, &face->face) != 0) {
-            std::printf("launcher: FT_New_Memory_Face failed\n");
+        if (FT_New_Memory_Face(library, blobs[i]->data, static_cast<FT_Long>(blobs[i]->size), 0, &face->face) != 0) {
+            std::printf("launcher: FT_New_Memory_Face failed for face %d\n", i);
             delete face;
             return false;
         }
-        // A bold request served by the regular blob is emboldened.
-        face->synthesizeBold = blob.synthesizeBold || (i == 1 && !blobs[i]->data);
+        face->synthesizeBold = synthesize[i];
         m_faces[i] = face;
     }
 
@@ -77,7 +80,24 @@ void FontCache::shutdown() {
     m_glyphs.clear();
 }
 
-FontCache::Face* FontCache::face(FontWeight weight) { return m_faces[weight == FontWeight::Bold ? 1 : 0]; }
+FontCache::Face* FontCache::face(FontWeight weight) { return m_faces[static_cast<int>(weight)]; }
+
+FontCache::Face* FontCache::faceFor(FontWeight weight, uint32_t codepoint, unsigned& index) {
+    Face* preferred = face(weight);
+    index = preferred ? FT_Get_Char_Index(preferred->face, codepoint) : 0;
+    if (index != 0 || !preferred)
+        return preferred;
+    // e.g. a symbol the display face lacks: borrow it from Bold, then Regular.
+    for (int i = kFaces - 2; i >= 0; --i) {
+        if (m_faces[i] && m_faces[i] != preferred) {
+            if (const unsigned other = FT_Get_Char_Index(m_faces[i]->face, codepoint)) {
+                index = other;
+                return m_faces[i];
+            }
+        }
+    }
+    return preferred;
+}
 
 bool FontCache::setSize(Face& face, int pixelSize) {
     if (face.pixelSize == pixelSize)
@@ -102,14 +122,14 @@ void FontCache::reset() {
 }
 
 const Glyph& FontCache::glyph(FontWeight weight, int pixelSize, uint32_t codepoint) {
-    const uint64_t key = (uint64_t(weight == FontWeight::Bold) << 56) | (uint64_t(pixelSize) << 32) | codepoint;
+    const uint64_t key = (uint64_t(weight) << 56) | (uint64_t(pixelSize) << 32) | codepoint;
     if (auto it = m_glyphs.find(key); it != m_glyphs.end())
         return it->second;
 
     Glyph result;
-    Face* f = face(weight);
+    unsigned index = 0;
+    Face* f = faceFor(weight, codepoint, index);
     if (f && setSize(*f, pixelSize)) {
-        const FT_UInt index = FT_Get_Char_Index(f->face, codepoint);
         if (FT_Load_Glyph(f->face, index, FT_LOAD_DEFAULT | FT_LOAD_NO_BITMAP) == 0) {
             FT_GlyphSlot slot = f->face->glyph;
             if (f->synthesizeBold)
@@ -177,6 +197,8 @@ float FontCache::kerning(FontWeight weight, int pixelSize, uint32_t left, uint32
     FT_Vector delta{};
     const FT_UInt a = FT_Get_Char_Index(f->face, left);
     const FT_UInt b = FT_Get_Char_Index(f->face, right);
+    if (a == 0 || b == 0)
+        return 0.0f;
     if (FT_Get_Kerning(f->face, a, b, FT_KERNING_DEFAULT, &delta) != 0)
         return 0.0f;
     return static_cast<float>(delta.x) / 64.0f;

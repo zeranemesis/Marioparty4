@@ -17,6 +17,7 @@
 //   players <n>             number of connected controllers
 //
 // --icon <file.png> renders the 256x256 homebrew menu icon instead.
+// --res <dir> reads PartyBoard's artwork and fonts from <dir> (default: res/).
 // --log-sounds prints every sound cue with its timestamp.
 
 #include <EGL/egl.h>
@@ -125,9 +126,15 @@ private:
 
 class HostPlatform final : public Platform {
 public:
-    HostPlatform(HeadlessGl& gl, std::string root) : m_gl(gl), m_layout(sdLayout(root)) {
-        m_regular = readFile("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
-        m_bold = readFile("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf");
+    HostPlatform(HeadlessGl& gl, std::string root, std::string resources)
+        : m_gl(gl), m_layout(sdLayout(root)), m_resources(std::move(resources)) {
+        // The console uses its shared system font for body text; Inter is the
+        // closest stand-in among PartyBoard's own fonts.
+        m_fonts[0] = readFile(m_resources + "/Inter-Regular.ttf");
+        m_fonts[1] = readFile(m_resources + "/FOT-NewRodin Pro DB.otf");
+        m_fonts[2] = readFile(m_resources + "/N64Party.otf");
+        if (m_fonts[0].empty())
+            m_fonts[0] = readFile("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
     }
 
     bool beginFrame() override { return true; }
@@ -158,11 +165,12 @@ public:
         return "#version 300 es\nprecision highp float;\nprecision highp int;\n";
     }
 
-    FontBlob font(bool bold) override {
-        const std::vector<uint8_t>& data = bold ? m_bold : m_regular;
+    FontBlob font(FontWeight weight) override {
+        const std::vector<uint8_t>& data = m_fonts[static_cast<int>(weight)];
         return data.empty() ? FontBlob{} : FontBlob{data.data(), data.size(), false};
     }
     Language systemLanguage() override { return m_language; }
+    std::string resourcePath(const std::string& name) override { return m_resources + "/" + name; }
 
     std::vector<std::string> gameDirectories() override { return m_layout.gameDirectories; }
     std::string coversDirectory() override { return m_layout.coversDirectory; }
@@ -192,8 +200,8 @@ public:
 private:
     HeadlessGl& m_gl;
     SdLayout m_layout;
-    std::vector<uint8_t> m_regular;
-    std::vector<uint8_t> m_bold;
+    std::string m_resources;
+    std::vector<uint8_t> m_fonts[3];
     uint64_t m_frame = 0;
 };
 
@@ -210,30 +218,39 @@ uint32_t parseButton(const std::string& name) {
 
 int renderIcon(HeadlessGl& gl, HostPlatform& platform, const std::string& path) {
     Renderer r;
-    if (!r.init(platform.shaderHeader(), platform.font(false), platform.font(true)))
+    if (!r.init(platform.shaderHeader(), platform.font(FontWeight::Regular), platform.font(FontWeight::Bold),
+                platform.font(FontWeight::Display)))
         return 1;
+    auto load = [&](const char* name) {
+        Image image;
+        return loadPng(platform.resourcePath(name), image, 2048)
+                   ? r.createTexture(image.width, image.height, image.rgba.data(), true)
+                   : Texture{};
+    };
+    Texture art = load("prelaunch-bg.png");
+    Texture logo = load("logo.png");
+
     r.beginFrame(gl.width(), gl.height(), gl.framebuffer(), 2.0f);
-    // The canvas is 1280x720 virtual units; the icon is its central square.
+    // The canvas is 1280x720 virtual units; the icon is its central square:
+    // the Mario Party 4 cast from the pre-launch art and the PartyBoard logo.
     constexpr float S = Renderer::kHeight;
     const float x0 = (Renderer::kWidth - S) * 0.5f;
-    r.rect(0, 0, Renderer::kWidth, Renderer::kHeight, rgb(0x0E0A2C));
-    r.softRect(x0 + 40, 40, S - 80, S - 80, S * 0.4f, 160.0f, withAlpha(rgb(0x5A49D6), 0.95f));
-
-    r.begin3D(x0, 40, S, S * 0.72f);
-    const Vec3 eye{5.1f, 5.6f, 5.1f};
-    const Mat4 vp = Mat4::perspective(30.0f * kPi / 180.0f, 1.0f / 0.72f, 0.1f, 50.0f) *
-                    Mat4::lookAt(eye, {0.0f, 0.2f, 0.0f}, {0.0f, 1.0f, 0.0f});
-    const int cells[8][2] = {{1, 0}, {0, 0}, {0, 1}, {0, 2}, {1, 2}, {2, 2}, {2, 1}, {1, 1}};
-    for (int i = 0; i < 8; ++i) {
-        const Vec3 p{static_cast<float>(cells[i][0] - 1), 0.47f, static_cast<float>(cells[i][1] - 1)};
-        const bool core = i == 7;
-        r.cube(vp, Mat4::translate(p) * Mat4::scale(core ? 1.0f : 0.94f), eye,
-               core ? rgb(0x8B7DFF) : rgb(0x5B4EE0), core ? 0.18f : 0.0f);
+    r.rect(0, 0, Renderer::kWidth, Renderer::kHeight, rgb(0x2B1D5E));
+    if (art) {
+        const float vSpan = 0.86f;
+        const float uSpan = vSpan * static_cast<float>(art.height) / static_cast<float>(art.width);
+        r.image(art, x0, 0, S, S, {}, 0.0f, 0.665f - uSpan * 0.5f, 0.04f, 0.665f + uSpan * 0.5f, 0.04f + vSpan);
     }
-    r.end3D();
-    r.text(FontWeight::Bold, 104.0f, Renderer::kWidth * 0.5f, S * 0.70f, "PartyBoard", rgb(0xFFFFFF), Align::Center);
-    r.text(FontWeight::Bold, 40.0f, Renderer::kWidth * 0.5f, S * 0.86f, "GAMECUBE", rgb(0xB9B0FF), Align::Center, 14.0f);
+    r.gradientRect(x0, S * 0.45f, S, S * 0.55f, withAlpha(rgb(0x0B0620), 0.0f), withAlpha(rgb(0x0B0620), 0.0f),
+                   withAlpha(rgb(0x0B0620), 0.95f), withAlpha(rgb(0x0B0620), 0.95f));
+    if (logo) {
+        const float lw = S - 60.0f;
+        const float lh = lw * static_cast<float>(logo.height) / static_cast<float>(logo.width);
+        r.image(logo, x0 + 30.0f, S - lh - 60.0f, lw, lh);
+    }
     r.endFrame();
+    r.destroyTexture(art);
+    r.destroyTexture(logo);
 
     Image full = gl.capture();
     // Crop the central square.
@@ -256,6 +273,7 @@ int main(int argc, char** argv) {
     std::string script = "wait 1.5; shot shelf";
     std::string icon;
     std::string demo;
+    std::string resources = PARTYBOARD_LAUNCHER_RES_DIR;
     bool demoEngine = true;
     bool logSounds = false;
     int width = 1280, height = 720;
@@ -277,6 +295,8 @@ int main(int argc, char** argv) {
             script = next();
         else if (arg == "--icon")
             icon = next();
+        else if (arg == "--res")
+            resources = next();
         else if (arg == "--size")
             std::sscanf(next().c_str(), "%dx%d", &width, &height);
     }
@@ -293,14 +313,14 @@ int main(int argc, char** argv) {
     if (!demo.empty())
         demo::makeDemoSdCard(demo, demoEngine);
 
-    HostPlatform platform(gl, root);
+    HostPlatform platform(gl, root, resources);
     platform.logSounds = logSounds;
     if (!icon.empty())
         return renderIcon(gl, platform, icon);
 
     makeDirectories(out);
     Renderer renderer;
-    if (!renderer.init(platform.shaderHeader(), platform.font(false), platform.font(true)))
+    if (!renderer.init(platform.shaderHeader(), platform.font(FontWeight::Regular), platform.font(FontWeight::Bold), platform.font(FontWeight::Display)))
         return 1;
 
     // Commands that configure the platform must apply before App::init.

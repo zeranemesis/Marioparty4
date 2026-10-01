@@ -19,8 +19,9 @@ constexpr float H = Renderer::kHeight;
 // GameCube indigo, with the Switch's cyan selection highlight on top.
 constexpr Color kBgTop = rgb(0x2A2266);
 constexpr Color kBgBottom = rgb(0x0D0A26);
-constexpr Color kAccent = rgb(0x35D6FF);
-constexpr Color kAccentLight = rgb(0xC4F4FF);
+// PartyBoard's selection cyan, from the PC pre-launch menu (#009dda).
+constexpr Color kAccent = rgb(0x009DDA);
+constexpr Color kAccentLight = rgb(0x8FE8FF);
 constexpr Color kText = rgb(0xFFFFFF);
 constexpr Color kTextSoft = rgb(0xC9C3F5);
 constexpr Color kTextDim = rgb(0x8F88C9);
@@ -87,6 +88,11 @@ Color hashedColor(const std::string& key, float lightness) {
     return {channel(0.0f), channel(0.33f), channel(0.67f), 1.0f};
 }
 
+// Mario Party 4 discs get the PartyBoard case art; other discs a generated case.
+bool isMarioParty4(const GameEntry& game) {
+    return game.error == DiscError::None && game.disc.gameId.rfind("GMP", 0) == 0;
+}
+
 std::string format(const char* pattern, unsigned value) {
     char buffer[128];
     std::snprintf(buffer, sizeof(buffer), pattern, value);
@@ -97,7 +103,12 @@ std::string format(const char* pattern, unsigned value) {
 
 App::App(Platform& platform, Renderer& renderer) : m_platform(platform), m_r(renderer) {}
 
-App::~App() { releaseTextures(); }
+App::~App() {
+    releaseTextures();
+    m_r.destroyTexture(m_logo);
+    m_r.destroyTexture(m_star);
+    m_r.destroyTexture(m_art);
+}
 
 void App::init() {
     loadSettings(m_platform.settingsPath(), m_settings);
@@ -105,7 +116,21 @@ void App::init() {
     m_language = m_settings.resolveLanguage(m_systemLanguage);
     m_now = m_last = m_platform.now();
     m_shelfFadeStart = m_now;
+    loadArtwork();
     rescan(false);
+}
+
+void App::loadArtwork() {
+    // Missing files are tolerated: every use falls back to drawn shapes.
+    auto load = [this](const char* name, bool mipmaps) {
+        Image image;
+        if (!loadPng(m_platform.resourcePath(name), image, 2048))
+            return Texture{};
+        return m_r.createTexture(image.width, image.height, image.rgba.data(), mipmaps);
+    };
+    m_logo = load("logo.png", true);
+    m_star = load("icon.png", true);
+    m_art = load("prelaunch-bg.png", true);
 }
 
 void App::releaseTextures() {
@@ -375,7 +400,7 @@ bool App::frame() {
     m_r.beginFrame(m_platform.framebufferWidth(), m_platform.framebufferHeight(), m_platform.presentFramebuffer(),
                    static_cast<float>(m_now));
     if (m_screen == Screen::Boot) {
-        m_boot.draw(m_r, m_now);
+        m_boot.draw(m_r, m_now, BootBranding{&m_logo, t(Str::BootPresents)});
     } else {
         drawShelf();
         if (m_screen == Screen::Launching) {
@@ -417,8 +442,7 @@ float App::drawButtonGlyph(float cx, float cy, const char* glyph, float radius, 
     const float textWidth = m_r.measure(FontWeight::Bold, size, glyph);
     const float width = std::max(radius * 2.0f, textWidth + radius * 1.1f);
     m_r.roundRect(cx - width * 0.5f, cy - radius, width, radius * 2.0f, radius, withAlpha(rgb(0xF4F2FF), alpha));
-    const float lh = m_r.lineHeight(FontWeight::Bold, size);
-    m_r.text(FontWeight::Bold, size, cx, cy - lh * 0.5f, glyph, withAlpha(kInk, alpha), Align::Center);
+    m_r.textMiddle(FontWeight::Bold, size, cx, cy, glyph, withAlpha(kInk, alpha), Align::Center);
     return width;
 }
 
@@ -428,7 +452,7 @@ void App::drawHints(const std::vector<Hint>& hints, float right, float y, float 
         const char* label = t(it->label);
         const float labelWidth = m_r.measure(FontWeight::Regular, 19.0f, label);
         x -= labelWidth;
-        m_r.text(FontWeight::Regular, 19.0f, x, y - m_r.lineHeight(FontWeight::Regular, 19.0f) * 0.5f, label,
+        m_r.textMiddle(FontWeight::Regular, 19.0f, x, y, label,
                  withAlpha(kText, alpha));
         const float glyphWidth = std::max(26.0f, m_r.measure(FontWeight::Bold, 12.0f, it->glyph) + 14.0f);
         x -= 9.0f + glyphWidth * 0.5f;
@@ -438,22 +462,31 @@ void App::drawHints(const std::vector<Hint>& hints, float right, float y, float 
 }
 
 void App::drawHeader() {
-    // Rotating emblem cube, rendered in its own small 3D viewport.
+    // PartyBoard wordmark, then the cube and "GAMECUBE" like the console app.
+    float x = 40.0f;
+    if (m_logo) {
+        const float lh = 42.0f;
+        const float lw = lh * static_cast<float>(m_logo.width) / static_cast<float>(m_logo.height);
+        m_r.image(m_logo, x, 22.0f, lw, lh);
+        x += lw + 18.0f;
+        m_r.rect(x, 26.0f, 2.0f, 34.0f, withAlpha(kText, 0.25f));
+        x += 16.0f;
+    }
     {
-        constexpr float size = 54.0f;
-        m_r.begin3D(38.0f, 18.0f, size, size);
+        constexpr float size = 44.0f;
+        m_r.begin3D(x - 4.0f, 21.0f, size, size);
         const Vec3 eye{2.5f, 2.0f, 2.5f};
         const Mat4 vp = Mat4::perspective(30.0f * kPi / 180.0f, 1.0f, 0.1f, 20.0f) *
                         Mat4::lookAt(eye, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f});
         const Mat4 model = Mat4::rotate(static_cast<float>(m_now) * 0.5f, {0.0f, 1.0f, 0.0f});
         m_r.cube(vp, model, eye, rgb(0x8B7DFF), 0.3f);
         m_r.end3D();
+        x += size + 4.0f;
     }
-    const float titleWidth = m_r.text(FontWeight::Bold, 30.0f, 104.0f, 22.0f, t(Str::AppTitle), kText);
-    m_r.text(FontWeight::Regular, 18.0f, 104.0f + titleWidth + 14.0f, 32.0f, t(Str::AppSubtitle), kTextSoft);
+    m_r.textMiddle(FontWeight::Display, 26.0f, x, 43.0f, "GAMECUBE", kText, Align::Left, 1.5f);
 
     // Clock and battery, like the Switch HOME menu.
-    float x = 1236.0f;
+    x = 1236.0f;
     if (m_status.hour >= 0) {
         char clock[16];
         std::snprintf(clock, sizeof(clock), "%02d:%02d", m_status.hour, m_status.minute);
@@ -501,13 +534,8 @@ void App::drawGeneratedCover(const GameEntry& game, const GameVisual& visual, fl
     // A soft light from the top-left, like a glossy case insert.
     m_r.softRect(x - w * 0.2f, y - h * 0.15f, w * 0.9f, h * 0.55f, w * 0.4f, w * 0.3f, withAlpha(kText, 0.10f));
 
-    // Case header strip with the cube mark.
+    drawCaseBand(x, y, w, s);
     const float band = 30.0f * s;
-    m_r.roundRect(x, y, w, band, radius, rgb(0x16113F));
-    m_r.rect(x, y + band * 0.5f, w, band * 0.5f, rgb(0x16113F));
-    drawEmblem(x + 20.0f * s, y + band * 0.5f, 18.0f * s, 1.0f);
-    m_r.text(FontWeight::Bold, 12.0f * s, x + 35.0f * s, y + band * 0.5f - m_r.lineHeight(FontWeight::Bold, 12.0f * s) * 0.5f,
-             "GAMECUBE", kText, Align::Left, 2.4f * s);
 
     const float bw = w - 28.0f * s;
     const float bh = bw / 3.0f;
@@ -548,15 +576,57 @@ void App::drawGeneratedCover(const GameEntry& game, const GameVisual& visual, fl
         m_r.circle(dcx, dcy, discR * 0.14f, bottom);
     }
 
-    // Footer: game ID and region chip.
+    drawRegionFooter(game, x, y, w, h, s);
+}
+
+void App::drawCaseBand(float x, float y, float w, float s) {
+    // GameCube case header strip with the cube mark.
+    const float band = 30.0f * s;
+    const float radius = 14.0f * s;
+    m_r.roundRect(x, y, w, band, radius, rgb(0x16113F));
+    m_r.rect(x, y + band * 0.5f, w, band * 0.5f, rgb(0x16113F));
+    drawEmblem(x + 20.0f * s, y + band * 0.5f, 18.0f * s, 1.0f);
+    m_r.textMiddle(FontWeight::Display, 14.0f * s, x + 35.0f * s, y + band * 0.5f, "GAMECUBE", kText, Align::Left,
+             1.6f * s);
+}
+
+void App::drawRegionFooter(const GameEntry& game, float x, float y, float w, float h, float s) {
     const float fy = y + h - 30.0f * s;
-    if (!game.disc.gameId.empty()) {
-        m_r.text(FontWeight::Regular, 13.0f * s, x + 14.0f * s, fy, game.disc.gameId, withAlpha(kText, 0.8f));
-        const char* region = t(regionName(game.disc.regionCode()));
-        const float rw = m_r.measure(FontWeight::Bold, 12.0f * s, region) + 16.0f * s;
-        m_r.roundRect(x + w - 14.0f * s - rw, fy - 2.0f * s, rw, 20.0f * s, 10.0f * s, withAlpha(rgb(0x000000), 0.3f));
-        m_r.text(FontWeight::Bold, 12.0f * s, x + w - 14.0f * s - rw * 0.5f, fy, region, kText, Align::Center);
+    if (game.disc.gameId.empty())
+        return;
+    const float mid = fy + 8.0f * s;
+    m_r.textMiddle(FontWeight::Regular, 13.0f * s, x + 14.0f * s, mid, game.disc.gameId, withAlpha(kText, 0.8f));
+    const char* region = t(regionName(game.disc.regionCode()));
+    const float rw = m_r.measure(FontWeight::Bold, 12.0f * s, region) + 16.0f * s;
+    m_r.roundRect(x + w - 14.0f * s - rw, mid - 10.0f * s, rw, 20.0f * s, 10.0f * s, withAlpha(rgb(0x000000), 0.45f));
+    m_r.textMiddle(FontWeight::Bold, 12.0f * s, x + w - 14.0f * s - rw * 0.5f, mid, region, kText, Align::Center);
+}
+
+void App::drawPartyCover(const GameEntry& game, float x, float y, float w, float h, float s) {
+    const float radius = 14.0f * s;
+    const float band = 30.0f * s;
+    m_r.roundRect(x, y, w, h, radius, rgb(0x2B1D5E));
+
+    // The cast from PartyBoard's pre-launch artwork, cropped around the "4".
+    const float artH = h - band;
+    const float aspect = w / artH;
+    const float texAspect = static_cast<float>(m_art.width) / static_cast<float>(m_art.height);
+    const float vSpan = 0.88f;
+    const float uSpan = vSpan * aspect / texAspect;
+    const float u0 = std::clamp(0.665f - uSpan * 0.5f, 0.0f, 1.0f - uSpan);
+    const float v0 = std::clamp(0.47f - vSpan * 0.5f, 0.0f, 1.0f - vSpan);
+    m_r.image(m_art, x, y + band, w, artH, {}, radius, u0, v0, u0 + uSpan, v0 + vSpan);
+
+    // Wordmark over a dark fade, like a box front.
+    m_r.roundRectGradient(x, y + h * 0.52f, w, h * 0.48f, radius, withAlpha(rgb(0x0B0620), 0.0f),
+                          withAlpha(rgb(0x0B0620), 0.92f));
+    if (m_logo) {
+        const float lw = w - 22.0f * s;
+        const float lh = lw * static_cast<float>(m_logo.height) / static_cast<float>(m_logo.width);
+        m_r.image(m_logo, x + 11.0f * s, y + h - 44.0f * s - lh, lw, lh);
     }
+    drawCaseBand(x, y, w, s);
+    drawRegionFooter(game, x, y, w, h, s);
 }
 
 void App::drawCard(size_t index, float cx, float bottom, float scale, float focus) {
@@ -574,31 +644,18 @@ void App::drawCard(size_t index, float cx, float bottom, float scale, float focu
                      withAlpha(kAccent, 0.32f * focus));
     }
 
-    if (visual.cover) {
-        // Fill the card, cropping the cover to the case aspect.
-        const float textureAspect = static_cast<float>(visual.cover.width) / static_cast<float>(visual.cover.height);
-        const float cardAspect = w / h;
-        float u0 = 0, v0 = 0, u1 = 1, v1 = 1;
-        if (textureAspect > cardAspect) {
-            const float keep = cardAspect / textureAspect;
-            u0 = (1.0f - keep) * 0.5f;
-            u1 = 1.0f - u0;
-        } else {
-            const float keep = textureAspect / cardAspect;
-            v0 = (1.0f - keep) * 0.5f;
-            v1 = 1.0f - v0;
-        }
-        m_r.image(visual.cover, x, y, w, h, {}, radius, u0, v0, u1, v1);
-    } else {
+    if (visual.cover)
+        m_r.imageCover(visual.cover, x, y, w, h, 0.5f, 0.5f, {}, radius);
+    else if (m_art && isMarioParty4(game))
+        drawPartyCover(game, x, y, w, h, scale);
+    else
         drawGeneratedCover(game, visual, x, y, w, h, scale);
-    }
 
     if (!game.launchable()) {
         m_r.roundRect(x, y, w, h, radius, withAlpha(rgb(0x0B0820), 0.38f));
         const Color badge = statusColor(game.compatibility);
         m_r.circle(x + w - 22.0f * scale, y + 48.0f * scale, 14.0f * scale, badge);
-        m_r.text(FontWeight::Bold, 18.0f * scale, x + w - 22.0f * scale,
-                 y + 48.0f * scale - m_r.lineHeight(FontWeight::Bold, 18.0f * scale) * 0.5f, "!", kInk, Align::Center);
+        m_r.textMiddle(FontWeight::Bold, 18.0f * scale, x + w - 22.0f * scale, y + 48.0f * scale, "!", kInk, Align::Center);
     }
     if (focus < 0.99f)
         m_r.roundRect(x, y, w, h, radius, withAlpha(rgb(0x0B0820), 0.42f * (1.0f - focus)));
@@ -613,7 +670,17 @@ void App::drawInfo() {
     if (m_selected >= m_games.size())
         return;
     const GameEntry& game = m_games[m_selected];
-    const float x = 120.0f;
+    float x = 120.0f;
+
+    // The disc's own opening.bnr banner, framed like a memory card icon row.
+    if (const Texture& banner = m_visuals[m_selected].banner) {
+        const float bw = 150.0f;
+        const float bh = 50.0f;
+        m_r.softRect(x, 504.0f, bw, bh, 8.0f, 10.0f, withAlpha(rgb(0x000000), 0.5f));
+        m_r.roundRect(x - 3.0f, 497.0f, bw + 6.0f, bh + 6.0f, 9.0f, withAlpha(kText, 0.92f));
+        m_r.image(banner, x, 500.0f, bw, bh, {}, 6.0f);
+        x += bw + 24.0f;
+    }
 
     const Color status = statusColor(game.compatibility);
     const char* statusLabel = t(statusText(game.compatibility));
@@ -622,7 +689,7 @@ void App::drawInfo() {
     m_r.roundRect(pillX, 500.0f, pillWidth, 34.0f, 17.0f, withAlpha(status, 0.18f));
     m_r.roundRectOutline(pillX, 500.0f, pillWidth, 34.0f, 17.0f, 1.5f, withAlpha(status, 0.7f));
     m_r.circle(pillX + 20.0f, 517.0f, 6.0f, status);
-    m_r.text(FontWeight::Bold, 16.0f, pillX + 34.0f, 517.0f - m_r.lineHeight(FontWeight::Bold, 16.0f) * 0.5f,
+    m_r.textMiddle(FontWeight::Bold, 16.0f, pillX + 34.0f, 517.0f,
              statusLabel, kText);
     if (game.launchable())
         m_r.text(FontWeight::Regular, 17.0f, 1160.0f, 546.0f, t(Str::Players), kTextSoft, Align::Right);
@@ -663,14 +730,19 @@ void App::drawEmptyState() {
     m_r.softRect(x, y + 12.0f, w, h, 24.0f, 30.0f, withAlpha(rgb(0x000000), 0.45f));
     m_r.roundRect(x, y, w, h, 24.0f, withAlpha(kPanel, 0.92f));
     m_r.roundRectOutline(x, y, w, h, 24.0f, 1.5f, withAlpha(kTextDim, 0.4f));
-    drawEmblem(W * 0.5f, y + 70.0f, 64.0f, 1.0f);
-    m_r.text(FontWeight::Bold, 30.0f, W * 0.5f, y + 118.0f, t(Str::NoGamesTitle), kText, Align::Center);
+    if (m_star) {
+        const float bounce = 4.0f * std::sin(static_cast<float>(m_now) * 2.4f);
+        m_r.image(m_star, W * 0.5f - 40.0f, y + 26.0f + bounce, 80.0f, 80.0f);
+    } else {
+        drawEmblem(W * 0.5f, y + 70.0f, 64.0f, 1.0f);
+    }
+    m_r.text(FontWeight::Display, 32.0f, W * 0.5f, y + 116.0f, t(Str::NoGamesTitle), kText, Align::Center);
     m_r.text(FontWeight::Regular, 19.0f, W * 0.5f, y + 166.0f, t(Str::NoGamesBody), kTextSoft, Align::Center);
     const std::vector<std::string> dirs = m_platform.gameDirectories();
     const std::string dir = dirs.empty() ? std::string{} : dirs.front();
     const float dw = m_r.measure(FontWeight::Bold, 20.0f, dir) + 40.0f;
     m_r.roundRect(W * 0.5f - dw * 0.5f, y + 200.0f, dw, 42.0f, 21.0f, withAlpha(rgb(0x000000), 0.35f));
-    m_r.text(FontWeight::Bold, 20.0f, W * 0.5f, y + 221.0f - m_r.lineHeight(FontWeight::Bold, 20.0f) * 0.5f, dir,
+    m_r.textMiddle(FontWeight::Bold, 20.0f, W * 0.5f, y + 221.0f, dir,
              kAccentLight, Align::Center);
     m_r.text(FontWeight::Regular, 17.0f, W * 0.5f, y + 266.0f, t(Str::NoGamesFormats), kTextDim, Align::Center);
 }
@@ -689,7 +761,7 @@ void App::drawFooter() {
             m_r.roundRect(x, 676.0f, lw, 26.0f, 13.0f, kPlayerColors[p]);
         else
             m_r.roundRectOutline(x, 676.0f, lw, 26.0f, 13.0f, 1.5f, withAlpha(kTextDim, 0.6f));
-        m_r.text(FontWeight::Bold, 14.0f, x + lw * 0.5f, 689.0f - m_r.lineHeight(FontWeight::Bold, 14.0f) * 0.5f, label,
+        m_r.textMiddle(FontWeight::Bold, 14.0f, x + lw * 0.5f, 689.0f, label,
                  on ? kInk : kTextDim, Align::Center);
         x += lw + 8.0f;
     }
@@ -705,9 +777,27 @@ void App::drawFooter() {
     drawHints(hints, 1240.0f, 689.0f);
 }
 
+void App::drawBackdrop() {
+    if (!m_art) {
+        m_r.background(kBgTop, kBgBottom, 1.0f);
+        return;
+    }
+    // PartyBoard's pre-launch artwork, softened behind the shelf and drifting
+    // slowly, darkened from the left like the PC screen.
+    m_r.rect(0, 0, W, H, rgb(0x120B2E));
+    const float drift = 0.5f + 0.5f * std::sin(static_cast<float>(m_now) * 0.07f);
+    m_r.imageCover(m_art, -30.0f, -20.0f, W + 60.0f, H + 40.0f, 0.42f + 0.16f * drift, 0.5f, {}, 0.0f, 3.2f);
+    const Color clear = withAlpha(rgb(0x07041A), 0.0f);
+    const Color shade = rgb(0x07041A);
+    m_r.gradientRect(0, 0, W, H, withAlpha(shade, 0.82f), withAlpha(shade, 0.5f), withAlpha(shade, 0.6f),
+                     withAlpha(shade, 0.9f));
+    m_r.gradientRect(0, 0, W, 110.0f, withAlpha(shade, 0.7f), withAlpha(shade, 0.7f), clear, clear);
+    m_r.gradientRect(0, 430.0f, W, H - 430.0f, clear, clear, withAlpha(shade, 0.96f), withAlpha(shade, 0.96f));
+}
+
 void App::drawShelf() {
     const float intro = easeOutCubic(phase(m_now, m_shelfFadeStart, 0.6));
-    m_r.background(kBgTop, kBgBottom, 1.0f);
+    drawBackdrop();
     drawHeader();
 
     if (m_games.empty()) {
@@ -759,7 +849,7 @@ void App::drawOptions(float anim) {
     m_r.softRect(px - 30.0f, 0, 60.0f, H, 0.0f, 24.0f, withAlpha(rgb(0x000000), 0.5f * anim));
     m_r.rect(px, 0, pw, H, kPanel);
 
-    m_r.text(FontWeight::Bold, 30.0f, px + 44.0f, 40.0f, t(Str::OptionsTitle), kText);
+    m_r.text(FontWeight::Display, 34.0f, px + 44.0f, 36.0f, t(Str::OptionsTitle), kText);
 
     struct Row {
         Str label;
@@ -790,11 +880,11 @@ void App::drawOptions(float anim) {
             m_r.roundRectOutline(rx - 3.0f, y - 3.0f, rw + 6.0f, rh + 6.0f, 14.0f, 3.0f, ring);
         }
         const float mid = y + rh * 0.5f;
-        m_r.text(FontWeight::Regular, 20.0f, rx + 22.0f, mid - m_r.lineHeight(FontWeight::Regular, 20.0f) * 0.5f,
+        m_r.textMiddle(FontWeight::Regular, 20.0f, rx + 22.0f, mid,
                  t(rows[i].label), kText);
         const float valueRight = rx + rw - 40.0f;
         const float valueWidth =
-            m_r.text(FontWeight::Bold, 20.0f, valueRight, mid - m_r.lineHeight(FontWeight::Bold, 20.0f) * 0.5f,
+            m_r.textMiddle(FontWeight::Bold, 20.0f, valueRight, mid,
                      t(rows[i].value), selected ? kAccentLight : kTextSoft, Align::Right);
         if (selected) {
             const float ax = valueRight + 14.0f;
@@ -819,7 +909,7 @@ void App::drawOptions(float anim) {
     const std::string engineLine = std::string(t(Str::EngineLabel)) + " : " +
                                    (engine.empty() ? t(Str::EngineMissing) : t(Str::EngineInstalled));
     m_r.circle(px + 52.0f, 618.0f, 6.0f, engine.empty() ? kOrange : kGreen);
-    m_r.text(FontWeight::Regular, 16.0f, px + 66.0f, 618.0f - m_r.lineHeight(FontWeight::Regular, 16.0f) * 0.5f,
+    m_r.textMiddle(FontWeight::Regular, 16.0f, px + 66.0f, 618.0f,
              engineLine, kTextDim);
 
     m_r.rect(px + 24.0f, 660.0f, pw - 48.0f, 1.0f, withAlpha(kText, 0.16f));
@@ -861,7 +951,7 @@ void App::drawGameCubeController(float cx, float cy, int highlight) {
     // C stick.
     m_r.circle(cx + 78.0f, cy + 70.0f, 32.0f, recess);
     m_r.circle(cx + 78.0f, cy + 70.0f, 19.0f, rgb(0xFFD23B));
-    m_r.text(FontWeight::Bold, 15.0f, cx + 78.0f, cy + 70.0f - m_r.lineHeight(FontWeight::Bold, 15.0f) * 0.5f, "C",
+    m_r.textMiddle(FontWeight::Bold, 15.0f, cx + 78.0f, cy + 70.0f, "C",
              rgb(0x8A6A00), Align::Center);
 
     // START/PAUSE.
@@ -873,13 +963,13 @@ void App::drawGameCubeController(float cx, float cy, int highlight) {
     m_r.circle(cx + 150.0f, cy - 22.0f, 34.0f, rgb(0x2FBF71));
     m_r.circle(cx + 98.0f, cy + 16.0f, 18.0f, rgb(0xE8434B));
     const float letter = 22.0f;
-    m_r.text(FontWeight::Bold, letter, cx + 150.0f, cy - 22.0f - m_r.lineHeight(FontWeight::Bold, letter) * 0.5f, "A",
+    m_r.textMiddle(FontWeight::Bold, letter, cx + 150.0f, cy - 22.0f, "A",
              rgb(0x0F5F35), Align::Center);
-    m_r.text(FontWeight::Bold, 14.0f, cx + 98.0f, cy + 16.0f - m_r.lineHeight(FontWeight::Bold, 14.0f) * 0.5f, "B",
+    m_r.textMiddle(FontWeight::Bold, 14.0f, cx + 98.0f, cy + 16.0f, "B",
              rgb(0x7A1218), Align::Center);
-    m_r.text(FontWeight::Bold, 14.0f, cx + 206.0f, cy - 34.0f - m_r.lineHeight(FontWeight::Bold, 14.0f) * 0.5f, "X",
+    m_r.textMiddle(FontWeight::Bold, 14.0f, cx + 206.0f, cy - 34.0f, "X",
              rgb(0x5A5675), Align::Center);
-    m_r.text(FontWeight::Bold, 14.0f, cx + 138.0f, cy - 82.0f - m_r.lineHeight(FontWeight::Bold, 14.0f) * 0.5f, "Y",
+    m_r.textMiddle(FontWeight::Bold, 14.0f, cx + 138.0f, cy - 82.0f, "Y",
              rgb(0x5A5675), Align::Center);
     m_r.text(FontWeight::Bold, 13.0f, cx - 158.0f, cy - 129.0f, "L", rgb(0x5A5675), Align::Center);
     m_r.text(FontWeight::Bold, 13.0f, cx + 224.0f, cy - 129.0f, "R", rgb(0x5A5675), Align::Center);
@@ -907,7 +997,7 @@ void App::drawControllers(float anim) {
     m_r.softRect(x, y + 14.0f, w, h, 28.0f, 30.0f, withAlpha(rgb(0x000000), 0.5f * anim));
     m_r.roundRect(x, y, w, h, 28.0f, withAlpha(kPanel, anim));
 
-    m_r.text(FontWeight::Bold, 30.0f, x + 48.0f, y + 32.0f, t(Str::ControllersTitle), withAlpha(kText, anim));
+    m_r.text(FontWeight::Display, 34.0f, x + 48.0f, y + 28.0f, t(Str::ControllersTitle), withAlpha(kText, anim));
     m_r.text(FontWeight::Regular, 18.0f, x + 48.0f, y + 74.0f, t(Str::ControllersSubtitle), withAlpha(kTextSoft, anim));
 
     drawGameCubeController(x + 330.0f, y + 300.0f, m_mapRow);
@@ -942,7 +1032,7 @@ void App::drawControllers(float anim) {
         const float mid = my + rowH * 0.5f;
         const float chipW = std::max(34.0f, m_r.measure(FontWeight::Bold, 14.0f, maps[i].gc) + 20.0f);
         m_r.roundRect(mx, mid - 13.0f, chipW, 26.0f, 13.0f, withAlpha(maps[i].gcColor, anim));
-        m_r.text(FontWeight::Bold, 14.0f, mx + chipW * 0.5f, mid - m_r.lineHeight(FontWeight::Bold, 14.0f) * 0.5f,
+        m_r.textMiddle(FontWeight::Bold, 14.0f, mx + chipW * 0.5f, mid,
                  maps[i].gc, withAlpha(kInk, anim), Align::Center);
         const float arrowX = mx + 150.0f;
         m_r.rect(arrowX - 18.0f, mid - 1.0f, 18.0f, 2.0f, withAlpha(kTextDim, anim));
@@ -957,8 +1047,7 @@ void App::drawControllers(float anim) {
             m_r.roundRect(arrowX + 17.0f, mid - 9.0f, 6.0f, 18.0f, 1.5f, withAlpha(kInk, anim));
         }
         if (*maps[i].detail) {
-            m_r.text(FontWeight::Regular, 17.0f, arrowX + 30.0f + glyphW * 0.5f + 4.0f,
-                     mid - m_r.lineHeight(FontWeight::Regular, 17.0f) * 0.5f, maps[i].detail,
+            m_r.textMiddle(FontWeight::Regular, 17.0f, arrowX + 30.0f + glyphW * 0.5f + 4.0f, mid, maps[i].detail,
                      withAlpha(selected ? kText : kTextSoft, anim));
         }
         my += rowH + 3.0f;
@@ -1005,7 +1094,7 @@ void App::drawDialog(float anim) {
         const std::string detail = m_r.ellipsize(FontWeight::Bold, 18.0f, m_dialogDetail, w - 130.0f);
         const float dw = m_r.measure(FontWeight::Bold, 18.0f, detail) + 36.0f;
         m_r.roundRect(x + 48.0f, ty + 8.0f, dw, 40.0f, 20.0f, withAlpha(rgb(0x000000), 0.35f * anim));
-        m_r.text(FontWeight::Bold, 18.0f, x + 66.0f, ty + 28.0f - m_r.lineHeight(FontWeight::Bold, 18.0f) * 0.5f, detail,
+        m_r.textMiddle(FontWeight::Bold, 18.0f, x + 66.0f, ty + 28.0f, detail,
                  withAlpha(kAccentLight, anim));
     }
     drawHints({{"A", Str::Ok}}, x + w - 44.0f, y + h - 40.0f, anim);
@@ -1020,7 +1109,7 @@ void App::drawToast() {
     const float x = (W - tw) * 0.5f;
     m_r.roundRect(x, 600.0f, tw, 42.0f, 21.0f, withAlpha(rgb(0x0B0820), 0.9f * alpha));
     m_r.roundRectOutline(x, 600.0f, tw, 42.0f, 21.0f, 1.5f, withAlpha(kAccent, 0.6f * alpha));
-    m_r.text(FontWeight::Regular, 18.0f, W * 0.5f, 621.0f - m_r.lineHeight(FontWeight::Regular, 18.0f) * 0.5f, m_toast,
+    m_r.textMiddle(FontWeight::Regular, 18.0f, W * 0.5f, 621.0f, m_toast,
              withAlpha(kText, alpha), Align::Center);
 }
 

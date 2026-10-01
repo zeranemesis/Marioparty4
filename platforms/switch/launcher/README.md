@@ -15,9 +15,11 @@ artifact (see [Previewing without a console](#previewing-without-a-console)).
   `.ciso`, `.gcz`, `.rvz`, `.wia`, one sub-folder level allowed) and reads
   each disc's boot header and `opening.bnr`: the 96x32 banner, title, maker
   and description, in French on PAL discs when the launcher is in French.
-  RVZ/WIA only expose the header, so those cases show the cube mark instead
-  of the banner. A PNG in `partyboard/covers/<GAMEID>.png` replaces the
-  generated case.
+  Mario Party 4 discs get a case made from PartyBoard's own artwork (the cast
+  from the pre-launch screen and the PartyBoard logo); the disc's real banner
+  sits next to the title below the shelf. Other discs get a generated case
+  with their banner. RVZ/WIA only expose the header, so they have no banner.
+  A PNG in `partyboard/covers/<GAMEID>.png` replaces any case.
 - **Compatibility.** NTSC-U (`GMPE01`) and PAL (`GMPP01`) Mario Party 4 can be
   launched. NTSC-J (`GMPJ01`) is recognised and marked as not supported yet,
   other GameCube discs are shown as not Mario Party 4. This mirrors
@@ -36,9 +38,14 @@ artifact (see [Previewing without a console](#previewing-without-a-console)).
   footer, the console's shared system font, 1080p rendering when docked,
   procedurally synthesised menu sounds.
 
-Nothing in the launcher comes from a Nintendo console or disc: the cube mark,
-boot animation, chime and sounds are generated from code, and the only font
-used on hardware is the console's own shared font, loaded at run time.
+## Artwork
+
+The launcher reuses PartyBoard's existing assets from `res/`, the same files
+the PC pre-launch screen loads: `logo.png`, `icon.png` (the star),
+`prelaunch-bg.png` (purple stripes with the Mario Party 4 cast), the N64 Party
+face for headings and FOT-NewRodin for titles. They are packed into the NRO's
+romfs at build time. Body text uses the console's shared system font. The
+GameCube cube mark, the boot animation and every sound are generated in code.
 
 ## Controls
 
@@ -96,9 +103,10 @@ cmake --preset switch-libnx-bootstrap
 cmake --build build/switch-libnx-bootstrap --target partyboard_switch_launcher_nro
 ```
 
-Output: `build/switch-libnx-bootstrap/platforms/switch/launcher/partyboard-launcher.nro`.
-It links FreeType, HarfBuzz and libpng from devkitPro's portlibs
-(`switch-freetype`, `switch-libpng`, already in the `devkitpro/devkita64` image).
+Output: `build/switch-libnx-bootstrap/platforms/switch/launcher/partyboard-launcher.nro`
+(about 15 MB, most of it the romfs artwork and fonts). It links FreeType,
+HarfBuzz and libpng from devkitPro's portlibs (`switch-freetype`,
+`switch-libpng`, already in the `devkitpro/devkita64` image).
 
 ## Previewing without a console
 
@@ -107,7 +115,7 @@ On a Linux host the same `App` and `Renderer` run on a headless Mesa context:
 
 ```sh
 sudo apt-get install libegl-dev libgles-dev libegl-mesa0 libgl1-mesa-dri \
-  libfreetype-dev libpng-dev zlib1g-dev fonts-dejavu-core
+  libfreetype-dev libpng-dev zlib1g-dev
 cmake -S platforms/switch/launcher -B build/launcher-host
 cmake --build build/launcher-host
 ctest --test-dir build/launcher-host                              # unit tests
@@ -118,8 +126,10 @@ platforms/switch/launcher/tools/render-previews.sh build/launcher-host build/lau
 headers, FSTs and banners, no game data) and drives the UI with scripted
 input at a fixed 60 Hz clock. Run `partyboard_launcher_preview` directly for
 other scenarios; its script commands are listed at the top of
-`host/preview_main.cpp`. `--icon icon.png` re-renders the homebrew menu icon
-(`icon.jpg` is that render converted to JPEG).
+`host/preview_main.cpp`. The preview reads the artwork and fonts straight
+from `res/`, with Inter standing in for the console's system font.
+`--icon icon.png` re-renders the homebrew menu icon (`icon.jpg` is that render
+converted to JPEG).
 
 ## Source map
 

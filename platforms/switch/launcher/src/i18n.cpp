@@ -116,6 +116,7 @@ constexpr Entry kStrings[] = {
     {Str::EngineLabel, "Moteur PartyBoard", "PartyBoard engine"},
     {Str::EngineInstalled, "installé", "installed"},
     {Str::EngineMissing, "introuvable", "not found"},
+    {Str::BootPresents, "Mario Party R&D présente", "Mario Party R&D presents"},
 };
 
 static_assert(std::size(kStrings) == static_cast<size_t>(Str::Count), "every Str needs a translation");

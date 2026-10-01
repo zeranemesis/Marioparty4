@@ -43,6 +43,7 @@ private:
     };
 
     // State
+    void loadArtwork();
     void rescan(bool announce);
     void releaseTextures();
     void refreshLanguage();
@@ -65,9 +66,13 @@ private:
 
     // Drawing
     void drawShelf();
+    void drawBackdrop();
     void drawHeader();
     void drawCard(size_t index, float cx, float bottom, float scale, float focus);
     void drawGeneratedCover(const GameEntry& game, const GameVisual& visual, float x, float y, float w, float h, float s);
+    void drawPartyCover(const GameEntry& game, float x, float y, float w, float h, float s);
+    void drawCaseBand(float x, float y, float w, float s);
+    void drawRegionFooter(const GameEntry& game, float x, float y, float w, float h, float s);
     void drawInfo();
     void drawEmptyState();
     void drawFooter();
@@ -92,6 +97,12 @@ private:
 
     std::vector<GameEntry> m_games;
     std::vector<GameVisual> m_visuals;
+
+    // PartyBoard artwork shared with the PC pre-launch screen (res/).
+    Texture m_logo;       // PartyBoard wordmark
+    Texture m_star;       // app icon star
+    Texture m_art;        // purple stripes with the Mario Party 4 cast
+
     size_t m_selected = 0;
     float m_scroll = 0.0f;
 

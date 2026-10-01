@@ -110,7 +110,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build libegl-dev libgles-dev libegl-mesa0 libgl1-mesa-dri \
-            libfreetype-dev libpng-dev zlib1g-dev fonts-dejavu-core
+            libfreetype-dev libpng-dev zlib1g-dev
 
       - name: Build
         run: |

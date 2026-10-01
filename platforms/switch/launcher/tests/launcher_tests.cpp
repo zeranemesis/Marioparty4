@@ -15,6 +15,7 @@
 #include "boot.hpp"
 #include "demo_library.hpp"
 #include "disc.hpp"
+#include "image.hpp"
 #include "library.hpp"
 #include "paths.hpp"
 #include "settings.hpp"
@@ -293,6 +294,27 @@ void testSounds() {
     mixer.mix(out.data(), 1024);
 }
 
+void testResources() {
+    // The artwork the Switch build packs into romfs must decode with the
+    // launcher's own PNG loader.
+    const std::string res = PARTYBOARD_LAUNCHER_RES_DIR;
+    const struct {
+        const char* name;
+        int width;
+        int height;
+    } expected[] = {{"logo.png", 1009, 160}, {"icon.png", 512, 512}, {"prelaunch-bg.png", 1700, 1080}};
+    for (const auto& e : expected) {
+        Image image;
+        CHECK(loadPng(res + "/" + e.name, image, 2048));
+        CHECK_EQ(image.width, e.width);
+        CHECK_EQ(image.height, e.height);
+        CHECK_EQ(image.rgba.size(), size_t(e.width) * e.height * 4);
+    }
+    Image small;
+    CHECK(loadPng(res + "/prelaunch-bg.png", small, 1024));
+    CHECK(small.width <= 1024 && small.height <= 1024 && small.width == 850);
+}
+
 } // namespace
 
 int main() {
@@ -305,6 +327,7 @@ int main() {
     testSettings();
     testBootTimeline();
     testSounds();
+    testResources();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

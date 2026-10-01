@@ -68,6 +68,33 @@ if(PARTYBOARD_SWITCH)
         -Wl,--end-group
     )
 
+    # romfs: PartyBoard's own artwork and fonts from res/, shared with the PC
+    # pre-launch screen.
+    set(PARTYBOARD_RES "${CMAKE_CURRENT_SOURCE_DIR}/../../../res")
+    set(PARTYBOARD_LAUNCHER_ROMFS "${CMAKE_CURRENT_BINARY_DIR}/romfs")
+    set(PARTYBOARD_LAUNCHER_ROMFS_FILES
+        "${PARTYBOARD_RES}/logo.png"
+        "${PARTYBOARD_RES}/icon.png"
+        "${PARTYBOARD_RES}/prelaunch-bg.png"
+        "${PARTYBOARD_RES}/N64Party.otf"
+        "${PARTYBOARD_RES}/FOT-NewRodin Pro DB.otf"
+    )
+    set(PARTYBOARD_LAUNCHER_ROMFS_STAMP "${CMAKE_CURRENT_BINARY_DIR}/romfs.stamp")
+    add_custom_command(
+        OUTPUT "${PARTYBOARD_LAUNCHER_ROMFS_STAMP}"
+        COMMAND "${CMAKE_COMMAND}" -E rm -rf "${PARTYBOARD_LAUNCHER_ROMFS}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${PARTYBOARD_LAUNCHER_ROMFS}"
+        COMMAND "${CMAKE_COMMAND}" -E copy "${PARTYBOARD_RES}/logo.png" "${PARTYBOARD_LAUNCHER_ROMFS}/logo.png"
+        COMMAND "${CMAKE_COMMAND}" -E copy "${PARTYBOARD_RES}/icon.png" "${PARTYBOARD_LAUNCHER_ROMFS}/icon.png"
+        COMMAND "${CMAKE_COMMAND}" -E copy "${PARTYBOARD_RES}/prelaunch-bg.png" "${PARTYBOARD_LAUNCHER_ROMFS}/prelaunch-bg.png"
+        COMMAND "${CMAKE_COMMAND}" -E copy "${PARTYBOARD_RES}/N64Party.otf" "${PARTYBOARD_LAUNCHER_ROMFS}/n64party.otf"
+        COMMAND "${CMAKE_COMMAND}" -E copy "${PARTYBOARD_RES}/FOT-NewRodin Pro DB.otf" "${PARTYBOARD_LAUNCHER_ROMFS}/rodin-db.otf"
+        COMMAND "${CMAKE_COMMAND}" -E touch "${PARTYBOARD_LAUNCHER_ROMFS_STAMP}"
+        DEPENDS ${PARTYBOARD_LAUNCHER_ROMFS_FILES}
+        VERBATIM
+        COMMENT "Staging PartyBoard launcher romfs"
+    )
+
     set(PARTYBOARD_LAUNCHER_NACP "${CMAKE_CURRENT_BINARY_DIR}/partyboard-launcher.nacp")
     set(PARTYBOARD_LAUNCHER_NRO  "${CMAKE_CURRENT_BINARY_DIR}/partyboard-launcher.nro")
     set(PARTYBOARD_LAUNCHER_ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.jpg")
@@ -89,7 +116,9 @@ if(PARTYBOARD_SWITCH)
                 "${PARTYBOARD_LAUNCHER_NRO}"
                 "--nacp=${PARTYBOARD_LAUNCHER_NACP}"
                 "--icon=${PARTYBOARD_LAUNCHER_ICON}"
+                "--romfsdir=${PARTYBOARD_LAUNCHER_ROMFS}"
         DEPENDS partyboard_switch_launcher "${PARTYBOARD_LAUNCHER_NACP}" "${PARTYBOARD_LAUNCHER_ICON}"
+                "${PARTYBOARD_LAUNCHER_ROMFS_STAMP}"
         VERBATIM
         COMMENT "Generating PartyBoard launcher NRO"
     )
@@ -109,6 +138,8 @@ find_library(PARTYBOARD_LAUNCHER_EGL EGL REQUIRED)
 find_library(PARTYBOARD_LAUNCHER_GLES GLESv2 REQUIRED)
 
 add_library(partyboard_launcher_core STATIC ${PARTYBOARD_LAUNCHER_CORE})
+get_filename_component(PARTYBOARD_RES "${CMAKE_CURRENT_SOURCE_DIR}/../../../res" ABSOLUTE)
+target_compile_definitions(partyboard_launcher_core PUBLIC PARTYBOARD_LAUNCHER_RES_DIR="${PARTYBOARD_RES}")
 target_include_directories(partyboard_launcher_core PUBLIC src)
 target_compile_options(partyboard_launcher_core PRIVATE ${PARTYBOARD_LAUNCHER_WARNINGS})
 target_link_libraries(partyboard_launcher_core PUBLIC
