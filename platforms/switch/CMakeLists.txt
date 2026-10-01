@@ -246,7 +246,7 @@ if(PARTYBOARD_SWITCH_AURORA_PROBE)
     target_compile_options(partyboard_switch_aurora_probe PRIVATE -Wall -Wextra -O2)
     target_link_options(partyboard_switch_aurora_probe PRIVATE -Wl,--gc-sections)
     target_link_libraries(partyboard_switch_aurora_probe PRIVATE
-        aurora::core aurora::gx aurora::main aurora::pad aurora::vi)
+        aurora::core aurora::gx aurora::main aurora::mtx aurora::pad aurora::vi)
 
     set(PARTYBOARD_SWITCH_AURORA_NACP "${CMAKE_CURRENT_BINARY_DIR}/partyboard-switch-aurora-probe.nacp")
     set(PARTYBOARD_SWITCH_AURORA_NRO  "${CMAKE_CURRENT_BINARY_DIR}/partyboard-switch-aurora-probe.nro")

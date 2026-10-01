@@ -1,3 +1,40 @@
+diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
+index 3f86df1..23e2b6f 100644
+--- a/lib/gfx/common.cpp
++++ b/lib/gfx/common.cpp
+@@ -835,7 +835,14 @@ PipelineRef pipeline_ref(const rmlui::PipelineConfig& config) {
+ 
+ void initialize() {
+   g_frameIndex = 0;
+-  render_worker::initialize();
++  // Dawn's OpenGL backends keep their EGL context current on the thread that
++  // created the device; another thread cannot make it current
++  // (EGL_BAD_ACCESS, device lost). As for the pipeline cache's worker, the
++  // render worker stays off there and its work runs on the calling thread.
++  if (webgpu::g_backendType != wgpu::BackendType::OpenGL &&
++      webgpu::g_backendType != wgpu::BackendType::OpenGLES) {
++    render_worker::initialize();
++  }
+   // render_worker::set_event_pump([] {
+   //   if (g_instance) {
+   //     g_instance.ProcessEvents();
+diff --git a/lib/gfx/render_worker.cpp b/lib/gfx/render_worker.cpp
+index 5da8808..48041a1 100644
+--- a/lib/gfx/render_worker.cpp
++++ b/lib/gfx/render_worker.cpp
+@@ -267,7 +267,11 @@ void synchronize() {
+   sync->cv.wait(lock, [&] { return sync->complete; });
+ }
+ 
+-bool is_worker_thread() noexcept { return g_workerThreadId == std::this_thread::get_id(); }
++// Without a worker (the OpenGL backends, see gfx::initialize) its work runs on
++// the calling thread, which then is the render worker.
++bool is_worker_thread() noexcept {
++  return !g_running.load(std::memory_order_acquire) || g_workerThreadId == std::this_thread::get_id();
++}
+ 
+ bool is_idle() noexcept { return g_pendingItems.load(std::memory_order_acquire) == 0; }
+ 
 diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
 index 7fb3e4e..b3f53c4 100644
 --- a/lib/webgpu/gpu.cpp

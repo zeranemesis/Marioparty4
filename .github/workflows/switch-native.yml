@@ -278,3 +278,50 @@ jobs:
           name: partyboard-switch-game
           path: build/switch-libnx-game/platforms/switch/partyboard.nro
           if-no-files-found: error
+
+  # The Switch renders through Dawn's OpenGL ES backend at the Compatibility
+  # feature level. The same Aurora probe, built for Linux, runs that
+  # configuration on Mesa (llvmpipe) under Xvfb, with Vulkan (lavapipe) as the
+  # reference: no Aurora error, 300 frames each, and a screenshot of both.
+  aurora-host:
+    name: Aurora on OpenGL ES (Mesa)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Apply PartyBoard Aurora patches
+        shell: bash
+        run: |
+          for patch in aurora-partyboard aurora-render-fixes aurora-android-surface-deadlock \
+                       aurora-mobile-one-local-player aurora-render-worker-idle aurora-quest-stereo \
+                       aurora-android-surface-generation aurora-quest-quality aurora-switch; do
+            git -C extern/aurora apply --check "../../patches/$patch.patch"
+            git -C extern/aurora apply "../../patches/$patch.patch"
+          done
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libx11-dev libxext-dev xvfb imagemagick \
+            libegl-dev libgles-dev libegl-mesa0 libgl1-mesa-dri mesa-vulkan-drivers \
+            zlib1g-dev libpng-dev libfreetype-dev libzstd-dev
+
+      - name: Build
+        run: |
+          cmake -S platforms/switch/aurora/host -B build/aurora-host -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build/aurora-host --target aurora_probe --parallel 4
+
+      - name: Run on OpenGL ES and Vulkan
+        run: platforms/switch/aurora/host/run-probe.sh build/aurora-host build/aurora-probe-shots
+
+      - name: Upload screenshots and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: partyboard-aurora-probe-host
+          path: build/aurora-probe-shots/
+          if-no-files-found: warn

@@ -150,9 +150,13 @@ cmake --preset switch-libnx-aurora-probe
 cmake --build build/switch-libnx-aurora-probe --target partyboard_switch_aurora_nro --parallel
 ```
 
-`partyboard-switch-aurora-probe.nro` is Aurora's own `simple` example
-(initialise, then clear the screen through `GXSetCopyClear` every frame) with
-a cycling colour; **+** quits. `aurora/SwitchAurora.cmake` builds
+`partyboard-switch-aurora-probe.nro` (`source/aurora_probe.c`) uses Aurora
+the way the game does: `GXInit`, then each frame clears the EFB to a cycling
+colour and draws, under an orthographic 640x480 projection, a spinning
+triangle with per-vertex colours (`GX_PASSCLR`) and a tinted quad textured
+with an I8 checkerboard in GameCube tile layout (`GX_MODULATE`). A black
+screen, a frozen frame or a missing shape points at the failing stage; **+**
+quits. `aurora/SwitchAurora.cmake` builds
 `extern/aurora` against the Switch Dawn and SDL3 and devkitPro's portlibs
 (zlib, libpng, FreeType, zstd). What the Switch needs on top:
 
@@ -162,12 +166,32 @@ a cycling colour; **+** quits. `aurora/SwitchAurora.cmake` builds
   `Compatibility` feature level on OpenGL and OpenGL ES, the only level Dawn
   offers there; Aurora asked for `Core`, which finds no adapter on those
   backends (the OpenGL ES fallback on other platforms has the same problem).
+  Dawn's OpenGL backends keep their EGL context current on the thread that
+  created the device, and another thread cannot take it (`EGL_BAD_ACCESS`,
+  device lost): on those backends Aurora's render worker stays off and its
+  work runs on the game thread, as its pipeline-cache worker already did.
 - SQLite (Aurora's pipeline caches) is built with `SQLITE_OS_OTHER` and
   `aurora/sqlite_vfs_switch.c`: SQLite's demo VFS for embedded systems plus
   pthread mutexes, since its unix VFS needs `ioctl`, `mmap` and file locks.
 - Tracy's thread-id and login lookups get a libnx case
   (`aurora/PatchTracyForSwitch.cmake`), and Dear ImGui's fork/exec "open in
   shell" is compiled out.
+
+The same probe builds for Linux (`aurora/host/`) to check that renderer
+configuration without a console: Dawn's OpenGL ES backend at the
+`Compatibility` level on Mesa's llvmpipe, with Vulkan (lavapipe) as the
+reference. CI's "Aurora on OpenGL ES (Mesa)" job runs both for 300 frames,
+fails on any Aurora error, and uploads a screenshot of each; locally:
+
+```sh
+# extern/aurora carries the same patches as above.
+cmake -S platforms/switch/aurora/host -B build/aurora-host -G Ninja
+cmake --build build/aurora-host --target aurora_probe
+platforms/switch/aurora/host/run-probe.sh build/aurora-host build/aurora-probe-shots
+```
+
+`--backend vulkan` and `--frames N` select the backend and stop after N
+frames when running the probe by hand.
 
 ### The game
 
