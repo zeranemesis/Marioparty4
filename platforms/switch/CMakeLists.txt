@@ -14,6 +14,14 @@ find_program(PARTYBOARD_ELF2NRO elf2nro
 add_executable(partyboard_switch_probe
     source/main.cpp
     source/switch_pad.cpp
+
+    # First real Aurora compatibility-layer code compiled for ARM64/libnx.
+    ${CMAKE_SOURCE_DIR}/extern/aurora/lib/dolphin/mtx/mtx.c
+    ${CMAKE_SOURCE_DIR}/extern/aurora/lib/dolphin/mtx/mtxstack.c
+    ${CMAKE_SOURCE_DIR}/extern/aurora/lib/dolphin/mtx/mtxvec.c
+    ${CMAKE_SOURCE_DIR}/extern/aurora/lib/dolphin/mtx/mtx44.c
+    ${CMAKE_SOURCE_DIR}/extern/aurora/lib/dolphin/mtx/vec.c
+    ${CMAKE_SOURCE_DIR}/extern/aurora/lib/dolphin/mtx/quat.c
 )
 
 set_target_properties(partyboard_switch_probe PROPERTIES
