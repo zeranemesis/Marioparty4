@@ -22,3 +22,7 @@ uint32_t PartyBoardSwitch_FramebufferWidth();
 uint32_t PartyBoardSwitch_FramebufferHeight();
 
 bool PartyBoardSwitch_SwapBuffers();
+
+// Dawn's OpenGL backend refuses adapter discovery without robust-context
+// creation plus an EGL sync primitive. This checks those exact requirements.
+bool PartyBoardSwitch_EglHasDawnRequirements();
