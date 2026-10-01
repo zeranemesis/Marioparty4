@@ -193,4 +193,22 @@ if(NOT _swapchain_content MATCHES "GetEGLNativeWindow")
     file(WRITE "${_swapchain_cpp}" "${_swapchain_content}")
 endif()
 
+
+# newlib/libnx does not expose the non-standard isascii() helper used by one
+# Tint minifier path. Keep the exact semantic test inline and portable.
+set(_tint_text_generator "${DAWN_SOURCE_DIR}/src/tint/utils/text_generator/text_generator.cc")
+if(NOT EXISTS "${_tint_text_generator}")
+    message(FATAL_ERROR "Tint text generator source not found: ${_tint_text_generator}")
+endif()
+
+file(READ "${_tint_text_generator}" _tint_text_generator_content)
+if(_tint_text_generator_content MATCHES "!isascii\\(c\\)")
+    string(REPLACE
+        "!isascii(c)"
+        "(static_cast<unsigned char>(c) > 0x7f)"
+        _tint_text_generator_content "${_tint_text_generator_content}")
+    file(WRITE "${_tint_text_generator}" "${_tint_text_generator_content}")
+    message(STATUS "Patched Tint ASCII classification for libnx")
+endif()
+
 message(STATUS "Patched Dawn native EGL-window surface for libnx")
