@@ -26,9 +26,9 @@ set(PARTYBOARD_SWITCH TRUE CACHE BOOL "Build for Nintendo Switch/libnx" FORCE)
 set(PARTYBOARD_SWITCH_BOOTSTRAP TRUE CACHE BOOL "Build only the Switch bring-up target" FORCE)
 
 set(_PB_SWITCH_ARCH "-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft")
-set(CMAKE_C_FLAGS_INIT   "${_PB_SWITCH_ARCH} -fPIE")
-set(CMAKE_CXX_FLAGS_INIT "${_PB_SWITCH_ARCH} -fPIE")
-set(CMAKE_ASM_FLAGS_INIT "${_PB_SWITCH_ARCH} -fPIE")
+set(CMAKE_C_FLAGS_INIT   "${_PB_SWITCH_ARCH} -fPIE -D__SWITCH__")
+set(CMAKE_CXX_FLAGS_INIT "${_PB_SWITCH_ARCH} -fPIE -D__SWITCH__")
+set(CMAKE_ASM_FLAGS_INIT "${_PB_SWITCH_ARCH} -fPIE -D__SWITCH__")
 set(CMAKE_EXE_LINKER_FLAGS_INIT "-specs=${LIBNX}/switch.specs ${_PB_SWITCH_ARCH}")
 
 set(CMAKE_FIND_ROOT_PATH "${DEVKITA64}" "${LIBNX}" "${PORTLIBS}")
