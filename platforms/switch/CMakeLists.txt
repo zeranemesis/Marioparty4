@@ -149,6 +149,13 @@ if(PARTYBOARD_SWITCH_DAWN_PROBE)
     )
     FetchContent_MakeAvailable(partyboard_switch_dawn)
 
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}"
+                "-DDAWN_SOURCE_DIR=${partyboard_switch_dawn_SOURCE_DIR}"
+                -P "${CMAKE_SOURCE_DIR}/cmake/PatchDawnDependenciesForSwitch.cmake"
+        COMMAND_ERROR_IS_FATAL ANY
+    )
+
     if(NOT TARGET dawn::webgpu_dawn)
         message(FATAL_ERROR "Dawn probe configured but dawn::webgpu_dawn was not created")
     endif()
