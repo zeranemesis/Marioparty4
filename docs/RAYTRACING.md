@@ -3065,3 +3065,35 @@ telles quelles ; sur le plateau, 0 ; sur m423Dll, 1.
 - Les mini-jeux qui copient l'image pour un effet (m405, m410, m416, m417, m421,
   m427, m430, m440, m448) n'ont pas été revus un par un ; le code dit qu'ils
   n'ont pas de seconde caméra.
+
+## Upscaling : FSR 1 d'abord, et ce que demandent DLSS, XeSS et FSR 3 (1er octobre 2026)
+
+Trois SDK officiels sont téléchargés dans `extern/sdk/`, ignoré localement par
+git pour qu'aucun binaire ne parte dans un commit : NVIDIA Streamline v2.14.1
+(DLSS, DLSS Ray Reconstruction), Intel XeSS v3.0.2, AMD FidelityFX v2.3.0. Leurs
+licences ne sont pas acceptées à la place de l'utilisateur, et celles de NVIDIA
+encadrent la redistribution des DLL.
+
+**FSR 1 est en place.** C'est un agrandisseur spatial — douze texels de l'image
+telle qu'elle est, sans mouvement ni profondeur — donc il ne demande rien que le
+jeu ne donne déjà. Il vit dans la passe de rééchantillonnage d'aurora, réécrit en
+WGSL d'après `ffx_fsr1.h` (AMD, licence MIT) : EASU, qui filtre le long des
+arêtes, puis RCAS, qui accentue dans la limite du contraste local. Réglage
+« Upscaling » du menu vidéo, `video.upscaler` = 2 ; `AURORA_FSR_SHARPNESS` en
+stops, 0,2 par défaut comme chez AMD. Il n'agit que si la résolution interne est
+sous celle de la fenêtre : une image plus grande est réduite par le filtre
+d'aire, quoi qu'on choisisse.
+
+Vérifié à 640 × 480 interne dans une fenêtre 1280 × 960 : le shader compile,
+l'image est nette sur les arêtes. Ce n'est pas une comparaison sur une même
+frame — les deux captures ne tombent pas au même instant.
+
+**Sur cette machine l'upscaling ne rapporte pas de vitesse** : le jeu est rendu
+très au-dessus de la fenêtre et le tracé coûte 1,5 ms. Son intérêt est la
+qualité d'image et les cartes plus modestes.
+
+**DLSS, XeSS et FSR 3 sont temporels** et demandent trois choses que le jeu ne
+fournit pas : un vecteur de mouvement par pixel, la profondeur, et un décalage
+sous-pixel de la projection à chaque frame. Le mouvement de la caméra est déjà
+mesuré ; celui des objets, la profondeur partagée avec le périphérique D3D12 et
+le décalage restent à faire, et sont communs aux trois.

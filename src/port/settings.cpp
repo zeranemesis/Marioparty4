@@ -34,6 +34,7 @@ UserSettings g_userSettings = {
         .enableRayTracedShadows {"video.enableRayTracedShadows", true},
         .enableRayTracedReflections {"video.enableRayTracedReflections", true},
         .rayTracingQuality {"video.rayTracingQuality", 2},
+        .upscaler {"video.upscaler", 0},
     },
 
     .audio = {
@@ -125,6 +126,7 @@ void registerSettings() {
     Register(g_userSettings.video.enableRayTracedShadows);
     Register(g_userSettings.video.enableRayTracedReflections);
     Register(g_userSettings.video.rayTracingQuality);
+    Register(g_userSettings.video.upscaler);
 
     // Audio
     Register(g_userSettings.audio.masterVolume);

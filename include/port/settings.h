@@ -70,6 +70,9 @@ struct UserSettings {
         // the pass measured between 1.8 and 6.6 ms across real boards at the
         // middle level, so this is what a card with less headroom turns down.
         ConfigVar<int> rayTracingQuality;
+        // How the internal frame is fitted to the window: 0 bilinear, 1 area,
+        // 2 FSR 1. FSR 1 only acts when the internal frame is the smaller one.
+        ConfigVar<int> upscaler;
     } video;
 
     struct {

@@ -100,6 +100,21 @@ index e81b621..9e83421 100644
  if (AURORA_ENABLE_RMLUI)
      target_sources(aurora_gx PRIVATE
          lib/rmlui/pipeline.cpp
+diff --git a/include/aurora/aurora.h b/include/aurora/aurora.h
+index 9d22cc6..6fd260c 100644
+--- a/include/aurora/aurora.h
++++ b/include/aurora/aurora.h
+@@ -15,6 +15,10 @@ extern "C" {
+ typedef enum {
+   SAMPLER_BILINEAR,
+   SAMPLER_AREA,
++  // AMD FidelityFX Super Resolution 1.0: edge-adaptive upscaling, then a
++  // contrast-bounded sharpen. Used when the internal frame is smaller than the
++  // window; a larger one is reduced with SAMPLER_AREA, which is what it needs.
++  SAMPLER_FSR1,
+ } AuroraSampler;
+ 
+ typedef enum {
 diff --git a/include/aurora/gfx.h b/include/aurora/gfx.h
 index 61388d7..f49d92c 100644
 --- a/include/aurora/gfx.h
@@ -8306,7 +8321,7 @@ index 0000000..1cb65be
 +  gOutput[tid.xy] = float4(accumulated, variance);
 +}
 diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
-index a969465..88ca69a 100644
+index a969465..3c38c4a 100644
 --- a/lib/webgpu/gpu.cpp
 +++ b/lib/webgpu/gpu.cpp
 @@ -21,6 +21,23 @@
@@ -8333,7 +8348,29 @@ index a969465..88ca69a 100644
  #endif
  
  namespace aurora::gx {
-@@ -59,6 +76,8 @@ static wgpu::SurfaceCapabilities g_surfaceCapabilities;
+@@ -47,10 +64,21 @@ static wgpu::BindGroupLayout g_CopyBindGroupLayout;
+ wgpu::RenderPipeline g_CopyPipeline;
+ wgpu::BindGroup g_CopyBindGroup;
+ static AuroraSampler g_Resampler = SAMPLER_BILINEAR;
++// RCAS strength as the shader wants it. AURORA_FSR_SHARPNESS gives it in stops,
++// AMD's own unit: 0 is the sharpest, 2 the softest; 0.2 is AMD's default.
++static float g_fsrSharpness = [] {
++  const char* env = std::getenv("AURORA_FSR_SHARPNESS");
++  const float stops = env != nullptr ? std::clamp(static_cast<float>(std::atof(env)), 0.f, 2.f) : 0.2f;
++  return std::exp2(-stops);
++}();
+ static wgpu::BindGroupLayout g_ResampleBindGroupLayout;
+ static wgpu::RenderPipeline g_ResamplePipeline;
+ static wgpu::Buffer g_ResampleUniformBuffer;
+ static TextureWithSampler g_resampledFrameBuffer;
++// FSR 1 runs the resample shader twice in one encoder, EASU then RCAS. A queue
++// write lands before either pass executes, so each pass has its own uniforms.
++static wgpu::Buffer g_SharpenUniformBuffer;
++static TextureWithSampler g_sharpenedFrameBuffer;
+ 
+ static wgpu::Adapter g_adapter;
+ wgpu::Instance g_instance;
+@@ -59,6 +87,8 @@ static wgpu::SurfaceCapabilities g_surfaceCapabilities;
  bool g_bcTexturesSupported = false;
  bool g_astcTexturesSupported = false;
  bool g_textureComponentSwizzleSupported = false;
@@ -8342,7 +8379,198 @@ index a969465..88ca69a 100644
  static std::atomic_bool g_shuttingDown = false;
  
  namespace {
-@@ -177,13 +196,15 @@ wgpu::PresentMode best_present_mode(bool vsync) {
+@@ -67,13 +97,20 @@ struct ResampleUniformBlock {
+   uint32_t samplerMode = 0;
+   float frameWidth = 0.f;
+   float frameHeight = 0.f;
++  // RCAS strength, exp2(-stops): 1 is the sharpest, AMD's default is 0.2 stops.
++  float sharpness = 0.f;
+ };
+ 
++// Modes of the resample shader that have no AuroraSampler of their own.
++constexpr uint32_t kResampleEasu = 2;
++constexpr uint32_t kResampleRcas = 3;
++
+ constexpr std::string_view resampleShaderSource = R"(
+ struct Uniforms {
+     sampler_mode: u32,
+     frame_width: f32,
+     frame_height: f32,
++    sharpness: f32,
+ };
+ 
+ struct VertexOutput {
+@@ -153,11 +190,169 @@ fn sample_area(frag_position: vec4<f32>) -> vec4<f32> {
+ 
+ // END AREA SAMPLER REGION
+ 
++// BEGIN FSR 1 REGION
++//
++// FidelityFX Super Resolution 1.0, after AMD's ffx_fsr1.h (MIT licence):
++// Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
++// Permission is hereby granted, free of charge, to any person obtaining a copy
++// of this software and associated documentation files (the "Software"), to deal
++// in the Software without restriction, including without limitation the rights
++// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++// copies of the Software, and to permit persons to whom the Software is
++// furnished to do so, subject to the following conditions: the above copyright
++// notice and this permission notice shall be included in all copies or
++// substantial portions of the Software. THE SOFTWARE IS PROVIDED "AS IS",
++// WITHOUT WARRANTY OF ANY KIND.
++//
++// EASU reads twelve texels around the output pixel, finds the direction and
++// sharpness of the edge they hold, and filters along it with a lobe that
++// narrows across it. RCAS then sharpens, bounded by the local contrast so that
++// it cannot ring.
++
++fn fsr_luma(c: vec3<f32>) -> f32 {
++    return c.b * 0.5 + (c.r * 0.5 + c.g);
++}
++
++struct EasuAccum {
++    dir: vec2<f32>,
++    len: f32,
++};
++
++fn easu_set(acc: EasuAccum, w: f32, lA: f32, lB: f32, lC: f32, lD: f32, lE: f32) -> EasuAccum {
++    var out = acc;
++    let dc = lD - lC;
++    let cb = lC - lB;
++    let dirX = lD - lB;
++    var lenX = max(abs(dc), abs(cb));
++    lenX = clamp(abs(dirX) / max(lenX, 1.0e-6), 0.0, 1.0);
++    lenX = lenX * lenX;
++    let ec = lE - lC;
++    let ca = lC - lA;
++    let dirY = lE - lA;
++    var lenY = max(abs(ec), abs(ca));
++    lenY = clamp(abs(dirY) / max(lenY, 1.0e-6), 0.0, 1.0);
++    lenY = lenY * lenY;
++    out.dir = out.dir + vec2<f32>(dirX, dirY) * w;
++    out.len = out.len + (lenX + lenY) * w;
++    return out;
++}
++
++fn easu_tap(acc: vec4<f32>, off: vec2<f32>, dir: vec2<f32>, len2: vec2<f32>, lob: f32, clp: f32,
++            c: vec3<f32>) -> vec4<f32> {
++    var v = vec2<f32>(off.x * dir.x + off.y * dir.y, off.x * (-dir.y) + off.y * dir.x);
++    v = v * len2;
++    let d2 = min(dot(v, v), clp);
++    var wB = 0.4 * d2 - 1.0;
++    var wA = lob * d2 - 1.0;
++    wB = wB * wB;
++    wA = wA * wA;
++    wB = 1.5625 * wB - 0.5625;
++    let w = wB * wA;
++    return acc + vec4<f32>(c * w, w);
++}
++
++fn fsr_easu(frag_position: vec4<f32>) -> vec4<f32> {
++    let source_size = vec2<f32>(textureDimensions(t));
++    let target_size = max(vec2<f32>(uniforms.frame_width, uniforms.frame_height), vec2<f32>(1.0, 1.0));
++    var pp = frag_position.xy * (source_size / target_size) - vec2<f32>(0.5, 0.5);
++    let fp = floor(pp);
++    pp = pp - fp;
++    let ip = vec2<i32>(fp);
++
++    //    b c
++    //  e f g h
++    //  i j k l
++    //    n o
++    let b = sample_by_pixel(ip + vec2<i32>(0, -1)).rgb;
++    let c = sample_by_pixel(ip + vec2<i32>(1, -1)).rgb;
++    let e = sample_by_pixel(ip + vec2<i32>(-1, 0)).rgb;
++    let f = sample_by_pixel(ip + vec2<i32>(0, 0)).rgb;
++    let g = sample_by_pixel(ip + vec2<i32>(1, 0)).rgb;
++    let h = sample_by_pixel(ip + vec2<i32>(2, 0)).rgb;
++    let i = sample_by_pixel(ip + vec2<i32>(-1, 1)).rgb;
++    let j = sample_by_pixel(ip + vec2<i32>(0, 1)).rgb;
++    let k = sample_by_pixel(ip + vec2<i32>(1, 1)).rgb;
++    let l = sample_by_pixel(ip + vec2<i32>(2, 1)).rgb;
++    let n = sample_by_pixel(ip + vec2<i32>(0, 2)).rgb;
++    let o = sample_by_pixel(ip + vec2<i32>(1, 2)).rgb;
++
++    let bL = fsr_luma(b); let cL = fsr_luma(c); let eL = fsr_luma(e); let fL = fsr_luma(f);
++    let gL = fsr_luma(g); let hL = fsr_luma(h); let iL = fsr_luma(i); let jL = fsr_luma(j);
++    let kL = fsr_luma(k); let lL = fsr_luma(l); let nL = fsr_luma(n); let oL = fsr_luma(o);
++
++    var acc = EasuAccum(vec2<f32>(0.0, 0.0), 0.0);
++    acc = easu_set(acc, (1.0 - pp.x) * (1.0 - pp.y), bL, eL, fL, gL, jL);
++    acc = easu_set(acc, pp.x * (1.0 - pp.y), cL, fL, gL, hL, kL);
++    acc = easu_set(acc, (1.0 - pp.x) * pp.y, fL, iL, jL, kL, nL);
++    acc = easu_set(acc, pp.x * pp.y, gL, jL, kL, lL, oL);
++
++    var dir = acc.dir;
++    var len = acc.len;
++    let dirR = dot(dir, dir);
++    if (dirR < 1.0 / 32768.0) {
++        dir = vec2<f32>(1.0, 0.0);
++    } else {
++        dir = dir * inverseSqrt(dirR);
++    }
++    len = len * 0.5;
++    len = len * len;
++    let stretch = dot(dir, dir) / max(abs(dir.x), abs(dir.y));
++    let len2 = vec2<f32>(1.0 + (stretch - 1.0) * len, 1.0 - 0.5 * len);
++    let lob = 0.5 + ((0.25 - 0.04) - 0.5) * len;
++    let clp = 1.0 / lob;
++
++    let min4 = min(min(f, g), min(j, k));
++    let max4 = max(max(f, g), max(j, k));
++
++    var a = vec4<f32>(0.0, 0.0, 0.0, 0.0);
++    a = easu_tap(a, vec2<f32>(0.0, -1.0) - pp, dir, len2, lob, clp, b);
++    a = easu_tap(a, vec2<f32>(1.0, -1.0) - pp, dir, len2, lob, clp, c);
++    a = easu_tap(a, vec2<f32>(-1.0, 1.0) - pp, dir, len2, lob, clp, i);
++    a = easu_tap(a, vec2<f32>(0.0, 1.0) - pp, dir, len2, lob, clp, j);
++    a = easu_tap(a, vec2<f32>(0.0, 0.0) - pp, dir, len2, lob, clp, f);
++    a = easu_tap(a, vec2<f32>(-1.0, 0.0) - pp, dir, len2, lob, clp, e);
++    a = easu_tap(a, vec2<f32>(1.0, 1.0) - pp, dir, len2, lob, clp, k);
++    a = easu_tap(a, vec2<f32>(2.0, 1.0) - pp, dir, len2, lob, clp, l);
++    a = easu_tap(a, vec2<f32>(2.0, 0.0) - pp, dir, len2, lob, clp, h);
++    a = easu_tap(a, vec2<f32>(1.0, 0.0) - pp, dir, len2, lob, clp, g);
++    a = easu_tap(a, vec2<f32>(1.0, 2.0) - pp, dir, len2, lob, clp, o);
++    a = easu_tap(a, vec2<f32>(0.0, 2.0) - pp, dir, len2, lob, clp, n);
++    let colour = min(max4, max(min4, a.rgb / a.w));
++    return vec4<f32>(colour, 1.0);
++}
++
++fn fsr_rcas(frag_position: vec4<f32>) -> vec4<f32> {
++    let sp = vec2<i32>(frag_position.xy);
++    //    b
++    //  d e f
++    //    h
++    let b = sample_by_pixel(sp + vec2<i32>(0, -1)).rgb;
++    let d = sample_by_pixel(sp + vec2<i32>(-1, 0)).rgb;
++    let e = sample_by_pixel(sp).rgb;
++    let f = sample_by_pixel(sp + vec2<i32>(1, 0)).rgb;
++    let h = sample_by_pixel(sp + vec2<i32>(0, 1)).rgb;
++    let mn4 = min(min(b, d), min(f, h));
++    let mx4 = max(max(b, d), max(f, h));
++    let hitMin = min(mn4, e) / max(4.0 * mx4, vec3<f32>(1.0e-6));
++    let hitMax = (vec3<f32>(1.0) - max(mx4, e)) / min(4.0 * mn4 - vec3<f32>(4.0), vec3<f32>(-1.0e-6));
++    let lobeRGB = max(-hitMin, hitMax);
++    // 0.1875 is the limit past which the filter would ring.
++    let lobe = max(-0.1875, min(max(lobeRGB.r, max(lobeRGB.g, lobeRGB.b)), 0.0)) * uniforms.sharpness;
++    let colour = (lobe * (b + d + h + f) + e) / (4.0 * lobe + 1.0);
++    return vec4<f32>(colour, 1.0);
++}
++
++// END FSR 1 REGION
++
+ @fragment
+ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+     var color = textureSample(t, s, in.uv);
+     if (uniforms.sampler_mode == 1u) {
+         color = sample_area(in.position);
++    } else if (uniforms.sampler_mode == 2u) {
++        color = fsr_easu(in.position);
++    } else if (uniforms.sampler_mode == 3u) {
++        color = fsr_rcas(in.position);
+     }
+     return vec4(color.rgb, 1.0);
+ }
+@@ -177,13 +372,15 @@ wgpu::PresentMode best_present_mode(bool vsync) {
        return wgpu::PresentMode::FifoRelaxed;
      }
    } else {
@@ -8362,7 +8590,15 @@ index a969465..88ca69a 100644
    }
    return wgpu::PresentMode::Fifo;
  }
-@@ -383,6 +404,14 @@ void create_copy_pipeline() {
+@@ -291,6 +488,7 @@ void set_resampler(AuroraSampler sampler) noexcept {
+   switch (sampler) {
+   case SAMPLER_AREA:
+   case SAMPLER_BILINEAR:
++  case SAMPLER_FSR1:
+     g_Resampler = sampler;
+     return;
+   default:
+@@ -383,6 +581,14 @@ void create_copy_pipeline() {
  var efb_sampler: sampler;
  @group(0) @binding(1)
  var efb_texture: texture_2d<f32>;
@@ -8377,7 +8613,7 @@ index a969465..88ca69a 100644
  
  struct VertexOutput {
      @builtin(position) pos: vec4<f32>,
-@@ -408,10 +437,37 @@ fn vs_main(@builtin(vertex_index) vtxIdx: u32) -> VertexOutput {
+@@ -408,10 +614,37 @@ fn vs_main(@builtin(vertex_index) vtxIdx: u32) -> VertexOutput {
      return out;
  }
  
@@ -8416,7 +8652,7 @@ index a969465..88ca69a 100644
  }
  )""";
    const wgpu::ShaderModuleDescriptor moduleDescriptor{
-@@ -447,6 +503,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+@@ -447,6 +680,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                    .viewDimension = wgpu::TextureViewDimension::e2D,
                },
        },
@@ -8443,11 +8679,13 @@ index a969465..88ca69a 100644
    };
    const wgpu::BindGroupLayoutDescriptor bindGroupLayoutDescriptor{
        .entryCount = bindGroupLayoutEntries.size(),
-@@ -563,7 +639,67 @@ void create_resample_pipeline() {
+@@ -561,9 +814,70 @@ void create_resample_pipeline() {
+       .size = AURORA_ALIGN(sizeof(ResampleUniformBlock), 16),
+   };
    g_ResampleUniformBuffer = g_device.CreateBuffer(&uniformBufferDescriptor);
- }
- 
--wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source) {
++  g_SharpenUniformBuffer = g_device.CreateBuffer(&uniformBufferDescriptor);
++}
++
 +// 1x1 stand-ins so the copy pass keeps one pipeline whether or not ray tracing
 +// is producing its textures. White for the multiplicative AO term, transparent
 +// black for the reflection, so both are no-ops.
@@ -8475,8 +8713,9 @@ index a969465..88ca69a 100644
 +
 +  view = texture.CreateView();
 +  return view;
-+}
-+
+ }
+ 
+-wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source) {
 +static wgpu::TextureView ao_fallback_view() {
 +  static wgpu::Texture texture;
 +  static wgpu::TextureView view;
@@ -8512,7 +8751,7 @@ index a969465..88ca69a 100644
    const std::array bindGroupEntries{
        wgpu::BindGroupEntry{
            .binding = 0,
-@@ -573,6 +709,14 @@ wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source) {
+@@ -573,6 +887,14 @@ wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source) {
            .binding = 1,
            .textureView = source.view,
        },
@@ -8527,7 +8766,92 @@ index a969465..88ca69a 100644
    };
    const wgpu::BindGroupDescriptor bindGroupDescriptor{
        .layout = g_CopyBindGroupLayout,
-@@ -824,7 +968,24 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -582,27 +904,22 @@ wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source) {
+   return g_device.CreateBindGroup(&bindGroupDescriptor);
+ }
+ 
+-const TextureWithSampler& resample_present_source(const wgpu::CommandEncoder& encoder, const Viewport& viewport) {
+-  const auto& source = present_source();
+-  const uint32_t width = viewport_extent(viewport.width);
+-  const uint32_t height = viewport_extent(viewport.height);
+-  if (!g_resampledFrameBuffer.view || g_resampledFrameBuffer.size.width != width ||
+-      g_resampledFrameBuffer.size.height != height || g_resampledFrameBuffer.format != source.format) {
+-    g_resampledFrameBuffer = create_render_texture(width, height, false);
+-  }
+-
++static void run_resample_pass(const wgpu::CommandEncoder& encoder, const TextureWithSampler& source,
++                              const TextureWithSampler& target, const wgpu::Buffer& uniforms, uint32_t mode,
++                              uint32_t width, uint32_t height, const char* label) {
+   const ResampleUniformBlock uniform{
+-      .samplerMode = sampler_mode(g_Resampler),
++      .samplerMode = mode,
+       .frameWidth = static_cast<float>(width),
+       .frameHeight = static_cast<float>(height),
++      .sharpness = g_fsrSharpness,
+   };
+   ASSERT(gfx::render_worker::is_worker_thread(), "Present resample queue write must run on the render worker");
+-  g_queue.WriteBuffer(g_ResampleUniformBuffer, 0, &uniform, sizeof(uniform));
++  g_queue.WriteBuffer(uniforms, 0, &uniform, sizeof(uniform));
+ 
+   const std::array bindGroupEntries{
+       wgpu::BindGroupEntry{
+           .binding = 0,
+-          .buffer = g_ResampleUniformBuffer,
++          .buffer = uniforms,
+           .size = AURORA_ALIGN(sizeof(ResampleUniformBlock), 16),
+       },
+       wgpu::BindGroupEntry{
+@@ -623,13 +940,13 @@ const TextureWithSampler& resample_present_source(const wgpu::CommandEncoder& en
+ 
+   const std::array attachments{
+       wgpu::RenderPassColorAttachment{
+-          .view = g_resampledFrameBuffer.view,
++          .view = target.view,
+           .loadOp = wgpu::LoadOp::Clear,
+           .storeOp = wgpu::StoreOp::Store,
+       },
+   };
+   const wgpu::RenderPassDescriptor renderPassDescriptor{
+-      .label = "Present resample render pass",
++      .label = label,
+       .colorAttachmentCount = attachments.size(),
+       .colorAttachments = attachments.data(),
+   };
+@@ -639,7 +956,33 @@ const TextureWithSampler& resample_present_source(const wgpu::CommandEncoder& en
+   pass.SetViewport(0.f, 0.f, static_cast<float>(width), static_cast<float>(height), 0.f, 1.f);
+   pass.Draw(3);
+   pass.End();
++}
+ 
++const TextureWithSampler& resample_present_source(const wgpu::CommandEncoder& encoder, const Viewport& viewport) {
++  const auto& source = present_source();
++  const uint32_t width = viewport_extent(viewport.width);
++  const uint32_t height = viewport_extent(viewport.height);
++  const auto fit = [&](TextureWithSampler& buffer) {
++    if (!buffer.view || buffer.size.width != width || buffer.size.height != height || buffer.format != source.format) {
++      buffer = create_render_texture(width, height, false);
++    }
++  };
++  fit(g_resampledFrameBuffer);
++
++  // FSR 1 enlarges; it has nothing to offer a frame that is being reduced, and
++  // there the area filter is the one that does not alias.
++  const bool upscaling = source.size.width < width || source.size.height < height;
++  if (g_Resampler == SAMPLER_FSR1 && upscaling) {
++    fit(g_sharpenedFrameBuffer);
++    run_resample_pass(encoder, source, g_resampledFrameBuffer, g_ResampleUniformBuffer, kResampleEasu, width, height,
++                      "FSR 1 EASU pass");
++    run_resample_pass(encoder, g_resampledFrameBuffer, g_sharpenedFrameBuffer, g_SharpenUniformBuffer, kResampleRcas,
++                      width, height, "FSR 1 RCAS pass");
++    return g_sharpenedFrameBuffer;
++  }
++  const uint32_t mode = g_Resampler == SAMPLER_FSR1 ? sampler_mode(SAMPLER_AREA) : sampler_mode(g_Resampler);
++  run_resample_pass(encoder, source, g_resampledFrameBuffer, g_ResampleUniformBuffer, mode, width, height,
++                    "Present resample render pass");
+   return g_resampledFrameBuffer;
+ }
+ 
+@@ -824,7 +1167,24 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
          }
          requiredFeatures.push_back(feature);
        }
@@ -8552,7 +8876,7 @@ index a969465..88ca69a 100644
  #ifdef WEBGPU_DAWN
      wgpu::DawnCacheDeviceDescriptor cacheDescriptor({
          .isolationKey = nullptr,
-@@ -919,6 +1080,27 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -919,6 +1279,27 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
    }
    g_queue = g_device.GetQueue();
  
@@ -8580,7 +8904,7 @@ index a969465..88ca69a 100644
    const wgpu::Status status = g_surface.GetCapabilities(g_adapter, &g_surfaceCapabilities);
    if (status != wgpu::Status::Success) {
      Log.error("Failed to get surface capabilities: {}", magic_enum::enum_name(status));
-@@ -962,6 +1144,9 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -962,12 +1343,17 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
  void shutdown() {
    g_shuttingDown = true;
    gfx::gpu_synchronize();
@@ -8590,7 +8914,15 @@ index a969465..88ca69a 100644
    g_CopyBindGroupLayout = {};
    g_CopyPipeline = {};
    g_CopyBindGroup = {};
-@@ -1043,9 +1228,56 @@ void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, ui
+   g_ResampleBindGroupLayout = {};
+   g_ResamplePipeline = {};
+   g_ResampleUniformBuffer = {};
++  g_SharpenUniformBuffer = {};
++  g_sharpenedFrameBuffer = {};
+   g_resampledFrameBuffer = {};
+   g_frameBuffer = {};
+   g_frameBufferResolved = {};
+@@ -1043,9 +1429,56 @@ void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, ui
    g_depthBuffer = create_depth_texture(width, height);
    g_CopyBindGroup = create_copy_bind_group(present_source());
  }

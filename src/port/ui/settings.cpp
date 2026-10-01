@@ -44,6 +44,7 @@ namespace partyboard::ui {
 // Ray tracing quality levels; the order matches kQualityLevels in aurora's
 // rt_capture.cpp, and High is what the pass did before the setting existed.
 constexpr const char *kRayTracingQualityNames[] = { "Low", "Medium", "High", "Ultra" };
+constexpr const char *kUpscalerNames[] = { "Bilinear", "Area", "FSR 1" };
 namespace {
 
     struct LanguageChoice {
@@ -524,6 +525,34 @@ SettingsWindow::SettingsWindow(bool prelaunch)
                              "Measured at 1.1 to 2.1 ms a frame at High on boards and mini-games with an RTX 5090, "
                              "so lower this first if the game does not hold its frame rate. Has no effect without a "
                              "Windows PC and a graphics card that supports DirectX Raytracing.");
+            });
+        leftPane.register_control(leftPane.add_select_button({
+                                      .key = "Upscaling",
+                                      .getValue = [] {
+                                          return Rml::String { kUpscalerNames[std::clamp(
+                                              getSettings().video.upscaler.getValue(), 0, 2)] };
+                                      },
+                                      .isModified = [] {
+                                          return getSettings().video.upscaler.getValue()
+                                              != getSettings().video.upscaler.getDefaultValue();
+                                      },
+                                  }),
+            rightPane, [](Pane &pane) {
+                for (int mode = 0; mode < 3; ++mode) {
+                    pane.add_button({
+                                        .text = Rml::String { kUpscalerNames[mode] },
+                                        .isSelected = [mode] { return getSettings().video.upscaler.getValue() == mode; },
+                                    })
+                        .on_pressed([mode] {
+                            getSettings().video.upscaler.setValue(mode);
+                            aurora_set_resampler(static_cast<AuroraSampler>(mode));
+                            config::Save();
+                        });
+                }
+                pane.add_rml("<br/>How the internal frame is fitted to the window. FSR 1 (AMD FidelityFX Super "
+                             "Resolution 1.0) enlarges a smaller frame along its edges and sharpens it; it only acts "
+                             "when Internal Resolution is below the window's, and a larger frame is reduced with the "
+                             "area filter whatever is chosen here.");
             });
         leftPane.register_control(leftPane.add_select_button({
                                       .key = "Frame Rate",
