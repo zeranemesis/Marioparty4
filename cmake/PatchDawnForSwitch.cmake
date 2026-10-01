@@ -71,3 +71,126 @@ if(NOT _dynamic_content MATCHES "Dynamic loading is unavailable on libnx")
     file(WRITE "${_dynamic}" "${_dynamic_content}")
     message(STATUS "Patched Dawn DynamicLib for external EGL/libnx")
 endif()
+
+
+# Add an opaque EGL-native-window surface path. This avoids adding a new
+# generated WebGPU sType: PartyBoard creates the surface through Dawn's native
+# OpenGL extension, and the existing SwapChainEGL owns presentation from there.
+set(_surface_h "${DAWN_SOURCE_DIR}/src/dawn/native/Surface.h")
+set(_surface_cpp "${DAWN_SOURCE_DIR}/src/dawn/native/Surface.cpp")
+set(_opengl_h "${DAWN_SOURCE_DIR}/include/dawn/native/OpenGLBackend.h")
+set(_opengl_cpp "${DAWN_SOURCE_DIR}/src/dawn/native/opengl/OpenGLBackend.cpp")
+set(_swapchain_cpp "${DAWN_SOURCE_DIR}/src/dawn/native/opengl/SwapChainEGL.cpp")
+
+foreach(_required IN ITEMS "${_surface_h}" "${_surface_cpp}" "${_opengl_h}" "${_opengl_cpp}" "${_swapchain_cpp}")
+    if(NOT EXISTS "${_required}")
+        message(FATAL_ERROR "Required Dawn surface source not found: ${_required}")
+    endif()
+endforeach()
+
+file(READ "${_surface_h}" _surface_h_content)
+if(NOT _surface_h_content MATCHES "EGLNativeWindow")
+    string(REPLACE
+        "    static Ref<Surface> MakeError(InstanceBase* instance);"
+        "    static Ref<Surface> MakeError(InstanceBase* instance);\n    static Ref<Surface> CreateEGLNativeWindow(InstanceBase* instance, void* window);"
+        _surface_h_content "${_surface_h_content}")
+
+    string(REPLACE
+        "        AndroidWindow,\n        MetalLayer,"
+        "        AndroidWindow,\n        EGLNativeWindow,\n        MetalLayer,"
+        _surface_h_content "${_surface_h_content}")
+
+    string(REPLACE
+        "    void* GetAndroidNativeWindow() const;"
+        "    void* GetAndroidNativeWindow() const;\n\n    // Valid to call if the type is EGLNativeWindow\n    void* GetEGLNativeWindow() const;"
+        _surface_h_content "${_surface_h_content}")
+
+    string(REPLACE
+        "    Surface(InstanceBase* instance, ErrorMonad::ErrorTag tag);"
+        "    Surface(InstanceBase* instance, ErrorMonad::ErrorTag tag);\n    Surface(InstanceBase* instance, void* eglNativeWindow);"
+        _surface_h_content "${_surface_h_content}")
+
+    string(REPLACE
+        "    // ANativeWindow\n    raw_ptr<void> mAndroidNativeWindow = nullptr;"
+        "    // ANativeWindow\n    raw_ptr<void> mAndroidNativeWindow = nullptr;\n\n    // Opaque EGLNativeWindowType supplied by PartyBoard/libnx.\n    raw_ptr<void> mEGLNativeWindow = nullptr;"
+        _surface_h_content "${_surface_h_content}")
+
+    if(NOT _surface_h_content MATCHES "CreateEGLNativeWindow")
+        message(FATAL_ERROR "Failed to patch Dawn Surface.h for EGL native window")
+    endif()
+    file(WRITE "${_surface_h}" "${_surface_h_content}")
+endif()
+
+file(READ "${_surface_cpp}" _surface_cpp_content)
+if(NOT _surface_cpp_content MATCHES "CreateEGLNativeWindow")
+    string(REPLACE
+        "        case Surface::Type::AndroidWindow:\n            s->Append(\"AndroidWindow\");\n            break;"
+        "        case Surface::Type::AndroidWindow:\n            s->Append(\"AndroidWindow\");\n            break;\n        case Surface::Type::EGLNativeWindow:\n            s->Append(\"EGLNativeWindow\");\n            break;"
+        _surface_cpp_content "${_surface_cpp_content}")
+
+    string(REPLACE
+        "Ref<Surface> Surface::MakeError(InstanceBase* instance) {\n    return AcquireRef(new Surface(instance, ErrorMonad::kError));\n}"
+        "Ref<Surface> Surface::MakeError(InstanceBase* instance) {\n    return AcquireRef(new Surface(instance, ErrorMonad::kError));\n}\n\n// static\nRef<Surface> Surface::CreateEGLNativeWindow(InstanceBase* instance, void* window) {\n    DAWN_CHECK(window != nullptr);\n    return AcquireRef(new Surface(instance, window));\n}"
+        _surface_cpp_content "${_surface_cpp_content}")
+
+    string(REPLACE
+        "Surface::Surface(InstanceBase* instance, ErrorTag tag) : ErrorMonad(tag), mInstance(instance) {}"
+        "Surface::Surface(InstanceBase* instance, ErrorTag tag) : ErrorMonad(tag), mInstance(instance) {}\n\nSurface::Surface(InstanceBase* instance, void* eglNativeWindow)\n    : ErrorMonad(),\n      mInstance(instance),\n      mCapabilityCache(std::make_unique<AdapterSurfaceCapCache>()),\n      mType(Type::EGLNativeWindow),\n      mEGLNativeWindow(eglNativeWindow) {}"
+        _surface_cpp_content "${_surface_cpp_content}")
+
+    string(REPLACE
+        "void* Surface::GetAndroidNativeWindow() const {\n    DAWN_CHECK(!IsError());\n    DAWN_CHECK(mType == Type::AndroidWindow);\n    return mAndroidNativeWindow;\n}"
+        "void* Surface::GetAndroidNativeWindow() const {\n    DAWN_CHECK(!IsError());\n    DAWN_CHECK(mType == Type::AndroidWindow);\n    return mAndroidNativeWindow;\n}\n\nvoid* Surface::GetEGLNativeWindow() const {\n    DAWN_CHECK(!IsError());\n    DAWN_CHECK(mType == Type::EGLNativeWindow);\n    return mEGLNativeWindow;\n}"
+        _surface_cpp_content "${_surface_cpp_content}")
+
+    if(NOT _surface_cpp_content MATCHES "Surface::CreateEGLNativeWindow")
+        message(FATAL_ERROR "Failed to patch Dawn Surface.cpp for EGL native window")
+    endif()
+    file(WRITE "${_surface_cpp}" "${_surface_cpp_content}")
+endif()
+
+file(READ "${_opengl_h}" _opengl_h_content)
+if(NOT _opengl_h_content MATCHES "CreateSurfaceFromEGLNativeWindow")
+    string(REPLACE
+        "struct DAWN_NATIVE_EXPORT ExternalImageDescriptorEGLImage : ExternalImageDescriptor {"
+        "// Creates a Dawn surface around an EGLNativeWindowType supplied by the host.\n// Intended for platforms such as libnx that are not represented by a generated WebGPU surface sType.\nDAWN_NATIVE_EXPORT WGPUSurface\nCreateSurfaceFromEGLNativeWindow(WGPUInstance instance, void* window);\n\nstruct DAWN_NATIVE_EXPORT ExternalImageDescriptorEGLImage : ExternalImageDescriptor {"
+        _opengl_h_content "${_opengl_h_content}")
+
+    if(NOT _opengl_h_content MATCHES "CreateSurfaceFromEGLNativeWindow")
+        message(FATAL_ERROR "Failed to patch Dawn OpenGLBackend.h surface helper")
+    endif()
+    file(WRITE "${_opengl_h}" "${_opengl_h_content}")
+endif()
+
+file(READ "${_opengl_cpp}" _opengl_cpp_content)
+if(NOT _opengl_cpp_content MATCHES "CreateSurfaceFromEGLNativeWindow")
+    string(REPLACE
+        "#include \"src/dawn/native/opengl/DeviceGL.h\""
+        "#include \"src/dawn/native/opengl/DeviceGL.h\"\n#include \"src/dawn/native/Instance.h\"\n#include \"src/dawn/native/Surface.h\""
+        _opengl_cpp_content "${_opengl_cpp_content}")
+
+    string(REPLACE
+        "ExternalImageDescriptorEGLImage::ExternalImageDescriptorEGLImage()"
+        "WGPUSurface CreateSurfaceFromEGLNativeWindow(WGPUInstance instance, void* window) {\n    if (instance == nullptr || window == nullptr) {\n        return nullptr;\n    }\n    Ref<Surface> surface = Surface::CreateEGLNativeWindow(FromAPI(instance), window);\n    return ToAPI(ReturnToAPI(std::move(surface)));\n}\n\nExternalImageDescriptorEGLImage::ExternalImageDescriptorEGLImage()"
+        _opengl_cpp_content "${_opengl_cpp_content}")
+
+    if(NOT _opengl_cpp_content MATCHES "WGPUSurface CreateSurfaceFromEGLNativeWindow")
+        message(FATAL_ERROR "Failed to patch Dawn OpenGLBackend.cpp surface helper")
+    endif()
+    file(WRITE "${_opengl_cpp}" "${_opengl_cpp_content}")
+endif()
+
+file(READ "${_swapchain_cpp}" _swapchain_content)
+if(NOT _swapchain_content MATCHES "GetEGLNativeWindow")
+    string(REPLACE
+        "        switch (surface->GetType()) {"
+        "        switch (surface->GetType()) {\n#if DAWN_PLATFORM_IS(SWITCH)\n            case Surface::Type::EGLNativeWindow:\n                mEGLSurface = egl.CreateWindowSurface(\n                    eglDisplay, config,\n                    static_cast<EGLNativeWindowType>(surface->GetEGLNativeWindow()),\n                    attribs.data());\n                return {};\n#endif  // DAWN_PLATFORM_IS(SWITCH)"
+        _swapchain_content "${_swapchain_content}")
+
+    if(NOT _swapchain_content MATCHES "GetEGLNativeWindow")
+        message(FATAL_ERROR "Failed to patch Dawn SwapChainEGL for libnx")
+    endif()
+    file(WRITE "${_swapchain_cpp}" "${_swapchain_content}")
+endif()
+
+message(STATUS "Patched Dawn native EGL-window surface for libnx")
