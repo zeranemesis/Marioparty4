@@ -46,7 +46,6 @@ export INCLUDE  := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
 
 export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 export NROFLAGS += --nacp=$(CURDIR)/$(TARGET).nacp
-export NACPFLAGS += --name="$(APP_TITLE)" --author="$(APP_AUTHOR)" --version="$(APP_VERSION)"
 
 .PHONY: all clean $(BUILD)
 
