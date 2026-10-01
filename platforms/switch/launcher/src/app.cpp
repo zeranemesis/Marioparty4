@@ -127,6 +127,9 @@ void App::init() {
     loadArtwork();
     loadCatalog();
     rescan(false);
+    m_appletMode = m_platform.appletMode();
+    if (m_appletMode)
+        showToast(t(Str::AppletModeNotice), 7.0);
 }
 
 void App::loadCatalog() {
@@ -298,9 +301,10 @@ void App::showDialog(Str title, Str body, std::string detail) {
     openOverlay(Overlay::Dialog);
 }
 
-void App::showToast(std::string message) {
+void App::showToast(std::string message, double seconds) {
     m_toast = std::move(message);
-    m_toastUntil = m_now + 2.6;
+    m_toastUntil = m_now + seconds;
+    m_toastDuration = seconds;
 }
 
 std::string App::findEngine(const CatalogEntry* entry) const {
@@ -655,7 +659,17 @@ void App::drawHeader() {
         m_r.roundRect(x + 3.5f, by + 3.5f, (bw - 7.0f) * level, bh - 7.0f, 2.0f, fill);
         char percent[8];
         std::snprintf(percent, sizeof(percent), "%d%%", m_status.battery);
-        m_r.text(FontWeight::Regular, 17.0f, x - 8.0f, 30.0f, percent, kTextSoft, Align::Right);
+        x -= m_r.text(FontWeight::Regular, 17.0f, x - 8.0f, 30.0f, percent, kTextSoft, Align::Right) + 8.0f;
+    }
+
+    // Started from the Album: the game may run short of memory.
+    if (m_appletMode) {
+        const char* label = t(Str::AppletModeBadge);
+        const float pw = m_r.measure(FontWeight::Bold, 15.0f, label) + 28.0f;
+        x -= pw + 22.0f;
+        m_r.roundRect(x, 27.0f, pw, 30.0f, 15.0f, withAlpha(kOrange, 0.18f));
+        m_r.roundRectOutline(x, 27.0f, pw, 30.0f, 15.0f, 1.5f, kOrange);
+        m_r.textMiddle(FontWeight::Bold, 15.0f, x + pw * 0.5f, 42.0f, label, kOrange, Align::Center);
     }
 }
 
@@ -1396,7 +1410,8 @@ void App::drawToast() {
     if (m_toast.empty() || m_now >= m_toastUntil)
         return;
     const float remaining = static_cast<float>(m_toastUntil - m_now);
-    const float alpha = std::min(1.0f, remaining / 0.3f) * std::min(1.0f, (2.6f - remaining) / 0.2f);
+    const float alpha = std::min(1.0f, remaining / 0.3f) *
+                        std::min(1.0f, (static_cast<float>(m_toastDuration) - remaining) / 0.2f);
     const float tw = m_r.measure(FontWeight::Regular, 18.0f, m_toast) + 48.0f;
     const float x = (W - tw) * 0.5f;
     m_r.roundRect(x, 600.0f, tw, 42.0f, 21.0f, withAlpha(rgb(0x0B0820), 0.9f * alpha));

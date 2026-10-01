@@ -128,6 +128,9 @@ constexpr Entry kStrings[] = {
     {Str::LaunchNoRuntimeBody, "Ce jeu tourne sur PC avec CubeShelf, mais son runtime n'a pas encore de version Switch.",
      "This game runs on PC through CubeShelf, but its runtime has no Switch build yet."},
     {Str::RuntimeLabel, "Runtime", "Runtime"},
+    {Str::AppletModeBadge, "Mode applet", "Applet mode"},
+    {Str::AppletModeNotice, "Mode applet : mémoire limitée. Pour jouer, ouvrez le Homebrew Menu en maintenant R sur un jeu.",
+     "Applet mode: limited memory. To play, open the Homebrew Menu by holding R while starting a game."},
 };
 
 static_assert(std::size(kStrings) == static_cast<size_t>(Str::Count), "every Str needs a translation");

@@ -108,6 +108,8 @@ enum class Str : unsigned short {
     LaunchNoRuntimeTitle,
     LaunchNoRuntimeBody,
     RuntimeLabel,
+    AppletModeBadge,
+    AppletModeNotice,
 
     Count,
 };

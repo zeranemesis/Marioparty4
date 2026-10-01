@@ -100,6 +100,9 @@ public:
     virtual void playSound(Sound sound, float gain = 1.0f) = 0;
     virtual LaunchResult launch(const std::vector<std::string>& args) = 0;
     virtual bool showControllerApplet() = 0;
+    // True when started as an applet (the hbmenu from the Album) rather than
+    // in place of a game: the engine then gets a fraction of the memory.
+    virtual bool appletMode() = 0;
 };
 
 } // namespace partyboard::launcher

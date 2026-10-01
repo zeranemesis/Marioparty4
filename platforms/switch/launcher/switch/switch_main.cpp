@@ -199,6 +199,11 @@ public:
         return R_SUCCEEDED(hidLaShowControllerSupport(&info, &arg));
     }
 
+    bool appletMode() override {
+        const AppletType type = appletGetAppletType();
+        return type != AppletType_Application && type != AppletType_SystemApplication;
+    }
+
 private:
     static std::vector<uint8_t> readFile(const char* path) {
         std::ifstream in(path, std::ios::binary);

@@ -52,7 +52,12 @@ artifact (see [Previewing without a console](#previewing-without-a-console)).
   engine, which applies them for the session without touching its own config.
 - **Controllers.** Shows the GameCube controller with the button each Switch
   control produces, which players are connected, and opens the system
-  "Change grip/order" applet with **Y**.
+  "Change grip/order" applet with **Y**. Single Joy-Cons are held sideways,
+  one per player, as in the game.
+- **Applet mode.** Started from the Album, the homebrew menu runs as an
+  applet with a fraction of the memory a game gets. A "Mode applet" badge
+  stays in the header and a notice explains how to start it in place of a
+  game (hold **R** while starting one) instead.
 - **Switch details.** Clock and battery in the header, player lamps in the
   footer, the console's shared system font, 1080p rendering when docked,
   procedurally synthesised menu sounds.

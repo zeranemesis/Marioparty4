@@ -33,6 +33,8 @@ mkdir -p "$out" "$sd/empty"
 
 "$preview" --root "$sd/empty" --out "$out" --script "wait 1.0; shot 11-empty"
 
+"$preview" --demo-sd "$sd/applet" --out "$out" --script "applet; wait 1.2; shot 15-applet-mode"
+
 "$preview" --demo-sd "$sd/surprise" --out "$out" --script "\
   wait 1.0; press a; hold zr 1.0; wait 2.6; shot 12-boot-surprise"
 

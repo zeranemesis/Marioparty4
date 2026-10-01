@@ -63,7 +63,7 @@ private:
     std::vector<std::string> modDirectoryCandidates(const GameEntry& game) const;
     bool hasMods(const GameEntry& game) const; // a playable game whose runtime reads CubeShelf mods
     std::string labelled(Str label, const std::string& value) const;
-    void showToast(std::string message);
+    void showToast(std::string message, double seconds = 2.6);
     void persistSettings();
     std::string findEngine(const CatalogEntry* entry) const;
     void requestLaunch();
@@ -147,6 +147,8 @@ private:
     std::string m_dialogDetail;
     std::string m_toast;
     double m_toastUntil = 0.0;
+    double m_toastDuration = 2.6;
+    bool m_appletMode = false;
 
     BootAnimation m_boot;
     std::vector<std::string> m_launchArgs;

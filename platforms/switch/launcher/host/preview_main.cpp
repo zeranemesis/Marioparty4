@@ -15,6 +15,7 @@
 //   lang fr|en              system language reported to the launcher
 //   battery <percent>       battery level shown in the header
 //   players <n>             number of connected controllers
+//   applet                  started as an applet (from the Album)
 //
 // --icon <file.png> renders the 256x256 homebrew menu icon instead.
 // --res <dir> reads PartyBoard's artwork and fonts from <dir> (default: res/).
@@ -192,11 +193,13 @@ public:
         return LaunchResult::Scheduled;
     }
     bool showControllerApplet() override { return false; }
+    bool appletMode() override { return m_appletMode; }
 
     uint32_t m_held = 0;
     uint32_t m_pressed = 0;
     int m_players = 1;
     int m_battery = 87;
+    bool m_appletMode = false;
     Language m_language = Language::French;
     bool launched = false;
     bool logSounds = false;
@@ -367,6 +370,8 @@ int main(int argc, char** argv) {
                 platform.m_battery = std::atoi(command[1].c_str());
             } else if (verb == "players" && command.size() > 1) {
                 platform.m_players = std::atoi(command[1].c_str());
+            } else if (verb == "applet") {
+                platform.m_appletMode = true;
             } else if (verb == "wait" && command.size() > 1) {
                 const int frames = static_cast<int>(std::lround(std::atof(command[1].c_str()) * 60.0));
                 for (int f = 0; f < frames && running; ++f)
