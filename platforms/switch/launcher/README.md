@@ -15,15 +15,31 @@ artifact (see [Previewing without a console](#previewing-without-a-console)).
   `.ciso`, `.gcz`, `.rvz`, `.wia`, one sub-folder level allowed) and reads
   each disc's boot header and `opening.bnr`: the 96x32 banner, title, maker
   and description, in French on PAL discs when the launcher is in French.
-  Mario Party 4 discs get a case made from PartyBoard's own artwork (the cast
-  from the pre-launch screen and the PartyBoard logo); the disc's real banner
-  sits next to the title below the shelf. Other discs get a generated case
+  Catalogue games show their real box art (below); the disc's own banner
+  sits next to the title under the shelf. Unknown discs get a generated case
   with their banner. RVZ/WIA only expose the header, so they have no banner.
   A PNG in `partyboard/covers/<GAMEID>.png` replaces any case.
-- **Compatibility.** NTSC-U (`GMPE01`) and PAL (`GMPP01`) Mario Party 4 can be
-  launched. NTSC-J (`GMPJ01`) is recognised and marked as not supported yet,
-  other GameCube discs are shown as not Mario Party 4. This mirrors
-  `src/port/iso_validate.cpp`.
+- **Catalogue.** As in CubeShelf, the games are data: `assets/catalog.json`
+  lists each game's accepted discs (a six-character id for every revision, or
+  `GMPE01_00` for one), its year, genre, players, description, box art and
+  the Switch NRO that runs it. It ships Mario Party 4 (PartyBoard, NTSC-U and
+  PAL; NTSC-J recognised but not playable yet, as in
+  `src/port/iso_validate.cpp`), plus Soulcalibur II (Ring Out) and Super Mario
+  Strikers (Strikers), which CubeShelf runs on PC and which show here as "not
+  on Switch yet". `sdmc:/config/partyboard/catalog.json` can add entries or
+  replace one by id, so a future Switch runtime needs no new launcher build.
+- **Box art.** Catalogue games use CubeShelf's front and spine scans, drawn
+  as a case seen slightly from the side; the info panel below shows the game
+  sheet (year, genre, players, runtime) and the disc's real banner.
+- **Mods, CubeShelf's way.** Copy CubeShelf's `Mods` folder
+  (`%LOCALAPPDATA%\CubeShelf\Mods`) to `sdmc:/cubeshelf/Mods`. **R** opens
+  the selected game's mods: switch them on and off with **A**, change the load
+  order with **L**/**R**. The launcher re-roots the Windows paths stored in
+  `installed.json`, saves the choices back in CubeShelf's format (original
+  paths kept, so the folder can return to the PC) and writes the
+  `active-mods.txt` PartyBoard reads, passed as `--mod-list`. Mods switched
+  off from inside the game (`player-disabled.json`) and folders missing from
+  the card are shown as such.
 - **Boot animation.** Played between **Play** and the engine. Hold **ZR**
   while it runs for the party-coloured variant and its alternate chime. **A**,
   **B** or **+** skips it.
@@ -40,18 +56,25 @@ artifact (see [Previewing without a console](#previewing-without-a-console)).
 
 ## Artwork
 
-The launcher reuses PartyBoard's existing assets from `res/`, the same files
-the PC pre-launch screen loads: `logo.png`, `icon.png` (the star),
-`prelaunch-bg.png` (purple stripes with the Mario Party 4 cast), the N64 Party
-face for headings and FOT-NewRodin for titles. They are packed into the NRO's
-romfs at build time. Body text uses the console's shared system font. The
-GameCube cube mark, the boot animation and every sound are generated in code.
+Two sources, both packed into the NRO's romfs at build time:
+
+- PartyBoard's own `res/`, the files the PC pre-launch screen loads:
+  `logo.png`, `icon.png` (the star), `prelaunch-bg.png` (purple stripes with
+  the Mario Party 4 cast), the N64 Party face for headings and FOT-NewRodin
+  for titles.
+- `assets/`, taken from [CubeShelf](https://github.com/zeranemesis/CubeShelf-Launcher):
+  the catalogue, the front and spine box art of each catalogue game (scaled to
+  720 px high) and the GameCube logo.
+
+Body text uses the console's shared system font. The boot animation and every
+sound are generated in code.
 
 ## Controls
 
 | Screen | Controls |
 | --- | --- |
-| Shelf | Left/Right or left stick: choose · **A** play · **X** options · **Y** controllers · **-** rescan · **+** quit |
+| Shelf | Left/Right or left stick: choose · **A** play · **X** options · **Y** controllers · **R** mods · **-** rescan · **+** quit |
+| Mods | Up/Down: choose · **A** on/off · **L**/**R** load order · **B** back |
 | Options | Up/Down: choose · Left/Right or **A**: change · **B** back |
 | Controllers | Up/Down: highlight a control · **Y** change grip/order · **B** back |
 | Boot animation | Hold **ZR**: surprise · **A**/**B**/**+**: skip |
@@ -65,12 +88,15 @@ sdmc:/
 │   └── partyboard/
 │       ├── partyboard.nro               the engine (also accepted: switch/partyboard.nro)
 │       └── games/                       alternative games folder
+├── cubeshelf/Mods/GMPE01_00/            CubeShelf's Mods folder, copied from the PC
 ├── partyboard/
 │   ├── games/                           disc images
 │   │   ├── Mario Party 4 (USA).iso
 │   │   └── Mario Party 4 [GMPP01]/game.ciso
 │   └── covers/GMPE01.png                optional box art
-└── config/partyboard/launcher.ini       launcher options
+└── config/partyboard/
+    ├── launcher.ini                     launcher options
+    └── catalog.json                     optional catalogue additions
 ```
 
 `launcher.ini` also accepts `engine=<path>` to point at another engine NRO.
@@ -87,6 +113,7 @@ sdmc:/switch/partyboard/partyboard.nro
   --filter=none|smooth|crt
   --lang=fr|en
   --rumble=on|off
+  --mod-list=<active-mods.txt> CubeShelf mod roots, same as PARTYBOARD_MOD_LIST on desktop
   --launcher=<launcher NRO>    so the engine can return to the shelf on exit
 ```
 
@@ -139,6 +166,9 @@ converted to JPEG).
 | `src/boot.*` | boot animation timeline (pure function of time) |
 | `src/render.*`, `src/font.*` | batched SDF 2D renderer, lit cubes, FreeType atlas |
 | `src/disc.*`, `src/library.*` | disc containers, banners, game shelf |
+| `src/catalog.*`, `assets/catalog.json` | game catalogue (after CubeShelf's games.json) |
+| `src/mods.*` | CubeShelf mod folders, active-mods.txt |
+| `src/json.*` | JSON reader/writer for the two above |
 | `src/settings.*`, `src/paths.hpp` | options file, engine arguments, SD layout |
 | `src/sound.*` | synthesised sounds and the audio mixer |
 | `src/i18n.*` | French and English strings |

@@ -7,7 +7,9 @@
 //   <root>/switch/partyboard/games/     alternative games folder
 //   <root>/partyboard/covers/<ID>.png   optional box art
 //   <root>/config/partyboard/launcher.ini
-//   <root>/switch/partyboard/partyboard.nro   the engine
+//   <root>/config/partyboard/catalog.json     optional catalogue additions
+//   <root>/cubeshelf/Mods/<game id>/          CubeShelf's Mods folder, copied from the PC
+//   <root>/switch/partyboard/partyboard.nro   the engine (engines come from the catalogue)
 //   <root>/switch/partyboard-launcher.nro     this launcher
 
 #include <string>
@@ -16,19 +18,23 @@
 namespace partyboard::launcher {
 
 struct SdLayout {
+    std::string root;
     std::vector<std::string> gameDirectories;
     std::string coversDirectory;
     std::string settingsPath;
-    std::vector<std::string> engineCandidates;
+    std::string userCatalogPath;
+    std::string modsDirectory;
     std::string launcherPath;
 };
 
 inline SdLayout sdLayout(const std::string& root) {
     SdLayout layout;
+    layout.root = root;
     layout.gameDirectories = {root + "/partyboard/games", root + "/switch/partyboard/games"};
     layout.coversDirectory = root + "/partyboard/covers";
     layout.settingsPath = root + "/config/partyboard/launcher.ini";
-    layout.engineCandidates = {root + "/switch/partyboard/partyboard.nro", root + "/switch/partyboard.nro"};
+    layout.userCatalogPath = root + "/config/partyboard/catalog.json";
+    layout.modsDirectory = root + "/cubeshelf/Mods";
     layout.launcherPath = root + "/switch/partyboard-launcher.nro";
     return layout;
 }

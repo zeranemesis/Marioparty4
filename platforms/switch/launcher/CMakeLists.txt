@@ -18,11 +18,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(PARTYBOARD_LAUNCHER_CORE
     src/app.cpp
     src/boot.cpp
+    src/catalog.cpp
     src/disc.cpp
     src/font.cpp
     src/i18n.cpp
     src/image.cpp
+    src/json.cpp
     src/library.cpp
+    src/mods.cpp
     src/render.cpp
     src/settings.cpp
     src/sound.cpp
@@ -68,7 +71,8 @@ if(PARTYBOARD_SWITCH)
         -Wl,--end-group
     )
 
-    # romfs: PartyBoard's own artwork and fonts from res/, shared with the PC
+    # romfs: the launcher's assets/ (catalogue, CubeShelf covers and logo) plus
+    # PartyBoard's own artwork and fonts from res/, shared with the PC
     # pre-launch screen.
     set(PARTYBOARD_RES "${CMAKE_CURRENT_SOURCE_DIR}/../../../res")
     set(PARTYBOARD_LAUNCHER_ROMFS "${CMAKE_CURRENT_BINARY_DIR}/romfs")
@@ -79,18 +83,20 @@ if(PARTYBOARD_SWITCH)
         "${PARTYBOARD_RES}/N64Party.otf"
         "${PARTYBOARD_RES}/FOT-NewRodin Pro DB.otf"
     )
+    file(GLOB_RECURSE PARTYBOARD_LAUNCHER_ASSET_FILES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/assets/*")
     set(PARTYBOARD_LAUNCHER_ROMFS_STAMP "${CMAKE_CURRENT_BINARY_DIR}/romfs.stamp")
     add_custom_command(
         OUTPUT "${PARTYBOARD_LAUNCHER_ROMFS_STAMP}"
         COMMAND "${CMAKE_COMMAND}" -E rm -rf "${PARTYBOARD_LAUNCHER_ROMFS}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${PARTYBOARD_LAUNCHER_ROMFS}"
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/assets" "${PARTYBOARD_LAUNCHER_ROMFS}"
         COMMAND "${CMAKE_COMMAND}" -E copy "${PARTYBOARD_RES}/logo.png" "${PARTYBOARD_LAUNCHER_ROMFS}/logo.png"
         COMMAND "${CMAKE_COMMAND}" -E copy "${PARTYBOARD_RES}/icon.png" "${PARTYBOARD_LAUNCHER_ROMFS}/icon.png"
         COMMAND "${CMAKE_COMMAND}" -E copy "${PARTYBOARD_RES}/prelaunch-bg.png" "${PARTYBOARD_LAUNCHER_ROMFS}/prelaunch-bg.png"
         COMMAND "${CMAKE_COMMAND}" -E copy "${PARTYBOARD_RES}/N64Party.otf" "${PARTYBOARD_LAUNCHER_ROMFS}/n64party.otf"
         COMMAND "${CMAKE_COMMAND}" -E copy "${PARTYBOARD_RES}/FOT-NewRodin Pro DB.otf" "${PARTYBOARD_LAUNCHER_ROMFS}/rodin-db.otf"
         COMMAND "${CMAKE_COMMAND}" -E touch "${PARTYBOARD_LAUNCHER_ROMFS_STAMP}"
-        DEPENDS ${PARTYBOARD_LAUNCHER_ROMFS_FILES}
+        DEPENDS ${PARTYBOARD_LAUNCHER_ROMFS_FILES} ${PARTYBOARD_LAUNCHER_ASSET_FILES}
         VERBATIM
         COMMENT "Staging PartyBoard launcher romfs"
     )
@@ -139,7 +145,9 @@ find_library(PARTYBOARD_LAUNCHER_GLES GLESv2 REQUIRED)
 
 add_library(partyboard_launcher_core STATIC ${PARTYBOARD_LAUNCHER_CORE})
 get_filename_component(PARTYBOARD_RES "${CMAKE_CURRENT_SOURCE_DIR}/../../../res" ABSOLUTE)
-target_compile_definitions(partyboard_launcher_core PUBLIC PARTYBOARD_LAUNCHER_RES_DIR="${PARTYBOARD_RES}")
+target_compile_definitions(partyboard_launcher_core PUBLIC
+    PARTYBOARD_LAUNCHER_RES_DIR="${PARTYBOARD_RES}"
+    PARTYBOARD_LAUNCHER_ASSETS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets")
 target_include_directories(partyboard_launcher_core PUBLIC src)
 target_compile_options(partyboard_launcher_core PRIVATE ${PARTYBOARD_LAUNCHER_WARNINGS})
 target_link_libraries(partyboard_launcher_core PUBLIC

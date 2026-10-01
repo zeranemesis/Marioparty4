@@ -12,28 +12,6 @@ namespace partyboard::launcher {
 
 namespace {
 
-struct KnownTitle {
-    const char* id;
-    const char* title;
-    Compatibility compatibility;
-};
-
-// Mirrors src/port/iso_validate.cpp: NTSC-U and PAL boot, NTSC-J is
-// recognised so the player is told it is not supported yet.
-constexpr KnownTitle kKnownTitles[] = {
-    {"GMPE01", "Mario Party 4", Compatibility::Supported},
-    {"GMPP01", "Mario Party 4", Compatibility::Supported},
-    {"GMPJ01", "Mario Party 4", Compatibility::UnsupportedRegion},
-};
-
-const KnownTitle* findKnown(const std::string& id) {
-    for (const KnownTitle& known : kKnownTitles) {
-        if (id == known.id)
-            return &known;
-    }
-    return nullptr;
-}
-
 bool isDirectory(const std::string& path) {
     struct stat st{};
     return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
@@ -103,22 +81,32 @@ BannerLanguage bannerLanguageFor(Language language) {
     return language == Language::French ? BannerLanguage::French : BannerLanguage::English;
 }
 
-Compatibility classifyDisc(const DiscInfo& disc) {
-    if (const KnownTitle* known = findKnown(disc.gameId))
-        return known->compatibility;
+Compatibility classifyDisc(const DiscInfo& disc, const Catalog& catalog, const CatalogEntry** entry) {
+    DiscMatch match = DiscMatch::None;
+    const int index = catalog.find(disc, match);
+    if (entry)
+        *entry = index >= 0 ? &catalog.games()[static_cast<size_t>(index)] : nullptr;
+    switch (match) {
+    case DiscMatch::Accepted:
+        return catalog.games()[static_cast<size_t>(index)].engines.empty() ? Compatibility::NoSwitchRuntime
+                                                                            : Compatibility::Supported;
+    case DiscMatch::OtherRevision: return Compatibility::UnsupportedRevision;
+    case DiscMatch::Recognised: return Compatibility::UnsupportedRegion;
+    case DiscMatch::None: break;
+    }
     return Compatibility::OtherGame;
 }
 
 std::string GameEntry::title(Language language) const {
     if (error == DiscError::None) {
+        if (catalog)
+            return catalog->titleFor(disc.regionCode());
         if (const BannerText* text = disc.text(bannerLanguageFor(language))) {
             if (!text->longTitle.empty())
                 return text->longTitle;
             if (!text->shortTitle.empty())
                 return text->shortTitle;
         }
-        if (const KnownTitle* known = findKnown(disc.gameId))
-            return known->title;
         if (!disc.internalTitle.empty())
             return disc.internalTitle;
     }
@@ -135,6 +123,8 @@ std::string GameEntry::maker(Language language) const {
 }
 
 std::string GameEntry::description(Language language) const {
+    if (catalog && !catalog->description.get(language).empty())
+        return catalog->description.get(language);
     if (const BannerText* text = disc.text(bannerLanguageFor(language)))
         return text->description;
     return {};
@@ -142,7 +132,8 @@ std::string GameEntry::description(Language language) const {
 
 std::vector<GameEntry> scanLibrary(const std::vector<std::string>& directories,
                                    const std::string& coversDir,
-                                   Language language) {
+                                   Language language,
+                                   const Catalog& catalog) {
     std::vector<std::string> paths;
     for (const std::string& dir : directories)
         collect(dir, 1, paths);
@@ -155,7 +146,8 @@ std::vector<GameEntry> scanLibrary(const std::vector<std::string>& directories,
         const size_t slash = path.find_last_of('/');
         entry.fileName = slash == std::string::npos ? path : path.substr(slash + 1);
         entry.error = readDisc(path, entry.disc);
-        entry.compatibility = entry.error == DiscError::None ? classifyDisc(entry.disc) : Compatibility::Unreadable;
+        entry.compatibility = entry.error == DiscError::None ? classifyDisc(entry.disc, catalog, &entry.catalog)
+                                                             : Compatibility::Unreadable;
         entry.coverPath = findCover(path, entry.disc.gameId, coversDir);
         games.push_back(std::move(entry));
     }

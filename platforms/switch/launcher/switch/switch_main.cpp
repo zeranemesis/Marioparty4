@@ -165,10 +165,7 @@ public:
         return Language::English;
     }
 
-    std::vector<std::string> gameDirectories() override { return m_layout.gameDirectories; }
-    std::string coversDirectory() override { return m_layout.coversDirectory; }
-    std::string settingsPath() override { return m_layout.settingsPath; }
-    std::vector<std::string> engineCandidates() override { return m_layout.engineCandidates; }
+    const SdLayout& layout() override { return m_layout; }
     std::string selfPath() override { return m_selfPath; }
 
     void playSound(Sound sound, float gain) override {

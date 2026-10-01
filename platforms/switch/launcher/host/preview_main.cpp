@@ -35,6 +35,8 @@
 #include <string>
 #include <vector>
 
+#include <sys/stat.h>
+
 #include "app.hpp"
 #include "demo_library.hpp"
 #include "image.hpp"
@@ -126,8 +128,8 @@ private:
 
 class HostPlatform final : public Platform {
 public:
-    HostPlatform(HeadlessGl& gl, std::string root, std::string resources)
-        : m_gl(gl), m_layout(sdLayout(root)), m_resources(std::move(resources)) {
+    HostPlatform(HeadlessGl& gl, std::string root, std::string resources, std::string assets)
+        : m_gl(gl), m_layout(sdLayout(root)), m_resources(std::move(resources)), m_assets(std::move(assets)) {
         // The console uses its shared system font for body text; Inter is the
         // closest stand-in among PartyBoard's own fonts.
         m_fonts[0] = readFile(m_resources + "/Inter-Regular.ttf");
@@ -170,12 +172,14 @@ public:
         return data.empty() ? FontBlob{} : FontBlob{data.data(), data.size(), false};
     }
     Language systemLanguage() override { return m_language; }
-    std::string resourcePath(const std::string& name) override { return m_resources + "/" + name; }
+    // The launcher's own assets (catalogue, CubeShelf covers) shadow res/.
+    std::string resourcePath(const std::string& name) override {
+        const std::string asset = m_assets + "/" + name;
+        struct stat st{};
+        return stat(asset.c_str(), &st) == 0 ? asset : m_resources + "/" + name;
+    }
 
-    std::vector<std::string> gameDirectories() override { return m_layout.gameDirectories; }
-    std::string coversDirectory() override { return m_layout.coversDirectory; }
-    std::string settingsPath() override { return m_layout.settingsPath; }
-    std::vector<std::string> engineCandidates() override { return m_layout.engineCandidates; }
+    const SdLayout& layout() override { return m_layout; }
     std::string selfPath() override { return m_layout.launcherPath; }
 
     void playSound(Sound sound, float gain) override {
@@ -201,6 +205,7 @@ private:
     HeadlessGl& m_gl;
     SdLayout m_layout;
     std::string m_resources;
+    std::string m_assets;
     std::vector<uint8_t> m_fonts[3];
     uint64_t m_frame = 0;
 };
@@ -274,6 +279,7 @@ int main(int argc, char** argv) {
     std::string icon;
     std::string demo;
     std::string resources = PARTYBOARD_LAUNCHER_RES_DIR;
+    std::string assets = PARTYBOARD_LAUNCHER_ASSETS_DIR;
     bool demoEngine = true;
     bool logSounds = false;
     int width = 1280, height = 720;
@@ -313,7 +319,7 @@ int main(int argc, char** argv) {
     if (!demo.empty())
         demo::makeDemoSdCard(demo, demoEngine);
 
-    HostPlatform platform(gl, root, resources);
+    HostPlatform platform(gl, root, resources, assets);
     platform.logSounds = logSounds;
     if (!icon.empty())
         return renderIcon(gl, platform, icon);

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "i18n.hpp"
+#include "paths.hpp"
 #include "sound.hpp"
 
 namespace partyboard::launcher {
@@ -92,10 +93,8 @@ public:
     // Bundled PartyBoard artwork (res/ in the repository, romfs:/ on Switch).
     virtual std::string resourcePath(const std::string& name) = 0;
 
-    virtual std::vector<std::string> gameDirectories() = 0;
-    virtual std::string coversDirectory() = 0;
-    virtual std::string settingsPath() = 0;
-    virtual std::vector<std::string> engineCandidates() = 0;
+    // SD card layout (see paths.hpp); catalogue engine paths are relative to sdRoot().
+    virtual const SdLayout& layout() = 0;
     virtual std::string selfPath() = 0;
 
     virtual void playSound(Sound sound, float gain = 1.0f) = 0;

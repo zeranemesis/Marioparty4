@@ -31,6 +31,8 @@ enum class Str : unsigned short {
     StatusUnsupportedRegion,
     StatusOtherGame,
     StatusUnreadable,
+    StatusNoSwitchRuntime,
+    StatusUnsupportedRevision,
 
     RegionUsa,
     RegionEurope,
@@ -98,6 +100,23 @@ enum class Str : unsigned short {
     EngineInstalled,
     EngineMissing,
     BootPresents,
+
+    Mods,
+    ModsTitle,
+    ModsActiveCount,
+    ModsNone,
+    ModsEmpty,
+    ModsCopyHint,
+    ModsToggle,
+    ModsOrder,
+    ModsActive,
+    ModsInactive,
+    ModsMissing,
+    ModsPlayerDisabled,
+    ModsHelp,
+    LaunchNoRuntimeTitle,
+    LaunchNoRuntimeBody,
+    RuntimeLabel,
 
     Count,
 };

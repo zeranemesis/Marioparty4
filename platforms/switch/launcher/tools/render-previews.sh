@@ -19,12 +19,14 @@ mkdir -p "$out" "$sd/empty"
   press right; wait 0.6; shot 02-shelf-pal; \
   press x; wait 0.6; shot 03-options; press b; wait 0.5; \
   press y; wait 0.6; shot 04-controllers; press b; wait 0.5; \
+  press r; wait 0.6; shot 13-mods; press b; wait 0.5; \
   press a; wait 1.6; shot 05-boot-trace; wait 1.0; shot 06-boot-slam; wait 1.3; shot 07-boot-logo"
 
 "$preview" --demo-sd "$sd/japan" --out "$out" --script "\
   lang en; players 2; wait 1.0; \
-  press right; wait 0.2; press right; wait 0.6; shot 08-shelf-english; \
-  press a; wait 0.5; shot 09-unsupported"
+  press right; wait 0.2; press right; wait 0.2; press right; wait 0.6; shot 08-shelf-english; \
+  press a; wait 0.5; shot 09-unsupported; press b; wait 0.4; \
+  press left; wait 0.6; shot 14-not-on-switch"
 
 "$preview" --demo-sd "$sd/noengine" --no-engine --out "$out" --script "\
   wait 1.0; press a; wait 0.5; shot 10-engine-missing"

@@ -13,10 +13,13 @@
 #include <unistd.h>
 
 #include "boot.hpp"
+#include "catalog.hpp"
 #include "demo_library.hpp"
 #include "disc.hpp"
 #include "image.hpp"
+#include "json.hpp"
 #include "library.hpp"
+#include "mods.hpp"
 #include "paths.hpp"
 #include "settings.hpp"
 #include "sound.hpp"
@@ -163,22 +166,31 @@ void testBnr1Fallbacks(const std::string& dir) {
     CHECK(text && text->shortTitle == "MP4");
 }
 
+Catalog shippedCatalog() {
+    Catalog catalog;
+    CHECK(catalog.loadFile(std::string(PARTYBOARD_LAUNCHER_ASSETS_DIR) + "/catalog.json"));
+    return catalog;
+}
+
 void testLibrary() {
     const std::string root = tempDir();
     demo::makeDemoSdCard(root, true);
     const SdLayout layout = sdLayout(root);
-    const std::vector<GameEntry> games = scanLibrary(layout.gameDirectories, layout.coversDirectory, Language::French);
+    const Catalog catalog = shippedCatalog();
+    const std::vector<GameEntry> games =
+        scanLibrary(layout.gameDirectories, layout.coversDirectory, Language::French, catalog);
 
-    // USA, PAL (sub-folder), Japan (second folder), test disc, corrupt. The
-    // AppleDouble "._" file is skipped.
-    CHECK_EQ(games.size(), 5u);
-    if (games.size() != 5u)
+    // USA, PAL (sub-folder), Strikers, Japan (second folder), test disc,
+    // corrupt. The AppleDouble "._" file is skipped.
+    CHECK_EQ(games.size(), 6u);
+    if (games.size() != 6u)
         return;
     CHECK(games[0].compatibility == Compatibility::Supported);
     CHECK(games[1].compatibility == Compatibility::Supported);
-    CHECK(games[2].compatibility == Compatibility::UnsupportedRegion);
-    CHECK(games[3].compatibility == Compatibility::OtherGame);
-    CHECK(games[4].compatibility == Compatibility::Unreadable);
+    CHECK(games[2].compatibility == Compatibility::NoSwitchRuntime);
+    CHECK(games[3].compatibility == Compatibility::UnsupportedRegion);
+    CHECK(games[4].compatibility == Compatibility::OtherGame);
+    CHECK(games[5].compatibility == Compatibility::Unreadable);
 
     int pal = -1;
     for (int i = 0; i < 2; ++i) {
@@ -187,18 +199,205 @@ void testLibrary() {
     }
     CHECK(pal >= 0);
     if (pal >= 0) {
-        CHECK(games[pal].description(Language::French).find("quatre amis") != std::string::npos);
-        CHECK(games[pal].description(Language::English).find("four friends") != std::string::npos);
+        // Catalogue description first, in the launcher's language.
+        CHECK(games[pal].description(Language::French).find("PartyBoard") != std::string::npos);
+        CHECK(games[pal].description(Language::English).find("natively") != std::string::npos);
         CHECK(games[pal].disc.format == DiscFormat::Ciso);
+        CHECK(games[pal].catalog && games[pal].catalog->coverFor('P')->front == "covers/mp4_pal_front.png");
     }
-    // Japanese banner text is Shift-JIS: the built-in title is used.
-    CHECK_EQ(games[2].title(Language::French), "Mario Party 4");
-    CHECK(games[2].disc.format == DiscFormat::Gcz);
-    CHECK_EQ(games[3].title(Language::French), "PartyBoard Test Disc");
-    CHECK(!games[3].coverPath.empty());
-    CHECK_EQ(games[4].title(Language::French), "corrupt");
-    CHECK(!games[4].launchable());
+    // The PAL title of Super Mario Strikers comes from regionTitles.
+    CHECK_EQ(games[2].title(Language::French), "Mario Smash Football");
+    CHECK(games[2].catalog && games[2].catalog->runtime == "Strikers");
+    CHECK(games[2].catalog && games[2].catalog->engines.empty());
+    // Japanese banner text is Shift-JIS: the catalogue title is used.
+    CHECK_EQ(games[3].title(Language::French), "Mario Party 4");
+    CHECK(games[3].disc.format == DiscFormat::Gcz);
+    CHECK_EQ(games[4].title(Language::French), "PartyBoard Test Disc");
+    CHECK(games[4].catalog == nullptr);
+    CHECK(!games[4].coverPath.empty());
+    CHECK_EQ(games[5].title(Language::French), "corrupt");
+    CHECK(!games[5].launchable());
     CHECK(games[0].launchable());
+
+    // Without a catalogue file the launcher still knows Mario Party 4.
+    const Catalog builtin = Catalog::builtin();
+    const std::vector<GameEntry> fallback =
+        scanLibrary(layout.gameDirectories, layout.coversDirectory, Language::French, builtin);
+    CHECK_EQ(fallback.size(), 6u);
+    if (fallback.size() == 6u) {
+        CHECK(fallback[0].launchable() && fallback[1].launchable());
+        CHECK(fallback[2].compatibility == Compatibility::UnsupportedRegion);
+    }
+}
+
+void testCatalog() {
+    const char* document = R"({
+      "games": [
+        {"id": "GMPE01_00", "title": "Mario Party 4", "discs": ["GMPE01_00"], "recognised": ["GMPJ01"],
+         "engines": ["switch/partyboard.nro"], "genre": {"fr": "Fête", "en": "Party"}, "players": "1-4",
+         "covers": {"E": {"front": "us.png"}, "*": {"front": "any.png", "spine": "s.png"}}},
+        {"id": "G4QE01", "title": "Super Mario Strikers", "regionTitles": {"P": "Mario Smash Football"},
+         "discs": ["G4QE01", "G4QP01"]}
+      ]})";
+    json::Value value;
+    CHECK(json::parse(document, value));
+    Catalog catalog;
+    CHECK(catalog.load(value));
+    CHECK_EQ(catalog.games().size(), 2u);
+
+    DiscInfo disc;
+    disc.gameId = "GMPE01";
+    disc.revision = 0;
+    DiscMatch match;
+    CHECK_EQ(catalog.find(disc, match), 0);
+    CHECK(match == DiscMatch::Accepted);
+    CHECK_EQ(revisionId(disc), "GMPE01_00");
+    disc.revision = 1; // only revision 0 is listed here
+    CHECK_EQ(catalog.find(disc, match), 0);
+    CHECK(match == DiscMatch::OtherRevision);
+    CHECK(classifyDisc(disc, catalog, nullptr) == Compatibility::UnsupportedRevision);
+    disc.gameId = "GMPJ01";
+    CHECK_EQ(catalog.find(disc, match), 0);
+    CHECK(match == DiscMatch::Recognised);
+    disc.gameId = "G4QP01";
+    CHECK_EQ(catalog.find(disc, match), 1);
+    CHECK(classifyDisc(disc, catalog, nullptr) == Compatibility::NoSwitchRuntime);
+    disc.gameId = "GALE01";
+    CHECK_EQ(catalog.find(disc, match), -1);
+    CHECK(match == DiscMatch::None);
+
+    const CatalogEntry& mp4 = catalog.games()[0];
+    CHECK_EQ(mp4.genre.get(Language::French), "Fête");
+    CHECK_EQ(mp4.genre.get(Language::English), "Party");
+    CHECK_EQ(mp4.players.get(Language::French), "1-4");
+    CHECK_EQ(mp4.coverFor('E')->front, "us.png");
+    CHECK_EQ(mp4.coverFor('F')->front, "any.png"); // French PAL disc, no P cover: the wildcard
+    CHECK_EQ(catalog.games()[1].titleFor('P'), "Mario Smash Football");
+    CHECK_EQ(catalog.games()[1].titleFor('E'), "Super Mario Strikers");
+    CHECK(catalog.games()[1].coverFor('E') == nullptr);
+
+    // A user catalogue replaces an entry by id and appends new ones.
+    json::Value extra;
+    CHECK(json::parse(R"([{"id": "G4QE01", "title": "Strikers Switch", "discs": ["G4QE01"],
+                          "engines": ["switch/strikers.nro"]},
+                         {"id": "GALE01", "title": "Other", "discs": ["GALE01"]}])", extra));
+    CHECK(catalog.load(extra));
+    CHECK_EQ(catalog.games().size(), 3u);
+    CHECK_EQ(catalog.games()[1].title, "Strikers Switch");
+    disc.gameId = "G4QE01";
+    CHECK(classifyDisc(disc, catalog, nullptr) == Compatibility::Supported);
+
+    // Every cover the shipped catalogue names exists in assets/.
+    const Catalog shipped = shippedCatalog();
+    CHECK_EQ(shipped.games().size(), 3u);
+    for (const CatalogEntry& entry : shipped.games()) {
+        for (const auto& [region, art] : entry.covers) {
+            Image image;
+            CHECK(loadPng(std::string(PARTYBOARD_LAUNCHER_ASSETS_DIR) + "/" + art.front, image));
+            CHECK(art.spine.empty() || loadPng(std::string(PARTYBOARD_LAUNCHER_ASSETS_DIR) + "/" + art.spine, image));
+        }
+    }
+}
+
+void testJson() {
+    json::Value value;
+    CHECK(json::parse("\xEF\xBB\xBF{\"a\": [1, 2.5, -3e2, true, false, null], \"s\": \"\\u00e9\\n\\ud83c\\udf89\\\"\"}", value));
+    CHECK(value.isObject());
+    CHECK_EQ(value["a"].items().size(), 6u);
+    CHECK_EQ(value["a"].items()[1].asNumber(), 2.5);
+    CHECK_EQ(value["a"].items()[2].asInteger(), -300);
+    CHECK_EQ(value["a"].items()[3].asBool(), true);
+    CHECK(value["a"].items()[5].isNull());
+    CHECK_EQ(value["s"].asString(), "\xC3\xA9\n\xF0\x9F\x8E\x89\"");
+    CHECK(value["missing"].isNull());
+
+    json::Value round;
+    CHECK(json::parse(json::serialize(value), round));
+    CHECK_EQ(round["s"].asString(), value["s"].asString());
+    CHECK_EQ(round["a"].items()[1].asNumber(), 2.5);
+
+    std::string error;
+    CHECK(!json::parse("{\"a\": }", value, &error));
+    CHECK(!error.empty());
+    CHECK(!json::parse("[1, 2", value));
+    CHECK(!json::parse("{\"a\": 1} trailing", value));
+    CHECK(!json::parse("\"tab\there\"", value));
+    std::string deep(200, '[');
+    CHECK(!json::parse(deep, value));
+}
+
+void testMods() {
+    const std::string root = tempDir();
+    demo::makeDemoSdCard(root, false);
+    const SdLayout layout = sdLayout(root);
+
+    // CubeShelf names the folder after the revision id; the bare id is not there.
+    const std::string dir = ModSet::findDirectory(layout.modsDirectory, {"GMPE01_00", "GMPE01"});
+    CHECK_EQ(dir, layout.modsDirectory + "/GMPE01_00");
+    CHECK(ModSet::findDirectory(layout.modsDirectory, {"GMPE01", "../GMPE01_00"}).empty());
+
+    ModSet mods;
+    CHECK(mods.load(dir));
+    CHECK_EQ(mods.mods().size(), 4u);
+    if (mods.mods().size() != 4u)
+        return;
+    // Highest priority first, Windows paths re-rooted on the SD card.
+    CHECK_EQ(mods.mods()[0].id, 546878);
+    CHECK_EQ(mods.mods()[0].resolvedRoot, dir + "/546878/files");
+    CHECK(mods.mods()[0].present && mods.mods()[0].active());
+    CHECK(mods.mods()[1].playerDisabled && !mods.mods()[1].active());
+    CHECK(!mods.mods()[2].enabled);
+    CHECK(!mods.mods()[3].present && !mods.mods()[3].active());
+    CHECK_EQ(mods.activeCount(), 1u);
+
+    auto readText = [](const std::string& path) {
+        std::string text;
+        FILE* f = std::fopen(path.c_str(), "rb");
+        if (!f)
+            return text;
+        char buffer[512];
+        size_t got = 0;
+        while ((got = std::fread(buffer, 1, sizeof(buffer), f)) > 0)
+            text.append(buffer, got);
+        std::fclose(f);
+        return text;
+    };
+
+    CHECK_EQ(mods.writeActiveList(), dir + "/active-mods.txt");
+    CHECK_EQ(readText(dir + "/active-mods.txt"), dir + "/546878/files\n");
+
+    // Switching on a mod the game had switched off clears the in-game switch.
+    mods.toggle(1);
+    CHECK(mods.mods()[1].active());
+    CHECK_EQ(mods.activeCount(), 2u);
+    // Move it above the first: it now wins conflicts.
+    CHECK(mods.move(1, -1));
+    CHECK_EQ(mods.mods()[0].id, 407132);
+    CHECK(!mods.move(0, -1));
+    mods.writeActiveList();
+    CHECK_EQ(readText(dir + "/active-mods.txt"), dir + "/407132/files\n" + dir + "/546878/files\n");
+
+    // Saved like CubeShelf would read it back: original paths kept.
+    CHECK(mods.save());
+    ModSet reloaded;
+    CHECK(reloaded.load(dir));
+    CHECK_EQ(reloaded.mods()[0].id, 407132);
+    CHECK(!reloaded.mods()[0].playerDisabled);
+    CHECK(reloaded.mods()[0].contentRoot.find("C:\\Users\\Player") == 0);
+    CHECK_EQ(readText(dir + "/player-disabled.json"), "[]\n");
+
+    // Turning every mod off leaves an empty list and no --mod-list.
+    for (size_t i = 0; i < reloaded.mods().size(); ++i) {
+        if (reloaded.mods()[i].active())
+            reloaded.toggle(i);
+    }
+    CHECK(reloaded.writeActiveList().empty());
+    CHECK_EQ(readText(dir + "/active-mods.txt"), "");
+
+    Settings settings;
+    const std::vector<std::string> args =
+        buildLaunchArgs("sdmc:/e.nro", "sdmc:/g.iso", "", settings, Language::English, dir + "/active-mods.txt");
+    CHECK_EQ(args.back(), "--mod-list=" + dir + "/active-mods.txt");
 }
 
 void testSettings() {
@@ -324,6 +523,9 @@ int main() {
     testIsoFormats(dir);
     testBnr1Fallbacks(dir);
     testLibrary();
+    testCatalog();
+    testJson();
+    testMods();
     testSettings();
     testBootTimeline();
     testSounds();

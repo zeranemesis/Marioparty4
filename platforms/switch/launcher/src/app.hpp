@@ -6,8 +6,12 @@
 #include <string>
 #include <vector>
 
+#include <map>
+
 #include "boot.hpp"
+#include "catalog.hpp"
 #include "library.hpp"
+#include "mods.hpp"
 #include "platform.hpp"
 #include "render.hpp"
 #include "settings.hpp"
@@ -30,11 +34,13 @@ public:
 
 private:
     enum class Screen : unsigned char { Shelf, Boot, Launching };
-    enum class Overlay : unsigned char { None, Options, Controllers, Dialog };
+    enum class Overlay : unsigned char { None, Options, Controllers, Mods, Dialog };
 
     struct GameVisual {
         Texture banner;
-        Texture cover;
+        Texture cover;              // the player's own PNG, owned here
+        const Texture* front = nullptr; // catalogue box art, owned by m_artCache
+        const Texture* spine = nullptr;
     };
 
     struct Hint {
@@ -44,15 +50,22 @@ private:
 
     // State
     void loadArtwork();
+    void loadCatalog();
+    const Texture* cachedArt(const std::string& resource);
     void rescan(bool announce);
     void releaseTextures();
     void refreshLanguage();
     void openOverlay(Overlay overlay);
     void closeOverlay();
     void showDialog(Str title, Str body, std::string detail);
+    void openMods();
+    void closeMods();
+    std::vector<std::string> modDirectoryCandidates(const GameEntry& game) const;
+    bool hasMods(const GameEntry& game) const; // a playable game whose runtime reads CubeShelf mods
+    std::string labelled(Str label, const std::string& value) const;
     void showToast(std::string message);
     void persistSettings();
-    std::string findEngine() const;
+    std::string findEngine(const CatalogEntry* entry) const;
     void requestLaunch();
     void finishLaunch();
 
@@ -61,6 +74,7 @@ private:
     void updateShelf(const InputState& input, uint32_t nav);
     void updateOptions(const InputState& input, uint32_t nav);
     void updateControllers(const InputState& input, uint32_t nav);
+    void updateMods(const InputState& input, uint32_t nav);
     void updateDialog(const InputState& input);
     void cycleOption(int row, int delta);
 
@@ -71,6 +85,7 @@ private:
     void drawCard(size_t index, float cx, float bottom, float scale, float focus);
     void drawGeneratedCover(const GameEntry& game, const GameVisual& visual, float x, float y, float w, float h, float s);
     void drawPartyCover(const GameEntry& game, float x, float y, float w, float h, float s);
+    void drawBoxArt(const GameVisual& visual, float x, float y, float w, float h, float s);
     void drawCaseBand(float x, float y, float w, float s);
     void drawRegionFooter(const GameEntry& game, float x, float y, float w, float h, float s);
     void drawInfo();
@@ -78,10 +93,13 @@ private:
     void drawFooter();
     void drawOptions(float anim);
     void drawControllers(float anim);
+    void drawMods(float anim);
     void drawDialog(float anim);
     void drawToast();
     void drawGameCubeController(float cx, float cy, int highlight);
     void drawEmblem(float cx, float cy, float size, float alpha);
+    // The GameCube cube mark: CubeShelf's logo image, or the drawn emblem.
+    void drawCubeMark(float cx, float cy, float size, float alpha);
     float drawButtonGlyph(float cx, float cy, const char* glyph, float radius, float alpha);
     void drawHints(const std::vector<Hint>& hints, float right, float y, float alpha = 1.0f);
     float pulse() const;
@@ -95,13 +113,24 @@ private:
     Language m_systemLanguage = Language::English;
     Language m_language = Language::English;
 
+    Catalog m_catalog;
     std::vector<GameEntry> m_games;
     std::vector<GameVisual> m_visuals;
+    std::map<std::string, Texture> m_artCache; // catalogue covers by resource path
 
     // PartyBoard artwork shared with the PC pre-launch screen (res/).
     Texture m_logo;       // PartyBoard wordmark
     Texture m_star;       // app icon star
     Texture m_art;        // purple stripes with the Mario Party 4 cast
+    Texture m_gcLogo;     // CubeShelf's GameCube cube logo
+
+    // Mods of the selected game, while the Mods panel is open.
+    ModSet m_mods;
+    int m_modRow = 0;
+    bool m_modsDirty = false;
+    std::string m_modsDirectory; // where installed.json lives, or where it should go
+    size_t m_selectedActiveMods = 0;
+    size_t m_selectedModsFor = static_cast<size_t>(-1);
 
     size_t m_selected = 0;
     float m_scroll = 0.0f;

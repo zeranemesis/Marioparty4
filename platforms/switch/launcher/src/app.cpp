@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 
 #include "image.hpp"
+#include "paths.hpp"
 
 namespace partyboard::launcher {
 
@@ -59,6 +60,8 @@ Str regionName(char code) {
 Str statusText(Compatibility compatibility) {
     switch (compatibility) {
     case Compatibility::Supported: return Str::StatusSupported;
+    case Compatibility::NoSwitchRuntime: return Str::StatusNoSwitchRuntime;
+    case Compatibility::UnsupportedRevision: return Str::StatusUnsupportedRevision;
     case Compatibility::UnsupportedRegion: return Str::StatusUnsupportedRegion;
     case Compatibility::OtherGame: return Str::StatusOtherGame;
     case Compatibility::Unreadable: break;
@@ -69,6 +72,8 @@ Str statusText(Compatibility compatibility) {
 Color statusColor(Compatibility compatibility) {
     switch (compatibility) {
     case Compatibility::Supported: return kGreen;
+    case Compatibility::NoSwitchRuntime: return kAccentLight;
+    case Compatibility::UnsupportedRevision:
     case Compatibility::UnsupportedRegion: return kOrange;
     case Compatibility::OtherGame: return kGrey;
     case Compatibility::Unreadable: break;
@@ -108,16 +113,41 @@ App::~App() {
     m_r.destroyTexture(m_logo);
     m_r.destroyTexture(m_star);
     m_r.destroyTexture(m_art);
+    m_r.destroyTexture(m_gcLogo);
+    for (auto& [path, texture] : m_artCache)
+        m_r.destroyTexture(texture);
 }
 
 void App::init() {
-    loadSettings(m_platform.settingsPath(), m_settings);
+    loadSettings(m_platform.layout().settingsPath, m_settings);
     m_systemLanguage = m_platform.systemLanguage();
     m_language = m_settings.resolveLanguage(m_systemLanguage);
     m_now = m_last = m_platform.now();
     m_shelfFadeStart = m_now;
     loadArtwork();
+    loadCatalog();
     rescan(false);
+}
+
+void App::loadCatalog() {
+    // Shipped catalogue first, then the player's additions on the SD card.
+    if (!m_catalog.loadFile(m_platform.resourcePath("catalog.json")) || m_catalog.empty())
+        m_catalog = Catalog::builtin();
+    m_catalog.loadFile(m_platform.layout().userCatalogPath);
+}
+
+const Texture* App::cachedArt(const std::string& resource) {
+    if (resource.empty())
+        return nullptr;
+    auto it = m_artCache.find(resource);
+    if (it == m_artCache.end()) {
+        Image image;
+        Texture texture;
+        if (loadPng(m_platform.resourcePath(resource), image, 1024))
+            texture = m_r.createTexture(image.width, image.height, image.rgba.data(), true);
+        it = m_artCache.emplace(resource, texture).first;
+    }
+    return it->second ? &it->second : nullptr;
 }
 
 void App::loadArtwork() {
@@ -131,6 +161,7 @@ void App::loadArtwork() {
     m_logo = load("logo.png", true);
     m_star = load("icon.png", true);
     m_art = load("prelaunch-bg.png", true);
+    m_gcLogo = load("gamecube_logo.png", true);
 }
 
 void App::releaseTextures() {
@@ -144,7 +175,8 @@ void App::releaseTextures() {
 void App::rescan(bool announce) {
     const std::string previous = m_selected < m_games.size() ? m_games[m_selected].path : m_settings.lastGame;
     releaseTextures();
-    m_games = scanLibrary(m_platform.gameDirectories(), m_platform.coversDirectory(), m_language);
+    const SdLayout& layout = m_platform.layout();
+    m_games = scanLibrary(layout.gameDirectories, layout.coversDirectory, m_language, m_catalog);
     m_visuals.resize(m_games.size());
     for (size_t i = 0; i < m_games.size(); ++i) {
         const GameEntry& game = m_games[i];
@@ -153,7 +185,14 @@ void App::rescan(bool announce) {
         Image cover;
         if (!game.coverPath.empty() && loadPng(game.coverPath, cover))
             m_visuals[i].cover = m_r.createTexture(cover.width, cover.height, cover.rgba.data(), true);
+        if (game.catalog) {
+            if (const CoverArt* art = game.catalog->coverFor(game.disc.regionCode())) {
+                m_visuals[i].front = cachedArt(art->front);
+                m_visuals[i].spine = cachedArt(art->spine);
+            }
+        }
     }
+    m_selectedModsFor = static_cast<size_t>(-1);
 
     m_selected = 0;
     for (size_t i = 0; i < m_games.size(); ++i) {
@@ -169,7 +208,7 @@ void App::refreshLanguage() {
     m_language = m_settings.resolveLanguage(m_systemLanguage);
 }
 
-void App::persistSettings() { saveSettings(m_platform.settingsPath(), m_settings); }
+void App::persistSettings() { saveSettings(m_platform.layout().settingsPath, m_settings); }
 
 void App::openOverlay(Overlay overlay) {
     m_overlay = overlay;
@@ -180,8 +219,76 @@ void App::openOverlay(Overlay overlay) {
 void App::closeOverlay() {
     if (m_overlay == Overlay::Options)
         persistSettings();
+    if (m_overlay == Overlay::Mods)
+        closeMods();
     m_overlay = Overlay::None;
     m_platform.playSound(Sound::Back, 0.8f);
+}
+
+bool App::hasMods(const GameEntry& game) const {
+    return game.launchable() && game.catalog && game.catalog->mods;
+}
+
+std::string App::labelled(Str label, const std::string& value) const {
+    // French typography puts a space before the colon.
+    return std::string(t(label)) + (m_language == Language::French ? " : " : ": ") + value;
+}
+
+void App::openMods() {
+    const GameEntry& game = m_games[m_selected];
+    const std::vector<std::string> candidates = modDirectoryCandidates(game);
+    const std::string& root = m_platform.layout().modsDirectory;
+    m_modsDirectory = ModSet::findDirectory(root, candidates);
+    m_mods = ModSet();
+    if (!m_modsDirectory.empty())
+        m_mods.load(m_modsDirectory);
+    else if (!candidates.empty())
+        m_modsDirectory = root + "/" + (game.catalog ? game.catalog->id : candidates.front());
+    m_modRow = 0;
+    m_modsDirty = false;
+    openOverlay(Overlay::Mods);
+}
+
+void App::closeMods() {
+    if (m_modsDirty) {
+        m_mods.save();
+        m_mods.writeActiveList();
+        m_modsDirty = false;
+    }
+    m_selectedModsFor = static_cast<size_t>(-1); // refresh the count under the shelf
+}
+
+void App::updateMods(const InputState& input, uint32_t nav) {
+    const int count = static_cast<int>(m_mods.mods().size());
+    if (nav & kButtonUp && m_modRow > 0) {
+        --m_modRow;
+        m_platform.playSound(Sound::Move, 0.7f);
+    }
+    if (nav & kButtonDown && m_modRow + 1 < count) {
+        ++m_modRow;
+        m_platform.playSound(Sound::Move, 0.7f);
+    }
+    if ((input.pressed & kButtonA) && m_modRow < count) {
+        m_mods.toggle(static_cast<size_t>(m_modRow));
+        m_modsDirty = true;
+        m_platform.playSound(Sound::Select, 0.7f);
+    }
+    // L/R move the focused mod up or down the load order, and focus follows it.
+    for (const auto& [button, direction] : {std::pair<uint32_t, int>{kButtonL, -1}, {kButtonR, 1}}) {
+        if ((input.pressed & button) && m_modRow < count) {
+            const int id = m_mods.mods()[static_cast<size_t>(m_modRow)].id;
+            if (m_mods.move(static_cast<size_t>(m_modRow), direction)) {
+                m_modsDirty = true;
+                for (int i = 0; i < count; ++i) {
+                    if (m_mods.mods()[static_cast<size_t>(i)].id == id)
+                        m_modRow = i;
+                }
+                m_platform.playSound(Sound::Move, 0.9f);
+            }
+        }
+    }
+    if (input.pressed & kButtonB)
+        closeOverlay();
 }
 
 void App::showDialog(Str title, Str body, std::string detail) {
@@ -196,14 +303,31 @@ void App::showToast(std::string message) {
     m_toastUntil = m_now + 2.6;
 }
 
-std::string App::findEngine() const {
-    if (fileExists(m_settings.enginePath))
+std::string App::findEngine(const CatalogEntry* entry) const {
+    if (!entry)
+        return {};
+    // launcher.ini's engine= overrides PartyBoard's location only.
+    if (entry->runtime == "PartyBoard" && fileExists(m_settings.enginePath))
         return m_settings.enginePath;
-    for (const std::string& candidate : m_platform.engineCandidates()) {
+    for (const std::string& relative : entry->engines) {
+        const std::string candidate = m_platform.layout().root + "/" + relative;
         if (fileExists(candidate))
             return candidate;
     }
     return {};
+}
+
+std::vector<std::string> App::modDirectoryCandidates(const GameEntry& game) const {
+    // CubeShelf names the folder after the catalogue revision id (GMPE01_00).
+    // Only for the same game id: mods are built against one release's files.
+    std::vector<std::string> names;
+    if (game.error != DiscError::None)
+        return names;
+    names.push_back(revisionId(game.disc));
+    if (game.catalog && game.catalog->id.compare(0, 6, game.disc.gameId) == 0)
+        names.push_back(game.catalog->id);
+    names.push_back(game.disc.gameId);
+    return names;
 }
 
 void App::requestLaunch() {
@@ -212,21 +336,36 @@ void App::requestLaunch() {
         return;
     }
     const GameEntry& game = m_games[m_selected];
+    if (game.compatibility == Compatibility::NoSwitchRuntime) {
+        showDialog(Str::LaunchNoRuntimeTitle, Str::LaunchNoRuntimeBody,
+                   labelled(Str::RuntimeLabel, game.catalog->runtime));
+        return;
+    }
     if (!game.launchable()) {
         showDialog(Str::LaunchUnsupportedTitle, Str::LaunchUnsupportedBody, t(statusText(game.compatibility)));
         return;
     }
-    const std::string engine = findEngine();
+    const std::string engine = findEngine(game.catalog);
     if (engine.empty()) {
-        const std::vector<std::string> candidates = m_platform.engineCandidates();
+        const std::vector<std::string>& engines = game.catalog->engines;
         showDialog(Str::LaunchEngineMissingTitle, Str::LaunchEngineMissingBody,
-                   candidates.empty() ? std::string{} : candidates.front());
+                   engines.empty() ? std::string{} : m_platform.layout().root + "/" + engines.front());
         return;
+    }
+
+    // Like CubeShelf right before it starts PartyBoard: rewrite the active
+    // list from installed.json so the engine never reads a stale one.
+    std::string modList;
+    if (game.catalog->mods) {
+        ModSet mods;
+        const std::string dir = ModSet::findDirectory(m_platform.layout().modsDirectory, modDirectoryCandidates(game));
+        if (!dir.empty() && mods.load(dir))
+            modList = mods.writeActiveList();
     }
 
     m_settings.lastGame = game.path;
     persistSettings();
-    m_launchArgs = buildLaunchArgs(engine, game.path, m_platform.selfPath(), m_settings, m_language);
+    m_launchArgs = buildLaunchArgs(engine, game.path, m_platform.selfPath(), m_settings, m_language, modList);
     m_platform.playSound(Sound::Select);
     m_launchStart = m_now;
     if (m_settings.bootAnimation) {
@@ -290,6 +429,8 @@ void App::updateShelf(const InputState& input, uint32_t nav) {
         openOverlay(Overlay::Options);
     else if (input.pressed & kButtonY)
         openOverlay(Overlay::Controllers);
+    else if ((input.pressed & kButtonR) && m_selected < m_games.size() && hasMods(m_games[m_selected]))
+        openMods();
     else if (input.pressed & kButtonMinus)
         rescan(true);
     else if (input.pressed & kButtonPlus)
@@ -371,12 +512,26 @@ bool App::frame() {
     const InputState input = m_platform.input();
     const uint32_t nav = navigation(input);
 
+    if (m_selected != m_selectedModsFor && m_selected < m_games.size()) {
+        m_selectedModsFor = m_selected;
+        m_selectedActiveMods = 0;
+        const GameEntry& game = m_games[m_selected];
+        if (hasMods(game)) {
+            ModSet mods;
+            const std::string dir =
+                ModSet::findDirectory(m_platform.layout().modsDirectory, modDirectoryCandidates(game));
+            if (!dir.empty() && mods.load(dir))
+                m_selectedActiveMods = mods.activeCount();
+        }
+    }
+
     switch (m_screen) {
     case Screen::Shelf:
         switch (m_overlay) {
         case Overlay::None: updateShelf(input, nav); break;
         case Overlay::Options: updateOptions(input, nav); break;
         case Overlay::Controllers: updateControllers(input, nav); break;
+        case Overlay::Mods: updateMods(input, nav); break;
         case Overlay::Dialog: updateDialog(input); break;
         }
         break;
@@ -437,6 +592,13 @@ void App::drawEmblem(float cx, float cy, float size, float alpha) {
     m_r.quad(right, withAlpha(rgb(0x4A3DB8), alpha));
 }
 
+void App::drawCubeMark(float cx, float cy, float size, float alpha) {
+    if (m_gcLogo)
+        m_r.image(m_gcLogo, cx - size * 0.5f, cy - size * 0.5f, size, size, withAlpha(rgb(0xFFFFFF), alpha));
+    else
+        drawEmblem(cx, cy, size, alpha);
+}
+
 float App::drawButtonGlyph(float cx, float cy, const char* glyph, float radius, float alpha) {
     const float size = radius * (std::strlen(glyph) > 1 ? 0.9f : 1.15f);
     const float textWidth = m_r.measure(FontWeight::Bold, size, glyph);
@@ -472,17 +634,8 @@ void App::drawHeader() {
         m_r.rect(x, 26.0f, 2.0f, 34.0f, withAlpha(kText, 0.25f));
         x += 16.0f;
     }
-    {
-        constexpr float size = 44.0f;
-        m_r.begin3D(x - 4.0f, 21.0f, size, size);
-        const Vec3 eye{2.5f, 2.0f, 2.5f};
-        const Mat4 vp = Mat4::perspective(30.0f * kPi / 180.0f, 1.0f, 0.1f, 20.0f) *
-                        Mat4::lookAt(eye, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f});
-        const Mat4 model = Mat4::rotate(static_cast<float>(m_now) * 0.5f, {0.0f, 1.0f, 0.0f});
-        m_r.cube(vp, model, eye, rgb(0x8B7DFF), 0.3f);
-        m_r.end3D();
-        x += size + 4.0f;
-    }
+    drawCubeMark(x + 20.0f, 43.0f, 40.0f, 1.0f);
+    x += 50.0f;
     m_r.textMiddle(FontWeight::Display, 26.0f, x, 43.0f, "GAMECUBE", kText, Align::Left, 1.5f);
 
     // Clock and battery, like the Switch HOME menu.
@@ -517,9 +670,11 @@ void App::drawGeneratedCover(const GameEntry& game, const GameVisual& visual, fl
         bottom = rgb(0x283CC4);
         break;
     case Compatibility::UnsupportedRegion:
+    case Compatibility::UnsupportedRevision:
         top = rgb(0xC77DFF);
         bottom = rgb(0x5B2BB5);
         break;
+    case Compatibility::NoSwitchRuntime:
     case Compatibility::OtherGame:
         top = hashedColor(game.disc.gameId, 0.85f);
         bottom = hashedColor(game.disc.gameId, 0.35f);
@@ -546,7 +701,7 @@ void App::drawGeneratedCover(const GameEntry& game, const GameVisual& visual, fl
         m_r.roundRect(bx - 3.0f * s, by - 3.0f * s, bw + 6.0f * s, bh + 6.0f * s, 8.0f * s, withAlpha(kText, 0.92f));
         m_r.image(visual.banner, bx, by, bw, bh, {}, 6.0f * s);
     } else {
-        drawEmblem(x + w * 0.5f, by + bh * 0.5f, bh * 0.95f, 0.9f);
+        drawCubeMark(x + w * 0.5f, by + bh * 0.5f, bh * 0.95f, 0.9f);
     }
 
     const std::vector<std::string> lines = m_r.wrap(FontWeight::Bold, 21.0f * s, game.title(m_language), w - 28.0f * s);
@@ -585,7 +740,7 @@ void App::drawCaseBand(float x, float y, float w, float s) {
     const float radius = 14.0f * s;
     m_r.roundRect(x, y, w, band, radius, rgb(0x16113F));
     m_r.rect(x, y + band * 0.5f, w, band * 0.5f, rgb(0x16113F));
-    drawEmblem(x + 20.0f * s, y + band * 0.5f, 18.0f * s, 1.0f);
+    drawCubeMark(x + 20.0f * s, y + band * 0.5f, 20.0f * s, 1.0f);
     m_r.textMiddle(FontWeight::Display, 14.0f * s, x + 35.0f * s, y + band * 0.5f, "GAMECUBE", kText, Align::Left,
              1.6f * s);
 }
@@ -600,6 +755,26 @@ void App::drawRegionFooter(const GameEntry& game, float x, float y, float w, flo
     const float rw = m_r.measure(FontWeight::Bold, 12.0f * s, region) + 16.0f * s;
     m_r.roundRect(x + w - 14.0f * s - rw, mid - 10.0f * s, rw, 20.0f * s, 10.0f * s, withAlpha(rgb(0x000000), 0.45f));
     m_r.textMiddle(FontWeight::Bold, 12.0f * s, x + w - 14.0f * s - rw * 0.5f, mid, region, kText, Align::Center);
+}
+
+void App::drawBoxArt(const GameVisual& visual, float x, float y, float w, float h, float s) {
+    const float radius = 10.0f * s;
+    // The spine is drawn foreshortened, as if the case were turned a little.
+    const float spineW = visual.spine ? std::round(h * 0.055f) : 0.0f;
+    const float frontX = x + spineW;
+    const float frontW = w - spineW;
+    if (visual.spine) {
+        m_r.image(*visual.spine, x, y, spineW + radius, h, rgb(0xB8B4CC), radius);
+        m_r.gradientRect(x, y + radius, spineW, h - radius * 2.0f, withAlpha(rgb(0x000000), 0.0f),
+                         withAlpha(rgb(0x000000), 0.35f), withAlpha(rgb(0x000000), 0.35f),
+                         withAlpha(rgb(0x000000), 0.0f));
+    }
+    m_r.image(*visual.front, frontX, y, frontW, h, {}, radius);
+    // Plastic sleeve: a soft sheen across the top and a crisp crease at the spine.
+    m_r.roundRectGradient(frontX, y, frontW, h * 0.45f, radius, withAlpha(rgb(0xFFFFFF), 0.13f),
+                          withAlpha(rgb(0xFFFFFF), 0.0f));
+    if (visual.spine)
+        m_r.rect(frontX - 1.0f, y + radius * 0.5f, 2.0f, h - radius, withAlpha(rgb(0x000000), 0.45f));
 }
 
 void App::drawPartyCover(const GameEntry& game, float x, float y, float w, float h, float s) {
@@ -646,6 +821,8 @@ void App::drawCard(size_t index, float cx, float bottom, float scale, float focu
 
     if (visual.cover)
         m_r.imageCover(visual.cover, x, y, w, h, 0.5f, 0.5f, {}, radius);
+    else if (visual.front)
+        drawBoxArt(visual, x, y, w, h, scale);
     else if (m_art && isMarioParty4(game))
         drawPartyCover(game, x, y, w, h, scale);
     else
@@ -689,40 +866,69 @@ void App::drawInfo() {
     m_r.roundRect(pillX, 500.0f, pillWidth, 34.0f, 17.0f, withAlpha(status, 0.18f));
     m_r.roundRectOutline(pillX, 500.0f, pillWidth, 34.0f, 17.0f, 1.5f, withAlpha(status, 0.7f));
     m_r.circle(pillX + 20.0f, 517.0f, 6.0f, status);
-    m_r.textMiddle(FontWeight::Bold, 16.0f, pillX + 34.0f, 517.0f,
-             statusLabel, kText);
-    if (game.launchable())
-        m_r.text(FontWeight::Regular, 17.0f, 1160.0f, 546.0f, t(Str::Players), kTextSoft, Align::Right);
+    m_r.textMiddle(FontWeight::Bold, 16.0f, pillX + 34.0f, 517.0f, statusLabel, kText);
+
+    // Under the pill: the mods CubeShelf installed for this game, or its runtime.
+    if (hasMods(game)) {
+        const std::string label = m_selectedActiveMods > 0
+                                      ? format(t(Str::ModsActiveCount), static_cast<unsigned>(m_selectedActiveMods))
+                                      : std::string(t(Str::ModsNone));
+        const float lw = m_r.textMiddle(FontWeight::Regular, 17.0f, 1160.0f, 556.0f, label, kTextSoft, Align::Right);
+        drawButtonGlyph(1160.0f - lw - 22.0f, 556.0f, "R", 12.0f, 1.0f);
+    } else if (game.catalog && !game.catalog->runtime.empty()) {
+        m_r.textMiddle(FontWeight::Regular, 17.0f, 1160.0f, 556.0f, labelled(Str::RuntimeLabel, game.catalog->runtime),
+                       kTextSoft, Align::Right);
+    }
 
     const float textWidth = pillX - x - 30.0f;
-    m_r.text(FontWeight::Bold, 32.0f, x, 494.0f, m_r.ellipsize(FontWeight::Bold, 32.0f, game.title(m_language), textWidth),
+    m_r.text(FontWeight::Bold, 30.0f, x, 490.0f, m_r.ellipsize(FontWeight::Bold, 30.0f, game.title(m_language), textWidth),
              kText);
 
-    std::string meta;
-    auto append = [&meta](const std::string& part) {
-        if (part.empty())
-            return;
-        if (!meta.empty())
-            meta += "  \xC2\xB7  ";
-        meta += part;
+    auto joined = [](std::initializer_list<std::string> parts) {
+        std::string out;
+        for (const std::string& part : parts) {
+            if (part.empty())
+                continue;
+            if (!out.empty())
+                out += "  \xC2\xB7  ";
+            out += part;
+        }
+        return out;
     };
-    append(game.maker(m_language));
-    if (game.error == DiscError::None) {
-        append(t(regionName(game.disc.regionCode())));
-        append(format(t(Str::Revision), game.disc.revision));
-        append(game.disc.gameId);
+
+    // CubeShelf's game sheet: year, genre, players and runtime from the catalogue.
+    float y = 532.0f;
+    if (game.catalog) {
+        const CatalogEntry& c = *game.catalog;
+        const std::string sheet = joined({c.year > 0 ? std::to_string(c.year) : std::string{}, c.genre.get(m_language),
+                                          c.players.get(m_language), c.runtime});
+        m_r.text(FontWeight::Regular, 18.0f, x, y, m_r.ellipsize(FontWeight::Regular, 18.0f, sheet, textWidth), kTextSoft);
+        y += 26.0f;
     }
-    append(discFormatName(game.disc.format));
-    m_r.text(FontWeight::Regular, 18.0f, x, 540.0f, m_r.ellipsize(FontWeight::Regular, 18.0f, meta, textWidth), kTextSoft);
+    // The disc itself.
+    std::string disc;
+    if (game.error == DiscError::None) {
+        disc = joined({game.catalog ? std::string{} : game.maker(m_language), t(regionName(game.disc.regionCode())),
+                       format(t(Str::Revision), game.disc.revision), game.disc.gameId,
+                       discFormatName(game.disc.format)});
+    } else {
+        disc = joined({game.fileName, discFormatName(game.disc.format)});
+    }
+    m_r.text(FontWeight::Regular, game.catalog ? 15.0f : 18.0f, x, y,
+             m_r.ellipsize(FontWeight::Regular, 18.0f, disc, textWidth), game.catalog ? kTextDim : kTextSoft);
+    y += game.catalog ? 26.0f : 30.0f;
 
     std::string description = game.description(m_language);
     if (description.empty() && game.error == DiscError::None && !game.disc.hasBanner())
         description = t(Str::BannerMissing);
-    if (description.empty() && game.error != DiscError::None)
-        description = game.fileName;
-    const std::vector<std::string> lines = m_r.wrap(FontWeight::Regular, 18.0f, description, textWidth);
-    for (size_t i = 0; i < lines.size() && i < 2; ++i)
-        m_r.text(FontWeight::Regular, 18.0f, x, 572.0f + 26.0f * static_cast<float>(i), lines[i], withAlpha(kText, 0.82f));
+    std::vector<std::string> lines = m_r.wrap(FontWeight::Regular, 17.0f, description, textWidth);
+    if (lines.size() > 2) {
+        // Two lines fit above the footer; say there was more.
+        lines[1] = m_r.ellipsize(FontWeight::Regular, 17.0f, lines[1] + " " + lines[2] + "\xE2\x80\xA6", textWidth);
+        lines.resize(2);
+    }
+    for (size_t i = 0; i < lines.size(); ++i)
+        m_r.text(FontWeight::Regular, 17.0f, x, y + 24.0f * static_cast<float>(i), lines[i], withAlpha(kText, 0.82f));
 }
 
 void App::drawEmptyState() {
@@ -738,7 +944,7 @@ void App::drawEmptyState() {
     }
     m_r.text(FontWeight::Display, 32.0f, W * 0.5f, y + 116.0f, t(Str::NoGamesTitle), kText, Align::Center);
     m_r.text(FontWeight::Regular, 19.0f, W * 0.5f, y + 166.0f, t(Str::NoGamesBody), kTextSoft, Align::Center);
-    const std::vector<std::string> dirs = m_platform.gameDirectories();
+    const std::vector<std::string>& dirs = m_platform.layout().gameDirectories;
     const std::string dir = dirs.empty() ? std::string{} : dirs.front();
     const float dw = m_r.measure(FontWeight::Bold, 20.0f, dir) + 40.0f;
     m_r.roundRect(W * 0.5f - dw * 0.5f, y + 200.0f, dw, 42.0f, 21.0f, withAlpha(rgb(0x000000), 0.35f));
@@ -771,6 +977,8 @@ void App::drawFooter() {
         hints.push_back({"A", Str::Play});
     hints.push_back({"X", Str::Options});
     hints.push_back({"Y", Str::Controllers});
+    if (m_selected < m_games.size() && hasMods(m_games[m_selected]))
+        hints.push_back({"R", Str::Mods});
     if (m_games.empty())
         hints.push_back({"-", Str::Refresh});
     hints.push_back({"+", Str::Quit});
@@ -833,6 +1041,7 @@ void App::drawShelf() {
         switch (m_overlayDrawn) {
         case Overlay::Options: drawOptions(anim); break;
         case Overlay::Controllers: drawControllers(anim); break;
+        case Overlay::Mods: drawMods(anim); break;
         case Overlay::Dialog: drawDialog(anim); break;
         case Overlay::None: break;
         }
@@ -904,16 +1113,104 @@ void App::drawOptions(float anim) {
         hy += 26.0f;
     }
 
-    // Where the engine was found, so a missing install is visible here too.
-    const std::string engine = findEngine();
-    const std::string engineLine = std::string(t(Str::EngineLabel)) + " : " +
-                                   (engine.empty() ? t(Str::EngineMissing) : t(Str::EngineInstalled));
+    // Whether PartyBoard is installed, so a missing engine is visible here too.
+    const CatalogEntry* partyboard = nullptr;
+    for (const CatalogEntry& entry : m_catalog.games()) {
+        if (entry.runtime == "PartyBoard" && !partyboard)
+            partyboard = &entry;
+    }
+    const std::string engine = findEngine(partyboard);
+    const std::string engineLine =
+        labelled(Str::EngineLabel, engine.empty() ? t(Str::EngineMissing) : t(Str::EngineInstalled));
     m_r.circle(px + 52.0f, 618.0f, 6.0f, engine.empty() ? kOrange : kGreen);
     m_r.textMiddle(FontWeight::Regular, 16.0f, px + 66.0f, 618.0f,
              engineLine, kTextDim);
 
     m_r.rect(px + 24.0f, 660.0f, pw - 48.0f, 1.0f, withAlpha(kText, 0.16f));
     drawHints({{"A", Str::Change}, {"B", Str::Back}}, px + pw - 40.0f, 689.0f);
+}
+
+void App::drawMods(float anim) {
+    m_r.rect(0, 0, W, H, withAlpha(rgb(0x05030F), 0.55f * anim));
+    const float pw = 620.0f;
+    const float px = W - pw * anim;
+    m_r.softRect(px - 30.0f, 0, 60.0f, H, 0.0f, 24.0f, withAlpha(rgb(0x000000), 0.5f * anim));
+    m_r.rect(px, 0, pw, H, kPanel);
+
+    m_r.text(FontWeight::Display, 34.0f, px + 44.0f, 36.0f, t(Str::ModsTitle), kText);
+    if (m_selected < m_games.size())
+        m_r.text(FontWeight::Regular, 17.0f, px + 44.0f, 82.0f,
+                 m_r.ellipsize(FontWeight::Regular, 17.0f, m_games[m_selected].title(m_language), pw - 88.0f), kTextSoft);
+
+    const std::vector<InstalledMod>& mods = m_mods.mods();
+    if (mods.empty()) {
+        float y = 150.0f;
+        m_r.text(FontWeight::Bold, 21.0f, px + 44.0f, y, t(Str::ModsEmpty), kText);
+        y += 44.0f;
+        for (const std::string& line : m_r.wrap(FontWeight::Regular, 17.0f, t(Str::ModsCopyHint), pw - 88.0f)) {
+            m_r.text(FontWeight::Regular, 17.0f, px + 44.0f, y, line, kTextSoft);
+            y += 24.0f;
+        }
+        const std::string dir = m_r.ellipsize(FontWeight::Bold, 16.0f, m_modsDirectory, pw - 120.0f);
+        const float dw = m_r.measure(FontWeight::Bold, 16.0f, dir) + 32.0f;
+        m_r.roundRect(px + 44.0f, y + 8.0f, dw, 38.0f, 19.0f, withAlpha(rgb(0x000000), 0.35f));
+        m_r.textMiddle(FontWeight::Bold, 16.0f, px + 60.0f, y + 27.0f, dir, kAccentLight);
+    } else {
+        // A window of rows that follows the focus.
+        constexpr int kVisible = 7;
+        const float rowH = 62.0f;
+        const int count = static_cast<int>(mods.size());
+        const int first = std::clamp(m_modRow - kVisible / 2, 0, std::max(0, count - kVisible));
+        float y = 118.0f;
+        for (int i = first; i < count && i < first + kVisible; ++i) {
+            const InstalledMod& mod = mods[static_cast<size_t>(i)];
+            const bool selected = i == m_modRow;
+            const float rx = px + 24.0f;
+            const float rw = pw - 48.0f;
+            m_r.roundRect(rx, y, rw, rowH - 8.0f, 12.0f, selected ? kPanelRow : withAlpha(kPanelRow, 0.35f));
+            if (selected)
+                m_r.roundRectOutline(rx - 3.0f, y - 3.0f, rw + 6.0f, rowH - 2.0f, 14.0f, 3.0f,
+                                     mixColor(kAccent, kAccentLight, pulse()));
+            const float mid = y + (rowH - 8.0f) * 0.5f;
+
+            // Load order number, then the switch, then the name and its state.
+            char order[16];
+            std::snprintf(order, sizeof(order), "%d", i + 1);
+            m_r.textMiddle(FontWeight::Display, 18.0f, rx + 26.0f, mid, order, kTextDim, Align::Center);
+            const bool on = mod.active();
+            const float sx = rx + 50.0f;
+            m_r.roundRect(sx, mid - 12.0f, 44.0f, 24.0f, 12.0f, on ? kGreen : withAlpha(kTextDim, 0.45f));
+            m_r.circle(on ? sx + 32.0f : sx + 12.0f, mid, 9.0f, kText);
+
+            const float nameX = sx + 60.0f;
+            const float nameW = rx + rw - nameX - 16.0f;
+            const char* state = !mod.present           ? t(Str::ModsMissing)
+                                : mod.playerDisabled   ? t(Str::ModsPlayerDisabled)
+                                : mod.enabled          ? t(Str::ModsActive)
+                                                       : t(Str::ModsInactive);
+            const Color stateColor = !mod.present ? kRed : mod.playerDisabled ? kOrange : kTextDim;
+            m_r.text(FontWeight::Bold, 18.0f, nameX, mid - 22.0f,
+                     m_r.ellipsize(FontWeight::Bold, 18.0f, mod.name, nameW), on ? kText : kTextSoft);
+            char detail[96];
+            std::snprintf(detail, sizeof(detail), "GameBanana #%d", mod.id);
+            m_r.text(FontWeight::Regular, 14.0f, nameX, mid + 2.0f, std::string(state) + "  \xC2\xB7  " + detail,
+                     stateColor);
+            y += rowH;
+        }
+        const float hy = 118.0f + rowH * kVisible + 6.0f;
+        float ly = hy;
+        for (const std::string& line : m_r.wrap(FontWeight::Regular, 16.0f, t(Str::ModsHelp), pw - 88.0f)) {
+            m_r.text(FontWeight::Regular, 16.0f, px + 44.0f, ly, line, kTextDim);
+            ly += 22.0f;
+        }
+    }
+
+    m_r.rect(px + 24.0f, 660.0f, pw - 48.0f, 1.0f, withAlpha(kText, 0.16f));
+    if (mods.empty())
+        drawHints({{"B", Str::Back}}, px + pw - 40.0f, 689.0f);
+    else
+        drawHints({{"A", Str::ModsToggle}, {"L/R", Str::ModsOrder}, {"B", Str::Back}},
+                  px + pw - 40.0f, 689.0f);
 }
 
 void App::drawGameCubeController(float cx, float cy, int highlight) {

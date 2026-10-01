@@ -39,6 +39,8 @@ constexpr Entry kStrings[] = {
      "Japanese release: not supported yet"},
     {Str::StatusOtherGame, "Ce disque n'est pas Mario Party 4", "This disc is not Mario Party 4"},
     {Str::StatusUnreadable, "Image disque illisible", "Unreadable disc image"},
+    {Str::StatusNoSwitchRuntime, "Pas encore disponible sur Switch", "Not available on Switch yet"},
+    {Str::StatusUnsupportedRevision, "Révision du disque non prise en charge", "Disc revision not supported"},
 
     {Str::RegionUsa, "NTSC-U", "NTSC-U"},
     {Str::RegionEurope, "PAL", "PAL"},
@@ -117,6 +119,26 @@ constexpr Entry kStrings[] = {
     {Str::EngineInstalled, "installé", "installed"},
     {Str::EngineMissing, "introuvable", "not found"},
     {Str::BootPresents, "Mario Party R&D présente", "Mario Party R&D presents"},
+
+    {Str::Mods, "Mods", "Mods"},
+    {Str::ModsTitle, "Mods", "Mods"},
+    {Str::ModsActiveCount, "Mods actifs : %u", "Active mods: %u"},
+    {Str::ModsNone, "Aucun mod", "No mods"},
+    {Str::ModsEmpty, "Aucun mod installé pour ce jeu.", "No mods installed for this game."},
+    {Str::ModsCopyHint, "Copie le dossier Mods de CubeShelf (%LOCALAPPDATA%\\CubeShelf\\Mods) dans :",
+     "Copy CubeShelf's Mods folder (%LOCALAPPDATA%\\CubeShelf\\Mods) to:"},
+    {Str::ModsToggle, "Activer", "Toggle"},
+    {Str::ModsOrder, "Ordre", "Order"},
+    {Str::ModsActive, "Actif", "On"},
+    {Str::ModsInactive, "Inactif", "Off"},
+    {Str::ModsMissing, "Dossier introuvable sur la carte SD", "Folder missing from the SD card"},
+    {Str::ModsPlayerDisabled, "Coupé depuis le jeu", "Switched off in game"},
+    {Str::ModsHelp, "En cas de conflit, le mod le plus haut dans la liste l'emporte. Les choix sont enregistrés dans installed.json, comme dans CubeShelf.",
+     "When two mods change the same file, the one higher in the list wins. Choices are saved to installed.json, as in CubeShelf."},
+    {Str::LaunchNoRuntimeTitle, "Pas encore sur Switch", "Not on Switch yet"},
+    {Str::LaunchNoRuntimeBody, "Ce jeu tourne sur PC avec CubeShelf, mais son runtime n'a pas encore de version Switch.",
+     "This game runs on PC through CubeShelf, but its runtime has no Switch build yet."},
+    {Str::RuntimeLabel, "Runtime", "Runtime"},
 };
 
 static_assert(std::size(kStrings) == static_cast<size_t>(Str::Count), "every Str needs a translation");

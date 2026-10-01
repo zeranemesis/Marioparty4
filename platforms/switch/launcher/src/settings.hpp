@@ -9,6 +9,7 @@
 //   --filter=none|smooth|crt
 //   --lang=fr|en
 //   --rumble=on|off
+//   --mod-list=<active-mods.txt>  CubeShelf mod roots, same as PARTYBOARD_MOD_LIST
 //   --launcher=<launcher NRO>  where to return to when the game exits
 
 #include <string>
@@ -41,7 +42,8 @@ std::vector<std::string> buildLaunchArgs(const std::string& enginePath,
                                          const std::string& discPath,
                                          const std::string& launcherPath,
                                          const Settings& settings,
-                                         Language language);
+                                         Language language,
+                                         const std::string& modList = {});
 
 // Joins argv for libnx envSetNextLoad, quoting arguments with spaces.
 std::string joinArgv(const std::vector<std::string>& args);

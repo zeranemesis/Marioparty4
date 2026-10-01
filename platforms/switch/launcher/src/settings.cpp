@@ -142,7 +142,8 @@ std::vector<std::string> buildLaunchArgs(const std::string& enginePath,
                                          const std::string& discPath,
                                          const std::string& launcherPath,
                                          const Settings& settings,
-                                         Language language) {
+                                         Language language,
+                                         const std::string& modList) {
     std::vector<std::string> args;
     args.push_back(enginePath);
     args.push_back("--disc-image=" + discPath);
@@ -150,6 +151,8 @@ std::vector<std::string> buildLaunchArgs(const std::string& enginePath,
     args.push_back(std::string("--filter=") + filterKey(settings.filter));
     args.push_back(std::string("--lang=") + (language == Language::French ? "fr" : "en"));
     args.push_back(std::string("--rumble=") + (settings.rumble ? "on" : "off"));
+    if (!modList.empty())
+        args.push_back("--mod-list=" + modList);
     if (!launcherPath.empty())
         args.push_back("--launcher=" + launcherPath);
     return args;

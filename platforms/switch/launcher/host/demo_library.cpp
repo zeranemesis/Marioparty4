@@ -8,6 +8,7 @@
 #include <zlib.h>
 
 #include "image.hpp"
+#include "json.hpp"
 #include "settings.hpp"
 
 namespace partyboard::launcher::demo {
@@ -152,6 +153,19 @@ std::vector<uint8_t> bannerArt(int art) {
         c.text(66, 4, "4", 6, 0xFF3B4E, 0xFFFFFF);
         for (int i = 0; i < 4; ++i)
             c.disc(8 + i * 9, 27, 3, players[i]);
+        break;
+    }
+    case 4: {
+        // A pitch for the football disc.
+        c.gradient(0x3DBB5A, 0x0E5A24);
+        for (int x = 0; x < kBannerWidth; x += 12)
+            for (int y = 0; y < kBannerHeight; ++y)
+                if ((x / 12) % 2 == 0)
+                    for (int k = 0; k < 6; ++k)
+                        c.set(x + k, y, 0x46C866);
+        c.disc(76, 16, 10, 0xFFFFFF);
+        c.disc(76, 16, 4, 0x202020);
+        c.text(5, 8, "SMS", 3, 0xFFFFFF, 0x0B3A16);
         break;
     }
     default: {
@@ -328,6 +342,14 @@ void makeDemoSdCard(const std::string& root, bool withEngine) {
     test.art = 3;
     writeFile(games + "/PartyBoard Test Disc.rvz", wrapRvzHeader(buildIso(test)));
 
+    DiscSpec strikers;
+    strikers.gameId = "G4QP01";
+    strikers.headerTitle = "Mario Smash Football";
+    strikers.art = 4;
+    strikers.texts = {{"Mario Smash Football", "Nintendo", "Mario Smash Football", "Next Level Games / Nintendo",
+                       "Five-a-side football with no referee."}};
+    writeFile(games + "/Mario Smash Football.iso", buildIso(strikers));
+
     writeFile(games + "/corrupt.iso", std::vector<uint8_t>(0x1000, 0));
     writeFile(games + "/._Mario Party 4 (USA).iso", std::vector<uint8_t>(0x1000, 0x55));
 
@@ -350,6 +372,47 @@ void makeDemoSdCard(const std::string& root, bool withEngine) {
     }
     makeDirectories(root + "/partyboard/covers");
     writePng(root + "/partyboard/covers/GPBEZZ.png", cover);
+
+    // CubeShelf's Mods folder as copied from a PC: Windows paths in
+    // installed.json, one folder per GameBanana id, one of them missing and
+    // one switched off from inside the game.
+    {
+        const std::string mods = root + "/cubeshelf/Mods/GMPE01_00";
+        const char* pc = "C:\\Users\\Player\\AppData\\Local\\CubeShelf\\Mods\\GMPE01_00\\";
+        struct DemoMod {
+            int id;
+            const char* name;
+            bool enabled;
+            int priority;
+            bool present;
+        };
+        const DemoMod list[] = {
+            {546878, "Boards HD Retexture", true, 120, true},
+            {407132, "Minigame Music Remix", true, 110, true},
+            {512340, "Bowser Voice Pack", false, 100, true},
+            {499001, "Lost Mod", true, 90, false},
+        };
+        json::Value installed = json::Value::array();
+        for (const DemoMod& mod : list) {
+            json::Value item = json::Value::object();
+            item.set("Id", json::Value::number(mod.id));
+            item.set("Name", json::Value::string(mod.name));
+            item.set("Updated", json::Value::number(1727000000));
+            item.set("Enabled", json::Value::boolean(mod.enabled));
+            item.set("Priority", json::Value::number(mod.priority));
+            item.set("ContentRoot", json::Value::string(std::string(pc) + std::to_string(mod.id) + "\\files"));
+            item.set("Sha256", json::Value::string("0000000000000000000000000000000000000000000000000000000000000000"));
+            installed.push(std::move(item));
+            if (mod.present) {
+                const std::string file = mods + "/" + std::to_string(mod.id) + "/files/data/demo.bin";
+                writeFile(file, std::vector<uint8_t>(16, static_cast<uint8_t>(mod.id & 0xFF)));
+            }
+        }
+        const std::string text = json::serialize(installed);
+        writeFile(mods + "/installed.json", std::vector<uint8_t>(text.begin(), text.end()));
+        const std::string disabled = "[407132]\n";
+        writeFile(mods + "/player-disabled.json", std::vector<uint8_t>(disabled.begin(), disabled.end()));
+    }
 
     if (withEngine) {
         const char placeholder[] = "NRO0 placeholder for the PartyBoard engine";
