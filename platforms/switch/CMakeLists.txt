@@ -144,6 +144,12 @@ if(PARTYBOARD_SWITCH_DAWN_PROBE)
     set(TINT_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(TINT_BUILD_CMD_TOOLS OFF CACHE BOOL "" FORCE)
     set(TINT_BUILD_GLSL_WRITER ON CACHE BOOL "" FORCE)
+    # Dawn's GL backend runs Tint's null writer to size compute workgroups;
+    # it otherwise follows DAWN_ENABLE_NULL, which is off here.
+    set(TINT_BUILD_NULL_WRITER ON CACHE BOOL "" FORCE)
+    # CMake's Generic platform names libdl for CMAKE_DL_LIBS; libnx has no
+    # dynamic loader (Dawn's DynamicLib is patched out for the Switch).
+    set(CMAKE_DL_LIBS "")
 
     FetchContent_Declare(
         partyboard_switch_dawn
@@ -236,4 +242,50 @@ if(PARTYBOARD_SWITCH_DAWN_PROBE)
     )
 
     message(STATUS "PartyBoard experimental Dawn/libnx probe enabled")
+endif()
+
+option(PARTYBOARD_SWITCH_SDL3_PROBE
+    "Build SDL3 for libnx (sdl3/) and an NRO that exercises it"
+    OFF)
+
+if(PARTYBOARD_SWITCH_SDL3_PROBE)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/sdl3/SwitchSDL3.cmake")
+
+    add_executable(partyboard_switch_sdl3_probe source/sdl3_probe.cpp)
+    set_target_properties(partyboard_switch_sdl3_probe PROPERTIES
+        OUTPUT_NAME "partyboard-switch-sdl3-probe"
+        SUFFIX ".elf"
+    )
+    target_compile_definitions(partyboard_switch_sdl3_probe PRIVATE __SWITCH__=1)
+    target_compile_options(partyboard_switch_sdl3_probe PRIVATE -Wall -Wextra -O2)
+    target_link_options(partyboard_switch_sdl3_probe PRIVATE -Wl,--gc-sections)
+    target_link_libraries(partyboard_switch_sdl3_probe PRIVATE SDL3::SDL3-static)
+
+    set(PARTYBOARD_SWITCH_SDL3_NACP "${CMAKE_CURRENT_BINARY_DIR}/partyboard-switch-sdl3-probe.nacp")
+    set(PARTYBOARD_SWITCH_SDL3_NRO  "${CMAKE_CURRENT_BINARY_DIR}/partyboard-switch-sdl3-probe.nro")
+    add_custom_command(
+        OUTPUT "${PARTYBOARD_SWITCH_SDL3_NACP}"
+        COMMAND "${PARTYBOARD_NACPTOOL}" --create
+                "PartyBoard SDL3 Probe"
+                "MarioPartyRD"
+                "0.1.0"
+                "${PARTYBOARD_SWITCH_SDL3_NACP}"
+        VERBATIM
+        COMMENT "Generating PartyBoard SDL3 probe NACP"
+    )
+    add_custom_command(
+        OUTPUT "${PARTYBOARD_SWITCH_SDL3_NRO}"
+        COMMAND "${PARTYBOARD_ELF2NRO}"
+                "$<TARGET_FILE:partyboard_switch_sdl3_probe>"
+                "${PARTYBOARD_SWITCH_SDL3_NRO}"
+                "--nacp=${PARTYBOARD_SWITCH_SDL3_NACP}"
+        DEPENDS partyboard_switch_sdl3_probe "${PARTYBOARD_SWITCH_SDL3_NACP}"
+        VERBATIM
+        COMMENT "Generating PartyBoard SDL3 probe NRO"
+    )
+    add_custom_target(partyboard_switch_sdl3_nro
+        DEPENDS "${PARTYBOARD_SWITCH_SDL3_NRO}"
+    )
+
+    message(STATUS "PartyBoard SDL3/libnx probe enabled")
 endif()

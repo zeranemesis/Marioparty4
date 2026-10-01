@@ -156,6 +156,36 @@ jobs:
       - name: Tests against nod
         run: platforms/switch/nodlite/tools/check-against-nod.sh
 
+  sdl3-probe:
+    name: SDL3 libnx probe
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkita64:20260219
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Prepare container git ownership
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Configure SDL3 probe
+        run: cmake --preset switch-libnx-sdl3-probe
+
+      - name: Build SDL3 and the probe NRO
+        run: cmake --build build/switch-libnx-sdl3-probe --target partyboard_switch_sdl3_nro --parallel 2
+
+      - name: Upload SDL3 probe
+        uses: actions/upload-artifact@v4
+        with:
+          name: partyboard-switch-sdl3-probe
+          path: |
+            build/switch-libnx-sdl3-probe/platforms/switch/partyboard-switch-sdl3-probe.nro
+            build/switch-libnx-sdl3-probe/platforms/switch/partyboard-switch-sdl3-probe.elf
+          if-no-files-found: error
+
   dawn-probe:
     name: Dawn OpenGLES probe
     runs-on: ubuntu-latest

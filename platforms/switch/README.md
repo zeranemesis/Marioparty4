@@ -102,8 +102,15 @@ cmake --build build/switch-libnx-dawn-probe --target partyboard_switch_dawn_nro 
 ```
 
 The experiment uses the same Dawn revision pinned by Aurora and enables only
-the OpenGL ES backend. A build-only patch teaches Dawn that `__SWITCH__` is a
-POSIX-like platform; the upstream Aurora/Dawn submodules remain untouched.
+the OpenGL ES backend. Build-only patches (`cmake/PatchDawnForSwitch.cmake`
+and `cmake/PatchDawnDependenciesForSwitch.cmake`, applied to FetchContent's
+copy; the upstream Aurora/Dawn submodules remain untouched) teach Dawn that
+`__SWITCH__` is a POSIX-like platform and fill the gaps libnx leaves: no
+dynamic loader, executable path, `pipe`/`poll` events or `mmap` (Abseil's
+low-level allocator gets heap pages instead), newlib's POSIX-only
+declarations under strict C++, and the Switch's native EGL types in Khronos'
+`eglplatform.h`. With them the probe compiles and links: a 12 MB NRO with
+Dawn's OpenGL ES backend, Tint's GLSL writer and the `NWindow` surface.
 
 If the NRO reaches hardware, its screen is intentionally diagnostic:
 
@@ -114,6 +121,23 @@ If the NRO reaches hardware, its screen is intentionally diagnostic:
 Dawn itself requires `EGL_EXT_create_context_robustness` and either
 `EGL_KHR_fence_sync` or `EGL_KHR_reusable_sync` for this adapter path. The
 normal probe prints whether the Switch Mesa/Nouveau EGL stack exposes them.
+
+### SDL3 probe
+
+Aurora's window, input, events and file access go through SDL3, which
+devkitPro does not ship for the Switch. `sdl3/` builds Aurora's SDL3 release
+with a homebrew libnx backend (video on the default `NWindow`, AUDOUT audio,
+HID gamepads) and exposes it as `SDL3::SDL3-static`; see
+[sdl3/README.md](sdl3/README.md).
+
+```sh
+cmake --preset switch-libnx-sdl3-probe
+cmake --build build/switch-libnx-sdl3-probe --target partyboard_switch_sdl3_nro --parallel
+```
+
+The NRO shows SDL's drivers, the base and pref paths, a file round trip
+through `SDL_IOStream`, and every connected gamepad live; hold **A** for a
+440 Hz tone, **+** quits.
 
 ## Current integration boundary
 

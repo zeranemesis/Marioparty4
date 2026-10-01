@@ -525,6 +525,18 @@
           "value": true
         }
       }
+    },
+    {
+      "name": "switch-libnx-sdl3-probe",
+      "displayName": "Nintendo Switch (libnx + SDL3 probe)",
+      "inherits": "switch-libnx-bootstrap",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "PARTYBOARD_SWITCH_SDL3_PROBE": {
+          "type": "BOOL",
+          "value": true
+        }
+      }
     }
   ],
   "buildPresets": [
