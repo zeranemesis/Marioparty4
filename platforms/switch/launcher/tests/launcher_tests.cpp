@@ -204,6 +204,9 @@ void testLibrary() {
         CHECK(games[pal].description(Language::English).find("natively") != std::string::npos);
         CHECK(games[pal].disc.format == DiscFormat::Ciso);
         CHECK(games[pal].catalog && games[pal].catalog->coverFor('P')->front == "covers/mp4_pal_front.png");
+        // European box art for every release, the US disc included.
+        const GameEntry& usa = games[1 - pal];
+        CHECK(usa.catalog && usa.catalog->coverFor(usa.disc.regionCode())->front == "covers/mp4_pal_front.png");
     }
     // The PAL title of Super Mario Strikers comes from regionTitles.
     CHECK_EQ(games[2].title(Language::French), "Mario Smash Football");

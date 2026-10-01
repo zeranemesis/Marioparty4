@@ -17,9 +17,7 @@
       "engines": ["switch/partyboard/partyboard.nro", "switch/partyboard.nro"],
       "mods": true,
       "covers": {
-        "E": { "front": "covers/mp4_us_front.png", "spine": "covers/mp4_us_spine.png" },
-        "P": { "front": "covers/mp4_pal_front.png", "spine": "covers/mp4_pal_spine.png" },
-        "*": { "front": "covers/mp4_us_front.png", "spine": "covers/mp4_us_spine.png" }
+        "*": { "front": "covers/mp4_pal_front.png", "spine": "covers/mp4_pal_spine.png" }
       }
     },
     {

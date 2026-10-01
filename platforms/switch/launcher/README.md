@@ -28,8 +28,9 @@ artifact (see [Previewing without a console](#previewing-without-a-console)).
   Strikers (Strikers), which CubeShelf runs on PC and which show here as "not
   on Switch yet". `sdmc:/config/partyboard/catalog.json` can add entries or
   replace one by id, so a future Switch runtime needs no new launcher build.
-- **Box art.** Catalogue games use CubeShelf's front and spine scans, drawn
-  as a case seen slightly from the side; the info panel below shows the game
+- **Box art.** Catalogue games use CubeShelf's European (PAL) front and
+  spine scans, whatever the disc's region, drawn as a case seen slightly
+  from the side; the info panel below shows the game
   sheet (year, genre, players, runtime) and the disc's real banner.
 - **Mods, CubeShelf's way.** Copy CubeShelf's `Mods` folder
   (`%LOCALAPPDATA%\CubeShelf\Mods`) to `sdmc:/cubeshelf/Mods`. **R** opens
@@ -63,8 +64,8 @@ Two sources, both packed into the NRO's romfs at build time:
   the Mario Party 4 cast), the N64 Party face for headings and FOT-NewRodin
   for titles.
 - `assets/`, taken from [CubeShelf](https://github.com/zeranemesis/CubeShelf-Launcher):
-  the catalogue, the front and spine box art of each catalogue game (scaled to
-  720 px high) and the GameCube logo.
+  the catalogue, the European front and spine box art of each catalogue game
+  (scaled to 720 px high) and the GameCube logo.
 
 Body text uses the console's shared system font. The boot animation and every
 sound are generated in code.
