@@ -13,6 +13,7 @@ find_program(PARTYBOARD_ELF2NRO elf2nro
 
 add_executable(partyboard_switch_probe
     source/main.cpp
+    source/switch_pad.cpp
 )
 
 set_target_properties(partyboard_switch_probe PROPERTIES
@@ -34,6 +35,7 @@ target_compile_options(partyboard_switch_probe PRIVATE
 target_include_directories(partyboard_switch_probe PRIVATE
     "${LIBNX}/include"
     "${PORTLIBS}/include"
+    "${CMAKE_SOURCE_DIR}/extern/aurora/include"
 )
 
 target_link_directories(partyboard_switch_probe PRIVATE
