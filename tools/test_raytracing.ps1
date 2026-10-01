@@ -72,6 +72,10 @@ param(
     # frame to the next counts noise and motion. Costly: every dumped frame is
     # traced twice, the reference at this many samples.
     [int]$SequenceReference = 0,
+    # Seconds between reaching the scene and arming the pair or the sequence.
+    # Four lets a board or a mini-game finish opening; less catches the opening
+    # itself, cuts included.
+    [double]$ArmDelaySeconds = 4,
     # One exact scene, such as m401Dll: any other attempt fails and is retried.
     # Two sequences only compare on the same scene; the target alone accepts any
     # board or any mini-game.
@@ -385,18 +389,24 @@ function Invoke-Run {
     }
 
     if ($reached) {
-        Start-Sleep -Seconds 4
+        Start-Sleep -Milliseconds ([int]($ArmDelaySeconds * 1000))
         if ($AB -or $Sequence -gt 0) {
             # The game polls for this file and traces its A/B pair on the next
             # frame it sees it. A triangle threshold cannot pick the scene: the
             # title sequence alone crosses any threshold a board would.
             New-Item -ItemType File -Path (Join-Path $binary 'rt_ab_arm') -Force | Out-Null
             Start-Sleep -Seconds 3
-            # Each sequence frame waits for its readback.
-            # Each frame waits for its readback, twice over with a reference.
+            # Each frame waits for its readback, twice over with a reference, and
+            # how long that takes depends on the trace size and on the disk: an
+            # estimate cut a 90-frame sequence at 80. Wait for the last file.
             if ($Sequence -gt 0) {
-                $perFrame = if ($SequenceReference -gt 0) { 1 } else { 10 }
-                Start-Sleep -Seconds ([math]::Ceiling($Sequence / $perFrame))
+                $lastFrame = Join-Path $binary ('rt_seq_{0:d3}.pfm' -f ($Sequence - 1))
+                $perFrame = if ($SequenceReference -gt 0) { 3 } else { 1 }
+                $deadline = (Get-Date).AddSeconds(10 + $Sequence * $perFrame)
+                while (-not (Test-Path $lastFrame) -and (Get-Date) -lt $deadline -and -not $process.HasExited) {
+                    Start-Sleep -Milliseconds 500
+                }
+                Start-Sleep -Seconds 1
             }
         }
         foreach ($k in 1..$Frames) { Save-Frame $window ('scene{0:d2}' -f $k) | Out-Null; Start-Sleep -Milliseconds 900 }

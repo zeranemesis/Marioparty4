@@ -1567,10 +1567,10 @@ index 7ec451d..4eb8f1c 100644
  enum class DrawKind : uint32_t {
 diff --git a/lib/rt/rt_accel.cpp b/lib/rt/rt_accel.cpp
 new file mode 100644
-index 0000000..73a9e69
+index 0000000..4e8f27c
 --- /dev/null
 +++ b/lib/rt/rt_accel.cpp
-@@ -0,0 +1,683 @@
+@@ -0,0 +1,784 @@
 +#include "rt_accel.hpp"
 +
 +#include "rt_device.hpp"
@@ -1579,6 +1579,8 @@ index 0000000..73a9e69
 +#include <chrono>
 +#include <cstdlib>
 +#include <cstring>
++#include <utility>
++#include <vector>
 +
 +#ifdef AURORA_HAS_RAYTRACING
 +#include <d3d12.h>
@@ -1616,6 +1618,22 @@ index 0000000..73a9e69
 +ComPtr<ID3D12Resource> g_normalGpu;
 +ComPtr<ID3D12Resource> g_texcoordGpu;
 +ComPtr<ID3D12Resource> g_materialGpu;
++// The positions as the previous build left them. The two position buffers
++// trade places at every build, so the one overwritten is two builds old and
++// the previous frame's stay readable: a hit can then ask where its triangle
++// was. See GroupMotion.
++ComPtr<ID3D12Resource> g_vertexPrevGpu;
++uint64_t g_vertexGpuBytes = 0;
++uint64_t g_vertexPrevGpuBytes = 0;
++// Triangles each of the two holds, so a motion record naming triangles past
++// the end is caught here rather than read by the shader: a root descriptor has
++// no bounds for the GPU to check against.
++uint32_t g_vertexGpuTriangles = 0;
++uint32_t g_vertexPrevGpuTriangles = 0;
++// One GroupMotion per group. CPU visible: it is read once per pixel, not once
++// per ray.
++ComPtr<ID3D12Resource> g_motionBuffer;
++size_t g_motionCapacity = 0;
 +uint64_t g_geometryBytes = 0;
 +uint64_t g_materialBytes = 0;
 +std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> g_geometries;
@@ -1785,7 +1803,10 @@ index 0000000..73a9e69
 +const AccelStats& stats() noexcept { return g_stats; }
 +
 +#ifndef AURORA_HAS_RAYTRACING
-+bool build(const float*, const float*, size_t) noexcept { return false; }
++bool build(const float*, const float*, const float*, const float*, const uint32_t*, size_t,
++           uint64_t, const DrawGroup*, size_t, const GroupMotion*) noexcept {
++  return false;
++}
 +void shutdown() noexcept {}
 +void* tlas_resource() noexcept { return nullptr; }
 +void* vertex_resource() noexcept { return nullptr; }
@@ -1793,6 +1814,8 @@ index 0000000..73a9e69
 +void* normal_resource() noexcept { return nullptr; }
 +void* texcoord_resource() noexcept { return nullptr; }
 +void* material_resource() noexcept { return nullptr; }
++void* previous_vertex_resource() noexcept { return nullptr; }
++void* motion_resource() noexcept { return nullptr; }
 +uint32_t vertex_count() noexcept { return 0; }
 +#else
 +
@@ -1802,12 +1825,21 @@ index 0000000..73a9e69
 +void* normal_resource() noexcept { return g_stats.built ? g_normalGpu.Get() : nullptr; }
 +void* texcoord_resource() noexcept { return g_stats.built ? g_texcoordGpu.Get() : nullptr; }
 +void* material_resource() noexcept { return g_stats.built ? g_materialGpu.Get() : nullptr; }
++void* previous_vertex_resource() noexcept {
++  if (!g_stats.built) {
++    return nullptr;
++  }
++  // Nothing changed since the previous frame, or nothing came before it: its
++  // positions are this frame's.
++  return (g_stats.reusedThisFrame || !g_vertexPrevGpu) ? g_vertexGpu.Get() : g_vertexPrevGpu.Get();
++}
++void* motion_resource() noexcept { return g_stats.built ? g_motionBuffer.Get() : nullptr; }
 +uint32_t vertex_count() noexcept { return g_stats.triangleCount * 3; }
 +
 +bool build(const float* positions, const float* colours, const float* normals,
 +           const float* texcoords, const uint32_t* materials, size_t vertexCount,
 +           uint64_t contentHash,
-+           const DrawGroup* groups, size_t groupCount) noexcept {
++           const DrawGroup* groups, size_t groupCount, const GroupMotion* motion) noexcept {
 +  if (!caps().available || positions == nullptr || colours == nullptr || normals == nullptr ||
 +      texcoords == nullptr || materials == nullptr || groups == nullptr || groupCount == 0 ||
 +      vertexCount < 3) {
@@ -1878,8 +1910,6 @@ index 0000000..73a9e69
 +    const uint64_t geometryBytes = static_cast<uint64_t>(capacity) * 3 * sizeof(float);
 +    const uint64_t materialBytes = static_cast<uint64_t>(capacity / 3 + 1) * sizeof(uint32_t);
 +    if (!create_buffer(geometryBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_NONE,
-+                       D3D12_RESOURCE_STATE_COMMON, g_vertexGpu) ||
-+        !create_buffer(geometryBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_NONE,
 +                       D3D12_RESOURCE_STATE_COMMON, g_colourGpu) ||
 +        !create_buffer(geometryBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_NONE,
 +                       D3D12_RESOURCE_STATE_COMMON, g_normalGpu) ||
@@ -1892,6 +1922,26 @@ index 0000000..73a9e69
 +    g_geometryBytes = geometryBytes;
 +    g_materialBytes = materialBytes;
 +    g_vertexCapacity = capacity;
++  }
++  if (!geometryUnchanged) {
++    // The positions trade places rather than being overwritten: what was this
++    // frame's becomes the previous frame's, still readable, and the buffer two
++    // builds old takes the new ones. Each grows on its own, since the swap
++    // leaves them with whatever size they last needed.
++    g_vertexGpu.Swap(g_vertexPrevGpu);
++    std::swap(g_vertexGpuBytes, g_vertexPrevGpuBytes);
++    std::swap(g_vertexGpuTriangles, g_vertexPrevGpuTriangles);
++    if (!g_vertexGpu || g_vertexGpuBytes < vertexBytes) {
++      const uint64_t bytes = vertexBytes + vertexBytes / 2;
++      g_vertexGpuBytes = 0;
++      g_vertexGpuTriangles = 0;
++      if (!create_buffer(bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_NONE,
++                         D3D12_RESOURCE_STATE_COMMON, g_vertexGpu)) {
++        return false;
++      }
++      g_vertexGpuBytes = bytes;
++    }
++    g_vertexGpuTriangles = static_cast<uint32_t>(vertexCount / 3);
 +  }
 +  if (!geometryUnchanged) {
 +    void* mapped = nullptr;
@@ -2099,6 +2149,49 @@ index 0000000..73a9e69
 +    }
 +    g_instanceCapacity = capacity;
 +  }
++  if (groupCount > g_motionCapacity) {
++    const size_t capacity = groupCount + groupCount / 2;
++    g_motionCapacity = 0;
++    if (!create_buffer(capacity * sizeof(GroupMotion), D3D12_HEAP_TYPE_UPLOAD,
++                       D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ,
++                       g_motionBuffer)) {
++      return false;
++    }
++    g_motionCapacity = capacity;
++  }
++
++  // One motion record per group, in the order of the instances below, so a hit
++  // reaches its own through the instance index. A record naming triangles the
++  // previous frame's positions do not hold is cut back to "not found" here:
++  // the shader reads that buffer through a root descriptor, which carries no
++  // size for the GPU to check an index against.
++  {
++    void* mapped = nullptr;
++    D3D12_RANGE noRead{0, 0};
++    if (FAILED(g_motionBuffer->Map(0, &noRead, &mapped))) {
++      Log.error("Failed to map the group motion buffer");
++      return false;
++    }
++    auto* records = static_cast<GroupMotion*>(mapped);
++    const uint32_t previousTriangles =
++        geometryUnchanged ? g_vertexGpuTriangles : g_vertexPrevGpuTriangles;
++    for (size_t i = 0; i < groupCount; ++i) {
++      GroupMotion record = motion != nullptr ? motion[i] : GroupMotion{};
++      if ((record.flags & MotionObject) != 0u) {
++        const uint64_t end =
++            static_cast<uint64_t>(record.previousFirstTriangle) + groups[i].triangleCount;
++        if (record.previousFirstTriangle == NoPreviousTriangle || end > previousTriangles) {
++          record.flags &= ~static_cast<uint32_t>(MotionObject);
++          ++g_stats.motionOutOfRange;
++        }
++      }
++      if ((record.flags & MotionObject) == 0u) {
++        record.previousFirstTriangle = NoPreviousTriangle;
++      }
++      records[i] = record;
++    }
++    g_motionBuffer->Unmap(0, nullptr);
++  }
 +
 +  // One instance per group, rewritten every frame: the transforms are where the
 +  // animation lives now. InstanceID carries the group's first triangle so the
@@ -2236,6 +2329,14 @@ index 0000000..73a9e69
 +  g_contentHash = 0;
 +  g_layoutHash = 0;
 +  g_instanceBuffer.Reset();
++  g_motionBuffer.Reset();
++  g_motionCapacity = 0;
++  g_vertexPrevGpu.Reset();
++  g_vertexGpu.Reset();
++  g_vertexGpuBytes = 0;
++  g_vertexPrevGpuBytes = 0;
++  g_vertexGpuTriangles = 0;
++  g_vertexPrevGpuTriangles = 0;
 +  g_tlas.Reset();
 +  g_blas.Reset();
 +  g_scratch.Reset();
@@ -2256,10 +2357,10 @@ index 0000000..73a9e69
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_accel.hpp b/lib/rt/rt_accel.hpp
 new file mode 100644
-index 0000000..485eb99
+index 0000000..1eaa2ea
 --- /dev/null
 +++ b/lib/rt/rt_accel.hpp
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,167 @@
 +#pragma once
 +
 +#include <cstddef>
@@ -2293,6 +2394,10 @@ index 0000000..485eb99
 +  // was skipped entirely. Counted since startup.
 +  uint64_t reusedFrames = 0;
 +  bool reusedThisFrame = false;
++  // Motion records dropped because the triangles they named fell outside the
++  // previous frame's positions. Counted since startup; anything but zero means
++  // the capture and these buffers disagree about what the previous frame was.
++  uint64_t motionOutOfRange = 0;
 +};
 +
 +// Builds BLAS and TLAS from `vertexCount` view-space positions, three per
@@ -2357,13 +2462,51 @@ index 0000000..485eb99
 +  // decided once the frame is over. Such geometry sits in view space where its
 +  // own camera put it, not where the traced one sees it.
 +  bool otherProjection = false;
++  // What the group is, whatever the frame drew before it: a hash of the draws
++  // it holds -- their primitive, vertex format, vertex stream and the array
++  // their positions index. The game draws a model through the same display
++  // list every frame, so the value survives the skinning rewriting the
++  // positions those indices point at, and a group can find the one it was a
++  // frame ago. 0 when it cannot be told.
++  uint64_t identity = 0;
 +};
 +
 +inline constexpr uint8_t NoProjection = 0xff;
 +
++// Where a group was in the previous frame, for the trace to work out how far
++// each pixel has moved. One per group, in the order of the groups; the layout
++// is GroupMotion in rt_ao.hlsl.
++enum MotionFlag : uint32_t {
++  // The group was found in the previous frame: `previous` and
++  // `previousFirstTriangle` say where each of its triangles was.
++  MotionObject = 1u << 0,
++  // The camera's own motion is known: `camera` says where the group would have
++  // been had it stood still in the scene.
++  MotionCamera = 1u << 1,
++};
++
++inline constexpr uint32_t NoPreviousTriangle = 0xffffffffu;
++
++struct GroupMotion {
++  // Row-major 3x4, from the group's own space to the previous frame's view
++  // space: the transform the same group carried then.
++  float previous[12] = {1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f};
++  // The same for a group taken to have stood still: this frame's transform
++  // followed by the camera's motion.
++  float camera[12] = {1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f};
++  // First triangle of the group in the previous frame's positions. Its
++  // triangles follow in the same order, so a hit finds its own.
++  uint32_t previousFirstTriangle = NoPreviousTriangle;
++  uint32_t flags = 0;
++  uint32_t pad[2] = {0u, 0u};
++};
++static_assert(sizeof(GroupMotion) == 112, "GroupMotion must match rt_ao.hlsl");
++
++// `motion` holds one GroupMotion per group, or is null when nothing is known
++// about the previous frame.
 +bool build(const float* positions, const float* colours, const float* normals,
 +           const float* texcoords, const uint32_t* materials, size_t vertexCount, uint64_t contentHash,
-+           const DrawGroup* groups, size_t groupCount) noexcept;
++           const DrawGroup* groups, size_t groupCount, const GroupMotion* motion) noexcept;
 +
 +const AccelStats& stats() noexcept;
 +
@@ -2375,6 +2518,11 @@ index 0000000..485eb99
 +void* normal_resource() noexcept;
 +void* texcoord_resource() noexcept;
 +void* material_resource() noexcept;
++// The positions the previous build left, laid out as vertex_resource() was
++// then -- this frame's own when nothing has changed since -- and this frame's
++// GroupMotion records.
++void* previous_vertex_resource() noexcept;
++void* motion_resource() noexcept;
 +uint32_t vertex_count() noexcept;
 +
 +void shutdown() noexcept;
@@ -2382,10 +2530,10 @@ index 0000000..485eb99
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_capture.cpp b/lib/rt/rt_capture.cpp
 new file mode 100644
-index 0000000..4b2cccb
+index 0000000..d3d3ed6
 --- /dev/null
 +++ b/lib/rt/rt_capture.cpp
-@@ -0,0 +1,2608 @@
+@@ -0,0 +1,2944 @@
 +#include "rt_capture.hpp"
 +
 +#include "rt_accel.hpp"
@@ -2506,6 +2654,27 @@ index 0000000..4b2cccb
 +// frame they would only ever read one of one.
 +uint32_t g_framesWithDelta = 0;
 +uint32_t g_framesTraced = 0;
++// Which group of the previous frame each group of this one is, by identity
++// (accel::DrawGroup::identity); UINT32_MAX where it has none.
++std::vector<uint32_t> g_groupPrevious;
++// What the trace is told about each group's previous position.
++std::vector<accel::GroupMotion> g_groupMotion;
++// Follow each surface through its own group's previous transform and
++// positions. On by default; AURORA_RT_OBJECT_MOTION=0 takes every surface to
++// have stood still and applies the camera's motion alone, as before, and the
++// A/B bench compares the two on one frame with AURORA_RT_AB=objectMotion=0.
++bool g_objectMotion = true;
++// Of the triangles the rays can reach in the last frame: found in the previous
++// frame, covered by the camera's motion alone, and with nothing to go by. Then
++// the groups set aside because their draws appeared a different number of
++// times in the two frames, which leaves no telling which is which.
++uint64_t g_motionFollowed = 0;
++uint64_t g_motionCameraOnly = 0;
++uint64_t g_motionUnknown = 0;
++uint32_t g_motionAmbiguousGroups = 0;
++// The first of those and their total, since start.
++uint64_t g_motionFollowedTotal = 0;
++uint64_t g_motionTrianglesTotal = 0;
 +uint32_t g_sequenceWritten = 0;
 +uint32_t g_sequenceStart = 0;
 +// Alpha testing of see-through candidates in the trace. On by default;
@@ -2736,6 +2905,8 @@ index 0000000..4b2cccb
 +  uint64_t triangles;
 +};
 +std::vector<FrameProjection> g_projections;
++// The previous frame's, for the groups of g_prevGroups to be read against.
++std::vector<FrameProjection> g_prevProjections;
 +// Largest number of distinct projections seen in any frame so far.
 +size_t g_maxProjections = 0;
 +
@@ -3135,6 +3306,41 @@ index 0000000..4b2cccb
 +    out[row * 4 + 3] = a[row * 4 + 0] * b[3] + a[row * 4 + 1] * b[7] +
 +                       a[row * 4 + 2] * b[11] + a[row * 4 + 3];
 +  }
++}
++
++// One step of the hash behind a draw's identity.
++uint64_t mix_identity(uint64_t h, uint64_t v) noexcept {
++  h = (h ^ v) * 0x9e3779b97f4a7c15ull;
++  return h ^ (h >> 29);
++}
++
++// What a draw is, whatever came before it in the frame: its primitive, its
++// vertex format, the array its positions index and its whole vertex stream.
++// The game draws its models through display lists that index their arrays, so
++// the stream is the same bytes every frame even while the skinning rewrites
++// the positions those indices point at -- which is the case this has to
++// recognise. A draw that carries its positions inline matches only while they
++// do not change: geometry rebuilt every frame goes without a previous position
++// rather than with a wrong one. Never 0, which stands for "no identity".
++uint64_t draw_identity(GXPrimitive prim, GXVtxFmt fmt, uint16_t vtxCount, const uint8_t* vtxData,
++                       uint32_t vtxSize, const void* positionArray) noexcept {
++  uint64_t h = 0x84222325cbf29ce4ull;
++  h = mix_identity(h, (static_cast<uint64_t>(prim) << 40) | (static_cast<uint64_t>(fmt) << 32) |
++                          (static_cast<uint64_t>(vtxSize) << 16) | vtxCount);
++  h = mix_identity(h, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(positionArray)));
++  const size_t bytes = static_cast<size_t>(vtxCount) * vtxSize;
++  size_t offset = 0;
++  for (; offset + sizeof(uint64_t) <= bytes; offset += sizeof(uint64_t)) {
++    uint64_t word;
++    std::memcpy(&word, vtxData + offset, sizeof(word));
++    h = mix_identity(h, word);
++  }
++  if (offset < bytes) {
++    uint64_t tail = 0;
++    std::memcpy(&tail, vtxData + offset, bytes - offset);
++    h = mix_identity(h, tail);
++  }
++  return h != 0u ? h : 1u;
 +}
 +
 +Vec3 apply_affine(const float m[12], const Vec3& p) noexcept {
@@ -4024,6 +4230,9 @@ index 0000000..4b2cccb
 +           finiteComponents(outPositions[idx]);
 +  };
 +
++  // Triangles this draw lost to an unusable position. One that lost any no
++  // longer lines up with itself from one frame to the next.
++  uint32_t rejectedInDraw = 0;
 +  const auto emit = [&](size_t ia, size_t ib, size_t ic) {
 +    // A position that is not a usable number stops here, before it reaches the
 +    // scene bounds or the acceleration structure. m402Dll and m405Dll produced
@@ -4034,6 +4243,7 @@ index 0000000..4b2cccb
 +    // from them went to the shader as the reach of every ray.
 +    if (!usable(ia) || !usable(ib) || !usable(ic)) {
 +      ++g_rejectedTriangles;
++      ++rejectedInDraw;
 +      if (!g_loggedRejectedPosition) {
 +        g_loggedRejectedPosition = true;
 +        const size_t bad = !usable(ia) ? ia : (!usable(ib) ? ib : ic);
@@ -4088,6 +4298,10 @@ index 0000000..4b2cccb
 +    std::memcpy(group.transform, drawTransform, sizeof(group.transform));
 +    group.additive = (material & accel::MaterialAdditive) != 0u;
 +    group.projection = projIndex == SIZE_MAX ? accel::NoProjection : static_cast<uint8_t>(projIndex);
++    group.identity = rejectedInDraw != 0u
++                         ? 0u
++                         : draw_identity(prim, fmt, vtxCount, vtxData, vtxSize,
++                                         indexed ? array.data : nullptr);
 +
 +    // Consecutive draws of one model share its matrix, and their triangles are
 +    // already adjacent, so they can share a structure. Each group costs a BLAS
@@ -4102,6 +4316,10 @@ index 0000000..4b2cccb
 +          last.additive == group.additive && last.projection == group.projection &&
 +          std::memcmp(last.transform, group.transform, sizeof(group.transform)) == 0) {
 +        last.triangleCount += group.triangleCount;
++        // The group is the draws it holds, in their order.
++        last.identity = (last.identity != 0u && group.identity != 0u)
++                            ? mix_identity(last.identity, group.identity)
++                            : 0u;
 +        if (measureCamera) {
 +          g_drawHashes.push_back(localHash);
 +          g_drawTriangles.push_back(triangles);
@@ -4237,6 +4455,11 @@ index 0000000..4b2cccb
 +      Log.info("Geometry drawn through another projection {}",
 +               g_skipOtherProjection ? "left out of the rays" : "traced");
 +    }
++    if (const char* env = std::getenv("AURORA_RT_OBJECT_MOTION")) {
++      g_objectMotion = env[0] != '0';
++      Log.info("Each surface's previous position taken from {}",
++               g_objectMotion ? "its own group" : "the camera's motion alone");
++    }
 +    if (const char* env = std::getenv("AURORA_RT_SEQUENCE")) {
 +      const int frames = std::atoi(env);
 +      g_sequenceFrames = frames <= 0 ? 0u : static_cast<uint32_t>(frames > 240 ? 240 : frames);
@@ -4262,7 +4485,8 @@ index 0000000..4b2cccb
 +      static constexpr const char* kAbNames[] = {"aoSamples", "shadowSamples", "lightRadius",
 +                                                 "aoRadius",  "bounce",        "denoisePhi",
 +                                                 "denoisePasses", "debugMode", "alphaTest",
-+                                                 "additive", "shadowStratify", "otherProjection"};
++                                                 "additive", "shadowStratify", "otherProjection",
++                                                 "objectMotion"};
 +      bool known = false;
 +      if (const char* eq = std::strchr(env, '='); eq != nullptr) {
 +        const std::string name(env, eq);
@@ -4280,7 +4504,7 @@ index 0000000..4b2cccb
 +      } else {
 +        Log.warn("AURORA_RT_AB ignored: expected name=value, name one of aoSamples, shadowSamples, "
 +                 "lightRadius, aoRadius, bounce, denoisePhi, denoisePasses, debugMode, alphaTest, "
-+                 "additive, shadowStratify, otherProjection");
++                 "additive, shadowStratify, otherProjection, objectMotion");
 +      }
 +    }
 +    // Frame numbers are a poor handle: the counter runs uncapped through boot,
@@ -4345,7 +4569,7 @@ index 0000000..4b2cccb
 +        static constexpr const char* kNames[] = {
 +            "off",        "shadow",   "occlusion", "normals",   "depth",   "primitive id",
 +            "material",   "reflection", "texcoord", "mask",     "screen uv", "history",
-+            "thumbnail"};
++            "thumbnail",  "motion"};
 +        const uint32_t named = sizeof(kNames) / sizeof(kNames[0]);
 +        Log.info("Ray tracing diagnostic view: {} ({})", g_debugMode,
 +                 g_debugMode < named ? kNames[g_debugMode] : "unknown");
@@ -4454,6 +4678,104 @@ index 0000000..4b2cccb
 +}
 +} // namespace
 +
++namespace {
++// What a group is paired by: its identity, and the part of the screen it was
++// drawn into. A model the game also draws into a texture -- m401Dll renders
++// 7 123 triangles of its scene a second time into a 384x384 one -- is the same
++// draws through another view, and what one view showed is not the other's
++// past. The viewport tells the two apart and, unlike the projection, holds
++// still while a camera zooms.
++uint64_t pairing_key(const accel::DrawGroup& group,
++                     const std::vector<FrameProjection>& views) noexcept {
++  uint64_t key = group.identity;
++  if (group.projection != accel::NoProjection && group.projection < views.size()) {
++    for (const float value : views[group.projection].viewport) {
++      uint32_t bits;
++      std::memcpy(&bits, &value, sizeof(bits));
++      key = mix_identity(key, bits);
++    }
++  }
++  return key != 0u ? key : 1u;
++}
++
++// Pairs each group of this frame with the one it was in the previous frame.
++//
++// By identity, not by place in the frame: one draw more or less ahead of a
++// group shifts its place and leaves what it is untouched. The same draws can
++// appear several times through one view -- a model the game instances -- and
++// then they are paired in the order they come, which holds while the game
++// draws its models in a settled order. Where the two frames do not hold the
++// same number of them there is no telling which is which, and the groups go
++// unpaired rather than paired wrongly: the trace then falls back on the
++// camera's motion for them, which is right for everything that stood still.
++void match_previous_groups() noexcept {
++  g_groupPrevious.assign(g_groups.size(), UINT32_MAX);
++  g_motionAmbiguousGroups = 0;
++  if (g_prevGroups.empty()) {
++    return;
++  }
++  static std::vector<std::pair<uint64_t, uint32_t>> now;
++  static std::vector<std::pair<uint64_t, uint32_t>> before;
++  now.clear();
++  before.clear();
++  for (size_t i = 0; i < g_groups.size(); ++i) {
++    if (g_groups[i].identity != 0u) {
++      now.emplace_back(pairing_key(g_groups[i], g_projections), static_cast<uint32_t>(i));
++    }
++  }
++  for (size_t i = 0; i < g_prevGroups.size(); ++i) {
++    if (g_prevGroups[i].identity != 0u) {
++      before.emplace_back(pairing_key(g_prevGroups[i], g_prevProjections),
++                          static_cast<uint32_t>(i));
++    }
++  }
++  // By key, then by place: within one key the order of the frame.
++  std::sort(now.begin(), now.end());
++  std::sort(before.begin(), before.end());
++  size_t a = 0;
++  size_t b = 0;
++  while (a < now.size() && b < before.size()) {
++    if (now[a].first < before[b].first) {
++      ++a;
++      continue;
++    }
++    if (before[b].first < now[a].first) {
++      ++b;
++      continue;
++    }
++    const uint64_t identity = now[a].first;
++    size_t aEnd = a;
++    size_t bEnd = b;
++    while (aEnd < now.size() && now[aEnd].first == identity) {
++      ++aEnd;
++    }
++    while (bEnd < before.size() && before[bEnd].first == identity) {
++      ++bEnd;
++    }
++    if (aEnd - a == bEnd - b) {
++      for (size_t k = 0; k < aEnd - a; ++k) {
++        const uint32_t current = now[a + k].second;
++        const uint32_t previous = before[b + k].second;
++        // The identity covers the vertex count of every draw, so the triangle
++        // counts agree unless a hash collided; a pair that does not is no pair.
++        if (g_groups[current].triangleCount == g_prevGroups[previous].triangleCount) {
++          g_groupPrevious[current] = previous;
++        }
++      }
++    } else {
++      g_motionAmbiguousGroups += static_cast<uint32_t>(aEnd - a);
++    }
++    a = aEnd;
++    b = bEnd;
++  }
++}
++
++bool is_identity(const float m[12]) noexcept {
++  static constexpr float kIdentity[12] = {1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f};
++  return std::memcmp(m, kIdentity, sizeof(kIdentity)) == 0;
++}
++} // namespace
++
 +void end_frame() noexcept {
 +  ++g_endFrameCalls;
 +  if (!g_armed) {
@@ -4538,14 +4860,191 @@ index 0000000..4b2cccb
 +    }
 +  }
 +
++  // Where every group was a frame ago, ahead of the build, which carries it to
++  // the trace.
++  match_previous_groups();
++
++  // How the camera moved since the last frame, measured from the geometry
++  // itself. Everything is captured in view space, so a group that did not move
++  // differs from its last frame only by the camera: this frame's transform
++  // inverted, composed with the previous frame's, is that motion. Groups that
++  // did move give a different answer, so the median over the groups decides --
++  // it asks that the still ones be the majority. It now only serves the groups
++  // that were not found in the previous frame: the others carry their own
++  // previous transform, which needs no such assumption.
++  //
++  // A group whose transform is the identity is left out of the vote: its
++  // vertices were baked into view space, or the game drew it there itself, and
++  // either way its transform says nothing about the camera.
++  g_haveViewDelta = false;
++  {
++    std::vector<std::array<float, 12>> candidates;
++    candidates.reserve(g_groups.size());
++    for (size_t i = 0; i < g_groups.size(); ++i) {
++      const uint32_t previous = g_groupPrevious[i];
++      if (previous == UINT32_MAX || is_identity(g_groups[i].transform)) {
++        continue;
++      }
++      float inverse[12];
++      if (!invert_affine(g_groups[i].transform, inverse)) {
++        continue;
++      }
++      std::array<float, 12> delta{};
++      compose_affine(g_prevGroups[previous].transform, inverse, delta.data());
++      bool finite = true;
++      for (const float value : delta) {
++        finite = finite && std::isfinite(value);
++      }
++      if (finite) {
++        candidates.push_back(delta);
++      }
++    }
++    if (candidates.size() >= 4) {
++      for (uint32_t component = 0; component < 12; ++component) {
++        std::vector<float> column;
++        column.reserve(candidates.size());
++        for (const auto& candidate : candidates) {
++          column.push_back(candidate[component]);
++        }
++        const size_t middle = column.size() / 2;
++        std::nth_element(column.begin(), column.begin() + middle, column.end());
++        g_viewDelta[component] = column[middle];
++      }
++      g_haveViewDelta = true;
++    }
++  }
++
++  g_groupMotion.assign(g_groups.size(), accel::GroupMotion{});
++  g_motionFollowed = 0;
++  g_motionCameraOnly = 0;
++  g_motionUnknown = 0;
++  for (size_t i = 0; i < g_groups.size(); ++i) {
++    accel::GroupMotion& record = g_groupMotion[i];
++    const uint32_t previous = g_groupPrevious[i];
++    if (previous != UINT32_MAX) {
++      std::memcpy(record.previous, g_prevGroups[previous].transform, sizeof(record.previous));
++      record.previousFirstTriangle = g_prevGroups[previous].firstTriangle;
++      record.flags |= accel::MotionObject;
++    }
++    if (g_haveViewDelta) {
++      compose_affine(g_viewDelta, g_groups[i].transform, record.camera);
++      bool finite = true;
++      for (const float value : record.camera) {
++        finite = finite && std::isfinite(value);
++      }
++      if (finite) {
++        record.flags |= accel::MotionCamera;
++      }
++    }
++    // Counted over what the rays can reach: a group they pass through never
++    // has its record read.
++    if ((g_groups[i].additive && g_skipAdditive) ||
++        (g_groups[i].otherProjection && g_skipOtherProjection)) {
++      continue;
++    }
++    if (g_objectMotion && (record.flags & accel::MotionObject) != 0u) {
++      g_motionFollowed += g_groups[i].triangleCount;
++    } else if ((record.flags & accel::MotionCamera) != 0u) {
++      g_motionCameraOnly += g_groups[i].triangleCount;
++    } else {
++      g_motionUnknown += g_groups[i].triangleCount;
++    }
++  }
++  g_motionFollowedTotal += g_motionFollowed;
++  g_motionTrianglesTotal += g_motionFollowed + g_motionCameraOnly + g_motionUnknown;
++
++  // Under a sequence dump, one line per frame on what the matching found: a
++  // frame whose history is turned away wholesale has its reason here.
++  if (rt_debug_logging() && g_abArmed && g_abName.empty() && g_sequenceWritten < g_sequenceFrames) {
++    uint32_t paired = 0;
++    uint32_t mirrored = 0;
++    uint64_t mirroredTriangles = 0;
++    for (size_t i = 0; i < g_groups.size(); ++i) {
++      const uint32_t previous = g_groupPrevious[i];
++      if (previous == UINT32_MAX) {
++        continue;
++      }
++      ++paired;
++      const float* a = g_groups[i].transform;
++      const float* b = g_prevGroups[previous].transform;
++      const float detA = a[0] * (a[5] * a[10] - a[6] * a[9]) - a[1] * (a[4] * a[10] - a[6] * a[8]) +
++                         a[2] * (a[4] * a[9] - a[5] * a[8]);
++      const float detB = b[0] * (b[5] * b[10] - b[6] * b[9]) - b[1] * (b[4] * b[10] - b[6] * b[8]) +
++                         b[2] * (b[4] * b[9] - b[5] * b[8]);
++      if ((detA < 0.f) != (detB < 0.f)) {
++        ++mirrored;
++        mirroredTriangles += g_groups[i].triangleCount;
++      }
++    }
++    std::string views;
++    for (size_t i = 0; i < g_projections.size(); ++i) {
++      const auto& entry = g_projections[i];
++      views += fmt::format("{}[{:.4f} {:.4f} {:.4f} {:.4f} | {:.0f}x{:.0f}+{:.0f}+{:.0f} | {}]{}",
++                           views.empty() ? "" : " ", entry.params[0], entry.params[1],
++                           entry.params[2], entry.params[3], entry.viewport[2], entry.viewport[3],
++                           entry.viewport[0], entry.viewport[1], entry.triangles,
++                           i == g_tracedProjection ? "*" : "");
++    }
++    // How far the camera turned and moved, so a cut reads as one.
++    const float turned =
++        std::acos(std::clamp((g_viewDelta[0] + g_viewDelta[5] + g_viewDelta[10] - 1.f) * 0.5f, -1.f,
++                             1.f)) *
++        57.29578f;
++    const float moved = std::sqrt(g_viewDelta[3] * g_viewDelta[3] + g_viewDelta[7] * g_viewDelta[7] +
++                                  g_viewDelta[11] * g_viewDelta[11]);
++    Log.info("Sequence frame {} (frame {}): {} groups after {}, {} paired, {} of them with the "
++             "opposite handedness ({} triangles), {} set aside; camera {}; structures {}; views {}",
++             g_sequenceWritten, g_frameIndex, g_groups.size(), g_prevGroups.size(), paired,
++             mirrored, mirroredTriangles, g_motionAmbiguousGroups,
++             g_haveViewDelta ? fmt::format("turned {:.3f} deg and moved {:.2f}", turned, moved)
++                             : std::string("motion unknown"),
++             accel::stats().reusedFrames, views);
++    // AURORA_RT_MOTION_TRACE: every group of some size, with where it was
++    // found and how far its own motion departs from the camera's.
++    static const bool traceGroups = [] {
++      const char* env = std::getenv("AURORA_RT_MOTION_TRACE");
++      return env != nullptr && env[0] != '0';
++    }();
++    if (traceGroups) {
++      for (size_t i = 0; i < g_groups.size(); ++i) {
++        if (g_groups[i].triangleCount < 100u) {
++          continue;
++        }
++        const uint32_t previous = g_groupPrevious[i];
++        float apart = -1.f;
++        if (previous != UINT32_MAX && g_haveViewDelta) {
++          float still[12];
++          compose_affine(g_viewDelta, g_groups[i].transform, still);
++          const float* was = g_prevGroups[previous].transform;
++          apart = std::sqrt((still[3] - was[3]) * (still[3] - was[3]) +
++                            (still[7] - was[7]) * (still[7] - was[7]) +
++                            (still[11] - was[11]) * (still[11] - was[11]));
++        }
++        Log.info("  group {:3} id {:016x} {:5} triangles at {:6}, view {}{}{}: was group {} at {}, "
++                 "{:.3f} from where the camera alone puts it; origin ({:.1f}, {:.1f}, {:.1f})",
++                 i, g_groups[i].identity, g_groups[i].triangleCount, g_groups[i].firstTriangle,
++                 g_groups[i].projection, g_groups[i].additive ? " additive" : "",
++                 g_groups[i].otherProjection ? " other" : "",
++                 previous == UINT32_MAX ? -1 : static_cast<int>(previous),
++                 previous == UINT32_MAX ? 0u : g_prevGroups[previous].firstTriangle, apart,
++                 g_groups[i].transform[3], g_groups[i].transform[7], g_groups[i].transform[11]);
++      }
++    }
++  }
++
 +  ++g_buildCalls;
 +  if (!accel::build(reinterpret_cast<const float*>(g_triangles.data()),
 +                    reinterpret_cast<const float*>(g_colours.data()),
 +                    reinterpret_cast<const float*>(g_normals.data()),
 +                    reinterpret_cast<const float*>(g_texcoords.data()), g_materials.data(),
-+                    g_triangles.size(), g_contentHash, g_groups.data(), g_groups.size())) {
++                    g_triangles.size(), g_contentHash, g_groups.data(), g_groups.size(),
++                    g_groupMotion.data())) {
 +    Log.error("Acceleration structure build failed");
 +    report_device_removal();
++    // What the position buffers now hold is no longer what these groups
++    // describe: the next frame starts without a previous one.
++    g_prevGroups.clear();
++    g_prevProjections.clear();
 +    ++g_frameIndex;
 +    return;
 +  }
@@ -4635,49 +5134,6 @@ index 0000000..4b2cccb
 +    }
 +  }
 +
-+  // How the camera moved since the last frame, measured from the geometry
-+  // itself. Everything is captured in view space, so a group that did not move
-+  // differs from its last frame only by the camera: this frame's transform
-+  // inverted, composed with the previous frame's, is that motion. Groups that
-+  // did move give a different answer, so the median over the groups decides --
-+  // it asks that the still ones be the majority, and where they are not, the
-+  // guide test in the temporal pass rejects what the reprojection brought back.
-+  g_haveViewDelta = false;
-+  if (g_prevGroups.size() == g_groups.size() && !g_groups.empty()) {
-+    std::vector<std::array<float, 12>> candidates;
-+    candidates.reserve(g_groups.size());
-+    for (size_t i = 0; i < g_groups.size(); ++i) {
-+      if (g_groups[i].triangleCount != g_prevGroups[i].triangleCount) {
-+        continue;
-+      }
-+      float inverse[12];
-+      if (!invert_affine(g_groups[i].transform, inverse)) {
-+        continue;
-+      }
-+      std::array<float, 12> delta{};
-+      compose_affine(g_prevGroups[i].transform, inverse, delta.data());
-+      bool finite = true;
-+      for (const float value : delta) {
-+        finite = finite && std::isfinite(value);
-+      }
-+      if (finite) {
-+        candidates.push_back(delta);
-+      }
-+    }
-+    if (candidates.size() >= 4) {
-+      for (uint32_t component = 0; component < 12; ++component) {
-+        std::vector<float> column;
-+        column.reserve(candidates.size());
-+        for (const auto& candidate : candidates) {
-+          column.push_back(candidate[component]);
-+        }
-+        const size_t middle = column.size() / 2;
-+        std::nth_element(column.begin(), column.begin() + middle, column.end());
-+        g_viewDelta[component] = column[middle];
-+      }
-+      g_haveViewDelta = true;
-+    }
-+  }
 +  ++g_framesTraced;
 +  if (g_haveViewDelta) {
 +    ++g_framesWithDelta;
@@ -4697,8 +5153,20 @@ index 0000000..4b2cccb
 +  g_prevViewHash = g_viewHash;
 +  g_prevContentHash = g_contentHash;
 +  g_prevGroups = g_groups;
-+  std::memcpy(g_prevProjParams, g_projParams, sizeof(g_prevProjParams));
-+  g_havePrevProj = g_haveProj;
++  g_prevProjections = g_projections;
++  // The projection the previous frame was traced through, read before this
++  // frame's takes its place. It used to be overwritten first -- and with the
++  // last draw's projection rather than the traced one -- so the "previous"
++  // projection handed to the trace was this frame's own: harmless while the
++  // field of view holds still, wrong on every frame it changes.
++  float previousProjection[4];
++  std::memcpy(previousProjection, g_prevProjParams, sizeof(previousProjection));
++  const bool havePreviousProjection = g_havePrevProj;
++  std::memcpy(g_prevProjParams,
++              g_tracedProjection < g_projections.size() ? g_projections[g_tracedProjection].params
++                                                        : g_projParams,
++              sizeof(g_prevProjParams));
++  g_havePrevProj = true;
 +
 +  // How much of the scene is actually in motion. Draws are keyed by their
 +  // position in the frame, which holds while the game issues them in a stable
@@ -4743,10 +5211,10 @@ index 0000000..4b2cccb
 +  params.features = g_features | (g_alphaTest ? trace::FeatureAlphaTest : 0u) |
 +                    (g_skipAdditive ? trace::FeatureSkipAdditive : 0u) |
 +                    (g_stratifiedShadow ? trace::FeatureStratifiedShadow : 0u) |
-+                    (g_skipOtherProjection ? trace::FeatureSkipOtherProjection : 0u);
-+  std::memcpy(params.viewDelta, g_viewDelta, sizeof(params.viewDelta));
-+  std::memcpy(params.prevProj, g_prevProjParams, sizeof(params.prevProj));
-+  params.haveViewDelta = g_haveViewDelta && g_havePrevProj;
++                    (g_skipOtherProjection ? trace::FeatureSkipOtherProjection : 0u) |
++                    (g_objectMotion ? trace::FeatureObjectMotion : 0u);
++  std::memcpy(params.prevProj, previousProjection, sizeof(params.prevProj));
++  params.havePrevious = havePreviousProjection;
 +  params.reflectionRange = shadowRange; // the scene's own size bounds both
 +  params.debugMode = g_debugMode;
 +  if (g_maskEnabled) {
@@ -4801,6 +5269,10 @@ index 0000000..4b2cccb
 +      probe.features =
 +          value != 0.0 ? (probe.features | trace::FeatureSkipOtherProjection)
 +                       : (probe.features & ~static_cast<uint32_t>(trace::FeatureSkipOtherProjection));
++    } else if (g_abName == "objectMotion") {
++      probe.features =
++          value != 0.0 ? (probe.features | trace::FeatureObjectMotion)
++                       : (probe.features & ~static_cast<uint32_t>(trace::FeatureObjectMotion));
 +    }
 +    if (!trace::run(probe, "rt_ab_b.pfm")) {
 +      Log.error("A/B bench: the B trace failed");
@@ -4953,6 +5425,18 @@ index 0000000..4b2cccb
 +             g_staticTriangles, seen);
 +    Log.info("Camera motion measured from the geometry on {} of {} traced frames",
 +             g_framesWithDelta, g_framesTraced);
++    Log.info("Previous position of each surface ({}): this frame {} triangles found in the "
++             "previous one, {} left to the camera's motion alone, {} with nothing to go by; {} "
++             "groups set aside, their draws appearing a different number of times in the two "
++             "frames. Since start {:.1f}% of {} triangles found; {} records refused as out of "
++             "range",
++             g_objectMotion ? "from its own group" : "from the camera's motion alone",
++             g_motionFollowed, g_motionCameraOnly, g_motionUnknown, g_motionAmbiguousGroups,
++             g_motionTrianglesTotal > 0
++                 ? 100.0 * static_cast<double>(g_motionFollowedTotal) /
++                       static_cast<double>(g_motionTrianglesTotal)
++                 : 0.0,
++             g_motionTrianglesTotal, accel::stats().motionOutOfRange);
 +    Log.info("Of {} captured draws: {} cut-out, occluding by their solid fraction; {} "
 +             "uniformly translucent, still traced as opaque; {} environment mapped; {} "
 +             "baked for want of a usable matrix; {} additive, {}",
@@ -5739,10 +6223,10 @@ index 0000000..b805129
 +} // namespace aurora::rt::textures
 diff --git a/lib/rt/rt_trace.cpp b/lib/rt/rt_trace.cpp
 new file mode 100644
-index 0000000..0661f23
+index 0000000..c83f92c
 --- /dev/null
 +++ b/lib/rt/rt_trace.cpp
-@@ -0,0 +1,1239 @@
+@@ -0,0 +1,1269 @@
 +#include "rt_trace.hpp"
 +
 +#include "rt_accel.hpp"
@@ -5826,11 +6310,15 @@ index 0000000..0661f23
 +ComPtr<ID3D12RootSignature> g_temporalRootSig;
 +ComPtr<ID3D12PipelineState> g_temporalPso;
 +ComPtr<ID3D12Resource> g_moments[2];
++// How far each pixel moved since the previous frame, written by the trace from
++// the surface it hit and read by the temporal pass: xy the move in pixels,
++// z how far from the camera the point then was, w zero where nothing is known.
++ComPtr<ID3D12Resource> g_motion;
 +// Width of the history clamp, in standard deviations of this frame's 3x3
 +// neighbourhood; 0 turns it off. AURORA_RT_CLAMP_SIGMA overrides.
 +float g_clampSigma = 2.0f;
 +// Whether the temporal pass looks the history up where the pixel was, using the
-+// camera motion the capture measures, rather than at the same pixel.
++// motion the trace writes, rather than at the same pixel.
 +// AURORA_RT_REPROJECT=0 goes back to the same pixel.
 +bool g_reproject = true;
 +// Whether the filter weighs signal agreement by the variance the temporal pass
@@ -5838,7 +6326,7 @@ index 0000000..0661f23
 +bool g_varianceGuided = true;
 +// Descriptors in the one heap every pass binds from; the layout is spelled out
 +// in ensure_output.
-+constexpr uint32_t kDescriptorCount = 34;
++constexpr uint32_t kDescriptorCount = 38;
 +uint32_t g_denoisePasses = 4;
 +uint32_t g_frameIndex = 0;
 +// Multiplier on the local spread in the denoiser's signal-agreement weight.
@@ -5889,9 +6377,11 @@ index 0000000..0661f23
 +  float temporalAlpha;
 +  // Counts frames, to move the sampling pattern. See the seed in rt_ao.hlsl.
 +  uint32_t frameIndex;
++  // The previous frame's projection parameters; all zero when there is none.
++  float prevProj[4];
 +};
 +// HLSL packs a cbuffer in float4 rows, so the size has to stay a multiple of 16.
-+static_assert(sizeof(Constants) == 96, "constants must stay 24 DWORDs");
++static_assert(sizeof(Constants) == 112, "constants must stay 28 DWORDs");
 +
 +// Must match the cbuffer in rt_denoise.hlsl exactly.
 +struct DenoiseConstants {
@@ -5915,11 +6405,8 @@ index 0000000..0661f23
 +  uint32_t debugMode;
 +  uint32_t reproject;
 +  float pad0[2];
-+  float proj[4];
-+  float prevProj[4];
-+  float viewDelta[12];
 +};
-+static_assert(sizeof(TemporalConstants) == 112, "temporal constants must stay 28 DWORDs");
++static_assert(sizeof(TemporalConstants) == 32, "temporal constants must stay 8 DWORDs");
 +
 +ID3D12Device5* device() noexcept { return static_cast<ID3D12Device5*>(native_device()); }
 +
@@ -5962,7 +6449,7 @@ index 0000000..0661f23
 +
 +  // b0 as root constants, t0/t1 as root SRVs, u0 through a descriptor table
 +  // because textures cannot be root descriptors.
-+  D3D12_ROOT_PARAMETER params[10]{};
++  D3D12_ROOT_PARAMETER params[12]{};
 +  params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
 +  params[0].Constants.ShaderRegister = 0;
 +  params[0].Constants.Num32BitValues = sizeof(Constants) / 4;
@@ -5984,19 +6471,24 @@ index 0000000..0661f23
 +  params[8].Descriptor.ShaderRegister = 6; // t6: vertex texture coordinates
 +  params[9].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
 +  params[9].Descriptor.ShaderRegister = 7; // t7: texture thumbnails
++  params[10].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
++  params[10].Descriptor.ShaderRegister = 8; // t8: the previous frame's vertices
++  params[11].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
++  params[11].Descriptor.ShaderRegister = 9; // t9: where each group was a frame ago
 +
 +  D3D12_DESCRIPTOR_RANGE uavRange{};
 +  uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-+  // u0 this frame's raw estimate, u1 guide, u2 reflection. The history belongs
-+  // to the temporal pass now, which can read a pixel's neighbours.
-+  uavRange.NumDescriptors = 3;
++  // u0 this frame's raw estimate, u1 guide, u2 reflection, u3 motion. The
++  // history belongs to the temporal pass now, which can read a pixel's
++  // neighbours.
++  uavRange.NumDescriptors = 4;
 +  uavRange.BaseShaderRegister = 0;
 +  params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
 +  params[3].DescriptorTable.NumDescriptorRanges = 1;
 +  params[3].DescriptorTable.pDescriptorRanges = &uavRange;
 +
 +  D3D12_ROOT_SIGNATURE_DESC rootDesc{};
-+  rootDesc.NumParameters = 10;
++  rootDesc.NumParameters = 12;
 +  rootDesc.pParameters = params;
 +
 +  ComPtr<ID3DBlob> blob;
@@ -6067,12 +6559,12 @@ index 0000000..0661f23
 +    }
 +  }
 +
-+  // Temporal pass: root constants plus one table of eight UAVs, laid out in
++  // Temporal pass: root constants plus one table of nine UAVs, laid out in
 +  // ensure_output.
 +  {
 +    D3D12_DESCRIPTOR_RANGE range{};
 +    range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-+    range.NumDescriptors = 8;
++    range.NumDescriptors = 9;
 +    range.BaseShaderRegister = 0;
 +
 +    D3D12_ROOT_PARAMETER temporalParams[2]{};
@@ -6233,6 +6725,7 @@ index 0000000..0661f23
 +  g_scratch.Reset();
 +  g_moments[0].Reset();
 +  g_moments[1].Reset();
++  g_motion.Reset();
 +  if (FAILED(device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &localDesc,
 +                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
 +                                               IID_PPV_ARGS(&g_guide[0]))) ||
@@ -6253,7 +6746,10 @@ index 0000000..0661f23
 +                                               IID_PPV_ARGS(&g_moments[0]))) ||
 +      FAILED(device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &localDesc,
 +                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
-+                                               IID_PPV_ARGS(&g_moments[1])))) {
++                                               IID_PPV_ARGS(&g_moments[1]))) ||
++      FAILED(device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &localDesc,
++                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
++                                               IID_PPV_ARGS(&g_motion)))) {
 +    Log.error("Failed to create the denoiser textures");
 +    return false;
 +  }
@@ -6285,9 +6781,10 @@ index 0000000..0661f23
 +  // Each pass binds one contiguous run, twice over because the guide, the
 +  // history and the moments alternate between frames: parity p writes index p
 +  // and reads 1 - p.
-+  //   trace     3 per parity: raw estimate (scratch), guide, reflection
-+  //   temporal  8 per parity: raw, guide, previous guide, history in, history
-+  //                           out, moments in, moments out, output
++  //   trace     4 per parity: raw estimate (scratch), guide, reflection,
++  //                           motion
++  //   temporal  9 per parity: raw, guide, previous guide, history in, history
++  //                           out, moments in, moments out, output, motion
 +  //   denoise   6 per parity: forward output -> scratch, backward scratch ->
 +  //                           output, each with this frame's guide
 +  // The trace writes scratch rather than output because the temporal pass reads
@@ -6295,14 +6792,16 @@ index 0000000..0661f23
 +  // scratch freely, the raw estimate having served its purpose.
 +  ID3D12Resource* const layout[kDescriptorCount] = {
 +      // trace, parity 0 and 1
-+      g_scratch.Get(), g_guide[0].Get(), g_reflection.Get(),
-+      g_scratch.Get(), g_guide[1].Get(), g_reflection.Get(),
++      g_scratch.Get(), g_guide[0].Get(), g_reflection.Get(), g_motion.Get(),
++      g_scratch.Get(), g_guide[1].Get(), g_reflection.Get(), g_motion.Get(),
 +      // temporal, parity 0
 +      g_scratch.Get(), g_guide[0].Get(), g_guide[1].Get(), g_history[1].Get(),
 +      g_history[0].Get(), g_moments[1].Get(), g_moments[0].Get(), g_output.Get(),
++      g_motion.Get(),
 +      // temporal, parity 1
 +      g_scratch.Get(), g_guide[1].Get(), g_guide[0].Get(), g_history[0].Get(),
 +      g_history[1].Get(), g_moments[0].Get(), g_moments[1].Get(), g_output.Get(),
++      g_motion.Get(),
 +      // denoise, parity 0: forward then backward
 +      g_output.Get(), g_scratch.Get(), g_guide[0].Get(),
 +      g_scratch.Get(), g_output.Get(), g_guide[0].Get(),
@@ -6606,8 +7105,11 @@ index 0000000..0661f23
 +  auto* nrms = static_cast<ID3D12Resource*>(accel::normal_resource());
 +  auto* mats = static_cast<ID3D12Resource*>(accel::material_resource());
 +  auto* uvs = static_cast<ID3D12Resource*>(accel::texcoord_resource());
++  auto* prevVerts = static_cast<ID3D12Resource*>(accel::previous_vertex_resource());
++  auto* motion = static_cast<ID3D12Resource*>(accel::motion_resource());
 +  if (!caps().available || tlas == nullptr || verts == nullptr || cols == nullptr ||
-+      nrms == nullptr || mats == nullptr || uvs == nullptr) {
++      nrms == nullptr || mats == nullptr || uvs == nullptr || prevVerts == nullptr ||
++      motion == nullptr) {
 +    return false;
 +  }
 +  // The previous frame's dispatch was left running. Everything below can pull
@@ -6680,6 +7182,11 @@ index 0000000..0661f23
 +  }
 +  constants.maskCols = maskAddress != 0 ? params.maskCols : 0u;
 +  constants.maskRows = maskAddress != 0 ? params.maskRows : 0u;
++  // Left at zero without a previous frame, which the shader reads as "no
++  // motion to write".
++  if (params.havePrevious) {
++    std::memcpy(constants.prevProj, params.prevProj, sizeof(constants.prevProj));
++  }
 +
 +  ID3D12DescriptorHeap* heaps[] = {g_uavHeap.Get()};
 +  g_cmdList->SetDescriptorHeaps(1, heaps);
@@ -6695,11 +7202,13 @@ index 0000000..0661f23
 +  g_cmdList->SetComputeRootShaderResourceView(8, uvs->GetGPUVirtualAddress());
 +  g_cmdList->SetComputeRootShaderResourceView(
 +      9, thumbAddress != 0 ? thumbAddress : mats->GetGPUVirtualAddress());
++  g_cmdList->SetComputeRootShaderResourceView(10, prevVerts->GetGPUVirtualAddress());
++  g_cmdList->SetComputeRootShaderResourceView(11, motion->GetGPUVirtualAddress());
 +  {
 +    const uint32_t descStride =
 +        device()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 +    D3D12_GPU_DESCRIPTOR_HANDLE traceTable = g_uavHeap->GetGPUDescriptorHandleForHeapStart();
-+    traceTable.ptr += static_cast<UINT64>(g_frameParity * 3u) * descStride;
++    traceTable.ptr += static_cast<UINT64>(g_frameParity * 4u) * descStride;
 +    g_cmdList->SetComputeRootDescriptorTable(3, traceTable);
 +  }
 +
@@ -6724,15 +7233,19 @@ index 0000000..0661f23
 +    tc.alpha = constants.temporalAlpha;
 +    tc.clampSigma = g_clampSigma;
 +    tc.debugMode = params.debugMode;
-+    tc.reproject = (g_reproject && params.haveViewDelta && !params.singleFrame) ? 1u : 0u;
-+    std::memcpy(tc.proj, params.proj, sizeof(tc.proj));
-+    std::memcpy(tc.prevProj, params.prevProj, sizeof(tc.prevProj));
-+    std::memcpy(tc.viewDelta, params.viewDelta, sizeof(tc.viewDelta));
++    // A single frame accumulates nothing, so where its history would have come
++    // from does not matter -- except to the history view, whose verdict is the
++    // whole point and holds whether or not anything accumulates. That is what
++    // lets the A/B bench judge two motions against one previous frame.
++    tc.reproject = (g_reproject && params.havePrevious &&
++                    (!params.singleFrame || params.debugMode == DebugHistory))
++                       ? 1u
++                       : 0u;
 +
 +    const uint32_t temporalStride =
 +        device()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 +    D3D12_GPU_DESCRIPTOR_HANDLE temporalTable = g_uavHeap->GetGPUDescriptorHandleForHeapStart();
-+    temporalTable.ptr += static_cast<UINT64>(6u + g_frameParity * 8u) * temporalStride;
++    temporalTable.ptr += static_cast<UINT64>(8u + g_frameParity * 9u) * temporalStride;
 +
 +    g_cmdList->SetComputeRootSignature(g_temporalRootSig.Get());
 +    g_cmdList->SetPipelineState(g_temporalPso.Get());
@@ -6784,8 +7297,8 @@ index 0000000..0661f23
 +      dc.varianceGuided = g_varianceGuided ? 1u : 0u;
 +
 +      D3D12_GPU_DESCRIPTOR_HANDLE table = heapBase;
-+      // 22 and 25 for parity 0, 28 and 31 for parity 1.
-+      table.ptr += static_cast<UINT64>(22u + g_frameParity * 6u + ((pass % 2 == 0) ? 0u : 3u)) *
++      // 26 and 29 for parity 0, 32 and 35 for parity 1.
++      table.ptr += static_cast<UINT64>(26u + g_frameParity * 6u + ((pass % 2 == 0) ? 0u : 3u)) *
 +                   stride;
 +
 +      g_cmdList->SetComputeRoot32BitConstants(0, sizeof(DenoiseConstants) / 4, &dc, 0);
@@ -6963,6 +7476,7 @@ index 0000000..0661f23
 +  g_scratch.Reset();
 +  g_moments[0].Reset();
 +  g_moments[1].Reset();
++  g_motion.Reset();
 +  g_uavHeap.Reset();
 +  g_temporalPso.Reset();
 +  g_temporalRootSig.Reset();
@@ -6984,10 +7498,10 @@ index 0000000..0661f23
 +} // namespace aurora::rt::trace
 diff --git a/lib/rt/rt_trace.hpp b/lib/rt/rt_trace.hpp
 new file mode 100644
-index 0000000..daa6222
+index 0000000..b955ea8
 --- /dev/null
 +++ b/lib/rt/rt_trace.hpp
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,155 @@
 +#pragma once
 +
 +#include <cstdint>
@@ -7039,6 +7553,12 @@ index 0000000..daa6222
 +  // its own camera placed it, which is how it behaved before -- the A/B bench
 +  // compares the two.
 +  FeatureSkipOtherProjection = 1u << 6,
++  // Follow each surface to where it was a frame ago through its own group: the
++  // transform the group carried then and the positions its triangles had. Off,
++  // every surface is taken to have stood still and only the camera's motion is
++  // applied, which is how the history was looked up before -- the A/B bench
++  // compares the two.
++  FeatureObjectMotion = 1u << 7,
 +};
 +
 +struct TraceParams {
@@ -7069,7 +7589,8 @@ index 0000000..daa6222
 +  uint32_t maskRows = 0;
 +  // Diagnostic view instead of the composited result: 0 off, 1 shadow,
 +  // 2 occlusion, 3 normals, 4 depth, 5 primitive id, 6 material, 7 reflection,
-+  // 8 texture coordinates, 9 mask, 10 screen-space ramp. The two continuous
++  // 8 texture coordinates, 9 mask, 10 screen-space ramp, 11 history,
++  // 12 thumbnail, 13 motion. The two continuous
 +  // ones are filtered like the real result, so what they show is what ships;
 +  // the categorical ones bypass the denoiser, where averaging neighbours would
 +  // invent a value that means nothing.
@@ -7082,12 +7603,13 @@ index 0000000..daa6222
 +  // This frame's estimate alone: no temporal accumulation, and the sampling
 +  // pattern held still, so two traces of one frame sample identically.
 +  bool singleFrame = false;
-+  // From this frame's view space to the previous frame's, row major 3x4, with
-+  // that frame's projection parameters: where a pixel was, for the temporal
-+  // pass to find its history there. False leaves the history at the same pixel.
-+  float viewDelta[12] = {1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f};
++  // The previous frame's projection parameters. With the motion records the
++  // structures carry (accel::GroupMotion) they place each pixel where it was a
++  // frame ago, for the temporal pass to find its history there. False when
++  // there is no previous frame to speak of: no motion is written and the
++  // history stays at the same pixel.
 +  float prevProj[4] = {0.f, 0.f, 0.f, 0.f};
-+  bool haveViewDelta = false;
++  bool havePrevious = false;
 +  // Per-trace denoiser overrides; negative keeps the global setting.
 +  float luminancePhi = -1.f;
 +  int32_t denoisePasses = -1;
@@ -7098,6 +7620,8 @@ index 0000000..daa6222
 +constexpr uint32_t DebugOcclusion = 2u;
 +// Where the temporal history survives its test; needs the accumulation running.
 +constexpr uint32_t DebugHistory = 11u;
++// How far each pixel moved since the previous frame, and what said so.
++constexpr uint32_t DebugMotion = 13u;
 +
 +// Traces against the current TLAS and, when `dumpPath` is not null, writes the
 +// result: as raw floats when the path ends in .pfm, which the A/B bench
@@ -7135,10 +7659,10 @@ index 0000000..daa6222
 +} // namespace aurora::rt::trace
 diff --git a/lib/rt/shaders/rt_ao.hlsl b/lib/rt/shaders/rt_ao.hlsl
 new file mode 100644
-index 0000000..ab8115b
+index 0000000..b0bf843
 --- /dev/null
 +++ b/lib/rt/shaders/rt_ao.hlsl
-@@ -0,0 +1,801 @@
+@@ -0,0 +1,902 @@
 +// Ray traced ambient occlusion for PartyBoard.
 +//
 +// Primary visibility is traced rather than rasterised: with inline RayQuery the
@@ -7198,6 +7722,28 @@ index 0000000..ab8115b
 +// 16x16 thumbnail of every texture the capture saw, one after another. See
 +// rt_textures.hpp for why a thumbnail rather than the texture itself.
 +StructuredBuffer<uint> gThumbnails : register(t7);
++// The previous frame's positions, laid out as gVertices was then: the game
++// skins its models on the CPU, so where a triangle was is in those positions
++// and not only in a transform.
++StructuredBuffer<float3> gPrevVertices : register(t8);
++// Where each group was in the previous frame, one per instance of the scene.
++// GroupMotion in rt_accel.hpp.
++struct GroupMotion {
++  // Rows of a 3x4, the group's own space to the previous frame's view space:
++  // as the group was placed then...
++  float4 previous0;
++  float4 previous1;
++  float4 previous2;
++  // ...and as it would have been had it stood still while the camera moved.
++  float4 camera0;
++  float4 camera1;
++  float4 camera2;
++  // First triangle of the group in gPrevVertices.
++  uint previousFirstTriangle;
++  uint flags; // MOTION_* below
++  uint2 pad;
++};
++StructuredBuffer<GroupMotion> gGroupMotion : register(t9);
 +// RGB rather than a single channel: the bounce carries colour, which is what
 +// reads as ray tracing instead of a grey darkening.
 +RWTexture2D<float4> gOutput : register(u0);
@@ -7209,6 +7755,12 @@ index 0000000..ab8115b
 +// composition needs both a multiplicative term and a replacing one, which is
 +// six channels; zero here leaves the frame untouched.
 +RWTexture2D<float4> gReflection : register(u2);
++// How far the pixel has moved since the previous frame: xy the move in pixels,
++// previous position minus this one; z how far from the camera its point then
++// was; w what said so -- 2 the surface's own group, 1 the camera's motion
++// alone, 0 nothing, and then the rest means nothing either. The temporal pass
++// finds its history there, and it is what a temporal upscaler asks for.
++RWTexture2D<float4> gMotion : register(u3);
 +
 +cbuffer Constants : register(b0) {
 +  // GX perspective parameters (p0, p1, p2, p3) straight from the XF registers,
@@ -7249,6 +7801,8 @@ index 0000000..ab8115b
 +  // Frame counter, used to move the sampling pattern. Held at 0 when nothing is
 +  // accumulating. See the seed below.
 +  uint gFrameIndex;
++  // gProj as it was in the previous frame; all zero when there was none.
++  float4 gProjPrev;
 +};
 +
 +#define FEATURE_AO 1u
@@ -7258,6 +7812,10 @@ index 0000000..ab8115b
 +#define FEATURE_SKIP_ADDITIVE 16u
 +#define FEATURE_STRATIFIED_SHADOW 32u
 +#define FEATURE_SKIP_OTHER_PROJECTION 64u
++#define FEATURE_OBJECT_MOTION 128u
++
++#define MOTION_OBJECT 1u
++#define MOTION_CAMERA 2u
 +
 +// Which instances a ray visits. Additive groups carry mask 0x02, groups drawn
 +// through another projection than the traced one 0x04, and everything else
@@ -7312,6 +7870,12 @@ index 0000000..ab8115b
 +// scale shows at a glance. Magenta and black stripes, which no texture in the
 +// game looks like, mark a surface with no thumbnail.
 +#define DEBUG_THUMBNAIL 12u
++// How far each pixel moved since the previous frame: red the move to the
++// right, green the move downwards, mid-grey for none and a full channel for 32
++// pixels; blue says what the move was worked out from -- full for the
++// surface's own group, half for the camera's motion alone, none where nothing
++// is known.
++#define DEBUG_MOTION 13u
 +
 +#define MATERIAL_REFLECTIVE 1u
 +#define MATERIAL_CUTOUT 2u
@@ -7501,6 +8065,7 @@ index 0000000..ab8115b
 +      gOutput[tid.xy] = float4(1.0f, 1.0f, 1.0f, 1.0f);
 +      gGuide[tid.xy] = float4(0.0f, 0.0f, 0.0f, 0.0f);
 +      gReflection[tid.xy] = float4(0.0f, 0.0f, 0.0f, 0.0f);
++      gMotion[tid.xy] = float4(0.0f, 0.0f, 0.0f, 0.0f);
 +      return;
 +    }
 +  }
@@ -7510,6 +8075,7 @@ index 0000000..ab8115b
 +    gOutput[tid.xy] = float4(1.0f, 1.0f, 1.0f, 1.0f);
 +    gGuide[tid.xy] = float4(0.0f, 0.0f, 0.0f, 0.0f);
 +    gReflection[tid.xy] = float4(0.0f, 0.0f, 0.0f, 0.0f);
++    gMotion[tid.xy] = float4(0.0f, 0.0f, 0.0f, 0.0f);
 +    return;
 +  }
 +  const float3 dir =
@@ -7572,6 +8138,7 @@ index 0000000..ab8115b
 +    gOutput[tid.xy] = float4(miss, 1.0f);
 +    gGuide[tid.xy] = float4(0.0f, 0.0f, 0.0f, 0.0f);
 +    gReflection[tid.xy] = float4(0.0f, 0.0f, 0.0f, 0.0f);
++    gMotion[tid.xy] = float4(0.0f, 0.0f, 0.0f, 0.0f);
 +    return;
 +  }
 +
@@ -7622,6 +8189,61 @@ index 0000000..ab8115b
 +  // Depth is the distance along the ray, not -hit.z: it stays meaningful at the
 +  // edges of a wide field of view, where -z compresses.
 +  gGuide[tid.xy] = float4(n, primary.CommittedRayT());
++
++  // Where this point of the surface was a frame ago, and from it how far the
++  // pixel has moved. The triangle is the same one in the previous frame's
++  // positions -- the game redraws a model through the same display list, so
++  // its triangles keep their order while the skinning moves their corners --
++  // and the hit's barycentrics pick the same point on it. That follows a limb
++  // as well as a platform, which one transform per object could not. Where the
++  // group was not found a frame ago, the point is taken to have stood still in
++  // the scene, and only the camera's own motion applies.
++  float4 motion = float4(0.0f, 0.0f, 0.0f, 0.0f);
++  if (abs(gProjPrev.x) >= 1e-8f && abs(gProjPrev.z) >= 1e-8f) {
++    const GroupMotion group = gGroupMotion[primary.CommittedInstanceIndex()];
++    const bool followed = (gFeatures & FEATURE_OBJECT_MOTION) != 0u &&
++                          (group.flags & MOTION_OBJECT) != 0u;
++    if (followed || (group.flags & MOTION_CAMERA) != 0u) {
++      const float2 bary = primary.CommittedTriangleBarycentrics();
++      float3 p0;
++      float3 p1;
++      float3 p2;
++      float4 row0;
++      float4 row1;
++      float4 row2;
++      if (followed) {
++        const uint first = (group.previousFirstTriangle + primary.CommittedPrimitiveIndex()) * 3u;
++        p0 = gPrevVertices[first + 0u];
++        p1 = gPrevVertices[first + 1u];
++        p2 = gPrevVertices[first + 2u];
++        row0 = group.previous0;
++        row1 = group.previous1;
++        row2 = group.previous2;
++      } else {
++        p0 = gVertices[prim * 3u + 0u];
++        p1 = gVertices[prim * 3u + 1u];
++        p2 = gVertices[prim * 3u + 2u];
++        row0 = group.camera0;
++        row1 = group.camera1;
++        row2 = group.camera2;
++      }
++      const float3 local = p0 * (1.0f - bary.x - bary.y) + p1 * bary.x + p2 * bary.y;
++      const float3 there = float3(dot(row0.xyz, local) + row0.w, dot(row1.xyz, local) + row1.w,
++                                  dot(row2.xyz, local) + row2.w);
++      // Behind the camera a frame ago: it had no position on screen.
++      if (there.z < -1e-4f) {
++        const float2 ndcPrev = float2((there.x / -there.z) * gProjPrev.x - gProjPrev.y,
++                                      (there.y / -there.z) * gProjPrev.z - gProjPrev.w);
++        const float2 pixelPrev =
++            float2(ndcPrev.x * 0.5f + 0.5f, 0.5f - ndcPrev.y * 0.5f) * float2(gDims);
++        // Clamped: the buffer holds half floats, and a point that was far off
++        // screen must stay a number the temporal pass can turn away.
++        const float2 moved = clamp(pixelPrev - (float2(tid.xy) + 0.5f), -32000.0f, 32000.0f);
++        motion = float4(moved, length(there), followed ? 2.0f : 1.0f);
++      }
++    }
++  }
++  gMotion[tid.xy] = motion;
 +  // Offset along the geometric normal so the surface does not shadow itself.
 +  // Proportional to the hit distance rather than a constant: float precision
 +  // coarsens with magnitude, and the scenes here range from 1476 units across a
@@ -7916,6 +8538,9 @@ index 0000000..ab8115b
 +      const float2 uv = (float2(tid.xy) + 0.5f) / float2(gDims);
 +      const bool grid = frac(uv.x * 8.0f) < 0.02f || frac(uv.y * 8.0f) < 0.02f;
 +      debugColour = grid ? float3(1.0f, 1.0f, 1.0f) : float3(uv.x, uv.y, 0.0f);
++    } else if (gDebugMode == DEBUG_MOTION) {
++      debugColour = float3(saturate(0.5f + motion.x / 64.0f), saturate(0.5f + motion.y / 64.0f),
++                           motion.w * 0.5f);
 +    } else if (gDebugMode == DEBUG_PRIMITIVE) {
 +      // One triangle, one colour: adjacent primitives land far apart, which is
 +      // what makes a mis-indexed vertex buffer obvious at a glance.
@@ -8112,10 +8737,10 @@ index 0000000..fad188a
 +}
 diff --git a/lib/rt/shaders/rt_temporal.hlsl b/lib/rt/shaders/rt_temporal.hlsl
 new file mode 100644
-index 0000000..1cb65be
+index 0000000..d6888fc
 --- /dev/null
 +++ b/lib/rt/shaders/rt_temporal.hlsl
-@@ -0,0 +1,204 @@
+@@ -0,0 +1,185 @@
 +// Temporal accumulation for the ray traced terms, between the trace -- which
 +// writes this frame's raw estimate -- and the a-trous filter.
 +//
@@ -8133,9 +8758,10 @@ index 0000000..1cb65be
 +//    with too short a history uses the spatial variance of its neighbourhood
 +//    instead. Schied et al., "Spatiotemporal Variance-Guided Filtering" (2017).
 +//
-+// There are still no motion vectors: a history survives where the same surface
-+// is at the same pixel, judged by normal and hit distance. The clamp is what
-+// keeps that test from being the only guard.
++// The history is read where the pixel's surface was a frame ago, which the
++// trace works out from the surface itself and hands over as a motion per pixel.
++// It survives where that place held the same surface, judged by normal and hit
++// distance; the clamp is what keeps that test from being the only guard.
 +
 +RWTexture2D<float4> gCurrent : register(u0);    // this frame's raw estimate
 +RWTexture2D<float4> gGuide : register(u1);      // normal in xyz, hit distance in w; 0 is a miss
@@ -8145,6 +8771,9 @@ index 0000000..1cb65be
 +RWTexture2D<float4> gMomentsIn : register(u5);  // r mean luminance, g mean square, b history length
 +RWTexture2D<float4> gMomentsOut : register(u6);
 +RWTexture2D<float4> gOutput : register(u7);     // accumulated colour; a carries the variance
++// xy how far the pixel moved, previous position minus this one, in pixels; z how
++// far from the camera its point then was; w zero where nothing is known.
++RWTexture2D<float4> gMotion : register(u8);
 +
 +cbuffer TemporalConstants : register(b0) {
 +  uint2 gDims;
@@ -8158,57 +8787,30 @@ index 0000000..1cb65be
 +  // Whether to look the history up where this pixel was in the previous frame.
 +  uint gReproject;
 +  float2 gPad0;
-+  // Projection parameters of this frame and of the previous one, as rt_ao.hlsl
-+  // uses them to build a view ray.
-+  float4 gProj;
-+  float4 gProjPrev;
-+  // This frame's view space to the previous frame's, row major 3x4: the
-+  // camera's own motion, measured by the capture from the draws that held
-+  // still.
-+  float4 gDeltaRow0;
-+  float4 gDeltaRow1;
-+  float4 gDeltaRow2;
 +};
 +
-+// Where this pixel was in the previous frame. Everything is traced in view
-+// space, so a surface that did not move is displaced by the camera alone, and
-+// that displacement is one affine transform. False when the pixel had no
-+// previous position on screen -- behind the camera, or outside the frame -- and
-+// then the history is read where it is, as it was before.
++// Where this pixel's surface was in the previous frame, as the trace worked it
++// out: the pixel it then covered, and how far from the camera its point was.
++// False when it had no previous position on screen -- nothing known about its
++// group, behind the camera, outside the frame -- and then the history is read
++// where it is, as it was before.
 +bool reproject(uint2 pixel, float distance, out int2 source, out float previousDistance) {
 +  source = int2(pixel);
 +  previousDistance = distance;
-+  if (gReproject == 0u || abs(gProj.x) < 1e-8f || abs(gProj.z) < 1e-8f ||
-+      abs(gProjPrev.x) < 1e-8f || abs(gProjPrev.z) < 1e-8f || distance <= 0.0f) {
++  if (gReproject == 0u) {
 +    return false;
 +  }
-+  const float2 uv = (float2(pixel) + 0.5f) / float2(gDims);
-+  const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-+  const float3 direction =
-+      normalize(float3((ndc.x + gProj.y) / gProj.x, (ndc.y + gProj.w) / gProj.z, -1.0f));
-+  const float3 here = direction * distance;
-+  const float3 there = float3(dot(gDeltaRow0.xyz, here) + gDeltaRow0.w,
-+                              dot(gDeltaRow1.xyz, here) + gDeltaRow1.w,
-+                              dot(gDeltaRow2.xyz, here) + gDeltaRow2.w);
-+  if (there.z > -1e-4f) {
++  const float4 motion = gMotion[pixel];
++  if (motion.w <= 0.0f) {
 +    return false;
 +  }
-+  const float2 ndcPrevious = float2((there.x / -there.z) * gProjPrev.x - gProjPrev.y,
-+                                    (there.y / -there.z) * gProjPrev.z - gProjPrev.w);
-+  const float2 uvPrevious = float2(ndcPrevious.x * 0.5f + 0.5f, 0.5f - ndcPrevious.y * 0.5f);
-+  const int2 pixelPrevious = int2(floor(uvPrevious * float2(gDims)));
++  const int2 pixelPrevious = int2(floor(float2(pixel) + 0.5f + motion.xy));
 +  if (any(pixelPrevious < int2(0, 0)) || any(pixelPrevious >= int2(gDims))) {
 +    return false;
 +  }
 +  source = pixelPrevious;
-+  previousDistance = length(there);
++  previousDistance = motion.z;
 +  return true;
-+}
-+
-+// A normal turns with the camera as well.
-+float3 turn_with_camera(float3 normal) {
-+  return float3(dot(gDeltaRow0.xyz, normal), dot(gDeltaRow1.xyz, normal),
-+                dot(gDeltaRow2.xyz, normal));
 +}
 +
 +#define DEBUG_OFF 0u
@@ -8268,16 +8870,20 @@ index 0000000..1cb65be
 +  const float lumaMean = lumaSum / count;
 +  const float spatialVariance = max(lumaSquares / count - lumaMean * lumaMean, 0.0f);
 +
-+  // Same surface at the same pixel: the normal and the hit distance both have
++  // Same surface where the pixel was: the normal and the hit distance both have
 +  // to agree. Distance alone lets a silhouette slide over a background at the
 +  // same depth; normal alone lets a wall inherit the floor it meets.
++  //
++  // The normal is compared as it is, in this frame's view space against the
++  // previous frame's. It is not turned back by what the surface or the camera
++  // rotated in between: the test allows 25 degrees, and nothing here turns
++  // that far in one frame.
 +  int2 source;
 +  float previousDistance;
-+  const bool reprojected = reproject(tid.xy, guide.w, source, previousDistance);
-+  const float3 previousNormal = reprojected ? turn_with_camera(guide.xyz) : guide.xyz;
++  reproject(tid.xy, guide.w, source, previousDistance);
 +  const float4 previousGuide = gGuidePrev[source];
 +  const bool haveHistory = previousGuide.w > 0.0f;
-+  const bool normalAgrees = dot(previousNormal, previousGuide.xyz) > 0.9f;
++  const bool normalAgrees = dot(guide.xyz, previousGuide.xyz) > 0.9f;
 +  const bool distanceAgrees =
 +      abs(previousDistance - previousGuide.w) <= 0.02f * previousDistance;
 +  const bool guideAccepts = haveHistory && normalAgrees && distanceAgrees;

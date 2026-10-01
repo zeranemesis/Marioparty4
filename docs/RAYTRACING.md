@@ -3097,3 +3097,173 @@ fournit pas : un vecteur de mouvement par pixel, la profondeur, et un décalage
 sous-pixel de la projection à chaque frame. Le mouvement de la caméra est déjà
 mesuré ; celui des objets, la profondeur partagée avec le périphérique D3D12 et
 le décalage restent à faire, et sont communs aux trois.
+
+## Le mouvement de chaque pixel, tiré de la surface elle-même (1er octobre 2026)
+
+La reprojection du 16 septembre ne connaissait qu'un mouvement : celui de la
+caméra. Tout ce qui bouge par lui-même — un personnage, une plateforme, une
+pièce qui tourne — était pris pour immobile, et son historique cherché à côté.
+C'est aussi la première des trois choses que demandent DLSS, XeSS et FSR 3.
+
+### Ce que le code du jeu dit
+
+- Les personnages sont animés **sur le processeur** : `EnvelopeProc`
+  (`src/game/EnvelopeExec.c`) réécrit à chaque frame les positions de
+  `mesh.vertex->data`, le tableau que `hsfdraw.c` donne à `GXSetArray`. Un bras
+  qui se lève ne passe donc par aucune matrice : une transformation par objet
+  ne suffit pas, il faut les sommets de la frame précédente.
+- Les modèles sont dessinés par des listes d'affichage construites une fois
+  (`GXBeginDisplayList` dans `hsfdraw.c`) et rappelées à chaque frame. Leur flux
+  de sommets ne contient que des indices : il est identique d'une frame à
+  l'autre, même quand l'animation réécrit ce que ces indices désignent.
+
+### Ce qui est fait
+
+- **Une identité par draw** : sa primitive, son format, le tableau que ses
+  positions indexent et son flux de sommets entier, hachés. Un groupe est la
+  suite de ses draws. Un draw qui porte ses positions en ligne ne se reconnaît
+  que tant qu'elles ne changent pas : la géométrie reconstruite à chaque frame
+  reste sans identité plutôt qu'avec une fausse. Les particules du jeu, elles,
+  passent par un tableau indexé (`particleFunc`, `src/game/hsfanim.c`) : elles
+  sont suivies case par case, et une case reprise par une nouvelle particule
+  saute.
+- **L'appariement d'une frame à l'autre** se fait par cette identité et par le
+  viewport, plus par le rang dans la frame — un draw de plus ou de moins devant
+  un groupe déplace son rang, pas ce qu'il est. Un modèle dessiné plusieurs fois
+  dans une même vue est apparié dans l'ordre ; si le nombre diffère entre les
+  deux frames, ces groupes sont écartés et retombent sur le mouvement de la
+  caméra.
+- **Les positions de la frame précédente restent sur le GPU** : les deux tampons
+  de sommets échangent leurs rôles à chaque construction au lieu d'être
+  écrasés. Chaque groupe reçoit un enregistrement — sa transformation d'alors,
+  son premier triangle d'alors, et la transformation qu'il aurait eue s'il
+  n'avait pas bougé. Un enregistrement qui nomme des triangles hors du tampon
+  est refusé avant d'atteindre le shader, qui lit ce tampon sans bornes.
+- **Le tracé écrit le mouvement** dans une quatrième cible : le déplacement en
+  pixels, la distance à laquelle le point était, et ce qui l'a dit. Le point est
+  repris sur le même triangle des positions précédentes, aux mêmes coordonnées
+  barycentriques : cela suit un membre aussi bien qu'une plateforme. La passe
+  temporelle lit cette cible et ne calcule plus rien.
+- `AURORA_RT_OBJECT_MOTION=0` rend l'ancienne hypothèse — tout immobile, caméra
+  seule ; `AURORA_RT_AB=objectMotion=0` compare les deux sur une frame ;
+  `AURORA_RT_DEBUG_MODE=13` montre le mouvement. La vue historique (11) rend
+  maintenant son verdict sur une frame isolée aussi, ce qui permet au banc A/B
+  de juger deux mouvements contre la même frame précédente.
+- **La profondeur** que demandent les upscalers est déjà là : la distance le
+  long du rayon, écrite pour le filtre depuis le début. Sa conversion au format
+  de chaque SDK viendra avec le code qui les appelle.
+
+### Un défaut corrigé en passant
+
+La projection « de la frame précédente » donnée au tracé était celle de la frame
+courante : la variable était écrasée avant d'être lue, et avec la projection du
+dernier draw plutôt qu'avec celle des rayons. Sans effet tant que le champ de
+vision ne bouge pas, faux à chaque frame où il change. Les mesures du
+16 septembre n'en sont pas touchées.
+
+### Mesuré
+
+L'appariement : **99,9 %** des triangles que les rayons peuvent atteindre sont
+retrouvés dans la frame précédente, sur 210 millions de triangles cumulés sur le
+plateau et 91 millions sur m401Dll ; aucun enregistrement refusé. Le mouvement
+de la caméra, qui ne sert plus qu'aux groupes non retrouvés, est mesuré sur
+7 634 frames sur 7 640.
+
+Sur **une même frame**, le mouvement suivi par groupe contre la caméra seule :
+
+| | pixels à plus d'un demi-pixel d'écart | médiane de l'écart parmi eux |
+|---|---|---|
+| plateau, en jeu | 6,96 % | 3,06 px |
+| m401Dll | 23,29 % | 1,35 px |
+
+Sur une même frame encore, jugés contre la même frame précédente, les pixels
+dont l'historique est refusé :
+
+| | groupe suivi | caméra seule | gagnés | perdus |
+|---|---|---|---|---|
+| plateau | 1,46 % | 2,34 % | 12 891 px | 2 168 px |
+| m401Dll | 0,96 % | 1,91 % | 14 933 px | 2 855 px |
+
+Les pixels gagnés sont les nageurs, leurs bras et leurs jambes, les objets qui
+tournent sur le plateau ; les perdus sont des liserés d'un pixel sur des arêtes.
+
+Sur des séquences de 60 frames de m401Dll, la part acceptée a pour médiane 95,4
+à 96,0 % avec le groupe suivi (quatre runs), 93,2 % avec la caméra seule (un
+run).
+
+**L'image finale n'en est pas mesurablement changée.** L'erreur contre la
+référence à 32 échantillons, sur m401Dll : 0,00722 et 0,00862 avec le groupe
+suivi, 0,00772 et 0,00704 avec la caméra seule. Deux runs du même réglage
+diffèrent plus que les deux réglages entre eux. Ce que ce lot apporte est un
+mouvement juste — pour un upscaler, c'est ce qui compte — et un refus
+d'historique deux fois plus rare, pas une image plus propre aujourd'hui.
+
+Les séquences et l'erreur contre la référence ont été relevées avant que le
+viewport n'entre dans la clé d'appariement ; les relevés sur une même frame
+sont du code final.
+
+Test nul A/B sur le plateau : 0 pixel sur 1 228 800.
+
+**Le coût**, build d'avant contre build d'après, intercalés, sans limite
+d'images, deux tours :
+
+| | tracé avant | tracé après |
+|---|---|---|
+| plateau | 1,89 à 1,91 ms | 2,01 à 2,07 ms |
+| m401Dll | 1,30 à 1,34 ms | 1,38 à 1,39 ms |
+
+Soit 0,12 à 0,16 ms de plus sur le plateau et 0,06 sur m401Dll : une cible de
+plus à écrire, et par pixel un enregistrement et trois sommets à lire. La
+période de frame ne bouge pas de façon mesurable — elle varie de 6,4 à 7,4 ms
+d'un run à l'autre dans les deux builds. Lire les enregistrements depuis la
+mémoire du GPU plutôt que depuis le tas d'envoi n'a rien changé (2,02 à
+2,05 ms) : essayé, retiré.
+
+### Deux fausses pistes, et ce qu'elles ont montré
+
+**Un historique refusé en bloc.** Le premier relevé montrait, sur deux frames
+d'un run, tout l'écran refusé par la normale. J'ai soupçonné l'appariement : m401Dll
+dessine 7 123 triangles de sa scène une seconde fois, dans une texture de
+384 × 384, et un groupe apparié avec son double de l'autre vue aurait donné ce
+tableau. Les diagnostics par frame n'ont montré aucun appariement croisé. En
+avançant la prise à une demi-seconde après l'ouverture, la vue des matériaux a
+donné la cause : **un quad découpé couvre tout l'écran pendant deux ou trois
+frames**, et le rayon primaire s'y arrête. Le même événement se produit avec la
+caméra seule, et il existait avant ce lot. L'appariement tient quand même compte
+du viewport désormais : ce qu'une vue a montré n'est pas le passé de l'autre.
+
+**Le plafond de m401Dll refusé par la distance**, deux frames à sept frames
+d'écart, 5 et 9 % de l'écran. Les diagnostics montraient ce groupe changer de
+rang ces frames-là, et j'ai cru à un décalage d'indices. Le run avec la caméra
+seule montre le même événement, aux mêmes proportions : c'est le jeu — un quad
+translucide passe devant puis derrière la surface de l'eau.
+
+### Ce qui reste
+
+- **Le quad plein écran fait sauter les termes tracés** pendant deux ou trois
+  frames : le tracé ombre le quad au lieu de la scène. C'est un défaut visible,
+  antérieur à ce lot, à traiter pour lui-même. Une piste, lue dans le code et
+  pas encore vérifiée : `particleFunc` multiplie l'alpha de la texture par celui
+  de la couleur des sommets, qui fait s'éteindre la particule, et la capture ne
+  lit que la texture — une particule presque éteinte reste un mur pour le rayon.
+- La normale n'est plus retournée de ce que la caméra a tourné. Le test tolère
+  25° : au-delà, en une frame, tout l'historique est refusé. C'est une coupe de
+  caméra, où il ne vaut rien de toute façon.
+- La géométrie dont le flux porte les positions et change à chaque frame n'a
+  pas d'identité et suit la caméra seule.
+- Un modèle dessiné plusieurs fois dans la même vue est apparié dans l'ordre :
+  si le jeu change cet ordre, deux exemplaires échangent leur passé pour une
+  frame. Non observé.
+- Le mouvement est celui du point de matière. Une surface qui glisse sur
+  elle-même « bouge », alors que son ombre ne bouge pas.
+- L'interface n'a pas de mouvement propre : pour un upscaler temporel, ses
+  pixels devront valoir zéro.
+- Le tracé doit avoir la résolution du rendu pour que son mouvement serve à un
+  upscaler ; aujourd'hui il a celle de la fenêtre.
+
+### Outils
+
+`test_raytracing.ps1` attend le dernier fichier d'une séquence au lieu d'estimer
+sa durée — une séquence de 90 frames était coupée à 80 — et `-ArmDelaySeconds`
+règle l'attente avant la prise : quatre secondes par défaut, moins pour prendre
+l'ouverture d'une scène.
