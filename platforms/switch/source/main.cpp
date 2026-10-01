@@ -6,6 +6,7 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <glad/glad.h>
+#include <dolphin/pad.h>
 
 namespace {
 
@@ -242,20 +243,28 @@ int main(int, char**) {
         return EXIT_FAILURE;
     }
 
-    padConfigureInput(1, HidNpadStyleSet_NpadStandard);
-    PadState pad;
-    padInitializeDefault(&pad);
-
+    PADInit();
+    PADStatus pads[PAD_CHANMAX] = {};
     unsigned frame = 0;
 
     while (appletMainLoop()) {
-        padUpdate(&pad);
+        PADRead(pads);
 
-        const u64 down = padGetButtonsDown(&pad);
-        if (down & HidNpadButton_Plus)
+        bool exitRequested = false;
+        bool aHeld = false;
+        for (unsigned i = 0; i < PAD_CHANMAX; ++i) {
+            if (pads[i].err != PAD_ERR_NONE)
+                continue;
+            exitRequested |= (pads[i].button & PAD_BUTTON_START) != 0;
+            aHeld |= (pads[i].button & PAD_BUTTON_A) != 0;
+        }
+        if (exitRequested)
             break;
 
-        const float pulse = static_cast<float>((frame / 90u) & 1u);
+        // Holding the GameCube A mapping brightens the background. This makes
+        // the bootstrap validate the exact PAD API consumed by Mario Party 4,
+        // not a second libnx-only input path.
+        const float pulse = aHeld ? 1.0f : static_cast<float>((frame / 90u) & 1u);
         renderFrame(pulse, width, height);
         eglSwapBuffers(g_display, g_surface);
         ++frame;
