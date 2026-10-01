@@ -9,7 +9,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 TARGET      := partyboard-switch-probe
 BUILD       := build
-SOURCES     := source
+SOURCES     := source ../../extern/aurora/lib/dolphin/mtx
 INCLUDES    := ../../extern/aurora/include
 
 APP_TITLE   := PartyBoard Switch Probe
