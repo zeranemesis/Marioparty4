@@ -70,3 +70,27 @@ if(NOT _elf_mem_image_content MATCHES "!defined\\(__SWITCH__\\)")
     file(WRITE "${_elf_mem_image}" "${_elf_mem_image_content}")
     message(STATUS "Disabled Abseil ELF memory image support on libnx")
 endif()
+
+
+set(_cctz_libc "${_absl_root}/absl/time/internal/cctz/src/time_zone_libc.cc")
+if(NOT EXISTS "${_cctz_libc}")
+    message(FATAL_ERROR "Dawn's Abseil CCTZ libc source was not found")
+endif()
+
+file(READ "${_cctz_libc}" _cctz_libc_content)
+if(NOT _cctz_libc_content MATCHES "PartyBoard libnx: newlib struct tm")
+    # newlib/libnx intentionally lacks the non-standard tm_gmtoff/tm_zone
+    # members used by CCTZ on glibc/BSD. Dawn does not require local timezone
+    # semantics, so keep this dependency portable by exposing UTC here.
+    string(REPLACE
+        "#else\n// Adapt to different spellings of the struct std::tm extension fields."
+        "#elif defined(__SWITCH__)\n// PartyBoard libnx: newlib struct tm has no gmtoff/zone extensions.\nauto tm_gmtoff(const std::tm&) -> long { return 0; }\nauto tm_zone(const std::tm&) -> const char* { return \"UTC\"; }\n#else\n// Adapt to different spellings of the struct std::tm extension fields."
+        _cctz_libc_content "${_cctz_libc_content}")
+
+    if(NOT _cctz_libc_content MATCHES "PartyBoard libnx: newlib struct tm")
+        message(FATAL_ERROR "Failed to patch Abseil CCTZ for libnx")
+    endif()
+
+    file(WRITE "${_cctz_libc}" "${_cctz_libc_content}")
+    message(STATUS "Patched Abseil CCTZ timezone extensions for libnx")
+endif()
