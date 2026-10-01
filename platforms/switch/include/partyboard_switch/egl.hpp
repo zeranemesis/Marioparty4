@@ -9,7 +9,7 @@
 // Aurora/Dawn Switch overlay later. Keeping EGL lifetime here prevents the
 // compatibility layer from depending directly on libnx window setup details.
 
-bool PartyBoardSwitch_EglInitialize();
+// Initializes only libnx NWindow + EGLDisplay. Dawn uses this mode so it can\n// own the EGLContext and EGLSurface itself.\nbool PartyBoardSwitch_EglInitializeDisplay();\n\nbool PartyBoardSwitch_EglInitialize();
 void PartyBoardSwitch_EglShutdown();
 
 EGLDisplay PartyBoardSwitch_EglDisplay();
