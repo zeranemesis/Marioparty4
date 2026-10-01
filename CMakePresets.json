@@ -549,6 +549,18 @@
           "value": true
         }
       }
+    },
+    {
+      "name": "switch-libnx-game",
+      "displayName": "Nintendo Switch (libnx: the game, plus the Dawn and Aurora probes)",
+      "inherits": "switch-libnx-aurora-probe",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "PARTYBOARD_SWITCH_GAME": {
+          "type": "BOOL",
+          "value": true
+        }
+      }
     }
   ],
   "buildPresets": [

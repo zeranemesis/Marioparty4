@@ -276,3 +276,11 @@ if(PARTYBOARD_SWITCH_AURORA_PROBE)
 
     message(STATUS "PartyBoard Aurora/libnx probe enabled")
 endif()
+
+option(PARTYBOARD_SWITCH_GAME
+    "Build the game itself for libnx (game/), on top of the Aurora probe's stack"
+    OFF)
+
+if(PARTYBOARD_SWITCH_GAME)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/game/SwitchGame.cmake")
+endif()

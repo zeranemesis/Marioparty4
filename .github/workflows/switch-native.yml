@@ -11,6 +11,11 @@ on:
       - "cmake/**"
       - "platforms/switch/**"
       - "patches/aurora-*.patch"
+      - "patches/musyx-*.patch"
+      - "files.cmake"
+      - "src/**"
+      - "include/**"
+      - "res/**"
       - "extern/aurora"
   pull_request:
     paths:
@@ -20,6 +25,11 @@ on:
       - "cmake/**"
       - "platforms/switch/**"
       - "patches/aurora-*.patch"
+      - "patches/musyx-*.patch"
+      - "files.cmake"
+      - "src/**"
+      - "include/**"
+      - "res/**"
   workflow_dispatch:
 
 concurrency:
@@ -189,7 +199,7 @@ jobs:
           if-no-files-found: error
 
   dawn-probe:
-    name: Dawn and Aurora probes
+    name: Dawn, Aurora and game
     runs-on: ubuntu-latest
     continue-on-error: true
     container:
@@ -201,9 +211,11 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Apply PartyBoard Aurora patches
+      - name: Apply PartyBoard Aurora and MusyX patches
         shell: bash
         run: |
+          git -C extern/musyx apply --check ../../patches/musyx-partyboard.patch
+          git -C extern/musyx apply ../../patches/musyx-partyboard.patch
           git -C extern/aurora apply --check ../../patches/aurora-partyboard.patch
           git -C extern/aurora apply ../../patches/aurora-partyboard.patch
           git -C extern/aurora apply --check ../../patches/aurora-render-fixes.patch
@@ -226,15 +238,18 @@ jobs:
       - name: Prepare container git ownership
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      # One build directory for both: the Aurora probe reuses the Dawn build.
-      - name: Configure Dawn and Aurora probes
-        run: cmake --preset switch-libnx-aurora-probe
+      # One build directory: the Aurora probe and the game reuse the Dawn build.
+      - name: Configure Dawn, Aurora and game
+        run: cmake --preset switch-libnx-game
 
       - name: Build Dawn probe NRO
-        run: cmake --build build/switch-libnx-aurora-probe --target partyboard_switch_dawn_nro --parallel 2
+        run: cmake --build build/switch-libnx-game --target partyboard_switch_dawn_nro --parallel 2
 
       - name: Build Aurora probe NRO
-        run: cmake --build build/switch-libnx-aurora-probe --target partyboard_switch_aurora_nro --parallel 2
+        run: cmake --build build/switch-libnx-game --target partyboard_switch_aurora_nro --parallel 2
+
+      - name: Build the game NRO
+        run: cmake --build build/switch-libnx-game --target partyboard_switch_game_nro --parallel 2
 
       - name: Upload Dawn probe
         if: success()
@@ -242,8 +257,8 @@ jobs:
         with:
           name: partyboard-switch-dawn-probe
           path: |
-            build/switch-libnx-aurora-probe/platforms/switch/partyboard-switch-dawn-probe.nro
-            build/switch-libnx-aurora-probe/platforms/switch/partyboard-switch-dawn-probe.elf
+            build/switch-libnx-game/platforms/switch/partyboard-switch-dawn-probe.nro
+            build/switch-libnx-game/platforms/switch/partyboard-switch-dawn-probe.elf
           if-no-files-found: error
 
       - name: Upload Aurora probe
@@ -252,6 +267,14 @@ jobs:
         with:
           name: partyboard-switch-aurora-probe
           path: |
-            build/switch-libnx-aurora-probe/platforms/switch/partyboard-switch-aurora-probe.nro
-            build/switch-libnx-aurora-probe/platforms/switch/partyboard-switch-aurora-probe.elf
+            build/switch-libnx-game/platforms/switch/partyboard-switch-aurora-probe.nro
+            build/switch-libnx-game/platforms/switch/partyboard-switch-aurora-probe.elf
+          if-no-files-found: error
+
+      - name: Upload the game
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: partyboard-switch-game
+          path: build/switch-libnx-game/platforms/switch/partyboard.nro
           if-no-files-found: error

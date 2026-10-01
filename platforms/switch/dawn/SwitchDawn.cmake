@@ -6,6 +6,11 @@ include_guard(GLOBAL)
 
 include(FetchContent)
 
+# libnx has no dynamic loader: every library is static. Forced, because
+# dependencies (RmlUi) default it to ON in the cache, which Dawn's monolithic
+# static library refuses.
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries (never on libnx)" FORCE)
+
 # Keep this in lock-step with the Dawn revision pinned by extern/aurora.
 set(PARTYBOARD_SWITCH_DAWN_REF
     "13abc3bc8ea2d3c2050f9e77a12d012108ceee24"

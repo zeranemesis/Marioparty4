@@ -169,6 +169,40 @@ a cycling colour; **+** quits. `aurora/SwitchAurora.cmake` builds
   (`aurora/PatchTracyForSwitch.cmake`), and Dear ImGui's fork/exec "open in
   shell" is compiled out.
 
+### The game
+
+The game itself now compiles and links for the Switch into one NRO, with
+its `res/` directory in the romfs:
+
+```sh
+# CI also applies patches/musyx-partyboard.patch to extern/musyx.
+cmake --preset switch-libnx-game
+cmake --build build/switch-libnx-game --target partyboard_switch_game_nro --parallel
+```
+
+`game/SwitchGame.cmake` builds the main module (`dol`: the decompiled game
+plus `src/port`) as on the other platforms, with RmlUi and Aurora's DVD layer
+over nodlite. What differs:
+
+- **Overlays are linked in.** libnx has no dynamic loader, so each REL is
+  linked into one relocatable object (`ld -r`, `game/overlay.ld`) whose only
+  global symbol is its renamed `ObjectSetup`; a generated table maps
+  `_ovltbl`'s names to them, and `objdll.c` looks there under
+  `PARTYBOARD_STATIC_OVERLAYS` (`include/port/static_overlays.h`). A shared
+  library starts from fresh globals each time it is opened, and the game
+  relies on it, so each overlay's writable data and bss are gathered into
+  sections of their own and reset whenever the game links it again.
+- **Mbed TLS** gets a Switch configuration (`game/mbedtls_switch_config.h`):
+  no clock or timer, entropy from libnx's random generator.
+- **Process setup** (`game/switch_app_init.c`, libnx's `userAppInit`):
+  romfs mounted and made the working directory (the port opens `res/...`
+  relative to it), BSD sockets, nxlink stdio, and SDL's preference path on
+  `sdmc:/switch/partyboard`.
+
+It has not run on a console yet; the next work is the runtime: the disc path
+from the launcher, input, audio, and Aurora's renderer at Dawn's
+`Compatibility` level.
+
 ## Current integration boundary
 
 The intended renderer chain is now:

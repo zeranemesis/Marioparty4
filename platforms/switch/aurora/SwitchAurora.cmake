@@ -10,9 +10,19 @@ include("${CMAKE_CURRENT_LIST_DIR}/../sdl3/SwitchSDL3.cmake")
 
 set(AURORA_ENABLE_GX ON CACHE BOOL "" FORCE)
 set(AURORA_ENABLE_CARD ON CACHE BOOL "" FORCE)
-set(AURORA_ENABLE_RMLUI OFF CACHE BOOL "" FORCE)
-# Aurora's DVD layer comes next, over nodlite.
-set(AURORA_ENABLE_DVD OFF CACHE BOOL "" FORCE)
+if(PARTYBOARD_SWITCH_GAME)
+    # The game's UI is RmlUi, and its discs go through Aurora's DVD layer,
+    # which reads them with nod: nodlite on the Switch (nod::nod, added by
+    # platforms/switch/CMakeLists.txt before this file).
+    set(AURORA_ENABLE_RMLUI ON CACHE BOOL "" FORCE)
+    set(AURORA_ENABLE_DVD ON CACHE BOOL "" FORCE)
+    set(AURORA_NOD_PROVIDER "system" CACHE STRING "" FORCE)
+    set(AURORA_NOD_LINKAGE "static" CACHE STRING "" FORCE)
+    set(nod_FOUND TRUE)
+else()
+    set(AURORA_ENABLE_RMLUI OFF CACHE BOOL "" FORCE)
+    set(AURORA_ENABLE_DVD OFF CACHE BOOL "" FORCE)
+endif()
 
 # Dawn: the "vendor" provider reuses an existing webgpu_dawn target and keeps
 # the DAWN_ENABLE_* values of that build (OpenGL ES only).
