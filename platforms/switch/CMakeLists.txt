@@ -84,7 +84,7 @@ add_custom_command(
     COMMAND "${PARTYBOARD_ELF2NRO}"
             "$<TARGET_FILE:partyboard_switch_probe>"
             "${PARTYBOARD_SWITCH_NRO}"
-            --nacp="${PARTYBOARD_SWITCH_NACP}"
+            "--nacp=${PARTYBOARD_SWITCH_NACP}"
     DEPENDS partyboard_switch_probe "${PARTYBOARD_SWITCH_NACP}"
     VERBATIM
     COMMENT "Generating PartyBoard Switch NRO"
@@ -218,7 +218,7 @@ if(PARTYBOARD_SWITCH_DAWN_PROBE)
         COMMAND "${PARTYBOARD_ELF2NRO}"
                 "$<TARGET_FILE:partyboard_switch_dawn_probe>"
                 "${PARTYBOARD_SWITCH_DAWN_NRO}"
-                --nacp="${PARTYBOARD_SWITCH_DAWN_NACP}"
+                "--nacp=${PARTYBOARD_SWITCH_DAWN_NACP}"
         DEPENDS partyboard_switch_dawn_probe "${PARTYBOARD_SWITCH_DAWN_NACP}"
         VERBATIM
         COMMENT "Generating PartyBoard Dawn probe NRO"
