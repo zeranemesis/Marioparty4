@@ -71,6 +71,8 @@ typedef struct om_dll_data {
     HMODULE hModule;
 #elif defined (__linux__) || defined(__APPLE__)
     void *handle;
+#elif defined(PARTYBOARD_STATIC_OVERLAYS)
+    struct PartyBoardStaticOverlay *overlay; /* see port/static_overlays.h */
 #else
 	OSModuleHeader *module;
 	void *bss;

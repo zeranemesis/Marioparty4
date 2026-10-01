@@ -6,6 +6,13 @@ extern "C" {
 #endif
 
 /**
+ * Use this mod list instead of the PARTYBOARD_MOD_LIST environment variable.
+ * Launchers that can only pass arguments (the Switch launcher's --mod-list)
+ * use this. Must be called before PartyBoard_InitMods(); null or "" clears it.
+ */
+void PartyBoard_SetModListPath(const char* path);
+
+/**
  * Overlay the mods selected by CubeShelf on top of the mounted disc image.
  *
  * Must be called after aurora_dvd_open() and before the game reads any file.

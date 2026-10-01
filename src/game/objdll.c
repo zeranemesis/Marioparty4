@@ -9,6 +9,9 @@
 #if defined(__linux__) || defined(__APPLE__)
 #include <dlfcn.h>
 #endif
+#if defined(PARTYBOARD_STATIC_OVERLAYS)
+#include "port/static_overlays.h"
+#endif
 
 typedef s32 (*DLLProlog)(void);
 typedef void (*DLLEpilog)(void);
@@ -184,6 +187,11 @@ omDllData *omDLLLink(omDllData **dll_ptr, s16 overlay, s16 flag)
 			OSReport("objdll>++++++++++++++++ DLL Link Failed %s\n", dlerror());
 		}
 	}
+#elif defined(PARTYBOARD_STATIC_OVERLAYS)
+	dll->overlay = PartyBoard_StaticOverlayLink(dllFile->name);
+	if (dll->overlay == NULL) {
+		OSReport("objdll>++++++++++++++++ DLL Link Failed: %s is not built in\n", dllFile->name);
+	}
 #elif defined(__MWERKS__)
 	dll->module = HuDvdDataReadDirect(dllFile->name, HEAP_SYSTEM);
 	dll->bss = HuMemDirectMalloc(HEAP_SYSTEM, dll->module->bssSize);
@@ -206,6 +214,10 @@ omDllData *omDLLLink(omDllData **dll_ptr, s16 overlay, s16 flag)
 #elif defined(__linux__) || defined(__APPLE__)
 		DLLObjectSetup objectSetup = (DLLObjectSetup)dlsym(dll->handle, "ObjectSetup");
 		objectSetup();
+#elif defined(PARTYBOARD_STATIC_OVERLAYS)
+		if (dll->overlay != NULL) {
+			dll->overlay->objectSetup();
+		}
 #else
 		dll->ret = ((DLLProlog)dll->module->prolog)();
 #endif
@@ -222,6 +234,8 @@ void omDLLUnlink(omDllData *dll_ptr, s16 flag)
     FreeLibrary(dll_ptr->hModule);
 #elif defined(__linux__) || defined(__APPLE__)
 	dlclose(dll_ptr->handle);
+#elif defined(PARTYBOARD_STATIC_OVERLAYS)
+	/* Built-in code stays; the next link resets the overlay's data. */
 #else
 	if(flag == 1) {
 		OSReport("objdll>Unlink DLL epilog\n");

@@ -193,4 +193,132 @@ if(NOT _swapchain_content MATCHES "GetEGLNativeWindow")
     file(WRITE "${_swapchain_cpp}" "${_swapchain_content}")
 endif()
 
+
+# newlib/libnx does not expose the non-standard isascii() helper used by one
+# Tint minifier path. Keep the exact semantic test inline and portable.
+set(_tint_text_generator "${DAWN_SOURCE_DIR}/src/tint/utils/text_generator/text_generator.cc")
+if(NOT EXISTS "${_tint_text_generator}")
+    message(FATAL_ERROR "Tint text generator source not found: ${_tint_text_generator}")
+endif()
+
+file(READ "${_tint_text_generator}" _tint_text_generator_content)
+if(_tint_text_generator_content MATCHES "!isascii\\(c\\)")
+    string(REPLACE
+        "!isascii(c)"
+        "(static_cast<unsigned char>(c) > 0x7f)"
+        _tint_text_generator_content "${_tint_text_generator_content}")
+    file(WRITE "${_tint_text_generator}" "${_tint_text_generator_content}")
+    message(STATUS "Patched Tint ASCII classification for libnx")
+endif()
+
+
+# SystemUtils: a homebrew NRO has no executable or module path Dawn could use
+# (it only looks for optional ICDs and caches next to the binary), and
+# newlib only declares setenv/unsetenv for POSIX builds, which Dawn's strict
+# -std=c++20 is not.
+set(_system_utils "${DAWN_SOURCE_DIR}/src/dawn/common/SystemUtils.cpp")
+if(NOT EXISTS "${_system_utils}")
+    message(FATAL_ERROR "Dawn SystemUtils source not found: ${_system_utils}")
+endif()
+
+file(READ "${_system_utils}" _system_utils_content)
+if(NOT _system_utils_content MATCHES "PartyBoard libnx")
+    string(REPLACE
+        "#elif DAWN_PLATFORM_IS(MACOS) || DAWN_PLATFORM_IS(IOS)\n#include <dlfcn.h>\n#include <mach-o/dyld.h>"
+        "#elif DAWN_PLATFORM_IS(SWITCH)\n// PartyBoard libnx: newlib hides these POSIX calls from strict C++.\nextern \"C\" int setenv(const char*, const char*, int);\nextern \"C\" int unsetenv(const char*);\n#elif DAWN_PLATFORM_IS(MACOS) || DAWN_PLATFORM_IS(IOS)\n#include <dlfcn.h>\n#include <mach-o/dyld.h>"
+        _system_utils_content "${_system_utils_content}")
+    # Both remaining platform switches end with an Emscripten case that
+    # returns no path: the Switch shares it.
+    string(REPLACE
+        "#elif DAWN_PLATFORM_IS(EMSCRIPTEN)\nstd::optional<std::string> GetExecutablePath() {"
+        "#elif DAWN_PLATFORM_IS(EMSCRIPTEN) || DAWN_PLATFORM_IS(SWITCH)\nstd::optional<std::string> GetExecutablePath() {"
+        _system_utils_content "${_system_utils_content}")
+    string(REPLACE
+        "#elif DAWN_PLATFORM_IS(EMSCRIPTEN)\nstd::optional<std::string> GetModulePath() {"
+        "#elif DAWN_PLATFORM_IS(EMSCRIPTEN) || DAWN_PLATFORM_IS(SWITCH)\nstd::optional<std::string> GetModulePath() {"
+        _system_utils_content "${_system_utils_content}")
+
+    string(REGEX MATCHALL "DAWN_PLATFORM_IS\\(SWITCH\\)" _system_utils_hits "${_system_utils_content}")
+    list(LENGTH _system_utils_hits _system_utils_hit_count)
+    if(NOT _system_utils_hit_count EQUAL 3)
+        message(FATAL_ERROR "Failed to patch Dawn SystemUtils for libnx")
+    endif()
+    file(WRITE "${_system_utils}" "${_system_utils_content}")
+    message(STATUS "Patched Dawn SystemUtils for libnx")
+endif()
+
+
+# dawn::utils::USleep: newlib keeps usleep() for POSIX builds only; a
+# standard sleep does the same job.
+set(_utils_system_utils "${DAWN_SOURCE_DIR}/src/dawn/utils/SystemUtils.cpp")
+if(NOT EXISTS "${_utils_system_utils}")
+    message(FATAL_ERROR "Dawn utils SystemUtils source not found: ${_utils_system_utils}")
+endif()
+
+file(READ "${_utils_system_utils}" _utils_system_utils_content)
+if(NOT _utils_system_utils_content MATCHES "DAWN_PLATFORM_IS\\(SWITCH\\)")
+    string(REPLACE
+        "#elif DAWN_PLATFORM_IS(POSIX)\n#include <unistd.h>"
+        "#elif DAWN_PLATFORM_IS(SWITCH)\n#include <chrono>\n#include <thread>\n#elif DAWN_PLATFORM_IS(POSIX)\n#include <unistd.h>"
+        _utils_system_utils_content "${_utils_system_utils_content}")
+    string(REPLACE
+        "#elif DAWN_PLATFORM_IS(POSIX)\nvoid USleep(unsigned int usecs) {"
+        "#elif DAWN_PLATFORM_IS(SWITCH)\nvoid USleep(unsigned int usecs) {\n    std::this_thread::sleep_for(std::chrono::microseconds(usecs));\n}\n#elif DAWN_PLATFORM_IS(POSIX)\nvoid USleep(unsigned int usecs) {"
+        _utils_system_utils_content "${_utils_system_utils_content}")
+
+    string(REGEX MATCHALL "DAWN_PLATFORM_IS\\(SWITCH\\)" _utils_system_utils_hits "${_utils_system_utils_content}")
+    list(LENGTH _utils_system_utils_hits _utils_system_utils_hit_count)
+    if(NOT _utils_system_utils_hit_count EQUAL 2)
+        message(FATAL_ERROR "Failed to patch Dawn utils USleep for libnx")
+    endif()
+    file(WRITE "${_utils_system_utils}" "${_utils_system_utils_content}")
+    message(STATUS "Patched Dawn utils USleep for libnx")
+endif()
+
+
+# SystemEvent: OS-level events are pipes polled with poll() on POSIX; libnx
+# has neither for anything but sockets. Only the D3D backends and the unused
+# WaitListEvent::WaitAsync create them, so the Switch takes Dawn's existing
+# "not implemented for this platform" branches.
+set(_system_event "${DAWN_SOURCE_DIR}/src/dawn/native/SystemEvent.cpp")
+if(NOT EXISTS "${_system_event}")
+    message(FATAL_ERROR "Dawn SystemEvent source not found: ${_system_event}")
+endif()
+
+file(READ "${_system_event}" _system_event_content)
+if(NOT _system_event_content MATCHES "DAWN_PLATFORM_IS\\(SWITCH\\)")
+    string(REPLACE
+        "#elif DAWN_PLATFORM_IS(POSIX)"
+        "#elif DAWN_PLATFORM_IS(POSIX) && !DAWN_PLATFORM_IS(SWITCH)"
+        _system_event_content "${_system_event_content}")
+
+    string(REGEX MATCHALL "!DAWN_PLATFORM_IS\\(SWITCH\\)" _system_event_hits "${_system_event_content}")
+    list(LENGTH _system_event_hits _system_event_hit_count)
+    if(NOT _system_event_hit_count EQUAL 3)
+        message(FATAL_ERROR "Failed to patch Dawn SystemEvent for libnx")
+    endif()
+    file(WRITE "${_system_event}" "${_system_event_content}")
+    message(STATUS "Patched Dawn SystemEvent for libnx")
+endif()
+
+# WGPUHelpers: newlib hides strnlen (POSIX 2008) from strict C++, but has it.
+set(_wgpu_helpers "${DAWN_SOURCE_DIR}/src/dawn/native/utils/WGPUHelpers.cpp")
+if(NOT EXISTS "${_wgpu_helpers}")
+    message(FATAL_ERROR "Dawn WGPUHelpers source not found: ${_wgpu_helpers}")
+endif()
+
+file(READ "${_wgpu_helpers}" _wgpu_helpers_content)
+if(NOT _wgpu_helpers_content MATCHES "PartyBoard libnx")
+    string(REPLACE
+        "\nnamespace dawn::native::utils {\n"
+        "\n#if defined(__SWITCH__)\n// PartyBoard libnx: newlib declares strnlen for POSIX builds only.\nextern \"C\" size_t strnlen(const char*, size_t);\n#endif\n\nnamespace dawn::native::utils {\n"
+        _wgpu_helpers_content "${_wgpu_helpers_content}")
+
+    if(NOT _wgpu_helpers_content MATCHES "PartyBoard libnx")
+        message(FATAL_ERROR "Failed to patch Dawn WGPUHelpers for libnx")
+    endif()
+    file(WRITE "${_wgpu_helpers}" "${_wgpu_helpers_content}")
+    message(STATUS "Patched Dawn WGPUHelpers strnlen for libnx")
+endif()
+
 message(STATUS "Patched Dawn native EGL-window surface for libnx")

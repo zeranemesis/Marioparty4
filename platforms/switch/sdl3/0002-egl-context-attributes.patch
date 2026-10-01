@@ -1,0 +1,57 @@
+diff --git a/src/video/switch/SDL_switchvideo.c b/src/video/switch/SDL_switchvideo.c
+index 2109b85f9..a1b5bd744 100644
+--- a/src/video/switch/SDL_switchvideo.c
++++ b/src/video/switch/SDL_switchvideo.c
+@@ -67,21 +67,37 @@ static SDL_GLContext SWITCH_GL_CreateContext(SDL_VideoDevice *_this, SDL_Window
+     SDL_VideoData *v = _this->internal;
+     EGLint num_configs = 0;
+ 
+-    static const EGLint config_attrs[] = {
+-        EGL_RED_SIZE, 8,
+-        EGL_GREEN_SIZE, 8,
+-        EGL_BLUE_SIZE, 8,
+-        EGL_ALPHA_SIZE, 8,
+-        EGL_DEPTH_SIZE, 24,
+-        EGL_STENCIL_SIZE, 8,
+-        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+-        EGL_NONE
+-    };
+-    static const EGLint context_attrs[] = {
+-        EGL_CONTEXT_CLIENT_VERSION, 2,
+-        EGL_NONE
+-    };
++    /* th07-switch: honour the GL version requested through SDL_GL_SetAttribute.
++       Switch Mesa (nouveau) exposes GLES 3.2, and th07 needs a GLES 3 context
++       for its shader pipeline, so default to ES3 unless ES2 was asked for. */
++    int req_major = _this->gl_config.major_version;
++    EGLint renderable_bit;
++    EGLint config_attrs[32];
++    EGLint context_attrs[8];
++    int n = 0;
++
++    if (req_major < 2) {
++        req_major = 3;
++    }
++#ifdef EGL_OPENGL_ES3_BIT
++    renderable_bit = (req_major >= 3) ? EGL_OPENGL_ES3_BIT : EGL_OPENGL_ES2_BIT;
++#else
++    renderable_bit = EGL_OPENGL_ES2_BIT;
++#endif
++
++    config_attrs[n++] = EGL_RED_SIZE;      config_attrs[n++] = 8;
++    config_attrs[n++] = EGL_GREEN_SIZE;    config_attrs[n++] = 8;
++    config_attrs[n++] = EGL_BLUE_SIZE;     config_attrs[n++] = 8;
++    config_attrs[n++] = EGL_ALPHA_SIZE;    config_attrs[n++] = 8;
++    config_attrs[n++] = EGL_DEPTH_SIZE;    config_attrs[n++] = 24;
++    config_attrs[n++] = EGL_STENCIL_SIZE;  config_attrs[n++] = 8;
++    config_attrs[n++] = EGL_SURFACE_TYPE;  config_attrs[n++] = EGL_WINDOW_BIT;
++    config_attrs[n++] = EGL_RENDERABLE_TYPE; config_attrs[n++] = renderable_bit;
++    config_attrs[n++] = EGL_NONE;
++
++    n = 0;
++    context_attrs[n++] = EGL_CONTEXT_CLIENT_VERSION; context_attrs[n++] = req_major;
++    context_attrs[n++] = EGL_NONE;
+ 
+     v->display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+     if (v->display == EGL_NO_DISPLAY) {

@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "games": [
+    {
+      "id": "GMPE01_00",
+      "title": "Mario Party 4",
+      "year": 2002,
+      "genre": { "fr": "Party", "en": "Party" },
+      "players": { "fr": "1 à 4 joueurs", "en": "1-4 players" },
+      "runtime": "PartyBoard",
+      "description": {
+        "fr": "Porté nativement par PartyBoard. Les mods installés avec CubeShelf fonctionnent aussi ici.",
+        "en": "Ported natively by PartyBoard. Mods installed with CubeShelf work here too."
+      },
+      "discs": ["GMPE01", "GMPP01"],
+      "recognised": ["GMPJ01"],
+      "engines": ["switch/partyboard/partyboard.nro", "switch/partyboard.nro"],
+      "mods": true,
+      "covers": {
+        "*": { "front": "covers/mp4_pal_front.png", "spine": "covers/mp4_pal_spine.png" }
+      }
+    },
+    {
+      "id": "GRSEAF",
+      "title": "Soulcalibur II",
+      "year": 2003,
+      "genre": { "fr": "Combat", "en": "Fighting" },
+      "players": { "fr": "1 à 2 joueurs", "en": "1-2 players" },
+      "runtime": "Ring Out",
+      "description": {
+        "fr": "Porté sur PC par Ring Out (recompilation statique). Pas encore de version Switch.",
+        "en": "Ported to PC by Ring Out (static recompilation). No Switch build yet."
+      },
+      "discs": ["GRSEAF", "GRSPAF", "GRSJAF", "GRSEPS"],
+      "engines": [],
+      "covers": {
+        "*": { "front": "covers/sc2_pal_front.png", "spine": "covers/sc2_pal_spine.png" }
+      }
+    },
+    {
+      "id": "G4QE01",
+      "title": "Super Mario Strikers",
+      "regionTitles": { "P": "Mario Smash Football" },
+      "year": 2005,
+      "genre": { "fr": "Sport", "en": "Sports" },
+      "players": { "fr": "1 à 4 joueurs", "en": "1-4 players" },
+      "runtime": "Strikers",
+      "description": {
+        "fr": "Porté nativement sur PC par Strikers, depuis le code décompilé. Pas encore de version Switch.",
+        "en": "Ported natively to PC by Strikers from the decompiled code. No Switch build yet."
+      },
+      "discs": ["G4QE01", "G4QP01", "G4QJ01"],
+      "engines": [],
+      "covers": {
+        "*": { "front": "covers/sms_pal_front.png", "spine": "covers/sms_pal_spine.png" }
+      }
+    }
+  ]
+}

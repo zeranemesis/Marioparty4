@@ -56,6 +56,15 @@ Once this renders correctly on hardware, the next step is to replace the test sc
 This probe is deliberately isolated so it cannot regress the current Windows/Android/Apple targets.
 
 
+## GameCube launcher
+
+`launcher/` holds a Switch 2-style GameCube front end for the port: a shelf
+of the GameCube discs on the SD card (with their real banners), a cube boot
+animation, options and controller screens. It is its own NRO and chain-loads
+the engine. The preset below builds it as `partyboard_switch_launcher_nro`;
+see [launcher/README.md](launcher/README.md) for the SD layout, the engine
+arguments and the headless preview.
+
 ## CMake bring-up builds
 
 The Switch target is now integrated into the repository's root CMake without
@@ -93,8 +102,15 @@ cmake --build build/switch-libnx-dawn-probe --target partyboard_switch_dawn_nro 
 ```
 
 The experiment uses the same Dawn revision pinned by Aurora and enables only
-the OpenGL ES backend. A build-only patch teaches Dawn that `__SWITCH__` is a
-POSIX-like platform; the upstream Aurora/Dawn submodules remain untouched.
+the OpenGL ES backend. Build-only patches (`cmake/PatchDawnForSwitch.cmake`
+and `cmake/PatchDawnDependenciesForSwitch.cmake`, applied to FetchContent's
+copy; the upstream Aurora/Dawn submodules remain untouched) teach Dawn that
+`__SWITCH__` is a POSIX-like platform and fill the gaps libnx leaves: no
+dynamic loader, executable path, `pipe`/`poll` events or `mmap` (Abseil's
+low-level allocator gets heap pages instead), newlib's POSIX-only
+declarations under strict C++, and the Switch's native EGL types in Khronos'
+`eglplatform.h`. With them the probe compiles and links: a 12 MB NRO with
+Dawn's OpenGL ES backend, Tint's GLSL writer and the `NWindow` surface.
 
 If the NRO reaches hardware, its screen is intentionally diagnostic:
 
@@ -105,6 +121,122 @@ If the NRO reaches hardware, its screen is intentionally diagnostic:
 Dawn itself requires `EGL_EXT_create_context_robustness` and either
 `EGL_KHR_fence_sync` or `EGL_KHR_reusable_sync` for this adapter path. The
 normal probe prints whether the Switch Mesa/Nouveau EGL stack exposes them.
+
+### SDL3 probe
+
+Aurora's window, input, events and file access go through SDL3, which
+devkitPro does not ship for the Switch. `sdl3/` builds Aurora's SDL3 release
+with a homebrew libnx backend (video on the default `NWindow`, AUDOUT audio,
+HID gamepads) and exposes it as `SDL3::SDL3-static`; see
+[sdl3/README.md](sdl3/README.md).
+
+```sh
+cmake --preset switch-libnx-sdl3-probe
+cmake --build build/switch-libnx-sdl3-probe --target partyboard_switch_sdl3_nro --parallel
+```
+
+The NRO shows SDL's drivers, the base and pref paths, a file round trip
+through `SDL_IOStream`, and every connected gamepad live; hold **A** for a
+440 Hz tone, **+** quits.
+
+### Aurora probe
+
+Aurora itself (its GX-on-WebGPU renderer, window, input and caches) now
+builds for the Switch, on top of the two probes above:
+
+```sh
+# CI applies patches/aurora-*.patch to extern/aurora first, Switch last.
+cmake --preset switch-libnx-aurora-probe
+cmake --build build/switch-libnx-aurora-probe --target partyboard_switch_aurora_nro --parallel
+```
+
+`partyboard-switch-aurora-probe.nro` (`source/aurora_probe.c`) uses Aurora
+the way the game does: `GXInit`, then each frame clears the EFB to a cycling
+colour and draws, under an orthographic 640x480 projection, a spinning
+triangle with per-vertex colours (`GX_PASSCLR`) and a tinted quad textured
+with an I8 checkerboard in GameCube tile layout (`GX_MODULATE`). A black
+screen, a frozen frame or a missing shape points at the failing stage; **+**
+quits. `aurora/SwitchAurora.cmake` builds
+`extern/aurora` against the Switch Dawn and SDL3 and devkitPro's portlibs
+(zlib, libpng, FreeType, zstd). What the Switch needs on top:
+
+- `patches/aurora-switch.patch`: the WebGPU surface goes on libnx's default
+  `NWindow` through Dawn's EGL entry point, Dawn gets switch-mesa's EGL
+  display and loader, and SDL stays out of EGL. It also asks for the
+  `Compatibility` feature level on OpenGL and OpenGL ES, the only level Dawn
+  offers there; Aurora asked for `Core`, which finds no adapter on those
+  backends (the OpenGL ES fallback on other platforms has the same problem).
+  Dawn's OpenGL backends keep their EGL context current on the thread that
+  created the device, and another thread cannot take it (`EGL_BAD_ACCESS`,
+  device lost): on those backends Aurora's render worker stays off and its
+  work runs on the game thread, as its pipeline-cache worker already did.
+- SQLite (Aurora's pipeline caches) is built with `SQLITE_OS_OTHER` and
+  `aurora/sqlite_vfs_switch.c`: SQLite's demo VFS for embedded systems plus
+  pthread mutexes, since its unix VFS needs `ioctl`, `mmap` and file locks.
+- Tracy's thread-id and login lookups get a libnx case
+  (`aurora/PatchTracyForSwitch.cmake`), and Dear ImGui's fork/exec "open in
+  shell" is compiled out.
+
+The same probe builds for Linux (`aurora/host/`) to check that renderer
+configuration without a console: Dawn's OpenGL ES backend at the
+`Compatibility` level on Mesa's llvmpipe, with Vulkan (lavapipe) as the
+reference. CI's "Aurora on OpenGL ES (Mesa)" job runs both for 300 frames,
+fails on any Aurora error, and uploads a screenshot of each; locally:
+
+```sh
+# extern/aurora carries the same patches as above.
+cmake -S platforms/switch/aurora/host -B build/aurora-host -G Ninja
+cmake --build build/aurora-host --target aurora_probe
+platforms/switch/aurora/host/run-probe.sh build/aurora-host build/aurora-probe-shots
+```
+
+`--backend vulkan` and `--frames N` select the backend and stop after N
+frames when running the probe by hand.
+
+### The game
+
+The game itself now compiles and links for the Switch into one NRO, with
+its `res/` directory in the romfs:
+
+```sh
+# CI also applies patches/musyx-partyboard.patch to extern/musyx.
+cmake --preset switch-libnx-game
+cmake --build build/switch-libnx-game --target partyboard_switch_game_nro --parallel
+```
+
+`game/SwitchGame.cmake` builds the main module (`dol`: the decompiled game
+plus `src/port`) as on the other platforms, with RmlUi and Aurora's DVD layer
+over nodlite. What differs:
+
+- **Overlays are linked in.** libnx has no dynamic loader, so each REL is
+  linked into one relocatable object (`ld -r`, `game/overlay.ld`) whose only
+  global symbol is its renamed `ObjectSetup`; a generated table maps
+  `_ovltbl`'s names to them, and `objdll.c` looks there under
+  `PARTYBOARD_STATIC_OVERLAYS` (`include/port/static_overlays.h`). A shared
+  library starts from fresh globals each time it is opened, and the game
+  relies on it, so each overlay's writable data and bss are gathered into
+  sections of their own and reset whenever the game links it again.
+- **Mbed TLS** gets a Switch configuration (`game/mbedtls_switch_config.h`):
+  no clock or timer, entropy from libnx's random generator.
+- **Controllers, for local multiplayer**: SDL3's Switch joystick driver
+  (`sdl3/0004-joystick-local-players.patch`) gives each Npad, No1 to No4,
+  its own gamepad and player index, connected and disconnected live; the
+  console's attached Joy-Cons are player 1. Pro Controllers, Joy-Con pairs,
+  single Joy-Cons held sideways and GameCube controllers on the USB adapter
+  all work, with rumble. The layout is the one the launcher's controller
+  screen shows (`source/switch_pad.cpp`). `aurora-switch.patch` leaves out
+  the keyboard Aurora otherwise puts on every port, so the game sees as many
+  players as there are controllers; the launcher's **Y** on that screen
+  opens the system applet to connect or rearrange them.
+- **Process setup** (`game/switch_app_init.c`, libnx's `userAppInit`):
+  romfs mounted and made the working directory (the port opens `res/...`
+  relative to it), BSD sockets, nxlink stdio, and SDL's preference path on
+  `sdmc:/switch/partyboard`.
+
+It has not run on a console yet; the next work is the runtime on hardware:
+the disc path from the launcher, audio, and performance of Aurora's renderer
+at Dawn's `Compatibility` level (checked on Mesa above, not yet on the
+Switch's GPU).
 
 ## Current integration boundary
 
