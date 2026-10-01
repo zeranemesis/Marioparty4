@@ -1,0 +1,87 @@
+name: Switch native bring-up
+
+on:
+  push:
+    branches:
+      - switch-native-bootstrap
+    paths:
+      - ".github/workflows/switch-native.yml"
+      - "CMakeLists.txt"
+      - "CMakePresets.json"
+      - "cmake/**"
+      - "platforms/switch/**"
+      - "extern/aurora"
+  workflow_dispatch:
+
+concurrency:
+  group: switch-native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bootstrap:
+    name: libnx bootstrap
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkita64:20260219
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Toolchain info
+        run: |
+          echo "DEVKITPRO=$DEVKITPRO"
+          aarch64-none-elf-g++ --version
+          cmake --version
+          ninja --version
+
+      - name: Configure
+        run: cmake --preset switch-libnx-bootstrap
+
+      - name: Build NRO
+        run: cmake --build build/switch-libnx-bootstrap --target partyboard_switch_nro --parallel 2
+
+      - name: Inspect output
+        run: |
+          ls -lh build/switch-libnx-bootstrap/platforms/switch/partyboard-switch-probe.*
+          file build/switch-libnx-bootstrap/platforms/switch/partyboard-switch-probe.elf || true
+
+      - name: Upload NRO
+        uses: actions/upload-artifact@v4
+        with:
+          name: partyboard-switch-probe
+          path: |
+            build/switch-libnx-bootstrap/platforms/switch/partyboard-switch-probe.nro
+            build/switch-libnx-bootstrap/platforms/switch/partyboard-switch-probe.elf
+          if-no-files-found: error
+
+  dawn-probe:
+    name: Dawn OpenGLES probe
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    container:
+      image: devkitpro/devkita64:20260219
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure Dawn probe
+        run: cmake --preset switch-libnx-dawn-probe
+
+      - name: Build Dawn probe NRO
+        run: cmake --build build/switch-libnx-dawn-probe --target partyboard_switch_dawn_nro --parallel 2
+
+      - name: Upload Dawn probe
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: partyboard-switch-dawn-probe
+          path: |
+            build/switch-libnx-dawn-probe/platforms/switch/partyboard-switch-dawn-probe.nro
+            build/switch-libnx-dawn-probe/platforms/switch/partyboard-switch-dawn-probe.elf
+          if-no-files-found: error
