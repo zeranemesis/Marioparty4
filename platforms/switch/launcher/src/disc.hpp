@@ -4,14 +4,14 @@
 //
 // Reads only what a GameCube menu shows: the boot header (game ID, revision,
 // internal title) and opening.bnr (the 96x32 banner and its title/maker/
-// description blocks). Nothing here validates hashes; the engine still runs
-// its own disc verification before booting.
+// description blocks). The engine still runs its own disc verification
+// before booting.
 //
-// Supported containers:
-//   .iso/.gcm   raw image                     header + banner
-//   .ciso       Wii Backup Manager sparse     header + banner
-//   .gcz        Dolphin zlib blocks           header + banner
-//   .wia/.rvz   Dolphin                       header only (banner is packed)
+// Discs are opened through the nod C API (nodlite on the Switch, see
+// platforms/switch/nodlite), so every container the engine boots shows its
+// header and banner: .iso/.gcm, .ciso, .gcz, .wia and .rvz. The container is
+// recognised from the file's contents; the extension only picks which files
+// the library looks at.
 
 #include <cstddef>
 #include <cstdint>

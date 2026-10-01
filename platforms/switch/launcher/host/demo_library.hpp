@@ -24,7 +24,7 @@ struct DiscSpec {
 std::vector<uint8_t> buildIso(const DiscSpec& spec);
 std::vector<uint8_t> wrapCiso(const std::vector<uint8_t>& iso, uint32_t blockSize);
 std::vector<uint8_t> wrapGcz(const std::vector<uint8_t>& iso, uint32_t blockSize);
-std::vector<uint8_t> wrapRvzHeader(const std::vector<uint8_t>& iso);
+std::vector<uint8_t> wrapRvz(const std::vector<uint8_t>& iso);
 
 // The RGBA banner buildIso() encodes for `art`, before RGB5A3 quantisation.
 std::vector<uint8_t> bannerArt(int art);

@@ -33,6 +33,12 @@ set(PARTYBOARD_LAUNCHER_CORE
 
 set(PARTYBOARD_LAUNCHER_WARNINGS -Wall -Wextra)
 
+# Disc images are read through the nod C API, implemented by nodlite (C++, no
+# Rust toolchain): the same library the engine's Switch build uses.
+if(NOT TARGET nod::nod)
+    add_subdirectory(../nodlite "${CMAKE_CURRENT_BINARY_DIR}/nodlite")
+endif()
+
 if(PARTYBOARD_SWITCH)
     add_executable(partyboard_switch_launcher
         ${PARTYBOARD_LAUNCHER_CORE}
@@ -65,6 +71,7 @@ if(PARTYBOARD_SWITCH)
     target_link_options(partyboard_switch_launcher PRIVATE -Wl,--gc-sections)
     # FreeType and HarfBuzz depend on each other in portlibs: link as a group.
     target_link_libraries(partyboard_switch_launcher PRIVATE
+        nod::nod
         -Wl,--start-group
         freetype harfbuzz bz2 png16 z
         glad EGL glapi drm_nouveau nx
@@ -151,7 +158,7 @@ target_compile_definitions(partyboard_launcher_core PUBLIC
 target_include_directories(partyboard_launcher_core PUBLIC src)
 target_compile_options(partyboard_launcher_core PRIVATE ${PARTYBOARD_LAUNCHER_WARNINGS})
 target_link_libraries(partyboard_launcher_core PUBLIC
-    Freetype::Freetype PNG::PNG ZLIB::ZLIB
+    nod::nod Freetype::Freetype PNG::PNG ZLIB::ZLIB
     ${PARTYBOARD_LAUNCHER_GLES} ${PARTYBOARD_LAUNCHER_EGL}
 )
 

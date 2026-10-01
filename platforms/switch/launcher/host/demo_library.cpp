@@ -256,6 +256,7 @@ std::vector<uint8_t> wrapGcz(const std::vector<uint8_t>& iso, uint32_t blockSize
     const uint32_t blocks = static_cast<uint32_t>((iso.size() + blockSize - 1) / blockSize);
     std::vector<uint8_t> data;
     std::vector<uint64_t> pointers;
+    std::vector<uint32_t> checksums; // Adler-32 of each stored block
     for (uint32_t b = 0; b < blocks; ++b) {
         std::vector<uint8_t> raw(blockSize, 0);
         const size_t start = size_t(b) * blockSize;
@@ -266,13 +267,11 @@ std::vector<uint8_t> wrapGcz(const std::vector<uint8_t>& iso, uint32_t blockSize
         const bool storeRaw = b % 3 == 1 ||
                               compress2(packed.data(), &packedSize, raw.data(), blockSize, 6) != Z_OK ||
                               packedSize >= blockSize;
-        if (storeRaw) {
-            pointers.push_back(data.size() | (1ull << 63));
-            data.insert(data.end(), raw.begin(), raw.end());
-        } else {
-            pointers.push_back(data.size());
-            data.insert(data.end(), packed.begin(), packed.begin() + packedSize);
-        }
+        const uint8_t* stored = storeRaw ? raw.data() : packed.data();
+        const size_t storedSize = storeRaw ? blockSize : packedSize;
+        pointers.push_back(data.size() | (storeRaw ? (1ull << 63) : 0));
+        checksums.push_back(static_cast<uint32_t>(adler32(adler32(0, nullptr, 0), stored, static_cast<uInt>(storedSize))));
+        data.insert(data.end(), stored, stored + storedSize);
     }
     std::vector<uint8_t> out(32 + blocks * 12, 0);
     put32le(out, 0, 0xB10BC001u);
@@ -281,19 +280,53 @@ std::vector<uint8_t> wrapGcz(const std::vector<uint8_t>& iso, uint32_t blockSize
     put64le(out, 16, iso.size());
     put32le(out, 24, blockSize);
     put32le(out, 28, blocks);
-    for (uint32_t b = 0; b < blocks; ++b)
+    for (uint32_t b = 0; b < blocks; ++b) {
         put64le(out, 32 + size_t(b) * 8, pointers[b]);
+        put32le(out, 32 + size_t(blocks) * 8 + size_t(b) * 4, checksums[b]);
+    }
     out.insert(out.end(), data.begin(), data.end());
     return out;
 }
 
-std::vector<uint8_t> wrapRvzHeader(const std::vector<uint8_t>& iso) {
-    std::vector<uint8_t> out(0x400, 0);
+// RVZ with uncompressed groups (Dolphin's docs/WiaAndRvz.md): one raw data
+// range from 0x80 to the end, 32 KiB chunks, 12-byte group entries with data
+// offsets stored divided by 4. The SHA-1 fields are left zero: nodlite does
+// not check them (Dolphin and nod would).
+std::vector<uint8_t> wrapRvz(const std::vector<uint8_t>& iso) {
+    constexpr uint32_t kChunk = 0x8000;
+    const uint32_t groups = static_cast<uint32_t>((iso.size() + kChunk - 1) / kChunk);
+    const size_t disc = 0x48;
+    const size_t rawTable = disc + 0xDC;
+    const size_t groupTable = rawTable + 0x18;
+    std::vector<uint8_t> out((groupTable + size_t(groups) * 12 + 3) & ~size_t(3), 0);
     std::memcpy(out.data(), "RVZ\x01", 4);
-    put32be(out, 0x48, 1);      // GameCube
-    put32be(out, 0x4C, 5);      // zstd
-    put32be(out, 0x54, 0x20000); // chunk size
-    std::memcpy(out.data() + 0x58, iso.data(), 0x80);
+    put32be(out, 0x04, 0x01000000); // version
+    put32be(out, 0x08, 0x00030000); // compatible version
+    put32be(out, 0x0C, 0xDC);       // disc struct size
+    put32be(out, 0x24, static_cast<uint32_t>(uint64_t(iso.size()) >> 32));
+    put32be(out, 0x28, static_cast<uint32_t>(iso.size()));
+    put32be(out, disc + 0x00, 1); // GameCube
+    put32be(out, disc + 0x04, 0); // no compression
+    put32be(out, disc + 0x0C, kChunk);
+    std::memcpy(out.data() + disc + 0x10, iso.data(), 0x80);
+    put32be(out, disc + 0x94, 0x30); // partition struct size
+    put32be(out, disc + 0xB4, 1);    // one raw data range
+    put32be(out, disc + 0xBC, static_cast<uint32_t>(rawTable));
+    put32be(out, disc + 0xC0, 0x18);
+    put32be(out, disc + 0xC4, groups);
+    put32be(out, disc + 0xCC, static_cast<uint32_t>(groupTable));
+    put32be(out, disc + 0xD0, groups * 12);
+    put32be(out, rawTable + 0x04, 0x80);
+    put32be(out, rawTable + 0x0C, static_cast<uint32_t>(iso.size() - 0x80));
+    put32be(out, rawTable + 0x14, groups);
+    for (uint32_t g = 0; g < groups; ++g) {
+        const size_t start = size_t(g) * kChunk;
+        const size_t n = std::min<size_t>(kChunk, iso.size() - start);
+        put32be(out, groupTable + size_t(g) * 12, static_cast<uint32_t>(out.size() / 4));
+        put32be(out, groupTable + size_t(g) * 12 + 4, static_cast<uint32_t>(n));
+        out.insert(out.end(), iso.begin() + start, iso.begin() + start + n);
+        out.resize((out.size() + 3) & ~size_t(3), 0);
+    }
     return out;
 }
 
@@ -340,7 +373,7 @@ void makeDemoSdCard(const std::string& root, bool withEngine) {
     test.gameId = "GPBEZZ";
     test.headerTitle = "PartyBoard Test Disc";
     test.art = 3;
-    writeFile(games + "/PartyBoard Test Disc.rvz", wrapRvzHeader(buildIso(test)));
+    writeFile(games + "/PartyBoard Test Disc.rvz", wrapRvz(buildIso(test)));
 
     DiscSpec strikers;
     strikers.gameId = "G4QP01";

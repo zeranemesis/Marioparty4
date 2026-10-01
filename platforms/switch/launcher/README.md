@@ -17,8 +17,10 @@ artifact (see [Previewing without a console](#previewing-without-a-console)).
   and description, in French on PAL discs when the launcher is in French.
   Catalogue games show their real box art (below); the disc's own banner
   sits next to the title under the shelf. Unknown discs get a generated case
-  with their banner. RVZ/WIA only expose the header, so they have no banner.
-  A PNG in `partyboard/covers/<GAMEID>.png` replaces any case.
+  with their banner. Discs are read through
+  [nodlite](../nodlite/README.md), so compressed RVZ, WIA, GCZ and CISO
+  images show their banner like a plain ISO; the container is recognised
+  from the file itself, not its extension. A PNG in `partyboard/covers/<GAMEID>.png` replaces any case.
 - **Catalogue.** As in CubeShelf, the games are data: `assets/catalog.json`
   lists each game's accepted discs (a six-character id for every revision, or
   `GMPE01_00` for one), its year, genre, players, description, box art and

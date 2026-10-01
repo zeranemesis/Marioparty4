@@ -7,32 +7,24 @@
 #include <cstring>
 #include <memory>
 
-#include <zlib.h>
+#include <nod.h>
 
 namespace partyboard::launcher {
 
 namespace {
 
 constexpr uint32_t kGameCubeMagic = 0xC2339F3Du; // boot header 0x1C
-constexpr uint32_t kGczMagic = 0xB10BC001u;      // little-endian cookie
 constexpr size_t kBootHeaderSize = 0x440;
 constexpr size_t kBannerImageOffset = 0x20;
 constexpr size_t kBannerImageSize = kBannerWidth * kBannerHeight * 2;
 constexpr size_t kBannerTextOffset = kBannerImageOffset + kBannerImageSize; // 0x1820
 constexpr size_t kBannerTextSize = 0x140;
-constexpr size_t kMaxFstSize = 4u * 1024u * 1024u;
 
 uint16_t be16(const uint8_t* p) { return static_cast<uint16_t>((p[0] << 8) | p[1]); }
 
 uint32_t be32(const uint8_t* p) {
     return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
 }
-
-uint32_t le32(const uint8_t* p) {
-    return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
-}
-
-uint64_t le64(const uint8_t* p) { return uint64_t(le32(p)) | (uint64_t(le32(p + 4)) << 32); }
 
 std::string lowerExtension(const std::string& path) {
     const size_t slash = path.find_last_of('/');
@@ -45,183 +37,45 @@ std::string lowerExtension(const std::string& path) {
     return ext;
 }
 
-class File {
-public:
-    explicit File(const std::string& path) : m_file(std::fopen(path.c_str(), "rb")) {}
-    ~File() {
-        if (m_file)
-            std::fclose(m_file);
-    }
-    File(const File&) = delete;
-    File& operator=(const File&) = delete;
+uint64_t fileSize(const std::string& path) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f)
+        return 0;
+    const off_t end = fseeko(f, 0, SEEK_END) == 0 ? ftello(f) : 0;
+    std::fclose(f);
+    return end > 0 ? static_cast<uint64_t>(end) : 0;
+}
 
-    bool ok() const { return m_file != nullptr; }
-
-    bool read(uint64_t offset, void* dst, size_t size) {
-        if (fseeko(m_file, static_cast<off_t>(offset), SEEK_SET) != 0)
-            return false;
-        return std::fread(dst, 1, size, m_file) == size;
-    }
-
-    uint64_t size() {
-        if (fseeko(m_file, 0, SEEK_END) != 0)
-            return 0;
-        const off_t end = ftello(m_file);
-        return end > 0 ? static_cast<uint64_t>(end) : 0;
-    }
-
-private:
-    FILE* m_file;
+// Disc access goes through the nod C API: nodlite on the Switch, which is
+// where every container (ISO, CISO, GCZ, WIA, RVZ) is decoded.
+struct NodDeleter {
+    void operator()(NodHandle* h) const { nod_free(h); }
 };
+using NodPtr = std::unique_ptr<NodHandle, NodDeleter>;
 
-// A view of the decoded disc, whatever the container.
-class DiscSource {
-public:
-    virtual ~DiscSource() = default;
-    virtual bool read(uint64_t offset, void* dst, size_t size) = 0;
-};
-
-class RawSource final : public DiscSource {
-public:
-    explicit RawSource(File& file) : m_file(file) {}
-    bool read(uint64_t offset, void* dst, size_t size) override { return m_file.read(offset, dst, size); }
-
-private:
-    File& m_file;
-};
-
-// CISO: 0x8000-byte header ("CISO", LE block size, one presence byte per
-// block), followed by the present blocks in order. Absent blocks read as zero.
-class CisoSource final : public DiscSource {
-public:
-    explicit CisoSource(File& file) : m_file(file) {}
-
-    bool open() {
-        // Heap buffers: libnx threads have small stacks.
-        std::vector<uint8_t> header(0x8000);
-        if (!m_file.read(0, header.data(), header.size()) || std::memcmp(header.data(), "CISO", 4) != 0)
+bool readAt(NodHandle* h, uint64_t offset, uint8_t* out, size_t size) {
+    if (nod_seek(h, static_cast<int64_t>(offset), 0) != static_cast<int64_t>(offset))
+        return false;
+    size_t done = 0;
+    while (done < size) {
+        const int64_t n = nod_read(h, out + done, size - done);
+        if (n <= 0)
             return false;
-        m_blockSize = le32(header.data() + 4);
-        if (m_blockSize == 0 || m_blockSize > (64u << 20))
-            return false;
-        m_index.resize(header.size() - 8);
-        uint32_t stored = 0;
-        for (size_t i = 0; i < m_index.size(); ++i) {
-            const bool present = header[8 + i] != 0;
-            m_index[i] = present ? static_cast<int32_t>(stored++) : -1;
-        }
-        return true;
+        done += static_cast<size_t>(n);
     }
+    return true;
+}
 
-    bool read(uint64_t offset, void* dst, size_t size) override {
-        auto* out = static_cast<uint8_t*>(dst);
-        while (size > 0) {
-            const uint64_t block = offset / m_blockSize;
-            const uint64_t within = offset % m_blockSize;
-            const size_t chunk = static_cast<size_t>(std::min<uint64_t>(size, m_blockSize - within));
-            if (block >= m_index.size())
-                return false;
-            if (m_index[block] < 0) {
-                std::memset(out, 0, chunk);
-            } else {
-                const uint64_t fileOffset = 0x8000 + uint64_t(m_index[block]) * m_blockSize + within;
-                if (!m_file.read(fileOffset, out, chunk))
-                    return false;
-            }
-            out += chunk;
-            offset += chunk;
-            size -= chunk;
-        }
-        return true;
+DiscFormat formatFromNod(NodFormat format) {
+    switch (format) {
+    case NOD_FORMAT_ISO: return DiscFormat::Iso;
+    case NOD_FORMAT_CISO: return DiscFormat::Ciso;
+    case NOD_FORMAT_GCZ: return DiscFormat::Gcz;
+    case NOD_FORMAT_WIA: return DiscFormat::Wia;
+    case NOD_FORMAT_RVZ: return DiscFormat::Rvz;
+    default: return DiscFormat::Unknown;
     }
-
-private:
-    File& m_file;
-    uint32_t m_blockSize = 0;
-    std::vector<int32_t> m_index;
-};
-
-// GCZ (Dolphin CompressedBlob): 32-byte LE header, u64 block pointers, u32
-// hashes, then zlib streams. Pointer bit 63 marks a block stored uncompressed.
-class GczSource final : public DiscSource {
-public:
-    GczSource(File& file, uint64_t fileSize) : m_file(file), m_fileSize(fileSize) {}
-
-    bool open() {
-        uint8_t header[32];
-        if (!m_file.read(0, header, sizeof(header)) || le32(header) != kGczMagic)
-            return false;
-        m_compressedSize = le64(header + 8);
-        m_blockSize = le32(header + 24);
-        const uint32_t blocks = le32(header + 28);
-        if (m_blockSize == 0 || m_blockSize > (16u << 20) || blocks == 0 || blocks > (1u << 24))
-            return false;
-        m_pointers.resize(blocks);
-        std::vector<uint8_t> raw(size_t(blocks) * 8);
-        if (!m_file.read(32, raw.data(), raw.size()))
-            return false;
-        for (uint32_t i = 0; i < blocks; ++i)
-            m_pointers[i] = le64(raw.data() + size_t(i) * 8);
-        m_dataOffset = 32 + uint64_t(blocks) * 12;
-        return true;
-    }
-
-    bool read(uint64_t offset, void* dst, size_t size) override {
-        auto* out = static_cast<uint8_t*>(dst);
-        while (size > 0) {
-            const uint64_t block = offset / m_blockSize;
-            const uint64_t within = offset % m_blockSize;
-            const size_t chunk = static_cast<size_t>(std::min<uint64_t>(size, m_blockSize - within));
-            if (!loadBlock(block))
-                return false;
-            std::memcpy(out, m_cache.data() + within, chunk);
-            out += chunk;
-            offset += chunk;
-            size -= chunk;
-        }
-        return true;
-    }
-
-private:
-    static constexpr uint64_t kUncompressed = 1ull << 63;
-
-    bool loadBlock(uint64_t block) {
-        if (block == m_cachedBlock)
-            return true;
-        if (block >= m_pointers.size())
-            return false;
-
-        const uint64_t start = m_pointers[block] & ~kUncompressed;
-        const uint64_t end = block + 1 < m_pointers.size() ? (m_pointers[block + 1] & ~kUncompressed)
-                                                           : m_compressedSize;
-        if (end < start || m_dataOffset + end > m_fileSize)
-            return false;
-
-        m_cache.assign(m_blockSize, 0);
-        if (m_pointers[block] & kUncompressed) {
-            if (!m_file.read(m_dataOffset + start, m_cache.data(), m_blockSize))
-                return false;
-        } else {
-            std::vector<uint8_t> packed(static_cast<size_t>(end - start));
-            if (!m_file.read(m_dataOffset + start, packed.data(), packed.size()))
-                return false;
-            uLongf produced = m_blockSize;
-            if (uncompress(m_cache.data(), &produced, packed.data(), static_cast<uLong>(packed.size())) != Z_OK)
-                return false;
-        }
-        m_cachedBlock = block;
-        return true;
-    }
-
-    File& m_file;
-    uint64_t m_fileSize;
-    uint64_t m_compressedSize = 0;
-    uint32_t m_blockSize = 0;
-    uint64_t m_dataOffset = 0;
-    std::vector<uint64_t> m_pointers;
-    std::vector<uint8_t> m_cache;
-    uint64_t m_cachedBlock = ~0ull;
-};
+}
 
 // Windows-1252 0x80-0x9F. Zero marks bytes that are undefined there.
 constexpr std::array<uint16_t, 32> kCp1252High = {
@@ -270,62 +124,25 @@ bool validGameId(const uint8_t* header) {
     return true;
 }
 
-// Root-level FST lookup of opening.bnr. Returns false when absent.
-bool findBanner(DiscSource& source, const uint8_t* header, uint32_t& offset, uint32_t& length) {
-    const uint32_t fstOffset = be32(header + 0x424);
-    const uint32_t fstSize = be32(header + 0x428);
-    if (fstOffset == 0 || fstSize < 12 || fstSize > kMaxFstSize)
-        return false;
-
-    std::vector<uint8_t> fst(fstSize);
-    if (!source.read(fstOffset, fst.data(), fst.size()))
-        return false;
-
-    const uint32_t entries = be32(fst.data() + 8);
-    if (entries == 0 || size_t(entries) * 12 > fst.size())
-        return false;
-    const size_t stringTable = size_t(entries) * 12;
-
-    for (uint32_t i = 1; i < entries;) {
-        const uint8_t* entry = fst.data() + size_t(i) * 12;
-        const bool directory = entry[0] != 0;
-        if (directory) {
-            // Skip the whole subtree: the banner always lives at the root.
-            const uint32_t next = be32(entry + 8);
-            i = next > i ? next : i + 1;
-            continue;
-        }
-        const uint32_t nameOffset = (uint32_t(entry[1]) << 16) | (uint32_t(entry[2]) << 8) | entry[3];
-        if (stringTable + nameOffset < fst.size()) {
-            const char* name = reinterpret_cast<const char*>(fst.data() + stringTable + nameOffset);
-            const size_t maxLen = fst.size() - stringTable - nameOffset;
-            const size_t len = strnlen(name, maxLen);
-            static constexpr char kBanner[] = "opening.bnr";
-            if (len == sizeof(kBanner) - 1) {
-                bool match = true;
-                for (size_t c = 0; c < len && match; ++c)
-                    match = std::tolower(static_cast<unsigned char>(name[c])) == kBanner[c];
-                if (match) {
-                    offset = be32(entry + 4);
-                    length = be32(entry + 8);
-                    return true;
-                }
-            }
-        }
-        ++i;
-    }
-    return false;
-}
-
-void readBanner(DiscSource& source, const uint8_t* header, DiscInfo& out) {
-    uint32_t offset = 0;
-    uint32_t length = 0;
-    if (!findBanner(source, header, offset, length) || length < kBannerTextOffset + kBannerTextSize)
+// opening.bnr from the root of the data partition, decoded by nod.
+void readBanner(NodHandle* disc, DiscInfo& out) {
+    NodHandle* rawPartition = nullptr;
+    if (nod_disc_open_partition_kind(disc, NOD_PARTITION_KIND_DATA, nullptr, &rawPartition) != NOD_RESULT_OK)
         return;
+    const NodPtr partition(rawPartition);
+    NodNodeKind kind{};
+    uint32_t length = 0;
+    const uint32_t index = nod_partition_find_file(partition.get(), "/opening.bnr", &kind, &length);
+    if (index == NOD_FST_STOP || kind != NOD_NODE_KIND_FILE || length < kBannerTextOffset + kBannerTextSize)
+        return;
+    NodHandle* rawFile = nullptr;
+    if (nod_partition_open_file(partition.get(), index, &rawFile) != NOD_RESULT_OK)
+        return;
+    const NodPtr file(rawFile);
 
     const size_t want = std::min<size_t>(length, kBannerTextOffset + kBannerTextSize * 6);
     std::vector<uint8_t> banner(want);
-    if (!source.read(offset, banner.data(), banner.size()))
+    if (!readAt(file.get(), 0, banner.data(), banner.size()))
         return;
 
     const bool bnr1 = std::memcmp(banner.data(), "BNR1", 4) == 0;
@@ -350,33 +167,16 @@ void readBanner(DiscSource& source, const uint8_t* header, DiscInfo& out) {
     }
 }
 
-DiscError inspectSource(DiscSource& source, DiscInfo& out) {
-    std::array<uint8_t, kBootHeaderSize> header{};
-    if (!source.read(0, header.data(), header.size()))
-        return DiscError::Read;
-    if (be32(header.data() + 0x1C) != kGameCubeMagic || !validGameId(header.data()))
+// nod chooses the container from the file's contents. When it refuses one,
+// the extension says what the file meant to be: a raw image that is not a
+// GameCube disc, or a container nod cannot read.
+DiscError openError(NodResult result, DiscFormat byExtension) {
+    if (result == NOD_RESULT_ERR_IO)
+        return DiscError::Open;
+    const char* message = nod_error_message();
+    if (byExtension == DiscFormat::Iso || (message && std::strstr(message, "Wii")))
         return DiscError::NotGameCube;
-    parseBootHeader(header.data(), out);
-    readBanner(source, header.data(), out);
-    return DiscError::None;
-}
-
-// WIA/RVZ keep the first 0x80 bytes of the disc verbatim in wia_disc_t.
-DiscError inspectWia(File& file, DiscInfo& out) {
-    uint8_t head[0x58 + 0x80];
-    if (!file.read(0, head, sizeof(head)))
-        return DiscError::Read;
-    if (std::memcmp(head, "WIA\x01", 4) != 0 && std::memcmp(head, "RVZ\x01", 4) != 0)
-        return DiscError::UnsupportedContainer;
-    const uint8_t* dhead = head + 0x58;
-    if (be32(head + 0x48) != 1 || be32(dhead + 0x1C) != kGameCubeMagic || !validGameId(dhead))
-        return DiscError::NotGameCube;
-    out.gameId.assign(reinterpret_cast<const char*>(dhead), 6);
-    out.makerCode.assign(reinterpret_cast<const char*>(dhead + 4), 2);
-    out.discNumber = dhead[6];
-    out.revision = dhead[7];
-    out.internalTitle = discTextToUtf8(reinterpret_cast<const char*>(dhead + 0x20), 0x60, dhead[3] == 'J');
-    return DiscError::None;
+    return DiscError::UnsupportedContainer;
 }
 
 } // namespace
@@ -424,36 +224,26 @@ const BannerText* DiscInfo::text(BannerLanguage preferred) const {
 DiscError readDisc(const std::string& path, DiscInfo& out) {
     out = DiscInfo{};
     out.format = discFormatFromPath(path);
+    out.fileSize = fileSize(path);
 
-    File file(path);
-    if (!file.ok())
-        return DiscError::Open;
-    out.fileSize = file.size();
+    NodHandle* rawDisc = nullptr;
+    const NodResult result = nod_disc_open(path.c_str(), nullptr, &rawDisc);
+    if (result != NOD_RESULT_OK)
+        return openError(result, out.format);
+    const NodPtr disc(rawDisc);
 
-    switch (out.format) {
-    case DiscFormat::Iso: {
-        RawSource source(file);
-        return inspectSource(source, out);
-    }
-    case DiscFormat::Ciso: {
-        CisoSource source(file);
-        if (!source.open())
-            return DiscError::UnsupportedContainer;
-        return inspectSource(source, out);
-    }
-    case DiscFormat::Gcz: {
-        GczSource source(file, out.fileSize);
-        if (!source.open())
-            return DiscError::UnsupportedContainer;
-        return inspectSource(source, out);
-    }
-    case DiscFormat::Wia:
-    case DiscFormat::Rvz:
-        return inspectWia(file, out);
-    case DiscFormat::Unknown:
-        break;
-    }
-    return DiscError::UnsupportedContainer;
+    NodDiscMeta meta{};
+    if (nod_disc_meta(disc.get(), &meta) == NOD_RESULT_OK && formatFromNod(meta.format) != DiscFormat::Unknown)
+        out.format = formatFromNod(meta.format);
+
+    std::array<uint8_t, kBootHeaderSize> header{};
+    if (!readAt(disc.get(), 0, header.data(), header.size()))
+        return DiscError::Read;
+    if (be32(header.data() + 0x1C) != kGameCubeMagic || !validGameId(header.data()))
+        return DiscError::NotGameCube;
+    parseBootHeader(header.data(), out);
+    readBanner(disc.get(), out);
+    return DiscError::None;
 }
 
 std::string discTextToUtf8(const char* text, size_t maxLen, bool shiftJis) {

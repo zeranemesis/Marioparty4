@@ -114,7 +114,9 @@ void testIsoFormats(const std::string& dir) {
         {"disc.gcm", iso, DiscFormat::Iso, true},
         {"disc.ciso", demo::wrapCiso(iso, 0x8000), DiscFormat::Ciso, true},
         {"disc.gcz", demo::wrapGcz(iso, 0x4000), DiscFormat::Gcz, true},
-        {"disc.rvz", demo::wrapRvzHeader(iso), DiscFormat::Rvz, false},
+        {"disc.rvz", demo::wrapRvz(iso), DiscFormat::Rvz, true},
+        // The container comes from the contents, not the extension.
+        {"renamed.iso", demo::wrapGcz(iso, 0x8000), DiscFormat::Gcz, true},
     };
     for (const Case& c : cases) {
         const std::string path = dir + "/" + c.name;
