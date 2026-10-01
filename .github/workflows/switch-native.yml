@@ -30,6 +30,26 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Apply PartyBoard Aurora patches
+        shell: bash
+        run: |
+          git -C extern/aurora apply --check ../../patches/aurora-partyboard.patch
+          git -C extern/aurora apply ../../patches/aurora-partyboard.patch
+          git -C extern/aurora apply --check ../../patches/aurora-render-fixes.patch
+          git -C extern/aurora apply ../../patches/aurora-render-fixes.patch
+          git -C extern/aurora apply --check ../../patches/aurora-android-surface-deadlock.patch
+          git -C extern/aurora apply ../../patches/aurora-android-surface-deadlock.patch
+          git -C extern/aurora apply --check ../../patches/aurora-mobile-one-local-player.patch
+          git -C extern/aurora apply ../../patches/aurora-mobile-one-local-player.patch
+          git -C extern/aurora apply --check ../../patches/aurora-render-worker-idle.patch
+          git -C extern/aurora apply ../../patches/aurora-render-worker-idle.patch
+          git -C extern/aurora apply --check ../../patches/aurora-quest-stereo.patch
+          git -C extern/aurora apply ../../patches/aurora-quest-stereo.patch
+          git -C extern/aurora apply --check ../../patches/aurora-android-surface-generation.patch
+          git -C extern/aurora apply ../../patches/aurora-android-surface-generation.patch
+          git -C extern/aurora apply --check ../../patches/aurora-quest-quality.patch
+          git -C extern/aurora apply ../../patches/aurora-quest-quality.patch
+
       - name: Toolchain info
         run: |
           echo "DEVKITPRO=$DEVKITPRO"
@@ -69,6 +89,26 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Apply PartyBoard Aurora patches
+        shell: bash
+        run: |
+          git -C extern/aurora apply --check ../../patches/aurora-partyboard.patch
+          git -C extern/aurora apply ../../patches/aurora-partyboard.patch
+          git -C extern/aurora apply --check ../../patches/aurora-render-fixes.patch
+          git -C extern/aurora apply ../../patches/aurora-render-fixes.patch
+          git -C extern/aurora apply --check ../../patches/aurora-android-surface-deadlock.patch
+          git -C extern/aurora apply ../../patches/aurora-android-surface-deadlock.patch
+          git -C extern/aurora apply --check ../../patches/aurora-mobile-one-local-player.patch
+          git -C extern/aurora apply ../../patches/aurora-mobile-one-local-player.patch
+          git -C extern/aurora apply --check ../../patches/aurora-render-worker-idle.patch
+          git -C extern/aurora apply ../../patches/aurora-render-worker-idle.patch
+          git -C extern/aurora apply --check ../../patches/aurora-quest-stereo.patch
+          git -C extern/aurora apply ../../patches/aurora-quest-stereo.patch
+          git -C extern/aurora apply --check ../../patches/aurora-android-surface-generation.patch
+          git -C extern/aurora apply ../../patches/aurora-android-surface-generation.patch
+          git -C extern/aurora apply --check ../../patches/aurora-quest-quality.patch
+          git -C extern/aurora apply ../../patches/aurora-quest-quality.patch
 
       - name: Configure Dawn probe
         run: cmake --preset switch-libnx-dawn-probe
