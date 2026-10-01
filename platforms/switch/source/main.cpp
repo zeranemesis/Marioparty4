@@ -11,6 +11,10 @@
 
 namespace {
 
+GLuint g_program = 0;
+GLuint g_vao = 0;
+GLuint g_vbo = 0;
+
 GLuint compileShader(GLenum type, const char* source) {
     GLuint shader = glCreateShader(type);
     glShaderSource(shader, 1, &source, nullptr);
