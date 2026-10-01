@@ -99,6 +99,10 @@ message(STATUS "  libnx:     ${LIBNX}")
 message(STATUS "  portlibs:  ${PORTLIBS}")
 message(STATUS "  output:    ${PARTYBOARD_SWITCH_NRO}")
 
+# nodlite: nod's C API without Rust, for every Switch target that reads discs
+# (the launcher today, Aurora's DVD layer and the disc validation next).
+add_subdirectory(nodlite)
+
 # GameCube-style launcher (game shelf + boot animation) that chain-loads the
 # engine NRO. Independent of the probe above.
 add_subdirectory(launcher)

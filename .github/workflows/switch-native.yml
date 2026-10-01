@@ -110,7 +110,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build libegl-dev libgles-dev libegl-mesa0 libgl1-mesa-dri \
-            libfreetype-dev libpng-dev zlib1g-dev
+            libfreetype-dev libpng-dev zlib1g-dev libbz2-dev libzstd-dev
 
       - name: Build
         run: |
@@ -129,6 +129,32 @@ jobs:
           name: partyboard-switch-launcher-screens
           path: build/launcher-screens/*.png
           if-no-files-found: error
+
+  nodlite:
+    name: nodlite tests (and against nod)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build zlib1g-dev libbz2-dev libzstd-dev liblzma-dev
+
+      - name: Build
+        run: |
+          cmake -S platforms/switch/nodlite -B build/nodlite -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build/nodlite --parallel 2
+
+      - name: Unit tests
+        run: ctest --test-dir build/nodlite --output-on-failure
+
+      # The same suite linked against the real nod (built with cargo), so
+      # nodlite keeps nod's behaviour, not just its own.
+      - name: Tests against nod
+        run: platforms/switch/nodlite/tools/check-against-nod.sh
 
   dawn-probe:
     name: Dawn OpenGLES probe
