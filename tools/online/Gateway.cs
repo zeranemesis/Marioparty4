@@ -34,6 +34,37 @@ sealed class Route {
     }
 }
 
+// The player's fixed-port choice, for a box whose automatic opening is off or
+// absent and whose ports were forwarded by hand. Port 0 means automatic: the
+// system picks a free port and the box is asked to open it, as before.
+//   Port       TCP (salon) and UDP (two-player game)
+//   Port + 1   UDP (three- and four-player game)
+// The public address is only needed when the box cannot report it itself; it
+// is typed by the player, never looked up on an outside service.
+static class NetworkSettings {
+    static string FilePath {get{return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"PartyBoard","online-network.txt");}}
+    public static int Port;public static IPAddress PublicAddress;
+    public static int MeshPort {get{return Port==0?0:Port+1;}}
+    public static void Load() {
+        Port=0;PublicAddress=null;
+        try {
+            foreach(var line in File.ReadAllLines(FilePath)) {
+                var parts=line.Split(new[]{'='},2);if(parts.Length!=2)continue;
+                int port;IPAddress address;
+                if(parts[0].Trim()=="port" && int.TryParse(parts[1].Trim(),out port) && Valid(port))Port=port;
+                if(parts[0].Trim()=="address" && IPAddress.TryParse(parts[1].Trim(),out address) && Gateway.Public(address))PublicAddress=address;
+            }
+        } catch {}
+    }
+    public static void Save() {
+        Directory.CreateDirectory(Path.GetDirectoryName(FilePath));
+        File.WriteAllText(FilePath,"port="+Port+Environment.NewLine+"address="+(PublicAddress==null?"":PublicAddress.ToString())+Environment.NewLine);
+    }
+    // The upper bound leaves room for Port + 1; below 1024 needs rights the
+    // firewall broker does not ask for.
+    public static bool Valid(int port) {return port==0 || port>=1024 && port<=65534;}
+}
+
 // Finite leases only. No external discovery service, permanent mapping, DMZ,
 // firewall disabling, VPN change, or unbounded URL fetch is implemented here.
 sealed class Gateway : IDisposable {
@@ -179,15 +210,54 @@ sealed class Gateway : IDisposable {
         uint granted;if(Value(check,"NewInternalClient")!=route.Local.ToString() || Value(check,"NewInternalPort")!=internalPort.ToString() || !uint.TryParse(Value(check,"NewLeaseDuration"),out granted)) throw new IOException("La box n'a pas confirmé la connexion temporaire.");
         Lifetime=granted;ValidateLease();
     }
+    // Automatic opening first, even with a fixed port: a box that can open it
+    // needs nothing done by hand. Only when it cannot, and the player chose a
+    // fixed port, is the port assumed to be forwarded manually.
+    public static Gateway OpenFor(Route r,int port,int requestedPort,bool datagram) {
+        var g=new Gateway(r,port,requestedPort,datagram);
+        try {g.Open();return g;}
+        catch(IOException) {}
+        if(NetworkSettings.Port!=0) {
+            try {return g.AsManual(requestedPort);} catch(IOException) {}
+        }
+        return g.AsLocal();
+    }
+    // Neither opening is possible: the salon still works on this network. The
+    // invitation then carries the local address as its main one, which
+    // Invitation.Decode accepts only when it equals the local address too.
+    public bool LocalOnly {get{return method=="LOCAL";}}
+    internal Gateway AsLocal() {
+        if(!Private(route.Local))throw new IOException("La box n'a pas autorisé la connexion automatique, et ce PC n'est pas sur un réseau local. Vous pouvez inverser les rôles : votre ami crée la partie.");
+        method="LOCAL";externalPort=internalPort;Address=route.Local;Lifetime=3600;
+        return this;
+    }
+    // The port is assumed forwarded by hand: nothing to open, renew or close.
+    // The address comes from the box when it reports one, else from the player.
+    internal Gateway AsManual(int requestedPort) {
+        method="MANUAL";externalPort=requestedPort;Lifetime=3600;
+        Address=BoxAddress()??NetworkSettings.PublicAddress;
+        if(Address==null)throw new IOException("Port fixe "+requestedPort+" : la box ne donne pas votre adresse publique. Indiquez-la dans Port fixe…, puis recréez le salon.");
+        return this;
+    }
+    // Asks the box for its public address over NAT-PMP, without opening
+    // anything. Null when it does not answer or is itself behind another NAT.
+    IPAddress BoxAddress() {
+        try {
+            var a=Exchange(new byte[]{0,0});
+            if(a.Length!=12 || a[0]!=0 || a[1]!=128 || U16(a,2)!=0)return null;
+            var address=new IPAddress(a.Skip(8).Take(4).ToArray());return Public(address)?address:null;
+        } catch {return null;}
+    }
     public void Open() {
         foreach(string candidate in new[]{"PCP","PMP","UPNP"}) {
             try {if(candidate=="PCP") Pcp(120);else if(candidate=="PMP") Pmp(120);else Upnp(120);return;}
             catch {if(method!=null) Dispose();method=null;Address=null;externalPort=requestedExternalPort;}
         }
-        throw new IOException("La box n'a pas autorisé la connexion automatique. Vous pouvez essayer d'inverser les rôles : votre ami crée la partie. Aucun réglage manuel n'est nécessaire dans PartyBoard, mais certains réseaux ne permettent pas la connexion directe.");
+        throw new IOException("La box n'a pas autorisé la connexion automatique. Vous pouvez essayer d'inverser les rôles : votre ami crée la partie. Si vous avez ouvert un port à la main sur votre box, indiquez-le dans Port fixe…. Certains réseaux, comme le partage de connexion d'un téléphone, ne permettent pas d'héberger.");
     }
     public void Renew() {
         int beforePort=externalPort;var beforeAddress=Address;
+        if(method=="MANUAL" || method=="LOCAL") return;
         if(method=="PCP") Pcp(120);else if(method=="PMP") Pmp(120);else if(method=="UPNP") Upnp(120);else throw new IOException("Connexion temporaire fermée.");
         if(beforePort!=externalPort || !beforeAddress.Equals(Address)) throw new IOException("La connexion de la box a changé. Recréez une partie.");
     }

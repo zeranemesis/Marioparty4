@@ -10,7 +10,7 @@
          lib/gfx/tex_palette_conv.cpp
 --- /dev/null
 +++ b/include/aurora/stereo.h
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,67 @@
 +#ifndef AURORA_STEREO_H
 +#define AURORA_STEREO_H
 +
@@ -25,25 +25,29 @@
 +//
 +// Between AuroraStereoBegin and AuroraStereoEnd, each GX draw made with a
 +// perspective projection is also drawn for two eyes, into an image holding
-+// both side by side (left eye on the left), followed by a single HUD region
-+// below the eye images. The hidden screen's world and HUD are skipped.
++// both side by side (left eye on the left); orthographic draws (the HUD) go
++// into a second image of their own. The hidden screen's world and HUD are
++// skipped.
 +// For eye e, the draw's projection is replaced by clip[e]: a row-major
 +// 4x4 matrix taking a view-space position (what GXLoadPosMtxImm gives) to GX
 +// clip space, with GX's depth conventions (z/w from -1 at near to 0 at far).
 +//
-+// The images are AHardwareBuffers (RGBA8, GPU color output), registered once,
-+// twice as wide as an eye, and eyeHeight + hudHeight tall. Orthographic
-+// draws keep their game projection in the hudWidth x hudHeight region.
-+// When the frame that drew into one has been
-+// submitted to the GPU, `callback` runs on Aurora's render thread with the
-+// image's index, the frame tag given to AuroraStereoBegin and a sync fd that
-+// signals once the GPU has written the image (-1: nothing to wait for). The
-+// callee owns the fd.
++// The images are AHardwareBuffers (RGBA8, GPU color output), registered
++// together, `count` of each: eye images width x height (twice as wide as an
++// eye), and HUD images hudWidth x hudHeight, where orthographic draws keep
++// their game projection. Image i and HUD image i are drawn by the same frame.
++// Apart, the eyes' multisampled pass covers the eyes only: with the HUD below
++// them in one image, 41% of its pixels were the HUD or unused (3360x2960 for
++// 3360x1760 of eyes, Quest 3, 2026-09-29), all cleared and written out.
++// When the frame that drew into image i has been submitted to the GPU,
++// `callback` runs on Aurora's render thread with i, the frame tag given to
++// AuroraStereoBegin and a sync fd that signals once the GPU has written both
++// of its images (-1: nothing to wait for). The callee owns the fd.
 +
 +typedef void (*AuroraStereoCallback)(uint32_t image, uint64_t frameTag, int syncFd, bool hasWorld, void* user);
 +
-+bool AuroraStereoRegisterImages(void* const* hardwareBuffers, uint32_t count, uint32_t width, uint32_t height,
-+                                uint32_t eyeHeight, uint32_t hudWidth, uint32_t hudHeight,
++bool AuroraStereoRegisterImages(void* const* eyeBuffers, void* const* hudBuffers, uint32_t count, uint32_t width,
++                                uint32_t height, uint32_t hudWidth, uint32_t hudHeight,
 +                                AuroraStereoCallback callback, void* user);
 +void AuroraStereoBegin(uint32_t image, const float clip[2][16], uint64_t frameTag);
 +void AuroraStereoEnd(void);
@@ -53,9 +57,21 @@
 +// Dynamic resolution, before AuroraStereoBegin: the part of each eye's half
 +// drawn this frame, from its top-left corner (0: all of it).
 +void AuroraStereoSetEyeSize(uint32_t width, uint32_t height);
++// Before AuroraStereoBegin: whether this frame draws the HUD image (true until
++// told otherwise). A frame that does not leaves it untouched: the headset
++// copies the HUD only from frames that drew it.
++void AuroraStereoSetHud(bool draw);
 +// The headset does not show the game's own frame (the model replaces it):
 +// the frame is still drawn for the eyes, but not presented to the screen.
 +void AuroraStereoHideScreen(bool hidden);
++// The draws that follow cannot reach the other eye (the game tested their
++// bounds): drawn for both eyes at once, they skip the cut at the eye's edge,
++// which costs the GPU its early depth rejection. Back to false after them.
++void AuroraStereoSetUncut(bool uncut);
++// The draws being recorded belong to one object, at this distance from the
++// eyes (any unit, the same for every object); < 0: outside any object. Opaque
++// draws of objects can then go to the GPU front to back (debug.partyboard.sort_opaque).
++void AuroraStereoSetSortKey(float key);
 +
 +#ifdef __cplusplus
 +}
@@ -128,7 +144,7 @@
  #include "tex_copy_conv.hpp"
  #include "tex_palette_conv.hpp"
  #include "texture_replacement.hpp"
-@@ -207,6 +208,10 @@ struct RenderPass {
+@@ -212,6 +213,11 @@ struct RenderPass {
    bool captureDepthSnapshot = false;
    bool sealed = false;
    std::vector<tex_palette_conv::ConvRequest> paletteConvs;
@@ -136,10 +152,11 @@
 +  int32_t stereoImage = -1;
 +  uint64_t stereoTag = 0;
 +  bool stereoHasWorld = false;
++  bool stereoHud = false; // the HUD image is drawn too, by the pass after this one
  };
  
  struct TextureCopy {
-@@ -593,6 +598,8 @@ void end_color_pass() {
+@@ -600,6 +606,8 @@ void end_color_pass() {
  }
  
  static inline void push_command(CommandType type, const Command::Data& data) {
@@ -148,7 +165,28 @@
    if (g_currentRenderPass == UINT32_MAX)
      UNLIKELY {
        Log.warn("Dropping command {}", magic_enum::enum_name(type));
-@@ -1257,6 +1264,111 @@ void finish() {
+@@ -1254,6 +1262,7 @@ bool begin_frame() {
+ 
+ void finish() {
+   ZoneScoped;
++  const bool hidden = stereo::latch_screen_hidden(); // once a frame, see below
+   if (g_recordingFrame == nullptr) {
+     return;
+   }
+@@ -1262,11 +1271,135 @@ void finish() {
+     auto& frame = current_frame_packet();
+     frame.uniforms.append_zeroes(gx::MaxUniformSize); // Pad the end of the GX uniform buffer slice.
+     auto& pass = frame.renderPasses[g_currentRenderPass];
+-    pass.observable = true;
+-    pass.captureDepthSnapshot = true;
++    // A headset showing the game as a model hides this screen (aurora.cpp
++    // does not present it): the final pass is then unobservable and skipped,
++    // with its clear and its store of the whole framebuffer (3840x2160 on
++    // the Quest, some 33 MB a frame) and the depth snapshot for GXPeekZ,
++    // which the game never calls. Passes resolved into textures (EFB copies)
++    // and the eyes' pass are left alone.
++    pass.observable = !hidden;
++    pass.captureDepthSnapshot = !hidden;
      enqueue_pass(frame, g_recordingFrameSlot, g_currentRenderPass);
      g_currentRenderPass = UINT32_MAX;
    }
@@ -159,7 +197,7 @@
 +void stereo::enqueue_pass(const PassDesc& desc) noexcept {
 +  auto& frame = current_frame_packet();
 +  RenderPass pass{
-+      .label = "Stereo eyes",
++      .label = desc.label,
 +      .colorView = desc.color,
 +      .resolveView = desc.resolve,
 +      .depthStencilView = desc.depth,
@@ -177,8 +215,9 @@
 +      .stereoImage = desc.image,
 +      .stereoTag = desc.tag,
 +      .stereoHasWorld = desc.hasWorld,
++      .stereoHud = desc.drawHud,
 +  };
-+  pass.commands.reserve(desc.eyes[0]->size() + desc.eyes[1]->size() + desc.hud->size() + 6);
++  pass.commands.reserve(desc.eyes[0]->size() + desc.eyes[1]->size() + (desc.hud != nullptr ? desc.hud->size() : 0) + 6);
 +  // With dynamic resolution, each eye draws a smaller rectangle of its half:
 +  // at the left, centered vertically, so the headset finds it at the same rows
 +  // whichever vertical origin its compositor gives the image.
@@ -210,69 +249,173 @@
 +        .data = {.draw = ShaderDrawCommand{.type = ShaderType::GX, .gx = draw}},
 +    });
 +  };
-+  // In recording order. A run of per-eye draws goes to the left eye, then the
++  // In recording order, or with the opaque draws of objects front to back
++  // (stereo_order.hpp). A run of per-eye draws goes to the left eye, then the
 +  // same run to the right eye, so the viewport changes per run, not per draw.
 +  const auto& leftDraws = *desc.eyes[0];
 +  const auto& rightDraws = *desc.eyes[1];
 +  const auto instanced = [&](size_t i) {
 +    return desc.instanced != nullptr && i < desc.instanced->size() && (*desc.instanced)[i] != 0;
 +  };
-+  for (size_t i = 0; i < leftDraws.size();) {
-+    if (instanced(i)) {
++  std::vector<uint32_t> sequence;
++  if (desc.order != nullptr && desc.order->size() == leftDraws.size()) {
++    sequence = stereo::draw_sequence(*desc.order, desc.sortOpaque);
++  } else {
++    sequence.resize(leftDraws.size());
++    std::iota(sequence.begin(), sequence.end(), 0u);
++  }
++  for (size_t p = 0; p < sequence.size();) {
++    if (instanced(sequence[p])) {
 +      set_view(2);
-+      auto draw = leftDraws[i++];
++      auto draw = leftDraws[sequence[p++]];
 +      draw.instanceCount = 2;
 +      push_gx(draw);
 +      continue;
 +    }
-+    size_t end = i;
-+    while (end < leftDraws.size() && !instanced(end)) {
++    size_t end = p;
++    while (end < sequence.size() && !instanced(sequence[end])) {
 +      ++end;
 +    }
 +    set_view(0);
-+    for (size_t j = i; j < end; ++j) {
-+      push_gx(leftDraws[j]);
++    for (size_t q = p; q < end; ++q) {
++      push_gx(leftDraws[sequence[q]]);
 +    }
 +    set_view(1);
-+    for (size_t j = i; j < end && j < rightDraws.size(); ++j) {
-+      push_gx(rightDraws[j]);
++    for (size_t q = p; q < end; ++q) {
++      if (sequence[q] < rightDraws.size()) {
++        push_gx(rightDraws[sequence[q]]);
++      }
 +    }
-+    i = end;
++    p = end;
 +  }
-+  pass.commands.push_back({
-+      .type = CommandType::SetViewport,
-+      .data = {.setViewport = {0.f, static_cast<float>(desc.hudTop), static_cast<float>(desc.hudWidth),
-+                              static_cast<float>(desc.hudHeight), 0.f, 1.f}},
-+  });
-+  pass.commands.push_back({
-+      .type = CommandType::SetScissor,
-+      .data = {.setScissor = {0, static_cast<int32_t>(desc.hudTop), static_cast<int32_t>(desc.hudWidth),
-+                             static_cast<int32_t>(desc.hudHeight)}},
-+  });
-+  for (const auto& draw : *desc.hud) {
++  if (desc.hud != nullptr) {
 +    pass.commands.push_back({
-+        .type = CommandType::Draw,
-+        .data = {.draw = ShaderDrawCommand{.type = ShaderType::GX, .gx = draw}},
++        .type = CommandType::SetViewport,
++        .data = {.setViewport = {0.f, static_cast<float>(desc.hudTop), static_cast<float>(desc.hudWidth),
++                                static_cast<float>(desc.hudHeight), 0.f, 1.f}},
 +    });
++    pass.commands.push_back({
++        .type = CommandType::SetScissor,
++        .data = {.setScissor = {0, static_cast<int32_t>(desc.hudTop), static_cast<int32_t>(desc.hudWidth),
++                               static_cast<int32_t>(desc.hudHeight)}},
++    });
++    for (const auto& draw : *desc.hud) {
++      pass.commands.push_back({
++          .type = CommandType::Draw,
++          .data = {.draw = ShaderDrawCommand{.type = ShaderType::GX, .gx = draw}},
++      });
++    }
 +  }
 +  frame.renderPasses.emplace_back(std::move(pass));
 +  gfx::enqueue_pass(frame, g_recordingFrameSlot, static_cast<uint32_t>(frame.renderPasses.size() - 1));
  }
  
  void end_frame(EndFrameCallback callback) {
-@@ -1451,6 +1563,9 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+@@ -1461,6 +1594,9 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
      };
      depthStencilAttachmentPtr = &depthStencilAttachment;
    }
 +  if (passInfo.stereoImage >= 0) {
-+    stereo::begin_access(passInfo.stereoImage, passInfo.stereoTag, passInfo.stereoHasWorld);
++    stereo::begin_access(passInfo.stereoImage, passInfo.stereoTag, passInfo.stereoHasWorld, passInfo.stereoHud);
 +  }
    const auto label = fmt::format("Render pass {}", passIndex);
    const wgpu::RenderPassDescriptor renderPassDescriptor{
        .label = passInfo.label.empty() ? label.c_str() : passInfo.label.c_str(),
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -930,7 +930,7 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
+     return 0;
+   }
+ 
+-  size_t acceptedRows = 0;
++  size_t acceptedRows = 0, invalidRows = 0;
+   while ((ret = sqlite3_step(g_pipelineCacheLoadStmt)) == SQLITE_ROW) {
+     const auto* configBlob = static_cast<const uint8_t*>(sqlite3_column_blob(g_pipelineCacheLoadStmt, 0));
+     const auto configSize = sqlite3_column_bytes(g_pipelineCacheLoadStmt, 0);
+@@ -944,10 +944,30 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
+     if (config.version != configVersion) {
+       continue;
+     }
++    // WebGPU has 1 or 4 samples. Rows with another count (a headset's MSAA 2x
++    // test wrote some on 2026-09-28) made the driver abort while they were
++    // built at every startup, so the game could not start again. Skip them.
++    if constexpr (requires { config.msaaSamples; }) {
++      if (config.msaaSamples != 1 && config.msaaSamples != 4) {
++        ++invalidRows;
++        continue;
++      }
++    }
++    // A half-precision TEV (debug.partyboard.shader_f16) on a device without
++    // f16 would fail validation, which is fatal: skipped, like a bad count.
++    if constexpr (requires { config.shaderConfig.halfPrecision; }) {
++      if (config.shaderConfig.halfPrecision && !webgpu::g_shaderF16Enabled) {
++        ++invalidRows;
++        continue;
++      }
++    }
+ 
+     find_pipeline_impl(type, config, [=] { return create(config); }, false, firstFrameUsed);
+     ++acceptedRows;
+   }
++  if (invalidRows != 0) {
++    Log.warn("Skipped {} cached pipelines this device cannot build (sample count, f16)", invalidRows);
++  }
+ 
+   if (ret != SQLITE_DONE) {
+     Log.error("Failed to read pipeline cache rows: {}", sqlite3_errmsg(g_pipelineCacheDb));
+@@ -1017,7 +1037,14 @@ PipelineRef find_pipeline(ShaderType type, const clear::PipelineConfig& config,
+ 
+ template <>
+ PipelineRef find_pipeline(ShaderType type, const gx::PipelineConfig& config, NewPipelineCallback&& cb) {
+-  return find_pipeline_impl(type, config, std::move(cb), true, std::nullopt);
++  // A headset's both-eyes pipelines, except the clip-distance one, are kept in
++  // the cache too, and built at startup with the others: a draw whose pipeline
++  // is not built yet is dropped (bind_pipeline), so every pipeline first met
++  // on the board made its objects pop in after a wait on the headset. The
++  // clip-distance one is not: a driver cannot build it (Adreno lost the device
++  // on it) and it must not be retried on every launch.
++  const bool persist = config.shaderConfig.stereo != gx::StereoClipDistance;
++  return find_pipeline_impl(type, config, std::move(cb), persist, std::nullopt);
+ }
+ 
+ #ifdef AURORA_ENABLE_RMLUI
+@@ -1146,17 +1173,33 @@ void begin_pipeline_frame() {
+   }
+ }
+ 
++// Draws dropped since the last report because their pipeline was not built.
++static std::atomic<uint32_t> g_missedPipelineLookups{0};
++
+ void end_pipeline_frame() {
+   g_pipelineFrameActive = false;
+   if (!g_hasPipelineThread) {
+     pipeline_worker();
+   }
++  // Every 5 seconds, when there were any: how many draws were dropped for a
++  // pipeline still to be built (objects missing from the picture meanwhile).
++  static auto reportedAt = std::chrono::steady_clock::now();
++  const auto now = std::chrono::steady_clock::now();
++  if (now - reportedAt >= std::chrono::seconds(5)) {
++    reportedAt = now;
++    const auto missed = g_missedPipelineLookups.exchange(0, std::memory_order_relaxed);
++    if (missed != 0) {
++      Log.info("Pipelines: {} draws dropped in the last 5 s, their pipeline not built yet ({} queued, {} built)",
++               missed, static_cast<size_t>(queuedPipelines.load()), static_cast<size_t>(createdPipelines.load()));
++    }
++  }
+ }
+ 
+ bool get_pipeline(PipelineRef ref, wgpu::RenderPipeline& pipeline) {
+   std::lock_guard guard{g_pipelineMutex};
+   const auto it = g_pipelines.find(ref);
+   if (it == g_pipelines.end()) {
++    g_missedPipelineLookups.fetch_add(1, std::memory_order_relaxed);
+     return false;
+   }
+   pipeline = it->second.pipeline;
 --- /dev/null
 +++ b/lib/gfx/stereo.cpp
-@@ -0,0 +1,563 @@
+@@ -0,0 +1,853 @@
 +#include "stereo.hpp"
 +
 +#include <aurora/stereo.h>
@@ -292,7 +435,13 @@
 +
 +#if defined(__ANDROID__)
 +#include <android/hardware_buffer.h>
++#include <linux/sync_file.h>
++#include <sys/ioctl.h>
++#include <sys/system_properties.h>
 +#include <unistd.h>
++
++#include <cerrno>
++#include <cstring>
 +#endif
 +
 +namespace aurora::gfx::stereo {
@@ -304,6 +453,10 @@
 +  wgpu::SharedTextureMemory memory;
 +  wgpu::Texture texture;
 +  wgpu::TextureView view;
++  // The interface's image, drawn by the same frame in a pass of its own.
++  wgpu::SharedTextureMemory hudMemory;
++  wgpu::Texture hudTexture;
++  wgpu::TextureView hudView;
 +};
 +
 +// Set once by AuroraStereoRegisterImages (game thread), then read by both threads.
@@ -312,10 +465,48 @@
 +uint32_t g_width = 0;
 +uint32_t g_height = 0;
 +uint32_t g_eyeHeight = 0, g_hudWidth = 0, g_hudHeight = 0;
-+constexpr uint32_t kStereoSamples = 4;
-+// Quest Vulkan fails to create the clip-distance pipeline (VK_ERROR_UNKNOWN);
-+// keep the proven per-eye path until that driver path is validated.
-+constexpr bool kUseInstancedStereo = false;
++// The eyes' multisampling. On the headset's tiled GPU (Adreno 740) 4x takes
++// four times the tile memory per pixel: smaller bins, and every draw is
++// processed again in each bin it touches. For a headset A/B, before starting
++// the game: `adb shell setprop debug.partyboard.stereo_msaa 1` (no MSAA).
++// WebGPU only has 1 and 4 samples: any other value keeps 4 (2x aborted the
++// game on its first eye frame, 2026-09-28).
++uint32_t stereo_samples() {
++  static const uint32_t samples = [] {
++    char value[PROP_VALUE_MAX] = {};
++    __system_property_get("debug.partyboard.stereo_msaa", value);
++    const uint32_t chosen = value[0] == '1' && value[1] == '\0' ? 1u : 4u;
++    Log.info("Stereo: MSAA {}x (debug.partyboard.stereo_msaa={})", chosen, value[0] != '\0' ? value : "unset");
++    return chosen;
++  }();
++  return samples;
++}
++// Both eyes in one draw halve the draws the board is limited by (414 per eye
++// kept the Toad board at 43-45 images/s whatever the resolution, 2026-09-28).
++// Quest Vulkan fails to create the clip-distance pipeline (VK_ERROR_UNKNOWN,
++// build 88), so each instance is cut at its eye's edge by a fragment test by
++// default, which needs no device feature. Before starting the game:
++//   adb shell setprop debug.partyboard.instanced_stereo 0   one draw per eye
++//   adb shell setprop debug.partyboard.instanced_stereo 1   clip distances
++//   adb shell setprop debug.partyboard.instanced_stereo 2   fragment test (default)
++// A pipeline that fails validation falls back to one draw per eye (gx/pipeline.cpp).
++uint8_t instanced_stereo_mode() {
++  static const uint8_t mode = []() -> uint8_t {
++    char value[PROP_VALUE_MAX] = {};
++    __system_property_get("debug.partyboard.instanced_stereo", value);
++    const uint8_t chosen = value[0] == '0' ? gx::StereoOff : value[0] == '1' ? gx::StereoClipDistance : gx::StereoDiscard;
++    if (chosen == gx::StereoClipDistance && !webgpu::g_clipDistancesSupported) {
++      Log.warn("Stereo: clip distances unsupported, instanced drawing stays off");
++      return gx::StereoOff;
++    }
++    Log.info("Stereo: {} (debug.partyboard.instanced_stereo={})",
++             chosen == gx::StereoOff ? "one draw per eye" : chosen == gx::StereoClipDistance
++                 ? "both eyes in one draw, cut by clip distances" : "both eyes in one draw, cut by a fragment test",
++             value[0] != '\0' ? value : "unset");
++    return chosen;
++  }();
++  return mode;
++}
 +AuroraStereoCallback g_callback = nullptr;
 +void* g_callbackUser = nullptr;
 +
@@ -323,15 +514,21 @@
 +bool g_recording = false;
 +bool g_worldMergeable = false;
 +bool g_worldOnly = false;
++// The draws being recorded cannot reach the other eye (AuroraStereoSetUncut).
++bool g_uncut = false;
 +int32_t g_image = -1;
 +uint64_t g_frameTag = 0;
 +bool g_loggedGeometry = false;
 +// Dynamic resolution: the part of each eye's half drawn this frame (0: all of it).
 +uint32_t g_frameEyeWidth = 0, g_frameEyeHeight = 0;
++// Whether this frame draws the HUD image (AuroraStereoSetHud).
++bool g_frameDrawHud = true;
 +// The game's own frame is not on show in the headset (aurora.cpp skips presenting it).
 +std::atomic_bool g_screenHidden = false;
-+// 8x once a headset uses the eyes' images (gx.cpp's samplers read it).
++// 8x once a headset uses the eyes' images (gx.cpp's samplers read it), or
++// debug.partyboard.anisotropy (Switches).
 +std::atomic<uint16_t> g_forcedAnisotropy{1};
++std::atomic_bool g_imagesRegistered = false;
 +std::array<Mat4x4<float>, 2> g_clip{};
 +std::array<std::vector<gx::DrawData>, 2> g_eyeDraws;
 +// Per world draw: 1 when both eyes are one instanced draw (g_eyeDraws[0]
@@ -343,18 +540,94 @@
 +// An instanced pipeline failed to build: every eye drawn on its own from then on.
 +std::atomic_bool g_instancedDisabled = false;
 +uint64_t g_statInstanced = 0, g_statPerEye = 0;
++// The object the draws being recorded belong to (AuroraStereoSetSortKey), and
++// per world draw its object and whether it may move (stereo_order.hpp).
++float g_sortKey = -1.f;
++uint32_t g_sortObject = 0;
++std::vector<DrawOrder> g_eyeOrder;
++uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
++// Headset A/B switches, read again every 2 s so a capture can flip them
++// without restarting the game. On the Toad board (Quest 3, build 118,
++// 2026-09-28) the sort with the opaque blend off shaded 35% fewer fragments
++// per image than neither (59% GPU instead of 82%, 53 ms motion-to-photon
++// instead of 68), with no difference the player could see: both are on by
++// default.
++//   debug.partyboard.sort_opaque 0       opaque draws of objects in the game's
++//                                        order (default: front to back)
++//   debug.partyboard.stereo_crossing 0   an object that reaches both eyes is
++//                                        one instanced draw cut by a fragment
++//                                        test; by default it is drawn once per
++//                                        eye, which keeps the GPU's early depth
++//                                        rejection: 11% fewer fragments shaded
++//                                        per image on the Toad board (Quest 3,
++//                                        build 117, 2026-09-28)
++//   debug.partyboard.opaque_blend off    the game's opaque objects drawn without
++//                                        their alpha blend (edges of translucent
++//                                        textures turn hard). Build 119 found no
++//                                        gain over keeping it with the sort on,
++//                                        so it stays on by default
++//   debug.partyboard.anisotropy 1|2|4    the anisotropic filtering forced on the
++//                                        eyes' 3D textures (8 by default, 16 at
++//                                        most). The board is seen at a slant
++//                                        across the table, where 8x reads the
++//                                        most texels: an A/B tells what the
++//                                        textures cost before compressing them
++struct Switches {
++  bool sortOpaque = true;
++  bool crossingPerEye = true;
++  bool opaqueBlendOff = false;
++  uint16_t anisotropy = 8;
++};
++Switches g_switches;
++std::chrono::steady_clock::time_point g_switchesAt{};
++
++void refresh_switches() {
++  const auto now = std::chrono::steady_clock::now();
++  if (g_switchesAt != std::chrono::steady_clock::time_point{} && now - g_switchesAt < std::chrono::seconds(2)) {
++    return;
++  }
++  g_switchesAt = now;
++  char value[PROP_VALUE_MAX] = {};
++  Switches read;
++  __system_property_get("debug.partyboard.sort_opaque", value);
++  read.sortOpaque = value[0] != '0';
++  value[0] = '\0';
++  __system_property_get("debug.partyboard.stereo_crossing", value);
++  read.crossingPerEye = value[0] != '0';
++  value[0] = '\0';
++  __system_property_get("debug.partyboard.opaque_blend", value);
++  read.opaqueBlendOff = std::string_view{value} == "off";
++  value[0] = '\0';
++  __system_property_get("debug.partyboard.anisotropy", value);
++  const std::string_view anisotropy{value};
++  read.anisotropy = anisotropy == "1" ? 1 : anisotropy == "2" ? 2 : anisotropy == "4" ? 4 : anisotropy == "16" ? 16 : 8;
++  static bool logged = false;
++  if (!logged || read.sortOpaque != g_switches.sortOpaque || read.crossingPerEye != g_switches.crossingPerEye ||
++      read.opaqueBlendOff != g_switches.opaqueBlendOff || read.anisotropy != g_switches.anisotropy) {
++    logged = true;
++    Log.info("Stereo switches: sort_opaque={} stereo_crossing={} opaque_blend={} anisotropy={}x", read.sortOpaque ? 1 : 0,
++             read.crossingPerEye ? 1 : 0, read.opaqueBlendOff ? "off" : "on", read.anisotropy);
++  }
++  g_switches = read;
++  // New samplers from the next draw on (gx.cpp builds them per descriptor).
++  if (g_imagesRegistered.load(std::memory_order_relaxed)) {
++    g_forcedAnisotropy.store(read.anisotropy, std::memory_order_relaxed);
++  }
++}
 +// Instanced pipelines seen built (game thread): asking the cache again would
 +// take its lock on every draw.
 +std::unordered_set<PipelineRef> g_readyInstanced;
 +std::vector<gx::DrawData> g_hudDraws;
 +webgpu::TextureWithSampler g_color; // multisampled, when the game's frame is
 +webgpu::TextureWithSampler g_depth;
++webgpu::TextureWithSampler g_hudColor, g_hudDepth; // the same for the interface's pass
 +
 +// Render thread: images drawn into by the frame being encoded.
 +struct Accessed {
 +  int32_t image;
 +  uint64_t tag;
 +  bool hasWorld;
++  bool hud; // the HUD image was accessed too
 +};
 +std::vector<Accessed> g_accessed;
 +
@@ -367,7 +640,8 @@
 +  };
 +}
 +
-+webgpu::TextureWithSampler create_target(wgpu::TextureFormat format, uint32_t sampleCount, const char* label) {
++webgpu::TextureWithSampler create_target(wgpu::TextureFormat format, uint32_t sampleCount, uint32_t width,
++                                         uint32_t height, const char* label) {
 +  // Multisampled color and depth are cleared, drawn and resolved within the
 +  // pass and never stored: on the headset's tiled GPU, transient attachments
 +  // live in tile memory only (no RAM, no bandwidth).
@@ -377,7 +651,7 @@
 +      .usage = transient ? wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TransientAttachment
 +                         : wgpu::TextureUsage::RenderAttachment,
 +      .dimension = wgpu::TextureDimension::e2D,
-+      .size = {g_width, g_height, 1},
++      .size = {width, height, 1},
 +      .format = format,
 +      .mipLevelCount = 1,
 +      .sampleCount = sampleCount,
@@ -388,6 +662,31 @@
 +  target.size = descriptor.size;
 +  target.format = format;
 +  return target;
++}
++
++// One sync fd for both of a frame's images (the callee waits on one). They
++// are written by the same submission, but each shared memory gives its own
++// fence. -1 when neither has one.
++int merge_fences(int first, int second) {
++  if (first < 0) return second;
++  if (second < 0) return first;
++  sync_merge_data merge{};
++  std::strncpy(merge.name, "stereo eyes+hud", sizeof(merge.name) - 1);
++  merge.fd2 = second;
++  if (ioctl(first, SYNC_IOC_MERGE, &merge) == 0) {
++    close(first);
++    close(second);
++    return merge.fence;
++  }
++  // Not merged: the eyes' fence, the one the headset shows first. Both come
++  // from the same submission, so it signals with the interface's.
++  static bool warned = false;
++  if (!warned) {
++    warned = true;
++    Log.warn("Stereo: could not merge the eyes' and HUD's fences ({}), waiting on the eyes'", std::strerror(errno));
++  }
++  close(second);
++  return first;
 +}
 +#endif
 +} // namespace
@@ -409,9 +708,21 @@
 +#endif
 +}
 +
++// The headset thread may flip it at any time; gfx::finish latches it once a
++// frame, so skipping the final pass and not presenting agree (a skipped pass
++// presented would show an old frame).
++bool g_frameScreenHidden = false; // game thread
++
++bool latch_screen_hidden() noexcept {
++#if defined(__ANDROID__)
++  g_frameScreenHidden = g_screenHidden.load(std::memory_order_relaxed);
++#endif
++  return g_frameScreenHidden;
++}
++
 +bool screen_hidden() noexcept {
 +#if defined(__ANDROID__)
-+  return g_screenHidden.load(std::memory_order_relaxed);
++  return g_frameScreenHidden;
 +#else
 +  return false;
 +#endif
@@ -466,7 +777,7 @@
 +    return false;
 +  }
 +  auto spatialConfig = config;
-+  spatialConfig.msaaSamples = kStereoSamples;
++  spatialConfig.msaaSamples = stereo_samples();
 +  if (spatialConfig.colorUpdate) {
 +    spatialConfig.alphaUpdate = true; // transparent MR targets need coverage
 +  }
@@ -489,11 +800,33 @@
 +  // Both eyes in one instanced draw once its pipeline is built (the first
 +  // request queues it); until then, and for lines and points, which already
 +  // use instances, one draw per eye.
-+  if (kUseInstancedStereo && webgpu::g_clipDistancesSupported &&
++  // An opaque draw of an object may go to the GPU in front-to-back order.
++  const bool inObject = g_sortKey >= 0.f;
++  const DrawOrder order{
++      .key = g_sortKey,
++      .object = g_sortObject,
++      // The game draws its opaque objects with the usual alpha blend on
++      // (hsfdraw.c's SetBlendMode); its translucent ones go through its own
++      // back-to-front pass, outside ObjDraw. Additive and other blends stay put.
++      .sortable = inObject && config.depthCompare && config.depthUpdate &&
++                  (config.depthFunc == GX_LESS || config.depthFunc == GX_LEQUAL) && config.colorUpdate &&
++                  (config.blendMode == GX_BM_NONE ||
++                   (config.blendMode == GX_BM_BLEND && config.blendFacSrc == GX_BL_SRCALPHA &&
++                    config.blendFacDst == GX_BL_INVSRCALPHA)),
++  };
++  g_statSortable += order.sortable;
++  if (g_switches.opaqueBlendOff && order.sortable && spatialConfig.blendMode == GX_BM_BLEND) {
++    spatialConfig.blendMode = GX_BM_NONE;
++  }
++  // An object that reaches both eyes, drawn once per eye when asked: no
++  // fragment test, so the GPU keeps rejecting its hidden fragments early.
++  const bool crossingPerEye = g_switches.crossingPerEye && inObject && !g_uncut;
++  g_statCrossingPerEye += crossingPerEye;
++  if (const uint8_t mode = instanced_stereo_mode(); mode != gx::StereoOff && !crossingPerEye &&
 +      !g_instancedDisabled.load(std::memory_order_relaxed) &&
 +      info.lineMode == 0 && draw.instanceCount == 1 && gx::stereo_instanced_fits(info)) {
 +    auto instancedConfig = spatialConfig;
-+    instancedConfig.shaderConfig.stereo = 1;
++    instancedConfig.shaderConfig.stereo = g_uncut ? gx::StereoUncut : mode;
 +    // One pipeline request per draw: pipeline_ref skips the cache's lock when
 +    // a draw asks for the same pipeline as the one before, the usual case.
 +    const auto instancedRef = pipeline_ref(instancedConfig);
@@ -512,6 +845,7 @@
 +      g_eyeDraws[0].push_back(draw);
 +      g_eyeDraws[1].push_back(draw);
 +      g_eyeInstanced.push_back(1);
++      g_eyeOrder.push_back(order);
 +      ++g_statInstanced;
 +      g_worldMergeable = true;
 +      return true;
@@ -519,6 +853,7 @@
 +  }
 +  ++g_statPerEye;
 +  g_eyeInstanced.push_back(0);
++  g_eyeOrder.push_back(order);
 +  draw.pipeline = pipeline_ref(spatialConfig);
 +  // One uniform build for both eyes: only the projection differs.
 +  const auto uniforms = gx::build_uniform_stereo(info, vtxStart, ranges, g_clip[0], g_clip[1]);
@@ -548,6 +883,7 @@
 +void end_frame() noexcept {
 +#if defined(__ANDROID__)
 +  g_worldMergeable = false;
++  g_uncut = false;
 +  g_recording = false;
 +  // Even without geometry, clear and submit the leased image. Dropping it
 +  // leaks a ring slot and leaves the preceding scene visible in the room.
@@ -563,6 +899,7 @@
 +      g_eyeDraws[0].clear();
 +      g_eyeDraws[1].clear();
 +      g_eyeInstanced.clear();
++  g_eyeOrder.clear();
 +      g_hudDraws.clear();
 +      return;
 +    }
@@ -571,12 +908,18 @@
 +
 +  // Same sample count and formats as the game's frame, so its pipelines draw here too.
 +  const auto& config = webgpu::g_graphicsConfig;
-+  const uint32_t samples = kStereoSamples;
++  const uint32_t samples = stereo_samples();
 +  if (samples > 1 && (g_color.size.width != g_width || g_color.size.height != g_height)) {
-+    g_color = create_target(config.surfaceConfiguration.format, samples, "Stereo color");
++    g_color = create_target(config.surfaceConfiguration.format, samples, g_width, g_height, "Stereo color");
 +  }
 +  if (g_depth.size.width != g_width || g_depth.size.height != g_height) {
-+    g_depth = create_target(config.depthFormat, samples, "Stereo depth");
++    g_depth = create_target(config.depthFormat, samples, g_width, g_height, "Stereo depth");
++  }
++  if (samples > 1 && (g_hudColor.size.width != g_hudWidth || g_hudColor.size.height != g_hudHeight)) {
++    g_hudColor = create_target(config.surfaceConfiguration.format, samples, g_hudWidth, g_hudHeight, "Stereo HUD color");
++  }
++  if (g_hudDepth.size.width != g_hudWidth || g_hudDepth.size.height != g_hudHeight) {
++    g_hudDepth = create_target(config.depthFormat, samples, g_hudWidth, g_hudHeight, "Stereo HUD depth");
 +  }
 +
 +  const bool hasWorld = !g_eyeDraws[0].empty();
@@ -592,16 +935,38 @@
 +      .eyeWidth = g_frameEyeWidth != 0 ? std::min(g_frameEyeWidth, eyeStride) : eyeStride,
 +      .eyeHeight = g_frameEyeHeight != 0 ? std::min(g_frameEyeHeight, g_eyeHeight) : g_eyeHeight,
 +      .hudTop = g_eyeHeight,
-+      .hudWidth = g_hudWidth,
-+      .hudHeight = g_hudHeight,
 +      .image = g_image,
 +      .tag = g_frameTag,
 +      .hasWorld = hasWorld,
 +      .eyes = {&g_eyeDraws[0], &g_eyeDraws[1]},
 +      .instanced = &g_eyeInstanced,
-+      .hud = &g_hudDraws,
++      .order = &g_eyeOrder,
++      .sortOpaque = g_switches.sortOpaque,
++      .drawHud = g_frameDrawHud,
 +  };
 +  enqueue_pass(desc);
++  // The interface, in its own image, when this frame draws it (its image's
++  // contents are not kept: a frame that draws it draws all of it): its pass
++  // after the eyes', in the same submission. The eyes' pass began the access
++  // to both images.
++  static const std::vector<gx::DrawData> noDraws;
++  const PassDesc hud{
++      .label = "Stereo HUD",
++      .color = samples > 1 ? g_hudColor.view : image.hudView,
++      .resolve = samples > 1 ? image.hudView : wgpu::TextureView{},
++      .depth = g_hudDepth.view,
++      .size = {g_hudWidth, g_hudHeight, 1},
++      .sampleCount = samples,
++      .hudTop = 0,
++      .hudWidth = g_hudWidth,
++      .hudHeight = g_hudHeight,
++      .image = -1,
++      .eyes = {&noDraws, &noDraws},
++      .hud = &g_hudDraws,
++  };
++  if (g_frameDrawHud) {
++    enqueue_pass(hud);
++  }
 +  if (!g_loggedGeometry && hasWorld) {
 +    Log.info("Stereo: first perspective pass ({} world draws per eye, {} HUD draws once, MSAA {}x)",
 +             worldDraws, g_hudDraws.size(), samples);
@@ -617,11 +982,15 @@
 +  statHud += g_hudDraws.size();
 +  statWorldMax = std::max(statWorldMax, worldDraws);
 +  if (const auto now = std::chrono::steady_clock::now(); now - statsAt >= std::chrono::seconds(5)) {
-+    Log.info("Stereo draws: {} frames, world {} avg / {} max per eye ({}% both eyes at once), HUD {} avg, {}x{} image",
++    const uint64_t recorded = g_statInstanced + g_statPerEye;
++    Log.info("Stereo draws: {} frames, world {} avg / {} max per eye ({}% both eyes at once), HUD {} avg, {}x{} image, "
++             "HUD {}x{} apart, sortable {}%{}, crossing per eye {}%",
 +             statFrames, statWorld / statFrames, statWorldMax,
-+             g_statInstanced + g_statPerEye != 0 ? g_statInstanced * 100 / (g_statInstanced + g_statPerEye) : 0,
-+             statHud / statFrames, g_width, g_height);
-+    g_statInstanced = g_statPerEye = 0;
++             recorded != 0 ? g_statInstanced * 100 / recorded : 0, statHud / statFrames, g_width, g_height,
++             g_hudWidth, g_hudHeight,
++             recorded != 0 ? g_statSortable * 100 / recorded : 0, g_switches.sortOpaque ? " (sorted)" : "",
++             recorded != 0 ? g_statCrossingPerEye * 100 / recorded : 0);
++    g_statInstanced = g_statPerEye = g_statSortable = g_statCrossingPerEye = 0;
 +    statsAt = now;
 +    statFrames = statWorld = statHud = 0;
 +    statWorldMax = 0;
@@ -629,12 +998,13 @@
 +  g_eyeDraws[0].clear();
 +  g_eyeDraws[1].clear();
 +  g_eyeInstanced.clear();
++  g_eyeOrder.clear();
 +  g_hudDraws.clear();
 +  g_image = -1;
 +#endif
 +}
 +
-+void begin_access(int32_t image, uint64_t tag, bool hasWorld) noexcept {
++void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept {
 +#if defined(__ANDROID__)
 +  Image target;
 +  {
@@ -662,7 +1032,11 @@
 +    Log.warn("Stereo image {} not accessible", image);
 +    return;
 +  }
-+  g_accessed.push_back({image, tag, hasWorld});
++  if (hud && target.hudMemory.BeginAccess(target.hudTexture, &begin) != wgpu::Status::Success) {
++    // Drawn anyway: the eyes' image is what matters; the interface shows its previous one.
++    Log.warn("Stereo HUD image {} not accessible", image);
++  }
++  g_accessed.push_back({image, tag, hasWorld, hud});
 +#endif
 +}
 +
@@ -677,22 +1051,30 @@
 +      }
 +      target = g_images[accessed.image];
 +    }
-+    wgpu::SharedTextureMemoryEndAccessState end{};
-+    wgpu::SharedTextureMemoryVkImageLayoutEndState layoutEnd{};
-+    if (webgpu::g_backendType == wgpu::BackendType::Vulkan) {
-+      end.nextInChain = &layoutEnd;
-+    }
-+    target.memory.EndAccess(target.texture, &end);
-+    int fd = -1;
-+    for (size_t i = 0; i < end.fenceCount && fd < 0; ++i) {
-+      wgpu::SharedFenceSyncFDExportInfo syncFd{};
-+      wgpu::SharedFenceExportInfo info{};
-+      info.nextInChain = &syncFd;
-+      end.fences[i].ExportInfo(&info);
-+      if (info.type == wgpu::SharedFenceType::SyncFD && syncFd.handle >= 0) {
-+        fd = dup(syncFd.handle); // the fence keeps its own
++    // Each image's access ends with its own fences; the headset gets one fd.
++    const auto end_access = [](wgpu::SharedTextureMemory& memory, wgpu::Texture& texture) {
++      wgpu::SharedTextureMemoryEndAccessState end{};
++      wgpu::SharedTextureMemoryVkImageLayoutEndState layoutEnd{};
++      if (webgpu::g_backendType == wgpu::BackendType::Vulkan) {
++        end.nextInChain = &layoutEnd;
 +      }
-+    }
++      if (!memory || memory.EndAccess(texture, &end) != wgpu::Status::Success) {
++        return -1;
++      }
++      int fd = -1;
++      for (size_t i = 0; i < end.fenceCount && fd < 0; ++i) {
++        wgpu::SharedFenceSyncFDExportInfo syncFd{};
++        wgpu::SharedFenceExportInfo info{};
++        info.nextInChain = &syncFd;
++        end.fences[i].ExportInfo(&info);
++        if (info.type == wgpu::SharedFenceType::SyncFD && syncFd.handle >= 0) {
++          fd = dup(syncFd.handle); // the fence keeps its own
++        }
++      }
++      return fd;
++    };
++    const int eyesFd = end_access(target.memory, target.texture);
++    const int fd = accessed.hud ? merge_fences(eyesFd, end_access(target.hudMemory, target.hudTexture)) : eyesFd;
 +    if (g_callback != nullptr) {
 +      g_callback(static_cast<uint32_t>(accessed.image), accessed.tag, fd, accessed.hasWorld, g_callbackUser);
 +    } else if (fd >= 0) {
@@ -708,8 +1090,8 @@
 +using namespace aurora;
 +using namespace aurora::gfx::stereo;
 +
-+bool AuroraStereoRegisterImages(void* const* hardwareBuffers, uint32_t count, uint32_t width, uint32_t height,
-+                                uint32_t eyeHeight, uint32_t hudWidth, uint32_t hudHeight,
++bool AuroraStereoRegisterImages(void* const* eyeBuffers, void* const* hudBuffers, uint32_t count, uint32_t width,
++                                uint32_t height, uint32_t hudWidth, uint32_t hudHeight,
 +                                AuroraStereoCallback callback, void* user) {
 +#if defined(__ANDROID__)
 +  if (!webgpu::g_device) {
@@ -720,51 +1102,61 @@
 +             static_cast<uint32_t>(webgpu::g_graphicsConfig.surfaceConfiguration.format));
 +    return false;
 +  }
-+  std::vector<Image> images;
-+  for (uint32_t i = 0; i < count; ++i) {
++  const auto import = [](void* buffer, uint32_t w, uint32_t h, const char* label, wgpu::SharedTextureMemory& memory,
++                          wgpu::Texture& texture, wgpu::TextureView& view) {
 +    wgpu::SharedTextureMemoryAHardwareBufferDescriptor ahb{};
-+    ahb.handle = hardwareBuffers[i];
++    ahb.handle = buffer;
 +    wgpu::SharedTextureMemoryDescriptor descriptor{};
 +    descriptor.nextInChain = &ahb;
-+    descriptor.label = "Stereo image";
-+    Image image;
-+    image.memory = webgpu::g_device.ImportSharedTextureMemory(&descriptor);
-+    if (!image.memory) {
-+      Log.warn("Stereo image {} could not be imported", i);
++    descriptor.label = label;
++    memory = webgpu::g_device.ImportSharedTextureMemory(&descriptor);
++    if (!memory) {
 +      return false;
 +    }
 +    const wgpu::TextureDescriptor textureDescriptor{
-+        .label = "Stereo image",
++        .label = label,
 +        .usage = wgpu::TextureUsage::RenderAttachment,
 +        .dimension = wgpu::TextureDimension::e2D,
-+        .size = {width, height, 1},
++        .size = {w, h, 1},
 +        .format = wgpu::TextureFormat::RGBA8Unorm,
 +        .mipLevelCount = 1,
 +        .sampleCount = 1,
 +    };
-+    image.texture = image.memory.CreateTexture(&textureDescriptor);
-+    image.view = image.texture.CreateView();
++    texture = memory.CreateTexture(&textureDescriptor);
++    view = texture.CreateView();
++    return true;
++  };
++  std::vector<Image> images;
++  for (uint32_t i = 0; i < count; ++i) {
++    Image image;
++    if (!import(eyeBuffers[i], width, height, "Stereo image", image.memory, image.texture, image.view) ||
++        !import(hudBuffers[i], hudWidth, hudHeight, "Stereo HUD image", image.hudMemory, image.hudTexture,
++                image.hudView)) {
++      Log.warn("Stereo image {} could not be imported", i);
++      return false;
++    }
 +    images.push_back(std::move(image));
 +  }
 +  std::lock_guard lock{g_imagesMutex};
 +  g_images = std::move(images);
 +  g_width = width;
 +  g_height = height;
-+  g_eyeHeight = eyeHeight;
++  g_eyeHeight = height;
 +  g_hudWidth = hudWidth;
 +  g_hudHeight = hudHeight;
 +  g_callback = callback;
 +  g_callbackUser = user;
 +  g_loggedGeometry = false;
-+  g_forcedAnisotropy.store(8, std::memory_order_relaxed);
-+  Log.info("Stereo: {} images of {}x{}", count, width, height);
++  g_forcedAnisotropy.store(g_switches.anisotropy, std::memory_order_relaxed);
++  g_imagesRegistered.store(true, std::memory_order_relaxed);
++  Log.info("Stereo: {} images of {}x{}, HUD {}x{} apart", count, width, height, hudWidth, hudHeight);
 +  return true;
 +#else
-+  (void)hardwareBuffers;
++  (void)eyeBuffers;
++  (void)hudBuffers;
 +  (void)count;
 +  (void)width;
 +  (void)height;
-+  (void)eyeHeight;
 +  (void)hudWidth;
 +  (void)hudHeight;
 +  (void)callback;
@@ -779,6 +1171,7 @@
 +  // with its existing clip matrices before switching to this camera/view.
 +  gx::fifo::drain();
 +  g_worldMergeable = false;
++  refresh_switches();
 +  g_clip[0] = to_mat(clip[0]);
 +  g_clip[1] = to_mat(clip[1]);
 +  g_image = static_cast<int32_t>(image);
@@ -819,11 +1212,51 @@
 +#endif
 +}
 +
++void AuroraStereoSetHud(bool draw) {
++#if defined(__ANDROID__)
++  g_frameDrawHud = draw;
++#else
++  (void)draw;
++#endif
++}
++
 +void AuroraStereoHideScreen(bool hidden) {
 +#if defined(__ANDROID__)
 +  g_screenHidden.store(hidden, std::memory_order_relaxed);
 +#else
 +  (void)hidden;
++#endif
++}
++
++extern "C" void AuroraStereoSetSortKey(float key) {
++#if defined(__ANDROID__)
++  using namespace aurora::gfx::stereo;
++  if (key < 0.f && g_sortKey < 0.f) {
++    return;
++  }
++  // The FIFO is deferred: its draws so far belong to the previous object.
++  aurora::gx::fifo::drain();
++  g_sortKey = key < 0.f ? -1.f : key;
++  if (key >= 0.f) {
++    ++g_sortObject;
++  }
++#else
++  (void)key;
++#endif
++}
++
++extern "C" void AuroraStereoSetUncut(bool uncut) {
++#if defined(__ANDROID__)
++  if (aurora::gfx::stereo::g_uncut == uncut) {
++    return;
++  }
++  // The FIFO is deferred: its draws so far go with the previous value, and
++  // none is merged across the change.
++  aurora::gx::fifo::drain();
++  aurora::gfx::stereo::g_uncut = uncut;
++  aurora::gfx::stereo::g_worldMergeable = false;
++#else
++  (void)uncut;
 +#endif
 +}
 +
@@ -838,7 +1271,7 @@
 +}
 --- /dev/null
 +++ b/lib/gfx/stereo.hpp
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,93 @@
 +#pragma once
 +
 +// Stereo rendering for a VR headset (include/aurora/stereo.h).
@@ -846,6 +1279,7 @@
 +#include "common.hpp"
 +#include "../gx/gx.hpp"
 +#include "../gx/pipeline.hpp"
++#include "stereo_order.hpp"
 +
 +#include <string>
 +#include <vector>
@@ -857,7 +1291,10 @@
 +bool recording() noexcept;
 +// Backpressure: consume perspective vertices without uploading hidden draws.
 +bool discard_world_draw() noexcept;
-+// The game's own frame is not on show in the headset: aurora.cpp skips presenting it.
++// The game's own frame is not on show in the headset: aurora.cpp skips
++// presenting it, and gfx::finish skips its final pass. Latched once a frame
++// by gfx::finish (game thread); screen_hidden() returns that frame's value.
++bool latch_screen_hidden() noexcept;
 +bool screen_hidden() noexcept;
 +// Anisotropic filtering every mipmapped texture gets while a headset uses the
 +// eyes' images (1: the game's own choice).
@@ -894,11 +1331,13 @@
 +
 +// On the render thread: the image is about to be drawn (render pass encode),
 +// and the frame using it was just submitted (aurora.cpp).
-+void begin_access(int32_t image, uint64_t tag, bool hasWorld) noexcept;
++void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept;
 +void after_submit() noexcept;
 +
-+// What common.cpp turns into the eyes' render pass.
++// What common.cpp turns into a render pass: the eyes' (hud null), or the
++// interface's (eyes empty, image -1: the eyes' pass began the access to both).
 +struct PassDesc {
++  const char* label = "Stereo eyes";
 +  wgpu::TextureView color;
 +  wgpu::TextureView resolve;
 +  wgpu::TextureView depth;
@@ -907,18 +1346,80 @@
 +  uint32_t eyeStride = 0; // an eye's half of the image
 +  uint32_t eyeWidth = 0;  // the part of it drawn this frame (dynamic resolution)
 +  uint32_t eyeHeight = 0;
-+  uint32_t hudTop = 0;    // the interface's region starts below the eyes' halves
++  uint32_t hudTop = 0;    // eyes' pass: the image's rows (eyes centered in them); HUD pass: 0
 +  uint32_t hudWidth = 0;
 +  uint32_t hudHeight = 0;
 +  int32_t image = -1;
 +  uint64_t tag = 0;
 +  bool hasWorld = false;
++  bool drawHud = false; // eyes' pass: the HUD pass follows (access to both images)
 +  const std::vector<gx::DrawData>* eyes[2]{};
 +  // Per world draw: 1 when eyes[0]'s draw covers both eyes (two instances).
 +  const std::vector<uint8_t>* instanced = nullptr;
++  // Per world draw: its object and whether it may move (stereo_order.hpp);
++  // sortOpaque sends the sortable runs front to back.
++  const std::vector<DrawOrder>* order = nullptr;
++  bool sortOpaque = false;
 +  const std::vector<gx::DrawData>* hud = nullptr;
 +};
 +void enqueue_pass(const PassDesc& desc) noexcept; // common.cpp
++
++} // namespace aurora::gfx::stereo
+--- /dev/null
++++ b/lib/gfx/stereo_order.hpp
+@@ -0,0 +1,54 @@
++#pragma once
++
++// The order the eyes' world draws go to the GPU in (gfx/common.cpp), kept
++// free of Aurora's types so tools/tests can check it.
++//
++// A tiled GPU (the headset's Adreno) rejects hidden fragments early only
++// behind depth already written (LRZ), so opaque draws are best sent front to
++// back. The game sends them in its models' order. Only a run of consecutive
++// sortable draws is reordered: an opaque, depth-tested, depth-writing draw of
++// an object (stereo.cpp decides). Anything else stays where it is and ends
++// the run: blended draws, draws outside an object (particles, sprites), and
++// the game's own back-to-front pass. Within a run, draws go by the distance of
++// their object from the eyes, and an object's draws stay together, in order.
++
++#include <algorithm>
++#include <cstdint>
++#include <numeric>
++#include <vector>
++
++namespace aurora::gfx::stereo {
++
++struct DrawOrder {
++  float key = -1.f;     // the object's distance from the eyes; < 0: not in an object
++  uint32_t object = 0;  // which object, in the order the game drew them
++  bool sortable = false;
++};
++
++// The draws' indices in the order to draw them.
++inline std::vector<uint32_t> draw_sequence(const std::vector<DrawOrder>& order, bool sortOpaque) {
++  std::vector<uint32_t> sequence(order.size());
++  std::iota(sequence.begin(), sequence.end(), 0u);
++  if (!sortOpaque) {
++    return sequence;
++  }
++  for (size_t start = 0; start < sequence.size();) {
++    if (!order[start].sortable) {
++      ++start;
++      continue;
++    }
++    size_t end = start;
++    while (end < sequence.size() && order[end].sortable) {
++      ++end;
++    }
++    std::stable_sort(sequence.begin() + start, sequence.begin() + end, [&](uint32_t a, uint32_t b) {
++      const auto& x = order[a];
++      const auto& y = order[b];
++      return x.key < y.key || (x.key == y.key && x.object < y.object);
++    });
++    start = end;
++  }
++  return sequence;
++}
 +
 +} // namespace aurora::gfx::stereo
 --- a/lib/gx/command_processor.cpp
@@ -1067,7 +1568,15 @@
        // Texture bind unchanged
        continue;
      }
-@@ -1084,10 +1094,15 @@ static u16 wgpu_aniso(GXAnisotropy aniso) {
+@@ -860,6 +870,7 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
+   } else {
+     config.shaderConfig.lineMode = 0;
+   }
++  config.shaderConfig.halfPrecision = webgpu::g_shaderF16Enabled ? 1 : 0;
+   config.shaderConfig.tevSwapTable = g_gxState.tevSwapTable;
+   for (u8 i = 0; i < g_gxState.numTevStages; ++i) {
+     config.shaderConfig.tevStages[i] = g_gxState.tevStages[i];
+@@ -1084,10 +1095,15 @@ static u16 wgpu_aniso(GXAnisotropy aniso) {
  wgpu::SamplerDescriptor aurora::gfx::TextureBind::get_descriptor() const noexcept {
    auto [minFilter, mipFilter] = wgpu_filter_mode(texObj.min_filter());
    auto [magFilter, _] = wgpu_filter_mode(texObj.mag_filter());
@@ -1083,7 +1592,7 @@
    if (ref && ref->isReplacement) {
      minLod = 0.f;
      maxLod = 1000.f;
-@@ -1098,6 +1113,10 @@ wgpu::SamplerDescriptor aurora::gfx::TextureBind::get_descriptor() const noexcep
+@@ -1098,6 +1114,10 @@ wgpu::SamplerDescriptor aurora::gfx::TextureBind::get_descriptor() const noexcep
      minLod = 0.f;
      maxLod = 0.f;
    }
@@ -1096,19 +1605,36 @@
    } else if (maxAnisotropy > 1) {
 --- a/lib/gx/gx.hpp
 +++ b/lib/gx/gx.hpp
-@@ -465,7 +465,11 @@ struct ShaderConfig {
+@@ -456,6 +456,8 @@ struct AttrConfig {
+   bool le = true;
+   bool nbt3 = false;     // GX_NRM_NBT3
+ };
++enum : u8 { StereoOff = 0, StereoClipDistance = 1, StereoDiscard = 2, StereoUncut = 3 };
++
+ struct ShaderConfig {
+   u8 fogType = GX_FOG_NONE;
+   u8 vtxStride = 0;
+@@ -465,8 +467,18 @@ struct ShaderConfig {
    // recorded before this stay valid and the shipped cache seed is unaffected.
    u8 ztexOp : 2 = 0;
    u8 ztexFmt : 2 = 0;
 -  u8 pad1 : 2 = 0;
+-  u8 pad2 = 0;
 +  // Both of a headset's eyes in one instanced draw (gfx/stereo.cpp): instance 1
 +  // takes the right eye's projection and half of the image. Also from pad1's
 +  // spare bits: 0 everywhere else, so other pipelines keep their hash.
-+  u8 stereo : 1 = 0;
-+  u8 pad1 : 1 = 0;
-   u8 pad2 = 0;
++  // StereoClipDistance cuts each eye at its edge with a clip distance;
++  // StereoDiscard, for drivers that fail those pipelines (Adreno), with a
++  // fragment test instead; StereoUncut, for draws that cannot reach the other
++  // eye, not at all.
++  u8 stereo : 2 = 0;
++  // The TEV in half precision (shader.cpp, webgpu::g_shaderF16Enabled): from
++  // pad2's spare bits, 0 elsewhere, so other pipelines keep their hash.
++  u8 halfPrecision : 1 = 0;
++  u8 pad2 : 7 = 0;
    std::array<AttrConfig, MaxVtxAttr> attrs;
    std::array<TevSwap, MaxTevSwap> tevSwapTable;
+   std::array<TevStage, MaxTevStages> tevStages;
 --- a/lib/gx/pipeline.cpp
 +++ b/lib/gx/pipeline.cpp
 @@ -1,5 +1,6 @@
@@ -1118,26 +1644,38 @@
  #include "../webgpu/gpu.hpp"
  #include "gx_fmt.hpp"
  #include "shader_info.hpp"
-@@ -10,7 +11,26 @@ static Module Log("aurora::gx");
+@@ -10,7 +11,38 @@ static Module Log("aurora::gx");
  
  wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    ZoneScoped;
 -  const auto shader = build_shader(config.shaderConfig);
 +  if (config.shaderConfig.stereo) {
 +    // A headset's eyes in one instanced draw. Any uncaptured WebGPU error is
-+    // fatal, so this is built in an error scope: should it fail, there is no
-+    // pipeline, and stereo.cpp goes back to drawing each eye on its own.
-+    webgpu::g_device.PushErrorScope(wgpu::ErrorFilter::Validation);
++    // fatal, so this is built in error scopes: should it fail, there is no
++    // pipeline, and stereo.cpp goes back to drawing each eye on its own. A
++    // driver's own failure (Adreno's VK_ERROR_UNKNOWN) is an Internal error,
++    // not a Validation one, so every filter gets a scope.
++    constexpr wgpu::ErrorFilter kFilters[]{wgpu::ErrorFilter::Validation, wgpu::ErrorFilter::OutOfMemory,
++                                           wgpu::ErrorFilter::Internal};
++    for (const auto filter : kFilters) webgpu::g_device.PushErrorScope(filter);
 +    auto pipeline = build_pipeline(config, {}, build_shader(config.shaderConfig), "GX Stereo Pipeline");
-+    bool failed = true;
-+    std::string message = "no answer";
-+    const auto future = webgpu::g_device.PopErrorScope(
-+        wgpu::CallbackMode::WaitAnyOnly,
-+        [&](wgpu::PopErrorScopeStatus status, wgpu::ErrorType type, wgpu::StringView text) {
-+          failed = status != wgpu::PopErrorScopeStatus::Success || type != wgpu::ErrorType::NoError;
-+          message = std::string{text.data != nullptr ? std::string_view{text} : std::string_view{}};
-+        });
-+    if (webgpu::g_instance.WaitAny(future, UINT64_MAX) != wgpu::WaitStatus::Success || failed) {
++    bool failed = false;
++    std::string message;
++    for (size_t i = 0; i < std::size(kFilters); ++i) {
++      bool scopeFailed = true;
++      std::string scopeMessage = "no answer";
++      const auto future = webgpu::g_device.PopErrorScope(
++          wgpu::CallbackMode::WaitAnyOnly,
++          [&](wgpu::PopErrorScopeStatus status, wgpu::ErrorType type, wgpu::StringView text) {
++            scopeFailed = status != wgpu::PopErrorScopeStatus::Success || type != wgpu::ErrorType::NoError;
++            scopeMessage = std::string{text.data != nullptr ? std::string_view{text} : std::string_view{}};
++          });
++      if (webgpu::g_instance.WaitAny(future, UINT64_MAX) != wgpu::WaitStatus::Success || scopeFailed) {
++        failed = true;
++        if (message.empty()) message = scopeMessage;
++      }
++    }
++    if (failed) {
 +      gfx::stereo::instanced_failed(message);
 +      return {};
 +    }
@@ -1159,7 +1697,170 @@
    uint32_t msaaSamples = 1;
 --- a/lib/gx/shader.cpp
 +++ b/lib/gx/shader.cpp
-@@ -851,6 +851,28 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8
+@@ -9,9 +9,15 @@
+ #include <dolphin/gx/GXEnum.h>
+ 
+ #include <absl/container/flat_hash_set.h>
++#include <cstdlib>
++#if defined(__ANDROID__)
++#include <sys/system_properties.h>
++#endif
++#include <algorithm>
+ #include <mutex>
+ #include <string_view>
+ #include <utility>
++#include <vector>
+ 
+ #include "tracy/Tracy.hpp"
+ 
+@@ -348,8 +354,44 @@ static std::string alpha_arg_reg(GXTevAlphaArg arg, size_t stageIdx, const Shade
+   }
+ }
+ 
++// Half precision (ShaderConfig::halfPrecision, a headset's switch): the TEV's
++// registers and operations in f16, its sources (textures, rasterized colors,
++// constants) converted as they enter it. Adreno does f16 arithmetic at twice
++// the f32 rate, and the TEV's values are 8-bit colors within [-4, 4], where
++// f16 keeps 1/1024 steps at 1: a quarter of an 8-bit step. The comparisons
++// over 16 and 24 bits (past f16's 65504) and the 8-bit wrap stay in f32.
++static void replace_all(std::string& text, std::string_view from, std::string_view to) {
++  for (size_t at = text.find(from); at != std::string::npos; at = text.find(from, at + to.size())) {
++    text.replace(at, from.size(), to);
++  }
++}
++
++static bool tev_register_operand(std::string_view operand) {
++  return operand.find("prev") != std::string_view::npos || operand.find("tevreg") != std::string_view::npos;
++}
++
++// A TEV operand as color_arg_reg or alpha_arg_reg writes it, for the f16 TEV:
++// registers renamed to their f16 copies, anything else converted.
++static std::string half_operand(std::string operand, bool alpha) {
++  if (tev_register_operand(operand)) {
++    replace_all(operand, "vec3f(", "vec3h(");
++    replace_all(operand, "tevreg", "htevreg");
++    replace_all(operand, "prev", "hprev");
++    return operand;
++  }
++  return alpha ? fmt::format("f16({})", operand) : fmt::format("vec3h({})", operand);
++}
++
++// `toF32`: for the f16 TEV, what converts a and b back to f32 for the
++// comparisons ("vec3f" or "f32"); empty otherwise.
+ static std::string tev_op(GXTevOp op, std::string_view bias, std::string_view scale, std::string_view a,
+-                          std::string_view b, std::string_view c, std::string_view d, std::string_view zero) {
++                          std::string_view b, std::string_view c, std::string_view d, std::string_view zero,
++                          std::string_view toF32 = {}) {
++  std::string a32{a}, b32{b};
++  if (!toF32.empty()) {
++    a32 = fmt::format("{}({})", toF32, a);
++    b32 = fmt::format("{}({})", toF32, b);
++  }
+   switch (op) {
+     DEFAULT_FATAL("unimplemented tev op {}", underlying(op));
+   case GX_TEV_ADD:
+@@ -358,48 +400,84 @@ static std::string tev_op(GXTevOp op, std::string_view bias, std::string_view sc
+     return fmt::format("(({0}mix({1}, {2}, {3}) + {4}){5}){6}", neg, a, b, c, d, bias, scale);
+   }
+   case GX_TEV_COMP_R8_GT:
+-    return fmt::format("select({3}, {2}, round({0}.r * 255.0) > round({1}.r * 255.0)) + {4}", a, b, c, zero, d);
++    return fmt::format("select({3}, {2}, round({0}.r * 255.0) > round({1}.r * 255.0)) + {4}", a32, b32, c, zero, d);
+   case GX_TEV_COMP_R8_EQ:
+-    return fmt::format("select({3}, {2}, round({0}.r * 255.0) == round({1}.r * 255.0)) + {4}", a, b, c, zero, d);
++    return fmt::format("select({3}, {2}, round({0}.r * 255.0) == round({1}.r * 255.0)) + {4}", a32, b32, c, zero, d);
+   case GX_TEV_COMP_GR16_GT:
+     return fmt::format(
+         "select({3}, {2}, round(dot({0}.rg * 255.0, vec2(1.0, 256.0))) > round(dot({1}.rg * 255.0, vec2(1.0, 256.0))))"
+         " + {4}",
+-        a, b, c, zero, d);
++        a32, b32, c, zero, d);
+   case GX_TEV_COMP_GR16_EQ:
+     return fmt::format(
+         "select({3}, {2}, round(dot({0}.rg * 255.0, vec2(1.0, 256.0))) == round(dot({1}.rg * 255.0, vec2(1.0, 256.0))))"
+         " + {4}",
+-        a, b, c, zero, d);
++        a32, b32, c, zero, d);
+   case GX_TEV_COMP_BGR24_GT:
+     return fmt::format(
+         "select({3}, {2}, round(dot({0}.rgb * 255.0, vec3(1.0, 256.0, 65536.0))) > round(dot({1}.rgb * 255.0, "
+         "vec3(1.0, 256.0, 65536.0)))) + {4}",
+-        a, b, c, zero, d);
++        a32, b32, c, zero, d);
+   case GX_TEV_COMP_BGR24_EQ:
+     return fmt::format(
+         "select({3}, {2}, round(dot({0}.rgb * 255.0, vec3(1.0, 256.0, 65536.0))) == round(dot({1}.rgb * 255.0, "
+         "vec3(1.0, 256.0, 65536.0)))) + {4}",
+-        a, b, c, zero, d);
++        a32, b32, c, zero, d);
+   case GX_TEV_COMP_RGB8_GT:
+-    return fmt::format("select({3}, {2}, round({0} * 255.0) > round({1} * 255.0)) + {4}", a, b, c, zero, d);
++    return fmt::format("select({3}, {2}, round({0} * 255.0) > round({1} * 255.0)) + {4}", a32, b32, c, zero, d);
+   case GX_TEV_COMP_RGB8_EQ:
+-    return fmt::format("select({3}, {2}, round({0} * 255.0) == round({1} * 255.0)) + {4}", a, b, c, zero, d);
++    return fmt::format("select({3}, {2}, round({0} * 255.0) == round({1} * 255.0)) + {4}", a32, b32, c, zero, d);
+   }
+ }
+ 
++// GX's TEV inputs a, b and c are 8 bits: a register's value past that range
++// wraps, which tev_overflow_* reproduces. Textures, rasterized colors and
++// constants are 8-bit values in [0, 1] already, where the wrap changes
++// nothing, so it is left out for them: several operations fewer per operand
++// and per stage in every fragment. debug.partyboard.tev_overflow=all (Android,
++// read once) or AURORA_TEV_OVERFLOW_ALL=1 wraps every operand as before.
++static bool tev_overflow_all() {
++  static const bool all = [] {
++#if defined(__ANDROID__)
++    char value[PROP_VALUE_MAX] = {};
++    __system_property_get("debug.partyboard.tev_overflow", value);
++    return std::string_view{value} == "all";
++#else
++    const char* value = std::getenv("AURORA_TEV_OVERFLOW_ALL");
++    return value != nullptr && value[0] == '1';
++#endif
++  }();
++  return all;
++}
++
++static bool tev_may_overflow(std::string_view operand) {
++  return tev_overflow_all() || tev_register_operand(operand);
++}
++
++// `half`: the operands are f16 (half_operand); the wrap is done in f32.
+ static std::string tev_color_op(GXTevOp op, std::string_view bias, std::string_view scale, bool clamp,
+-                                std::string_view a, std::string_view b, std::string_view c, std::string_view d) {
+-  const auto overflow = [](std::string_view reg) { return fmt::format("tev_overflow_vec3f({})", reg); };
+-  std::string expr = tev_op(op, bias, scale, overflow(a), overflow(b), overflow(c), d, "vec3(0)"sv);
+-  return clamp ? fmt::format("clamp({}, vec3f(0.0), vec3f(1.0))", expr)
+-               : fmt::format("clamp({}, vec3f(-4.0), vec3f(4.0))", expr);
++                                std::string_view a, std::string_view b, std::string_view c, std::string_view d,
++                                bool half = false) {
++  const auto overflow = [half](std::string_view reg) {
++    if (!tev_may_overflow(reg)) return std::string{reg};
++    return half ? fmt::format("vec3h(tev_overflow_vec3f(vec3f({})))", reg) : fmt::format("tev_overflow_vec3f({})", reg);
++  };
++  std::string expr = tev_op(op, bias, scale, overflow(a), overflow(b), overflow(c), d,
++                            half ? "vec3h(0.0)"sv : "vec3(0)"sv, half ? "vec3f"sv : ""sv);
++  const std::string_view vec = half ? "vec3h"sv : "vec3f"sv;
++  return clamp ? fmt::format("clamp({0}, {1}(0.0), {1}(1.0))", expr, vec)
++               : fmt::format("clamp({0}, {1}(-4.0), {1}(4.0))", expr, vec);
+ }
+ 
+ static std::string tev_alpha_op(GXTevOp op, std::string_view bias, std::string_view scale, bool clamp,
+-                                std::string_view a, std::string_view b, std::string_view c, std::string_view d) {
+-  const auto overflow = [](std::string_view reg) { return fmt::format("tev_overflow_f32({})", reg); };
+-  std::string expr = tev_op(op, bias, scale, overflow(a), overflow(b), overflow(c), d, "0.0"sv);
++                                std::string_view a, std::string_view b, std::string_view c, std::string_view d,
++                                bool half = false) {
++  const auto overflow = [half](std::string_view reg) {
++    if (!tev_may_overflow(reg)) return std::string{reg};
++    return half ? fmt::format("f16(tev_overflow_f32(f32({})))", reg) : fmt::format("tev_overflow_f32({})", reg);
++  };
++  std::string expr =
++      tev_op(op, bias, scale, overflow(a), overflow(b), overflow(c), d, "0.0"sv, half ? "f32"sv : ""sv);
+   return clamp ? fmt::format("clamp({}, 0.0, 1.0)", expr) : fmt::format("clamp({}, -4.0, 4.0)", expr);
+ }
+ 
+@@ -851,6 +929,40 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8
                       alpha ? "a"sv : ""sv);
  }
  
@@ -1185,10 +1886,22 @@
 +  source.insert(0, "enable clip_distances;\n");
 +}
 +
++// StereoDiscard: the fragments of an eye's instance beyond its edge (the
++// varying's sign) are dropped first thing, before any texture or colour work.
++static void add_stereo_discard(std::string& source) noexcept {
++  constexpr std::string_view fragmentMain = "fn fs_main(in: VertexOutput)";
++  const auto main = source.find(fragmentMain);
++  const auto body = main != std::string::npos ? source.find('{', main) : std::string::npos;
++  if (body == std::string::npos) {
++    FATAL("stereo shader: fs_main not found");
++  }
++  source.insert(body + 1, "\n    if (in.stereo_side < 0.0) { discard; }");
++}
++
  std::string build_shader_source(const ShaderConfig& config) noexcept {
    ZoneScoped;
    const auto hash = xxh3_hash(config);
-@@ -1003,7 +1025,23 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+@@ -1003,7 +1115,29 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
                                    attr_load_nbt_slice(config, NbtSlice::T, vidxAttr));
    }
  
@@ -1196,8 +1909,13 @@
 +  if (config.lineMode == 0 && config.stereo) {
 +    // Both eyes in one draw: instance 1 is the right eye. The viewport spans
 +    // both eyes' rectangles; each instance is squeezed into its own and cut
-+    // at its edge (clip distance), so nothing spills into the other eye.
++    // at its edge, so nothing spills into the other eye: by a clip distance,
++    // or (StereoDiscard) by the same signed distance as a varying, tested in
++    // the fragment stage. Linear in clip space, it interpolates exactly.
 +    vtxInAttrs += ",\n    @builtin(instance_index) iidx: u32";
++    if (config.stereo == StereoDiscard) {
++      vtxOutAttrs += fmt::format("\n    @location({}) stereo_side: f32,", vtxOutIdx++);
++    }
 +    vtxXfrAttrsPre += fmt::format(
 +        "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
 +        "\n    let right_eye = iidx != 0u;"
@@ -1206,14 +1924,15 @@
 +        "\n    out.pos = vec4f(mv_pos, 1.0) * eye_proj;"
 +        "\n    let eye_x = select(ubuf.stereo_x.xy, ubuf.stereo_x.zw, right_eye);"
 +        "\n    out.pos.x = out.pos.x * eye_x.x + eye_x.y * out.pos.w;"
-+        "\n    out.stereo_clip[0] = select(ubuf.stereo_clip.x * out.pos.w - out.pos.x,"
++        "\n    {} = select(ubuf.stereo_clip.x * out.pos.w - out.pos.x,"
 +        "\n                                out.pos.x - ubuf.stereo_clip.y * out.pos.w, right_eye);",
-+        vtx_attr(config, GX_VA_POS));
++        vtx_attr(config, GX_VA_POS),
++        config.stereo == StereoDiscard ? "out.stereo_side" : config.stereo == StereoUncut ? "_" : "out.stereo_clip[0]");
 +  } else if (config.lineMode == 0) {
      vtxXfrAttrsPre += fmt::format(
          "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
          "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;",
-@@ -1051,6 +1089,13 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+@@ -1051,28 +1185,59 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
    }
  
    uniBufAttrs += "\n    proj: mat4x4f,";
@@ -1227,7 +1946,133 @@
    uniBufAttrs += fmt::format("\n    postex_mtx: array<mat3x4f, {}>,", MaxPnMtx + MaxTexMtx);
    uniBufAttrs += fmt::format("\n    nrm_mtx: array<mat3x4f, {}>,", MaxPnMtx);
    std::string fragmentFnPre;
-@@ -1632,7 +1677,7 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+   std::string fragmentFn;
+ 
++  // With half precision, the stages work on f16 copies of the registers
++  // (fragmentFnPre, above them in the shader, declares and loads the f32
++  // ones); prev goes back to f32 after the last stage, for fog, the alpha
++  // compare and the output.
++  const bool half = config.halfPrecision;
+   static std::array regName{"prev"sv, "tevreg0"sv, "tevreg1"sv, "tevreg2"sv};
++  static std::array halfRegName{"hprev"sv, "htevreg0"sv, "htevreg1"sv, "htevreg2"sv};
++  const auto& reg = half ? halfRegName : regName;
++  const std::string_view vec4 = half ? "vec4h"sv : "vec4f"sv;
++  if (half) {
++    fragmentFn += "\n    // TEV in half precision\n    var hprev = vec4h(prev);";
++    for (int i = 1 /* Skip TEVPREV */; i < info.loadsTevReg.size(); ++i) {
++      if (info.loadsTevReg.test(i) || info.writesTevReg.test(i)) {
++        fragmentFn += fmt::format("\n    var htevreg{0} = vec4h(tevreg{0});", i - 1);
++      }
++    }
++  }
++  const auto color_operand = [&](GXTevColorArg arg, u32 idx, const TevStage& stage) {
++    std::string operand = color_arg_reg(arg, idx, config, stage);
++    return half ? half_operand(std::move(operand), false) : operand;
++  };
++  const auto alpha_operand = [&](GXTevAlphaArg arg, u32 idx, const TevStage& stage) {
++    std::string operand = alpha_arg_reg(arg, idx, config, stage);
++    return half ? half_operand(std::move(operand), true) : operand;
++  };
+   for (u32 idx = 0; idx < config.tevStageCount; ++idx) {
+     const auto& stage = config.tevStages[idx];
+     {
+-      std::string_view outReg = regName[stage.colorOp.outReg];
++      std::string_view outReg = reg[stage.colorOp.outReg];
+       std::string op = tev_color_op(
+           stage.colorOp.op, tev_bias(stage.colorOp.bias), tev_scale(stage.colorOp.scale), stage.colorOp.clamp,
+-          color_arg_reg(stage.colorPass.a, idx, config, stage), color_arg_reg(stage.colorPass.b, idx, config, stage),
+-          color_arg_reg(stage.colorPass.c, idx, config, stage), color_arg_reg(stage.colorPass.d, idx, config, stage));
+-      fragmentFn += fmt::format("\n    // TEV stage {2}\n    {0} = vec4f({1}, {0}.a);", outReg, op, idx);
++          color_operand(stage.colorPass.a, idx, stage), color_operand(stage.colorPass.b, idx, stage),
++          color_operand(stage.colorPass.c, idx, stage), color_operand(stage.colorPass.d, idx, stage), half);
++      fragmentFn += fmt::format("\n    // TEV stage {2}\n    {0} = {3}({1}, {0}.a);", outReg, op, idx, vec4);
+     }
+     {
+-      std::string_view outReg = regName[stage.alphaOp.outReg];
++      std::string_view outReg = reg[stage.alphaOp.outReg];
+       std::string op = tev_alpha_op(
+           stage.alphaOp.op, tev_bias(stage.alphaOp.bias), tev_scale(stage.alphaOp.scale), stage.alphaOp.clamp,
+-          alpha_arg_reg(stage.alphaPass.a, idx, config, stage), alpha_arg_reg(stage.alphaPass.b, idx, config, stage),
+-          alpha_arg_reg(stage.alphaPass.c, idx, config, stage), alpha_arg_reg(stage.alphaPass.d, idx, config, stage));
++          alpha_operand(stage.alphaPass.a, idx, stage), alpha_operand(stage.alphaPass.b, idx, stage),
++          alpha_operand(stage.alphaPass.c, idx, stage), alpha_operand(stage.alphaPass.d, idx, stage), half);
+       fragmentFn += fmt::format("\n    {0}.a = {1};", outReg, op);
+     }
+   }
+@@ -1080,10 +1245,13 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+   {
+     const auto& lastStage = config.tevStages[config.tevStageCount - 1];
+     if (lastStage.colorOp.outReg != 0) {
+-      fragmentFn += fmt::format("\n    prev = vec4f({0}.rgb, prev.a);", regName[lastStage.colorOp.outReg]);
++      fragmentFn += fmt::format("\n    {1} = {2}({0}.rgb, {1}.a);", reg[lastStage.colorOp.outReg], reg[0], vec4);
+     }
+     if (lastStage.alphaOp.outReg != 0) {
+-      fragmentFn += fmt::format("\n    prev.a = {0}.a;", regName[lastStage.alphaOp.outReg]);
++      fragmentFn += fmt::format("\n    {1}.a = {0}.a;", reg[lastStage.alphaOp.outReg], reg[0]);
++    }
++    if (half) {
++      fragmentFn += "\n    prev = vec4f(hprev);";
+     }
+   }
+ 
+@@ -1313,6 +1481,10 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+   }
+   const int zTexStage = ztex_source_stage(config);
+   int lastSampledStage = -1;
++  // A texture already sampled at the same coordinates by an earlier stage is
++  // not sampled again: the same texture, sampler, coordinates and bias give
++  // the same value.
++  std::vector<std::pair<std::string, int>> sampledAt;
+   for (int i = 0; i < config.tevStageCount; ++i) {
+     const auto& stage = config.tevStages[i];
+     const bool needsIndirectCoord = stage.indTexMtxId != GX_ITM_OFF;
+@@ -1486,9 +1658,16 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+       // No indirect texturing
+       uvIn = fmt::format("tex{0}_uv", underlying(stage.texCoordId));
+     }
+-    fragmentFnPre +=
+-        fmt::format("\n    var sampled{0} = textureSampleBias(tex{1}, tex{1}_samp, {2}, ubuf.tex{1}_size_bias.z);", i,
+-                    underlying(stage.texMapId), uvIn);
++    const auto sampleKey = fmt::format("{}|{}", underlying(stage.texMapId), uvIn);
++    const auto earlier = std::ranges::find(sampledAt, sampleKey, &std::pair<std::string, int>::first);
++    if (!tev_overflow_all() && uvIn.starts_with("tex") && earlier != sampledAt.end()) {
++      fragmentFnPre += fmt::format("\n    var sampled{0} = sampled{1};", i, earlier->second);
++    } else {
++      fragmentFnPre +=
++          fmt::format("\n    var sampled{0} = textureSampleBias(tex{1}, tex{1}_samp, {2}, ubuf.tex{1}_size_bias.z);", i,
++                      underlying(stage.texMapId), uvIn);
++      sampledAt.emplace_back(sampleKey, i);
++    }
+     // GX takes the z texture from the last stage that sampled one.
+     lastSampledStage = i;
+   }
+@@ -1598,7 +1777,24 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+         "var tex{0}_samp: sampler;",
+         i, i * 2, i * 2 + 1);
+   }
+-  fragmentFn += "\n    prev = tev_overflow_vec4f(prev);";
++  // prev's final 8 bits. When the last stages writing it clamp their color and
++  // alpha, prev is in [0, 1] already (fog mixes it with a color in [0, 1]),
++  // where the wrap changes nothing.
++  bool prevClamped = true;
++  for (int i = static_cast<int>(config.tevStageCount) - 1, color = 0, alpha = 0; i >= 0 && (!color || !alpha); --i) {
++    const auto& stage = config.tevStages[i];
++    if (!color && stage.colorOp.outReg == GX_TEVPREV) {
++      color = 1;
++      prevClamped = prevClamped && stage.colorOp.clamp;
++    }
++    if (!alpha && stage.alphaOp.outReg == GX_TEVPREV) {
++      alpha = 1;
++      prevClamped = prevClamped && stage.alphaOp.clamp;
++    }
++  }
++  if (!prevClamped || tev_overflow_all()) {
++    fragmentFn += "\n    prev = tev_overflow_vec4f(prev);";
++  }
+   if (config.alphaCompare) {
+     const auto comp0 = alpha_compare(config.alphaCompare.comp0, config.alphaCompare.ref0);
+     const auto comp1 = alpha_compare(config.alphaCompare.comp1, config.alphaCompare.ref1);
+@@ -1632,7 +1828,7 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
      fragmentFn += "\n    prev = vec4f(in.nrm, prev.a);";
    }
  
@@ -1236,12 +2081,17 @@
  fn bswap32(v: u32, le: bool) -> u32 {{
    if (le) {{
      return v;
-@@ -1997,6 +2042,9 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
+@@ -1997,6 +2193,14 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
                                          uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn,
                                          fragmentFnPre, vtxXfrAttrsPre, uniformPre, fragOutStruct, fragRetType,
                                          fragRetStmt);
-+  if (config.stereo) {
++  if (config.stereo == StereoClipDistance) {
 +    add_stereo_clip_distance(shaderSource);
++  } else if (config.stereo == StereoDiscard) {
++    add_stereo_discard(shaderSource);
++  }
++  if (config.halfPrecision) {
++    shaderSource.insert(0, "enable f16;\n");
 +  }
    if (EnableDebugPrints) {
      Log.info("Generated shader: {}", shaderSource);

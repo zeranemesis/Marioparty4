@@ -36,6 +36,18 @@
        switch (surfaceStatus) {
        case wgpu::SurfaceGetCurrentTextureStatus::Timeout:
          Log.warn("Surface texture acquisition timed out");
+@@ -422,7 +422,10 @@ void end_frame() noexcept {
+         break;
+       case wgpu::SurfaceGetCurrentTextureStatus::Error:
+         Log.warn("Surface texture is {}, dropping surface", magic_enum::enum_name(surfaceStatus));
+-        g_surface = {};
++        // Unconfigured too, as for Lost: a swapchain left configured keeps the
++        // Android window connected, and the next surface created for it on
++        // resume fails with VK_ERROR_NATIVE_WINDOW_IN_USE_KHR (device lost).
++        webgpu::release_surface();
+         break;
+       default:
+         if (!window::is_presentable()) {
 --- /dev/null
 +++ b/lib/surface_lifecycle.hpp
 @@ -0,0 +1,26 @@
@@ -75,7 +87,42 @@
  wgpu::BackendType g_backendType;
  GraphicsConfig g_graphicsConfig;
  TextureWithSampler g_frameBuffer;
-@@ -830,6 +831,8 @@ static bool create_surface() {
+@@ -809,6 +810,28 @@ static wgpu::BackendType to_wgpu_backend(AuroraBackend backend) {
+   }
+ }
+ 
++// Dawn destroys an unconfigured swapchain only once the GPU has finished the
++// submission that follows it. In the background nothing is submitted, so on
++// resume the old swapchain was still alive and connected to the Android
++// window. The new surface for that window then failed with
++// VK_ERROR_NATIVE_WINDOW_IN_USE_KHR, a lost device: at every resume after a
++// pause on the Quest 3, whose flat screen is one window kept for the whole
++// session (2026-09-27 and 28). Submit an empty command buffer, wait for it and
++// tick the device, so the released swapchain is gone before a new surface.
++static void flush_released_surfaces() {
++  if (!g_device || !g_queue) {
++    return;
++  }
++  const wgpu::CommandEncoderDescriptor encoderDescriptor{.label = "Surface release flush"};
++  auto encoder = g_device.CreateCommandEncoder(&encoderDescriptor);
++  const auto commands = encoder.Finish();
++  g_queue.Submit(1, &commands);
++  const auto future = g_queue.OnSubmittedWorkDone(wgpu::CallbackMode::WaitAnyOnly,
++                                                  [](wgpu::QueueWorkDoneStatus, wgpu::StringView) {});
++  g_instance.WaitAny(future, UINT64_MAX);
++  g_device.Tick();
++}
++
+ static bool create_surface() {
+   SDL_Window* window = window::get_sdl_window();
+   if (window == nullptr) {
+@@ -825,11 +848,14 @@ static bool create_surface() {
+       .label = "Surface",
+   };
+   release_surface();
++  flush_released_surfaces();
+   g_surface = g_instance.CreateSurface(&surfaceDescriptor);
+   if (!g_surface) {
      Log.error("Failed to create surface");
      return false;
    }
@@ -84,7 +131,7 @@
    return true;
  }
  
-@@ -1189,6 +1192,10 @@ void release_surface() noexcept {
+@@ -1189,6 +1215,10 @@ void release_surface() noexcept {
    g_surface = {};
  }
  
@@ -95,7 +142,7 @@
  bool refresh_surface(bool recreate) {
    gfx::gpu_synchronize();
    if (!g_instance || !g_device) {
-@@ -1198,7 +1205,7 @@ bool refresh_surface(bool recreate) {
+@@ -1198,7 +1228,7 @@ bool refresh_surface(bool recreate) {
      release_surface();
      return false;
    }
@@ -104,7 +151,7 @@
      return false;
    }
    uint32_t width = g_graphicsConfig.surfaceConfiguration.width;
-@@ -1220,9 +1227,13 @@ bool refresh_surface(bool recreate) {
+@@ -1220,9 +1250,13 @@ bool refresh_surface(bool recreate) {
  
  void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, uint32_t native_height, bool force) {
    gfx::gpu_synchronize();

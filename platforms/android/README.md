@@ -115,6 +115,9 @@ changes.
   (`XR_FB_spatial_entity`), so it stays on the real table from one session to
   the next; `files/quest_table.txt` keeps it with the size, resolution and
   room visibility.
+- `table_scene.cpp`: the tables of the headset's room scan (`XR_FB_scene`,
+  Space Setup), read with the "spatial data" permission
+  (`com.oculus.permission.USE_SCENE`, asked when the table calibration opens).
 - `org/libsdl/app/QuestControllers.java`: the controllers as one SDL gamepad
   ("Meta Quest Touch"), and the game's rumble on both controllers.
 - The manifest's `com.oculus.intent.category.VR` starts the game immersive on
@@ -125,8 +128,19 @@ changes.
 The experimental 3D diorama draws camera 0's perspective geometry for each
 eye at the table anchor. The original screen remains behind it for menus,
 text and scenes using other cameras. This is not yet a complete conversion
-of all boards and minigames. Table placement is manual; no table detection
-or real-world occlusion is implemented.
+of all boards and minigames. No real-world occlusion is implemented.
+
+Before the first board or minigame, while no table is calibrated (or the saved
+one is out of reach), the game waits (`src/game/objmain.c`,
+`PartyBoard_QuestHoldOverlay`) on a panel: lay the right controller flat at the
+middle of the table, its front toward you, and press X. The table of the room
+scan under the controller gives the model's height and size: the scene spans
+the table from the controller to its nearest edge. A opens Space Setup to scan
+the room (Quest 3 finds the tables; on Quest 2 you draw them), B puts the
+calibration off until the next session. Without a scanned table, or without
+the permission, the controller alone measures the height and the size stays
+the left thumbstick's. An online game never waits; its first 3D scene opens
+the same panel.
 
 Minigames m401–m463 use their initial camera framing as a provisional scale
 and center, frozen until the overlay changes. Board maps retain their world
@@ -143,6 +157,7 @@ The screen turns blue and the game waits meanwhile.
 | Right thumbstick ↕ / ↔ | Size / turn |
 | Left thumbstick ↕ / ↔ | Height / diorama scale |
 | Left thumbstick click | Enable or disable the 3D diorama (during placement) |
+| Left grip | Minigames on the board's screen, seen as their camera sees them, or on the table |
 | X | Room visible (mixed reality) or not |
 | Y | Resolution: 1080p, 1440p, 4K (3840×2160), live |
 | A, B, menu or right thumbstick click | Done |
@@ -251,7 +266,9 @@ two emulators can play through the host PC's port forwarding.
 The experimental spatial renderer currently enables only w01�w06 and m401�m463.
 Title/selection/instruction scenes retain the original screen composition.
 Once a world image is presented, the classic screen is hidden; original orthographic
-sprites/messages are placed on a spatial panel. This is a compatibility bridge,
+sprites/messages are placed on a screen raised at the back of the board, facing
+the player like a stadium's (`hud_pose` in quest_xr.cpp, drawn over the model with
+a dark face and a bezel, StereoView::hud_screen_layer). This is a compatibility bridge,
 not a completed MR interface; multicamera games and per-draw clipping still need validation.
 Eye images use a 0.5 resolution scale and new placements default to a 1080p screen.
 
@@ -261,9 +278,16 @@ sequenced music runs, `sequence_diagnostic.log` in the private files directory.
 Use a fresh ordinary launch to disable this opt-in diagnostic mode.
 
 The board's playable-space bounds determine its initial center, scale and lowest
-surface. Later game-camera pans, rotations and zoom-distance changes move the
-board relative to that initial view. This behavior follows the game rather than
-keeping the diorama fixed. Field-of-view changes are not yet reproduced.
+surface. The game camera itself is cancelled (the headset is the viewpoint) and
+a board never moves: sliding or turning it with the turns made the player sick.
+A minigame floats where the board's screen stands, without its face, facing the
+player's eyes as they are when it starts, as wide as the screen; it is turned so
+the player sees the arena from its camera's side and height, once the camera
+rests for 0.4 s (changes under 8 degrees and fly-overs are ignored), so the
+stick's "up" goes away from the player as on the screen. The table stays empty
+meanwhile. Zoom and field of view are not reproduced.
+`include/port/quest_camera_follow.hpp` has the filter,
+`tools/test_quest_table_follow.ps1` tests it with the table fit.
 
 Stereo source images remain leased while an asynchronous GL copy fence is pending.
 Older submitted images are reclaimed only after their Aurora fence signals.

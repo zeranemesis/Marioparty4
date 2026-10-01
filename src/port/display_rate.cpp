@@ -31,6 +31,23 @@ int headset_frame_rate()
     return 0;
 }
 
+int64_t headset_frame_start([[maybe_unused]] int64_t nowNs, [[maybe_unused]] int targetFps)
+{
+#ifdef __ANDROID__
+    using StartFn = int64_t (*)(int64_t, float);
+    static StartFn start = nullptr;
+    if (!start) {
+        void *library = dlopen("libpartyboard_quest.so", RTLD_NOW | RTLD_NOLOAD);
+        if (library) {
+            start = reinterpret_cast<StartFn>(dlsym(library, "PartyBoardQuest_NextFrameStart"));
+            dlclose(library);
+        }
+    }
+    if (start) return start(nowNs, static_cast<float>(targetFps));
+#endif
+    return 0;
+}
+
 std::vector<int> supported_refresh_rates()
 {
     std::vector<int> rates;

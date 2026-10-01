@@ -7,7 +7,9 @@
 #include "gfx/stereo.hpp"
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 #include <cstdio>
@@ -68,11 +70,13 @@ static int render_scene(const std::string& dir) {
   config.vtxStride = 16;
   config.colorChannels[0].matSrc = GX_SRC_VTX;
   config.colorChannels[1].matSrc = GX_SRC_VTX;
-  for (int stereo = 0; stereo < 2; ++stereo) {
-    config.stereo = stereo;
-    write(dir + (stereo ? "/scene-stereo.wgsl" : "/scene.wgsl"), build_shader_source(config));
-  }
-  config.stereo = 0;
+  config.stereo = StereoOff;
+  write(dir + "/scene.wgsl", build_shader_source(config));
+  config.stereo = StereoClipDistance;
+  write(dir + "/scene-stereo.wgsl", build_shader_source(config));
+  config.stereo = StereoDiscard;
+  write(dir + "/scene-stereo-discard.wgsl", build_shader_source(config));
+  config.stereo = StereoOff;
 
   // The grid: x in [-1.8, 1.8], y in [-0.95, 0.95], depth 0..2 across x.
   std::vector<uint8_t> verts;
@@ -132,7 +136,67 @@ static int render_scene(const std::string& dir) {
     build_uniform_stereo_instanced(build_shader_info(config), 0, ranges, left, right, eyeX, eyeClip);
     write_bytes(dir + "/scene-both-" + std::to_string(strides[i]) + ".bin", pushed[0].data(), pushed[0].size());
   }
-  std::ofstream params(dir + "/scene.txt");
+  // The same grid with its vertex colours as a TEV "b" input (a lerp towards
+  // them by 1.0), where tev_overflow_* applies: written with the operand
+  // wrap left out (the default) or, under AURORA_TEV_OVERFLOW_ALL=1, with it.
+  // render.exe draws both and wants the same image.
+  {
+    auto tev = config;
+    tev.stereo = 0;
+    auto& stage = tev.tevStages[0];
+    stage.colorPass = {GX_CC_ZERO, GX_CC_RASC, GX_CC_ONE, GX_CC_ZERO};
+    stage.alphaPass = {GX_CA_ZERO, GX_CA_RASA, GX_CA_KONST, GX_CA_ZERO};
+    stage.kaSel = GX_TEV_KASEL_8_8;
+    const char* all = std::getenv("AURORA_TEV_OVERFLOW_ALL");
+    const bool wrapAll = all != nullptr && all[0] == '1';
+    write(dir + (wrapAll ? "/scene-tev-old.wgsl" : "/scene-tev.wgsl"), build_shader_source(tev));
+    state.proj = left; // the per-eye path's projection
+    pushed.clear();
+    build_uniform(build_shader_info(tev), 0, ranges);
+    write_bytes(dir + "/scene-tev-left.bin", pushed[0].data(), pushed[0].size());
+    // The same TEV in half precision: render.exe compares it with f32.
+    if (!wrapAll) {
+      tev.halfPrecision = 1;
+      write(dir + "/scene-tev-f16.wgsl", build_shader_source(tev));
+    }
+  }
+  // Three TEV stages through what half precision could get wrong: a konst
+  // color, bias and scale without clamping (so the 8-bit wrap of tevreg0 when
+  // it is read back), a subtraction, and an 8-bit comparison. Written in f32
+  // and in f16 for render.exe.
+  {
+    auto ops = config;
+    ops.stereo = 0;
+    ops.tevStageCount = 3;
+    state.kcolors[0] = aurora::Vec4<float>{0.8f, 0.3f, 0.6f, 0.5f};
+    auto& s0 = ops.tevStages[0];
+    s0.colorPass = {GX_CC_RASC, GX_CC_KONST, GX_CC_HALF, GX_CC_ZERO};
+    s0.alphaPass = {GX_CA_RASA, GX_CA_KONST, GX_CA_ZERO, GX_CA_ZERO};
+    s0.kcSel = GX_TEV_KCSEL_K0;
+    s0.kaSel = GX_TEV_KASEL_K0_A;
+    s0.colorOp = {GX_TEV_ADD, GX_TB_SUBHALF, GX_CS_SCALE_2, GX_TEVREG0, false};
+    s0.alphaOp = {GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TEVREG0, true};
+    auto& s1 = ops.tevStages[1];
+    s1 = s0;
+    s1.colorPass = {GX_CC_C0, GX_CC_RASC, GX_CC_RASC, GX_CC_ZERO};
+    s1.alphaPass = {GX_CA_A0, GX_CA_RASA, GX_CA_RASA, GX_CA_ZERO};
+    s1.colorOp = {GX_TEV_SUB, GX_TB_ADDHALF, GX_CS_SCALE_1, GX_TEVPREV, true};
+    s1.alphaOp = {GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TEVPREV, true};
+    auto& s2 = ops.tevStages[2];
+    s2 = s0;
+    s2.colorPass = {GX_CC_CPREV, GX_CC_C0, GX_CC_HALF, GX_CC_CPREV};
+    s2.alphaPass = {GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV};
+    s2.colorOp = {GX_TEV_COMP_RGB8_GT, GX_TB_ZERO, GX_CS_SCALE_1, GX_TEVPREV, true};
+    s2.alphaOp = {GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TEVPREV, true};
+    write(dir + "/scene-tevops.wgsl", build_shader_source(ops));
+    ops.halfPrecision = 1;
+    write(dir + "/scene-tevops-f16.wgsl", build_shader_source(ops));
+    ops.halfPrecision = 0;
+    state.proj = left;
+    pushed.clear();
+    build_uniform(build_shader_info(ops), 0, ranges);
+    write_bytes(dir + "/scene-tevops-left.bin", pushed[0].data(), pushed[0].size());
+  }  std::ofstream params(dir + "/scene.txt");
   params << verts.size() / 16 << ' ' << eyeWidth << ' ' << height << ' ' << strides[0] << ' ' << strides[1] << '\n';
   std::printf("scene: %zu vertices\n", verts.size() / 16);
   return 0;
@@ -145,10 +209,21 @@ int main(int argc, char** argv) {
   }
   int written = 0;
   const auto emit = [&](const char* name, ShaderConfig config) {
-    for (int stereo = 0; stereo < 2; ++stereo) {
+    for (const auto [stereo, suffix] : {std::pair{StereoOff, ".wgsl"}, std::pair{StereoClipDistance, "-stereo.wgsl"},
+                                        std::pair{StereoDiscard, "-stereo-discard.wgsl"},
+                                        std::pair{StereoUncut, "-stereo-uncut.wgsl"}}) {
       config.stereo = stereo;
-      write(dir + "/" + name + (stereo ? "-stereo.wgsl" : ".wgsl"), build_shader_source(config));
+      config.halfPrecision = 0;
+      write(dir + "/" + name + suffix, build_shader_source(config));
       ++written;
+      // The headset's variants with the TEV in half precision (-f16: validate.exe
+      // needs a device with f16 for them).
+      if (stereo != StereoClipDistance) {
+        config.halfPrecision = 1;
+        const std::string half = std::string{suffix}.replace(std::string{suffix}.rfind(".wgsl"), 5, "-f16.wgsl");
+        write(dir + "/" + name + half, build_shader_source(config));
+        ++written;
+      }
     }
   };
 
@@ -179,6 +254,15 @@ int main(int argc, char** argv) {
     config.fogType = GX_FOG_PERSP_EXP;
     config.alphaCompare = {GX_GREATER, 0, GX_AOP_AND, GX_ALWAYS, 0};
     emit("textured-fog-alpha", config);
+
+    // Two stages reading the same texture at the same coordinates: the second
+    // reuses the first sample (shader.cpp).
+    config.tevStageCount = 2;
+    auto& second = config.tevStages[1];
+    second = config.tevStages[0];
+    second.colorPass = {GX_CC_CPREV, GX_CC_TEXC, GX_CC_HALF, GX_CC_ZERO};
+    second.alphaPass = {GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV};
+    emit("textured-two-stages", config);
   }
 
   {

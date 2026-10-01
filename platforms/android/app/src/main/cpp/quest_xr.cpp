@@ -12,6 +12,11 @@
 // standing on the table (a spatial anchor, table_anchor.cpp), and the
 // placement help while the player moves it.
 //
+// Before the first board or minigame, while the table is not calibrated, the
+// game waits (PartyBoardQuest_TableSetupHold) for the player to lay the right
+// controller at the table's center. The table of the headset's room scan
+// under it (table_scene.cpp) gives the height and the model's size.
+//
 // Everything OpenXR runs on one thread, started by nativeStart: set-up, the
 // frame loop and tear-down. The controllers go to Java (QuestVr.onControllers),
 // which presents them to SDL as a gamepad.
@@ -19,18 +24,26 @@
 #include "perf_metrics.hpp"
 #include "stereo_view.hpp"
 #include "table_anchor.hpp"
+#include "table_fit.hpp"
+#include "table_scene.hpp"
 #include "xr_util.hpp"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <sys/system_properties.h>
 
 using namespace quest;
 
@@ -41,6 +54,15 @@ constexpr float kScreenLiftMeters = 0.02f;
 // Before any placement: in front of the player, a little below the eyes.
 constexpr float kDefaultDistanceMeters = 1.1f;
 constexpr float kDefaultDropMeters = 0.35f;
+// A saved table farther than this from the player at startup, or this far
+// below the eyes, is out of reach (another room, a reset boundary, a table
+// set on the floor): the screen would stand out of sight, on black.
+constexpr float kReachableTableMeters = 3.0f;
+constexpr float kTableBelowEyesMeters = 1.5f;
+// Nor is a table this close to the floor, or under it: on 2026-09-28 a place
+// saved before Space Setup came back 16 cm under the floor, and the model with it.
+constexpr float kLowestTableMeters = 0.2f;
+constexpr XrDuration kPlacementCheckDuration = 10'000'000'000; // the anchor loads meanwhile
 // With the model on the table, the flat screen (text, menus, split-screen
 // minigames) stands behind it.
 constexpr float kScreenBehindModelMeters = 0.45f;
@@ -56,6 +78,18 @@ constexpr float kMinModelScale = 0.00003f;
 constexpr float kMaxModelScale = 0.002f;
 constexpr float kMinScreenWidth = 0.3f;
 constexpr float kMaxScreenWidth = 4.0f;
+
+// With the model on the table, the game's interface (scores, messages) shows
+// on a screen at the back of the model, facing the player, like a stadium's:
+// wider than the scene and raised above it, where the eyes already look,
+// instead of a panel fixed to the head. At the table's height it stood behind
+// the board's scenery (terrain and sea go well past the spaces) and could not
+// be seen (2026-09-28).
+constexpr float kHudBehindSceneMeters = 0.10f; // from the scene's far edge
+constexpr float kHudLiftMeters = 0.22f;        // the interface's bottom edge, above the table
+constexpr float kHudWidthPerScene = 1.3f;
+constexpr float kMinHudWidth = 0.9f;
+constexpr float kMaxHudWidth = 1.6f;
 
 // The placement help, drawn by QuestVr.drawHelp, floats below the line of sight.
 constexpr int kHelpWidthPixels = 1024;
@@ -93,6 +127,7 @@ struct Java {
   jmethodID onSessionState = nullptr;
   jmethodID onControllers = nullptr;
   jmethodID onExit = nullptr;
+  jmethodID requestScenePermission = nullptr;
 };
 
 struct Actions {
@@ -142,6 +177,8 @@ struct Extensions {
   bool imageLayout = false;
   bool anchors = false;
   bool perfMetrics = false;
+  bool scene = false;        // the room scan's tables
+  bool sceneCapture = false; // opening Space Setup from the game
 };
 
 struct App {
@@ -154,6 +191,7 @@ struct App {
   Egl egl;
   Actions actions;
   XrSpace stage = XR_NULL_HANDLE; // the room's floor; LOCAL without a play area
+  bool stageIsFloor = false;      // STAGE: y = 0 is the floor
   XrSpace view = XR_NULL_HANDLE;  // the head
   Passthrough passthrough;
   PFN_xrRequestDisplayRefreshRateFB requestRefreshRate = nullptr;
@@ -167,12 +205,30 @@ struct App {
   std::string statePath;
   TableSettings table;
   TableAnchor anchor;
+  TableScene scene;  // the tables of the headset's room scan
   StereoView stereo; // the game's world as a model on the table
+  bool modelAvailable = false; // the stereo images exist: the model can show
   XrPosef pose = identity_pose(); // the anchor point, in STAGE space
   bool poseKnown = false;
+  // The saved place was out of reach at startup: the screen stands in front
+  // of the player for this session, until a new placement or calibration.
+  bool savedPlaceIgnored = false;
+  // A minigame's place, where the board's screen stands, taken when it starts.
+  bool minigamePlaced = false;
+  XrPosef minigamePose = identity_pose();
+  float minigameScale = 0.0f;
+  XrTime firstFrameTime = 0;
+  // The eyes' height (STAGE) the flat screen is raised to at least: taken
+  // while placing or calibrating, and once at startup (NaN until then).
+  float screenEyeHeight = std::numeric_limits<float>::quiet_NaN();
   bool calibrating = false;
   bool calibrationConfirmed = false;
   bool calibrationConfirmArmed = false;
+  bool scanArmed = false;           // A (scan the room) was released since the panel opened
+  bool skipArmed = false;           // B (later) too
+  bool calibrationSkipped = false;  // B: not before the next session
+  bool permissionRequested = false; // the spatial data permission, asked once a session
+  int shownSceneState = -1;         // TableScene::State on the panel
   std::deque<XrPosef> calibrationSamples;
   XrTime calibrationStableSince = 0;
 
@@ -180,6 +236,7 @@ struct App {
   bool grabbing = false;
   bool triggerHeld = false;
   bool leftTriggerHeld = false;
+  bool leftGripHeld = false;
   XrPosef grabOffset = identity_pose();
   int previousButtons = 0;
   int suppressedButtons = 0; // held when placement ended: the game waits for their release
@@ -202,6 +259,19 @@ std::atomic_uint g_rumbleSerial = 0;
 
 // Frame pacing and the headset's counters: logged, and read by the placement panel.
 PerfMetrics g_perf;
+
+// The spatial data permission (QuestVr): -1 not known yet, 0 refused, 1 granted.
+std::atomic_int g_scenePermission = -1;
+
+// The table set-up the game waits for (PartyBoardQuest_TableSetupHold, the
+// game thread) and the XR thread runs. Needed: no calibrated table yet, and
+// not put off (B) this session. Open: the calibration panel is up.
+std::atomic_bool g_setupNeeded = false;
+std::atomic_bool g_setupOpen = false;
+std::atomic_bool g_setupRequested = false;
+
+// The model follows the game camera (PartyBoardQuest_StereoFollowCamera).
+std::atomic_bool g_followCamera = true;
 
 void clear_exception(JNIEnv* env) {
   if (env->ExceptionCheck()) {
@@ -271,7 +341,17 @@ bool create_instance(App& app) {
                                     [&](const char* name) { return has_extension(available, name); });
   if (ext.anchors) {
     enabled.insert(enabled.end(), std::begin(TableAnchor::kExtensions), std::end(TableAnchor::kExtensions));
+    // The room scan's entities are queried like the anchors.
+    ext.scene = optional(TableScene::kExtension);
+    ext.sceneCapture = ext.scene && optional(TableScene::kCaptureExtension);
   }
+
+  // Not enabled: whether the runtime could take the eyes' depth (reprojection
+  // of the head's translation) or motion vectors (Application SpaceWarp), the
+  // next step against judder if 72 Hz cannot hold (docs/quest-optimization.md).
+  LOGI("Reprojection: depth submission %s, space warp %s",
+       has_extension(available, XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME) ? "offered" : "not offered",
+       has_extension(available, XR_FB_SPACE_WARP_EXTENSION_NAME) ? "offered" : "not offered");
 
   XrInstanceCreateInfoAndroidKHR android{XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
   android.applicationVM = g_java.vm;
@@ -313,8 +393,35 @@ bool create_egl(Egl& egl) {
     LOGW("No EGL config");
     return false;
   }
+  // The copies into the headset's images run on this context. On the board
+  // the headset predicted its frames about 70 ms ahead (VrApi Prd), up from
+  // 18 ms in the menus: these copies waited behind the game's rendering on
+  // the GPU. A high-priority context lets them go first where the driver
+  // allows it (EGL_IMG_context_priority). debug.partyboard.xr_priority
+  // medium|off, read at startup, for an A/B.
+  constexpr EGLint kPriorityLevel = 0x3100; // EGL_CONTEXT_PRIORITY_LEVEL_IMG
+  constexpr EGLint kPriorityHigh = 0x3101, kPriorityMedium = 0x3102;
+  char priority[PROP_VALUE_MAX] = {};
+  __system_property_get("debug.partyboard.xr_priority", priority);
+  const char* extensions = eglQueryString(egl.display, EGL_EXTENSIONS);
+  const bool canPrioritize = extensions != nullptr && std::strstr(extensions, "EGL_IMG_context_priority") != nullptr;
+  const EGLint wanted = std::strcmp(priority, "off") == 0 ? 0 : std::strcmp(priority, "medium") == 0 ? kPriorityMedium
+                                                                                                       : kPriorityHigh;
+  const EGLint prioritized[] = {EGL_CONTEXT_CLIENT_VERSION, 3, kPriorityLevel, wanted, EGL_NONE};
   const EGLint contextAttributes[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
-  egl.context = eglCreateContext(egl.display, egl.config, EGL_NO_CONTEXT, contextAttributes);
+  egl.context = eglCreateContext(egl.display, egl.config, EGL_NO_CONTEXT,
+                                 canPrioritize && wanted != 0 ? prioritized : contextAttributes);
+  if (egl.context == EGL_NO_CONTEXT && canPrioritize && wanted != 0) {
+    egl.context = eglCreateContext(egl.display, egl.config, EGL_NO_CONTEXT, contextAttributes);
+  }
+  EGLint obtained = 0;
+  if (egl.context != EGL_NO_CONTEXT && canPrioritize) {
+    eglQueryContext(egl.display, egl.context, kPriorityLevel, &obtained);
+  }
+  LOGI("XR GL context priority: asked %s, got %s (debug.partyboard.xr_priority=%s)",
+       !canPrioritize ? "nothing (no EGL_IMG_context_priority)" : wanted == kPriorityHigh ? "high" : wanted ? "medium" : "default",
+       obtained == kPriorityHigh ? "high" : obtained == kPriorityMedium ? "medium" : obtained == 0x3103 ? "low" : "default",
+       priority[0] != '\0' ? priority : "unset");
   const EGLint pbufferAttributes[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
   egl.pbuffer = eglCreatePbufferSurface(egl.display, egl.config, pbufferAttributes);
   if (egl.context == EGL_NO_CONTEXT || egl.pbuffer == EGL_NO_SURFACE ||
@@ -370,7 +477,8 @@ bool create_session(App& app) {
   }
 
   // STAGE is the room's floor: it stays put when the player recenters.
-  if (!create_reference_space(app, XR_REFERENCE_SPACE_TYPE_STAGE, app.stage)) {
+  app.stageIsFloor = create_reference_space(app, XR_REFERENCE_SPACE_TYPE_STAGE, app.stage);
+  if (!app.stageIsFloor) {
     LOGW("No STAGE space: placing relative to the start position");
     if (!create_reference_space(app, XR_REFERENCE_SPACE_TYPE_LOCAL, app.stage)) {
       return false;
@@ -572,6 +680,35 @@ void set_passthrough(App& app, bool on) {
   }
 }
 
+// The display rate to ask for, among those the headset offers: the fastest,
+// or `adb shell setprop debug.partyboard.display_hz 72` (72, 80, 90, 120: the
+// offered rate closest to it). The game then renders at that rate below
+// 110 Hz, every displayed image a new one, and at half of it from 110 Hz up
+// (src/port/imgui.cpp). At 120 Hz each image is shown twice, and the
+// compositor, which corrects the head's rotation but not its translation,
+// makes a nearby board judder when the head moves (2026-09-28); 72 Hz shows
+// each image once and leaves the compositor half the work.
+float preferred_refresh_rate(const std::vector<float>& rates) {
+  if (rates.empty()) {
+    return 0.0f;
+  }
+  char value[PROP_VALUE_MAX] = {};
+  __system_property_get("debug.partyboard.display_hz", value);
+  const float wanted = static_cast<float>(std::atof(value));
+  float chosen = *std::max_element(rates.begin(), rates.end());
+  if (wanted > 0.0f) {
+    chosen = *std::min_element(rates.begin(), rates.end(), [wanted](float a, float b) {
+      return std::abs(a - wanted) < std::abs(b - wanted);
+    });
+  }
+  static float logged = 0.0f;
+  if (chosen != logged) {
+    LOGI("Display rate %.0f Hz (debug.partyboard.display_hz=%s)", chosen, value[0] != '\0' ? value : "unset");
+    logged = chosen;
+  }
+  return chosen;
+}
+
 void query_refresh_rates(App& app) {
   if (!app.extensions.refreshRate) {
     return;
@@ -588,7 +725,7 @@ void query_refresh_rates(App& app) {
   std::lock_guard lock{g_ratesMutex};
   g_refreshRates = std::move(rates);
   if (!g_refreshRates.empty()) {
-    g_requestedRefreshRate.store(*std::max_element(g_refreshRates.begin(), g_refreshRates.end()));
+    g_requestedRefreshRate.store(preferred_refresh_rate(g_refreshRates));
   }
 }
 
@@ -605,16 +742,47 @@ float current_refresh_rate(const App& app) {
 
 // The game emulates a console on the CPU and renders up to 4K: ask for the
 // highest levels the headset sustains without throttling.
-void request_performance(const App& app) {
+// Read again every 2 s from the frame loop, so a capture can compare the GPU
+// levels in one session; the levels are asked again only when it changes.
+void request_performance(const App& app, bool sessionStart = false) {
   if (!app.extensions.performance) {
     return;
   }
+  static std::string applied = "<none>";
+  if (sessionStart) {
+    applied = "<none>"; // a new session: ask again
+  }
+  static auto checkedAt = std::chrono::steady_clock::time_point{};
+  const auto now = std::chrono::steady_clock::now();
+  if (applied != "<none>" && now - checkedAt < std::chrono::seconds(2)) {
+    return;
+  }
+  checkedAt = now;
+  {
+    char current[PROP_VALUE_MAX] = {};
+    __system_property_get("debug.partyboard.gpu_level", current);
+    if (applied == current) {
+      return;
+    }
+    applied = current;
+  }
   auto set = proc<PFN_xrPerfSettingsSetPerformanceLevelEXT>(app.instance, "xrPerfSettingsSetPerformanceLevelEXT");
   if (set != nullptr) {
+    // The board is GPU-bound (85-98% busy), yet the GPU mostly ran at level 2
+    // under "sustained high" (Quest 3, 2026-09-28). For a headset test,
+    // `adb shell setprop debug.partyboard.gpu_level boost` before the session
+    // starts asks for the boost level instead; watch "Perf settings" (thermal)
+    // and the VrApi GPU level in the log.
+    char value[PROP_VALUE_MAX] = {};
+    __system_property_get("debug.partyboard.gpu_level", value);
+    const bool boost = std::strcmp(value, "boost") == 0;
+    const XrPerfSettingsLevelEXT gpuLevel =
+        boost ? XR_PERF_SETTINGS_LEVEL_BOOST_EXT : XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT;
     check(app.instance, set(app.session, XR_PERF_SETTINGS_DOMAIN_CPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT),
           "CPU performance level");
-    check(app.instance, set(app.session, XR_PERF_SETTINGS_DOMAIN_GPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT),
-          "GPU performance level");
+    check(app.instance, set(app.session, XR_PERF_SETTINGS_DOMAIN_GPU_EXT, gpuLevel), "GPU performance level");
+    LOGI("Performance levels: CPU sustained high, GPU %s (debug.partyboard.gpu_level=%s)",
+         boost ? "boost" : "sustained high", value[0] != '\0' ? value : "unset");
   }
 }
 
@@ -755,14 +923,58 @@ void send_controllers(JNIEnv* env, const ControllerState& s) {
 
 // --- Placement ---
 
-void notify_placement(const App& app, JNIEnv* env) {
+void notify_placement(App& app, JNIEnv* env) {
+  // The panel also says what the room scan found (TableScene::State).
+  float length = 0.0f, width = 0.0f;
+  app.scene.largest(length, width);
+  app.shownSceneState = static_cast<int>(app.scene.state());
   env->CallStaticVoidMethod(g_java.questVr, g_java.onPlacement, app.placing, app.table.resolution,
                             app.table.passthrough && passthrough_available(app), app.table.diorama, app.calibrating,
-                            app.calibrationConfirmed);
+                            app.calibrationConfirmed, app.table.followCamera, app.shownSceneState, length, width);
   clear_exception(env);
 }
 
 void save_settings(App& app) { app.table.save(app.statePath); }
+
+// The model is to stand on a table nobody measured yet (or the saved one is
+// out of reach), and the player has not put it off this session.
+bool table_setup_needed(const App& app) {
+  return app.modelAvailable && app.table.diorama && !app.table.calibrated && !app.calibrationSkipped;
+}
+
+// The interface's screen at the back of the model standing at `table` (the
+// anchor: +Z toward the player) with `modelScale` meters per game unit: its
+// center, upright and facing the player, and the interface's size (the bezel
+// goes around it, StereoView::hud_screen_layer). The fitted scene is
+// kSceneExtentUnits across (quest_scene_fit.hpp).
+XrPosef hud_pose(const XrPosef& table, float modelScale, XrExtent2Df& size) {
+  const float sceneRadius = 0.5f * kSceneExtentUnits * modelScale;
+  size.width = std::clamp(2.0f * sceneRadius * kHudWidthPerScene, kMinHudWidth, kMaxHudWidth);
+  size.height = size.width * 0.75f; // the interface is 4:3
+  XrPosef local = identity_pose();
+  local.position = {0.0f, kHudLiftMeters + size.height * 0.5f, -(sceneRadius + kHudBehindSceneMeters)};
+  return compose(table, local);
+}
+
+// A minigame's place: the center of the board's screen (hud_pose), its +Z
+// toward `head` (quest_stereo.cpp turns the arena to look along -Z as its
+// camera does), and the scale that makes the fitted scene as wide as the
+// screen. Taken once when the minigame starts: the arena does not follow the head.
+XrPosef minigame_pose(const XrPosef& table, float modelScale, const XrPosef& head, float& scale) {
+  XrExtent2Df size{};
+  XrPosef pose = hud_pose(table, modelScale, size);
+  scale = std::clamp(size.width / kSceneExtentUnits, kMinModelScale, kMaxModelScale);
+  const XrVector3f to{head.position.x - pose.position.x, head.position.y - pose.position.y,
+                      head.position.z - pose.position.z};
+  const float flat = std::hypot(to.x, to.z);
+  if (flat > 0.05f) {
+    // Turned toward the head, then its +Z raised (or lowered) to the eyes.
+    const float pitch = std::atan2(to.y, flat);
+    const XrQuaternionf raise{std::sin(-pitch * 0.5f), 0.0f, 0.0f, std::cos(-pitch * 0.5f)};
+    pose.orientation = multiply(yaw_rotation(std::atan2(to.x, to.z)), raise);
+  }
+  return pose;
+}
 
 // Where the screen appears before the first placement: ahead, facing the player.
 void default_pose(App& app, const XrPosef& head) {
@@ -780,6 +992,7 @@ void begin_placement(App& app, JNIEnv* env) {
   app.grabbing = false;
   app.triggerHeld = true; // a trigger already held does not place at once
   app.leftTriggerHeld = true;
+  app.leftGripHeld = true;
   notify_placement(app, env);
 }
 
@@ -787,6 +1000,8 @@ void begin_table_calibration(App& app, JNIEnv* env, int buttons) {
   app.calibrating = true;
   app.calibrationConfirmed = false;
   app.calibrationConfirmArmed = (buttons & kButtonX) == 0;
+  app.scanArmed = (buttons & kButtonA) == 0;
+  app.skipArmed = (buttons & kButtonB) == 0;
   app.placing = true;
   app.grabbing = false;
   app.triggerHeld = true;
@@ -794,10 +1009,52 @@ void begin_table_calibration(App& app, JNIEnv* env, int buttons) {
   app.calibrationSamples.clear();
   app.calibrationStableSince = 0;
   LOGI("Automatic table calibration started");
+  // The room scan may have changed since the last look (the player scanned it
+  // from the headset's settings), or the permission is still to be asked.
+  if (app.scene.available()) {
+    if (g_scenePermission.load() != 1 && !app.permissionRequested && g_java.requestScenePermission != nullptr) {
+      app.permissionRequested = true;
+      env->CallStaticVoidMethod(g_java.questVr, g_java.requestScenePermission);
+      clear_exception(env);
+    }
+    app.scene.query();
+  }
+  notify_placement(app, env);
+}
+
+// B on the calibration panel: not now. An uncalibrated table is asked for
+// again next session; a recalibration keeps the table as it was.
+void skip_table_calibration(App& app, JNIEnv* env, int heldButtons) {
+  LOGI("Table calibration put off");
+  app.calibrationSkipped = !app.table.calibrated;
+  app.calibrating = false;
+  app.calibrationConfirmed = false;
+  app.calibrationConfirmArmed = false;
+  app.placing = false;
+  app.grabbing = false;
+  app.suppressedButtons = heldButtons;
+  app.calibrationSamples.clear();
+  app.calibrationStableSince = 0;
   notify_placement(app, env);
 }
 
 void sample_table_calibration(App& app, const XrPosef* grip, XrTime time, int pressed, int heldButtons, JNIEnv* env) {
+  if ((heldButtons & kButtonB) == 0) {
+    app.skipArmed = true;
+  } else if (app.skipArmed && (pressed & kButtonB) != 0) {
+    skip_table_calibration(app, env, heldButtons);
+    return;
+  }
+  // A: scan the room in Space Setup (the panel shows the table when back).
+  if ((heldButtons & kButtonA) == 0) {
+    app.scanArmed = true;
+  } else if (app.scanArmed && (pressed & kButtonA) != 0) {
+    app.scanArmed = false;
+    if (app.scene.request_capture()) {
+      tick(app);
+      notify_placement(app, env);
+    }
+  }
   if (!app.calibrationConfirmed) {
     if ((heldButtons & kButtonX) == 0) {
       app.calibrationConfirmArmed = true;
@@ -875,6 +1132,21 @@ void sample_table_calibration(App& app, const XrPosef* grip, XrTime time, int pr
   }
   calibrated.position.y -= kControllerGripToTableMeters;
   calibrated.orientation = yaw_rotation(std::atan2(yawSin, yawCos));
+  // The scanned table under the controller: its top's height (the scan
+  // measures it better than the grip's offset), and the model sized so the
+  // scene spans the table from there. The center and the turn stay the
+  // controller's: the player laid it where the game goes.
+  const std::vector<ScannedTable> tables = app.scene.tables(time);
+  if (const ScannedTable* table =
+          pick_table(tables, calibrated.position.x, calibrated.position.y, calibrated.position.z)) {
+    calibrated.position.y = table->height;
+    app.table.modelScale =
+        scale_for_table(*table, calibrated.position.x, calibrated.position.z, kMinModelScale, kMaxModelScale);
+    LOGI("Table scan: matched %.2f x %.2f m, model scale %.6f (scene %.2f m across)", table->halfLength * 2.0f,
+         table->halfWidth * 2.0f, app.table.modelScale, app.table.modelScale * kSceneExtentUnits);
+  } else {
+    LOGI("Table scan: no scanned table under the controller (%zu table(s)), model scale kept", tables.size());
+  }
   app.pose = calibrated;
   app.poseKnown = true;
   app.table.placed = true;
@@ -884,6 +1156,7 @@ void sample_table_calibration(App& app, const XrPosef* grip, XrTime time, int pr
   if (app.extensions.anchors) {
     app.anchor.place(calibrated, time);
   }
+  app.savedPlaceIgnored = false;
   save_settings(app);
   app.calibrating = false;
   app.calibrationConfirmed = false;
@@ -912,6 +1185,7 @@ void end_placement(App& app, JNIEnv* env, XrTime time, int heldButtons) {
   if (app.extensions.anchors) {
     app.anchor.place(app.pose, time);
   }
+  app.savedPlaceIgnored = false; // the new anchor is this place
   save_settings(app);
   notify_placement(app, env);
 }
@@ -1014,6 +1288,16 @@ void place(App& app, JNIEnv* env, const ControllerState& input, int pressed, flo
     tick(app);
     notify_placement(app, env);
   }
+  // Left grip: the model follows the game camera, or stays as placed.
+  const bool leftGrip = input.leftGrip > (app.leftGripHeld ? 0.4f : 0.6f);
+  if (leftGrip && !app.leftGripHeld) {
+    app.table.followCamera = !app.table.followCamera;
+    g_followCamera.store(app.table.followCamera, std::memory_order_relaxed);
+    LOGI("Model follows the game camera: %s", app.table.followCamera ? "yes" : "no");
+    tick(app);
+    notify_placement(app, env);
+  }
+  app.leftGripHeld = leftGrip;
 
   if ((pressed & kButtonX) != 0 && passthrough_available(app)) {
     set_passthrough(app, !app.table.passthrough);
@@ -1033,7 +1317,8 @@ void place(App& app, JNIEnv* env, const ControllerState& input, int pressed, flo
 bool poll_events(App& app, JNIEnv* env) {
   XrEventDataBuffer event{XR_TYPE_EVENT_DATA_BUFFER};
   while (xrPollEvent(app.instance, &event) == XR_SUCCESS) {
-    if (app.anchor.handle_event(event)) {
+    // The room scan first: it takes only its own requests' events.
+    if (app.scene.handle_event(event) || app.anchor.handle_event(event)) {
       event = {XR_TYPE_EVENT_DATA_BUFFER};
       continue;
     }
@@ -1049,7 +1334,17 @@ bool poll_events(App& app, JNIEnv* env) {
         begin.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
         app.running = check(app.instance, xrBeginSession(app.session, &begin), "xrBeginSession");
         if (app.running) {
-          request_performance(app);
+          request_performance(app, true);
+          // Back from another immersive app (Space Setup, opened by the table
+          // calibration, on 2026-09-28): the headset had paused the room's
+          // view, and the game came back over black. Start it again.
+          if (app.table.passthrough && passthrough_available(app)) {
+            set_passthrough(app, true);
+            if (auto resume = proc<PFN_xrPassthroughLayerResumeFB>(app.instance, "xrPassthroughLayerResumeFB")) {
+              check(app.instance, resume(app.passthrough.layer), "xrPassthroughLayerResumeFB");
+            }
+            LOGI("Room view started again with the session");
+          }
         }
       } else if (app.state == XR_SESSION_STATE_STOPPING) {
         xrEndSession(app.session);
@@ -1062,6 +1357,24 @@ bool poll_events(App& app, JNIEnv* env) {
       clear_exception(env);
       break;
     }
+    case XR_TYPE_EVENT_DATA_PERF_SETTINGS_EXT: {
+      // The headset warning that it cannot hold the work (compositing,
+      // rendering) or is heating (thermal): the log ("Perf settings") shows
+      // when throttling starts and ends, next to the frame rates. On
+      // 2026-09-28 the GPU ran at level 2 (456 MHz) while 92% busy.
+      const auto& perf = reinterpret_cast<const XrEventDataPerfSettingsEXT&>(event);
+      const auto level = [](XrPerfSettingsNotificationLevelEXT l) {
+        return l == XR_PERF_SETTINGS_NOTIF_LEVEL_NORMAL_EXT    ? "normal"
+               : l == XR_PERF_SETTINGS_NOTIF_LEVEL_WARNING_EXT ? "warning"
+                                                                : "impaired";
+      };
+      const char* subDomain = perf.subDomain == XR_PERF_SETTINGS_SUB_DOMAIN_COMPOSITING_EXT ? "compositing"
+                              : perf.subDomain == XR_PERF_SETTINGS_SUB_DOMAIN_RENDERING_EXT ? "rendering"
+                                                                                            : "thermal";
+      LOGW("Perf settings: %s %s %s -> %s", perf.domain == XR_PERF_SETTINGS_DOMAIN_CPU_EXT ? "CPU" : "GPU", subDomain,
+           level(perf.fromLevel), level(perf.toLevel));
+      break;
+    }
     default:
       break;
     }
@@ -1071,6 +1384,7 @@ bool poll_events(App& app, JNIEnv* env) {
 }
 
 void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
+  request_performance(app); // debug.partyboard.gpu_level, every 2 s
   XrFrameState frame{XR_TYPE_FRAME_STATE};
   if (!check(app.instance, xrWaitFrame(app.session, nullptr, &frame), "xrWaitFrame")) {
     return;
@@ -1086,7 +1400,16 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   const ControllerState input = focused ? read_controllers(app) : ControllerState{};
   const int pressed = input.buttons & ~app.previousButtons;
   app.previousButtons = input.buttons;
-  if (!app.table.calibrated && !app.placing && app.stereo.world_visible()) {
+  // The spatial data permission, as QuestVr last heard it.
+  const int permission = g_scenePermission.load(std::memory_order_relaxed);
+  if (permission >= 0) {
+    app.scene.set_permission(permission == 1);
+  }
+  // The game waits for a table before its first board or minigame
+  // (PartyBoardQuest_TableSetupHold). A game world shown without one (an
+  // online game, which does not wait) asks for it too.
+  const bool setupRequested = g_setupRequested.exchange(false);
+  if (table_setup_needed(app) && !app.placing && (setupRequested || app.stereo.world_visible())) {
     begin_table_calibration(app, env, input.buttons);
   }
   XrPosef head, aim;
@@ -1101,12 +1424,36 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   // Where the game stands: the anchor, which follows the real table, unless
   // the player is moving it.
   XrPosef anchored;
-  if (!app.placing && app.anchor.locate(time, anchored)) {
+  if (!app.placing && !app.savedPlaceIgnored && app.anchor.locate(time, anchored)) {
     app.pose = anchored;
     app.poseKnown = true;
   }
   if (!app.poseKnown && haveHead) {
     default_pose(app, head);
+  }
+  if (haveHead && (!std::isfinite(app.screenEyeHeight) || app.placing)) {
+    app.screenEyeHeight = head.position.y;
+  }
+  // Out of reach at startup: in front of the player instead, for this
+  // session only. The saved place stays saved (it may be another room's
+  // table) until the player places or calibrates the table again.
+  if (app.firstFrameTime == 0) {
+    app.firstFrameTime = time;
+  }
+  if (!app.savedPlaceIgnored && !app.placing && !app.calibrating && app.poseKnown && haveHead &&
+      time - app.firstFrameTime < kPlacementCheckDuration) {
+    const float away = std::hypot(app.pose.position.x - head.position.x, app.pose.position.z - head.position.z);
+    const float below = head.position.y - app.pose.position.y;
+    const bool underFloor = app.stageIsFloor && app.pose.position.y < kLowestTableMeters;
+    if (away > kReachableTableMeters || below > kTableBelowEyesMeters || underFloor) {
+      LOGW("Saved table place out of reach (%.2f m away, %.2f m below the eyes, %.2f m above the floor): screen in "
+           "front for this session",
+           away, below, app.pose.position.y);
+      app.savedPlaceIgnored = true;
+      default_pose(app, head);
+      // The model needs a real table here: the next board or minigame asks for one.
+      app.table.calibrated = false;
+    }
   }
 
   // In placement mode A starts table calibration; the other controls finish it.
@@ -1123,6 +1470,12 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   } else if (app.placing) {
     place(app, env, input, pressed, dt, haveHead ? &head : nullptr, haveAim ? &aim : nullptr,
           haveLeftAim ? &leftAim : nullptr);
+  }
+  g_setupNeeded.store(table_setup_needed(app));
+  g_setupOpen.store(app.calibrating);
+  // The calibration panel follows the room scan (permission, search, Space Setup).
+  if (app.calibrating && static_cast<int>(app.scene.state()) != app.shownSceneState) {
+    notify_placement(app, env);
   }
 
   // Sent every frame (SDL drops repeated values) so the pad is right as soon
@@ -1161,12 +1514,24 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   const bool model = app.table.diorama && app.poseKnown && haveViews && frame.shouldRender && !app.stereo.screen_required();
   // Invalid tracking must disable new game leases, rather than leave the
   // previous valid eye poses enabled while the headset cannot render.
-  XrPosef modelPose = app.pose;
-  // The scene's floor is measured by the game (quest_stereo.cpp) and put on
-  // the table exactly: no clearance.
+  // The board's floor is measured by the game (quest_stereo.cpp) and put on
+  // the table exactly: no clearance. A minigame, following its camera, floats
+  // where the board's screen stands instead, and the table stays empty.
+  const bool minigameView = app.table.followCamera && app.stereo.minigame_mode();
+  if (!minigameView) {
+    app.minigamePlaced = false;
+  } else if (!app.minigamePlaced && haveHead) {
+    app.minigamePose = minigame_pose(app.pose, app.table.modelScale, head, app.minigameScale);
+    app.minigamePlaced = true;
+    LOGI("Minigame view: at %.2f %.2f %.2f, %.2f m across", app.minigamePose.position.x, app.minigamePose.position.y,
+         app.minigamePose.position.z, app.minigameScale * kSceneExtentUnits);
+  }
+  const bool floating = minigameView && app.minigamePlaced;
+  const XrPosef modelPose = floating ? app.minigamePose : app.pose;
+  const float modelScale = floating ? app.minigameScale : app.table.modelScale;
   app.stereo.set_quality_sample(g_perf.quality_sample());
-  app.stereo.set_frame_time(time);
-  app.stereo.update(views, modelPose, app.table.modelScale, model, app.table.screenWidth, app.table.screenWidth * 0.75f);
+  app.stereo.set_frame_time(time, frame.predictedDisplayPeriod);
+  app.stereo.update(views, modelPose, modelScale, model, app.table.screenWidth, app.table.screenWidth * 0.75f);
   XrCompositionLayerImageLayoutFB modelFlip{XR_TYPE_COMPOSITION_LAYER_IMAGE_LAYOUT_FB};
   modelFlip.flags = XR_COMPOSITION_LAYER_IMAGE_LAYOUT_VERTICAL_FLIP_BIT_FB;
   XrCompositionLayerSettingsFB modelSettings{XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB};
@@ -1175,11 +1540,33 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
       ? XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SHARPENING_BIT_FB
       : XR_COMPOSITION_LAYER_SETTINGS_NORMAL_SHARPENING_BIT_FB;
   modelSettings.next = app.extensions.imageLayout ? &modelFlip : nullptr;
-  const void* modelChain = app.extensions.layerSettings ? static_cast<const void*>(&modelSettings)
-                                                       : modelSettings.next;
+  // The compositor runs the filter at the display rate: about 2 ms of GPU per
+  // displayed frame at 120 Hz, a quarter of the GPU, was the compositor's on
+  // 2026-09-28. For a headset A/B: `adb shell setprop
+  // debug.partyboard.layer_filter normal` (lighter sharpening) or `none`,
+  // read again every 2 s so a capture can compare them in one session.
+  static int layerFilter = -1;
+  static auto layerFilterAt = std::chrono::steady_clock::time_point{};
+  if (const auto now = std::chrono::steady_clock::now(); layerFilter < 0 || now - layerFilterAt >= std::chrono::seconds(2)) {
+    layerFilterAt = now;
+    char value[PROP_VALUE_MAX] = {};
+    __system_property_get("debug.partyboard.layer_filter", value);
+    const int chosen = std::strcmp(value, "none") == 0 ? 0 : std::strcmp(value, "normal") == 0 ? 1 : 2;
+    if (chosen != layerFilter) {
+      LOGI("Eyes' layer filter: %s (debug.partyboard.layer_filter=%s)",
+           chosen == 0 ? "none" : chosen == 1 ? "normal sharpening" : "by resolution",
+           value[0] != '\0' ? value : "unset");
+    }
+    layerFilter = chosen;
+  }
+  if (layerFilter == 1) {
+    modelSettings.layerFlags = XR_COMPOSITION_LAYER_SETTINGS_NORMAL_SHARPENING_BIT_FB;
+  }
+  const void* modelChain = app.extensions.layerSettings && layerFilter != 0 ? static_cast<const void*>(&modelSettings)
+                                                                             : modelSettings.next;
   const auto* modelLayer = model ? app.stereo.layer(app.stage, modelChain) : nullptr;
 
-  std::array<const XrCompositionLayerBaseHeader*, 5> layers{};
+  std::array<const XrCompositionLayerBaseHeader*, 6> layers{};
   uint32_t layerCount = 0;
 
   XrCompositionLayerPassthroughFB room{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
@@ -1228,6 +1615,14 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
     onTable.position.z = -kScreenBehindModelMeters;
   }
   screen.pose = compose(app.pose, onTable);
+  // Behind the board, but never below the eyes' comfortable level: standing
+  // on the table, a low table (or one placed on the floor, 0.04 m on
+  // 2026-09-28) took the menus, instructions and results down with it. The
+  // eyes' height is the one measured while placing (or first seen), not the
+  // live head, so the screen does not bob as the player moves.
+  if (std::isfinite(app.screenEyeHeight)) {
+    screen.pose.position.y = std::max(screen.pose.position.y, app.screenEyeHeight - kDefaultDropMeters);
+  }
   screen.size = {screenWidth, screenHeight};
   const bool screenShown = app.poseKnown && (!modelLayer || !app.stereo.world_visible() || app.placing);
   if (screenShown) {
@@ -1238,9 +1633,18 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   app.stereo.set_screen_hidden(app.poseKnown && modelLayer != nullptr && !screenShown);
 
   // The images come from Aurora like the screen's, so they need the same flip.
+  // The interface's screen goes over the model: raised above the board, it
+  // must never be hidden by the board's far scenery. A minigame, floating
+  // there, shows its interface over it without the screen: no frame, no face.
   if (modelLayer) {
     layers[layerCount++] = modelLayer;
-    if (const auto* hud = app.stereo.hud_layer(app.view, app.extensions.imageLayout ? &modelFlip : nullptr)) {
+    XrExtent2Df hudSize{};
+    const XrPosef hudPose = hud_pose(app.pose, app.table.modelScale, hudSize);
+    if (const auto* screen = floating ? nullptr : app.stereo.hud_screen_layer(app.stage, hudPose, hudSize)) {
+      layers[layerCount++] = screen;
+    }
+    if (const auto* hud =
+            app.stereo.hud_layer(app.stage, hudPose, hudSize, app.extensions.imageLayout ? &modelFlip : nullptr)) {
       layers[layerCount++] = hud;
     }
   }
@@ -1258,6 +1662,34 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
     help.pose.position = kHelpPosition;
     help.size = {kHelpWidthMeters, kHelpWidthMeters * app.help.height / app.help.width};
     layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&help);
+  }
+
+  // What the headset is shown, whenever it changes and every 10 s: which
+  // layers, and how far the screen and the model stand from the head. On
+  // 2026-09-28 the game vanished after Space Setup with nothing in the log
+  // to say where it had gone.
+  {
+    static std::string lastLayers;
+    static auto layersAt = std::chrono::steady_clock::time_point{};
+    const auto distance = [&](const XrVector3f& p) {
+      if (!haveHead) return -1.0f;
+      const float dx = p.x - head.position.x, dy = p.y - head.position.y, dz = p.z - head.position.z;
+      return std::sqrt(dx * dx + dy * dy + dz * dz);
+    };
+    char text[256];
+    std::snprintf(text, sizeof(text),
+                  "Layers: render=%d room=%d screen=%d model=%d help=%d poseKnown=%d placing=%d count=%u",
+                  frame.shouldRender ? 1 : 0, layerCount > 0 && layers[0] == reinterpret_cast<const XrCompositionLayerBaseHeader*>(&room) ? 1 : 0,
+                  screenShown ? 1 : 0, modelLayer ? 1 : 0, app.placing ? 1 : 0, app.poseKnown ? 1 : 0,
+                  app.placing ? 1 : 0, layerCount);
+    const auto now = std::chrono::steady_clock::now();
+    if (lastLayers != text || now - layersAt >= std::chrono::seconds(10)) {
+      LOGI("%s, screen %.2f m and model %.2f m from the head (model at %.2f %.2f %.2f)", text,
+           distance(screen.pose.position), distance(app.pose.position), app.pose.position.x, app.pose.position.y,
+           app.pose.position.z);
+      lastLayers = text;
+      layersAt = now;
+    }
   }
 
   XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
@@ -1290,9 +1722,11 @@ bool set_up(App& app, JNIEnv* env) {
   // the Quest 3 panel's own pixels): sharp polygons and textures on the table.
   // Dynamic resolution (stereo_view.cpp) draws less of them when 120 Hz needs it.
   const float eyeScale = 1.25f;
-  if (!app.stereo.init(app.instance, app.session, app.system, app.egl.display, eyeScale)) {
+  app.modelAvailable = app.stereo.init(app.instance, app.session, app.system, app.egl.display, eyeScale);
+  if (!app.modelAvailable) {
     LOGW("No model on the table: the game stays on its screen");
   }
+  g_followCamera.store(app.table.followCamera, std::memory_order_relaxed);
   app.stereo.set_quality_cap(quality_cap(app.table.resolution));
   query_refresh_rates(app);
   if (app.extensions.anchors) {
@@ -1301,12 +1735,22 @@ bool set_up(App& app, JNIEnv* env) {
       app.anchor.load(app.table.anchorUuid);
     }
   }
+  if (app.extensions.scene) {
+    app.scene.init(app.instance, app.session, app.stage, app.extensions.sceneCapture);
+    const int permission = g_scenePermission.load();
+    if (permission >= 0) {
+      app.scene.set_permission(permission == 1); // queries the scan when granted
+    }
+  }
   return true;
 }
 
 void tear_down(App& app, JNIEnv* env) {
   app.stereo.destroy(); // GL objects: while the context is current
+  app.scene.destroy();
   app.anchor.destroy();
+  g_setupNeeded.store(false);
+  g_setupOpen.store(false); // the game does not wait for a session that is gone
   destroy_passthrough(app);
   for (SurfaceQuad* quad : {&app.screen, &app.next, &app.retiring, &app.help}) {
     destroy_surface_quad(env, *quad);
@@ -1357,7 +1801,7 @@ void xr_thread(std::string statePath) {
   if (ok) {
     LOGI("Screen %dx%d, room %s, anchors %s", app.screen.width, app.screen.height,
          passthrough_available(app) ? "visible" : "unavailable", app.extensions.anchors ? "on" : "off");
-    // An uncalibrated table is measured when the first game world is visible.
+    // An uncalibrated table is measured before the first board or minigame.
     notify_placement(app, env);
     unsigned rumbleSerial = 0;
     while (!g_stop.load(std::memory_order_acquire)) {
@@ -1399,6 +1843,26 @@ __attribute__((visibility("default"))) float PartyBoardQuest_ActiveRefreshRate()
   return g_activeRefreshRate.load(std::memory_order_relaxed);
 }
 
+// The game thread, before it starts a board or a minigame (src/game/objmain.c
+// through PartyBoard_QuestHoldOverlay): true while it should wait for the
+// table's calibration. The first call opens the panel, which the XR thread
+// shows on its next frame.
+__attribute__((visibility("default"))) bool PartyBoardQuest_TableSetupHold() {
+  if (g_setupOpen.load()) {
+    return true;
+  }
+  if (!g_setupNeeded.load()) {
+    return false;
+  }
+  g_setupRequested.store(true);
+  return true;
+}
+
+// The game thread, each eye frame: whether the model follows the game camera.
+__attribute__((visibility("default"))) bool PartyBoardQuest_StereoFollowCamera() {
+  return g_followCamera.load(std::memory_order_relaxed);
+}
+
 JNIEXPORT jboolean JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_nativeStart(JNIEnv* env, jclass clazz,
                                                                                      jobject activity,
                                                                                      jstring statePath) {
@@ -1414,9 +1878,11 @@ JNIEXPORT jboolean JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_native
   g_java.onSessionState = static_method(env, clazz, "onSessionState", "(ZZ)V");
   g_java.onControllers = static_method(env, clazz, "onControllers", "(IFFFFFFFF)V");
   g_java.onExit = static_method(env, clazz, "onExit", "()V");
-  g_java.onPlacement = static_method(env, clazz, "onPlacement", "(ZIZZZZ)V");
+  g_java.onPlacement = static_method(env, clazz, "onPlacement", "(ZIZZZZZIFF)V");
+  g_java.requestScenePermission = static_method(env, clazz, "requestScenePermission", "()V");
   for (jmethodID method : {g_java.onSurface, g_java.onSurfaceReplaced, g_java.onHelpSurface, g_java.onPlacement,
-                           g_java.onSessionState, g_java.onControllers, g_java.onExit}) {
+                           g_java.onSessionState, g_java.onControllers, g_java.onExit,
+                           g_java.requestScenePermission}) {
     if (method == nullptr) {
       return JNI_FALSE;
     }
@@ -1449,6 +1915,11 @@ JNIEXPORT void JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_nativeSurf
   g_surfaceSwitched.store(true);
 }
 
+JNIEXPORT void JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_nativeScenePermission(JNIEnv*, jclass,
+                                                                                           jboolean granted) {
+  g_scenePermission.store(granted ? 1 : 0);
+}
+
 JNIEXPORT void JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_nativeRumble(JNIEnv*, jclass, jfloat amplitude,
                                                                                   jint durationMs) {
   g_rumbleAmplitude.store(amplitude, std::memory_order_relaxed);
@@ -1472,7 +1943,10 @@ JNIEXPORT jfloatArray JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_nat
 
 JNIEXPORT void JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_nativeRequestRefreshRate(JNIEnv*, jclass,
                                                                                               jfloat rate) {
-  g_requestedRefreshRate.store(rate);
+  // QuestVr asks for the fastest rate: the preferred one wins (a test switch).
+  std::lock_guard lock{g_ratesMutex};
+  const float preferred = preferred_refresh_rate(g_refreshRates);
+  g_requestedRefreshRate.store(preferred > 0.0f ? preferred : rate);
 }
 
 } // extern "C"

@@ -1,11 +1,12 @@
 --- /dev/null
 +++ b/lib/gfx/rgba_mips.hpp
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,169 @@
 +#pragma once
 +
 +#include <algorithm>
 +#include <cmath>
 +#include <cstdint>
++#include <cstring>
 +#include <vector>
 +
 +namespace aurora::gfx {
@@ -14,17 +15,81 @@
 +  uint32_t levels = 1;
 +};
 +
++namespace rgba_mips_detail {
++// The sRGB byte for a linear value: the encoding every mip texel goes through.
++inline uint8_t encode_srgb(float v) {
++  const float encoded = v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
++  return uint8_t(std::clamp(std::lround(encoded * 255), 0l, 255l));
++}
++
++struct SrgbTables {
++  static constexpr unsigned kBucketShift = 15; // [0, 2) in 32768 buckets of float bit patterns
++  static constexpr uint32_t kTwo = 0x40000000u;
++  float linear[256];
++  // threshold[k], 1 <= k <= 255: the bits of the smallest float encode_srgb
++  // takes to k or above; threshold[256] ends the search.
++  uint32_t threshold[257];
++  // The byte at the start of each bucket: at most a step or two below the answer.
++  uint8_t bucket[kTwo >> kBucketShift];
++};
++
++// Built once with this platform's own pow, so a lookup gives exactly the
++// byte encode_srgb would: mip generation runs on the game thread, for every
++// world texture loaded or updated, and pow per texel was most of its cost.
++inline const SrgbTables& srgb_tables() {
++  static const SrgbTables tables = [] {
++    SrgbTables t;
++    for (unsigned i = 0; i < 256; ++i) {
++      const float c = i / 255.0f;
++      t.linear[i] = c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
++    }
++    // Non-negative floats sort like their bit patterns: bisect those.
++    const auto as_float = [](uint32_t bits) { float f; std::memcpy(&f, &bits, sizeof f); return f; };
++    t.threshold[0] = 0;
++    for (unsigned k = 1; k < 256; ++k) {
++      uint32_t lo = 0, hi = SrgbTables::kTwo; // 0 encodes to 0, 2 to 255
++      while (hi - lo > 1) {
++        const uint32_t mid = lo + (hi - lo) / 2;
++        (encode_srgb(as_float(mid)) >= k ? hi : lo) = mid;
++      }
++      t.threshold[k] = hi;
++    }
++    t.threshold[256] = UINT32_MAX;
++    unsigned k = 0;
++    for (uint32_t i = 0; i < std::size(t.bucket); ++i) {
++      while (t.threshold[k + 1] <= i << SrgbTables::kBucketShift) ++k;
++      t.bucket[i] = uint8_t(k);
++    }
++    return t;
++  }();
++  return tables;
++}
++
++inline uint8_t encode_srgb_table(const SrgbTables& t, float v) {
++  uint32_t bits;
++  std::memcpy(&bits, &v, sizeof bits);
++  if (bits >= SrgbTables::kTwo) return bits >> 31 ? 0 : 255; // negative, or 2 and above
++  unsigned k = t.bucket[bits >> SrgbTables::kBucketShift];
++  while (bits >= t.threshold[k + 1]) ++k;
++  return uint8_t(k);
++}
++} // namespace rgba_mips_detail
++
 +// Keep level zero exact. Average sRGB colors in linear light with alpha
 +// weighting so transparent texels cannot introduce colored fringes.
 +inline RgbaMipChain rgba_mip_chain(const uint8_t* pixels, uint32_t width, uint32_t height) {
 +  RgbaMipChain out;
 +  if (!pixels || !width || !height) return out;
-+  out.bytes.assign(pixels, pixels + size_t(width) * height * 4);
-+  float linear[256];
-+  for (unsigned i = 0; i < 256; ++i) {
-+    const float c = i / 255.0f;
-+    linear[i] = c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
++  size_t total = size_t(width) * height * 4;
++  for (uint32_t w = width, h = height; w > 1 || h > 1;) {
++    w = std::max(1u, w / 2);
++    h = std::max(1u, h / 2);
++    total += size_t(w) * h * 4;
 +  }
++  out.bytes.reserve(total);
++  out.bytes.assign(pixels, pixels + size_t(width) * height * 4);
++  const auto& tables = rgba_mips_detail::srgb_tables();
++  const float* linear = tables.linear;
 +  size_t offset = 0;
 +  bool cutout = true;
 +  size_t covered = 0;
@@ -34,10 +99,35 @@
 +  }
 +  const float coverage = float(covered) / (size_t(width) * height);
 +  cutout &= coverage > 0 && coverage < 1;
++  std::vector<uint8_t> next;
 +  while (width > 1 || height > 1) {
 +    const uint32_t nextW = std::max(1u, width / 2), nextH = std::max(1u, height / 2);
-+    std::vector<uint8_t> next(size_t(nextW) * nextH * 4);
-+    for (uint32_t y = 0; y < nextH; ++y) for (uint32_t x = 0; x < nextW; ++x) {
++    next.assign(size_t(nextW) * nextH * 4, 0);
++    // Even sizes (the usual case): each texel is a whole 2x2 (or 2x1) block,
++    // every weight exactly 1. Same sums in the same order as the general
++    // loop below, so the same bytes; each product is its own statement so the
++    // compiler cannot fuse it differently from there.
++    const uint32_t spanX = width == 1 ? 1 : 2, spanY = height == 1 ? 1 : 2;
++    const bool halves = (width == 1 || width % 2 == 0) && (height == 1 || height % 2 == 0);
++    if (halves) for (uint32_t y = 0; y < nextH; ++y) for (uint32_t x = 0; x < nextW; ++x) {
++      float rgb[3]{}, alpha = 0, weight = 0;
++      for (uint32_t dy = 0; dy < spanY; ++dy)
++        for (uint32_t dx = 0; dx < spanX; ++dx) {
++          const auto* p = out.bytes.data() + offset + (size_t(y * spanY + dy) * width + x * spanX + dx) * 4;
++          const float a = p[3] / 255.0f;
++          for (unsigned c = 0; c < 3; ++c) {
++            const float term = linear[p[c]] * a;
++            rgb[c] += term;
++          }
++          alpha += a;
++          weight += 1.0f;
++        }
++      auto* p = next.data() + (size_t(y) * nextW + x) * 4;
++      for (unsigned c = 0; c < 3; ++c)
++        p[c] = rgba_mips_detail::encode_srgb_table(tables, alpha > 0 ? rgb[c] / alpha : 0);
++      p[3] = uint8_t(std::clamp(std::lround(alpha / weight * 255), 0l, 255l));
++    }
++    else for (uint32_t y = 0; y < nextH; ++y) for (uint32_t x = 0; x < nextW; ++x) {
 +      const float x0 = float(x) * width / nextW, x1 = float(x + 1) * width / nextW;
 +      const float y0 = float(y) * height / nextH, y1 = float(y + 1) * height / nextH;
 +      float rgb[3]{}, alpha = 0, weight = 0;
@@ -52,11 +142,8 @@
 +          weight += w;
 +        }
 +      auto* p = next.data() + (size_t(y) * nextW + x) * 4;
-+      for (unsigned c = 0; c < 3; ++c) {
-+        const float v = alpha > 0 ? rgb[c] / alpha : 0;
-+        const float encoded = v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
-+        p[c] = uint8_t(std::clamp(std::lround(encoded * 255), 0l, 255l));
-+      }
++      for (unsigned c = 0; c < 3; ++c)
++        p[c] = rgba_mips_detail::encode_srgb_table(tables, alpha > 0 ? rgb[c] / alpha : 0);
 +      p[3] = uint8_t(std::clamp(std::lround(alpha / weight * 255), 0l, 255l));
 +    }
 +    // Preserve the closest representable cutout coverage at the common 0.5
@@ -93,7 +180,7 @@
  #include "texture_convert.hpp"
  #include "../gx/gx_fmt.hpp"
  
-@@ -56,26 +57,34 @@ bool setup_swizzle(wgpu::TextureComponentSwizzleDescriptor& swizzle, u32 format)
+@@ -56,26 +57,38 @@ bool setup_swizzle(wgpu::TextureComponentSwizzleDescriptor& swizzle, u32 format)
  } // namespace
  
  TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 format, ArrayRef<uint8_t> data,
@@ -124,8 +211,12 @@
    }
 +  if (!converted.data.empty()) data = converted.data;
 +  RgbaMipChain generated;
++  // Colour formats, CMPR included: decoded to RGBA8 on the headset (no BC
++  // there), and the boards' large textures, which shimmer at a distance
++  // without mips. Intensity formats stay out: often masks or fonts, their
++  // alpha is not a colour's coverage.
 +  const bool colorFormat = format == GX_TF_RGBA8 || format == GX_TF_RGB565 ||
-+      format == GX_TF_RGB5A3 || format == GX_TF_RGBA8_PC;
++      format == GX_TF_RGB5A3 || format == GX_TF_RGBA8_PC || format == GX_TF_CMPR;
 +  if (worldMips && !tlut && colorFormat && mips == 1 && width >= 16 && height >= 16 &&
 +      width <= 2048 && height <= 2048 && to_wgpu(format) == wgpu::TextureFormat::RGBA8Unorm) {
 +    CHECK(data.size() == UINT32_MAX || data.size() >= size_t(width) * height * 4, "RGBA mip source truncated");
@@ -141,7 +232,7 @@
  
    // Average the top mip while the decoded texels are still in reach.
    {
-@@ -253,13 +262,22 @@ void write_texture(TextureRef& ref, ArrayRef<uint8_t> data) noexcept {
+@@ -253,13 +266,22 @@ void write_texture(TextureRef& ref, ArrayRef<uint8_t> data) noexcept {
  
    ConvertedTexture converted;
    if (ref.gxFormat != InvalidTextureFormat) {
@@ -185,3 +276,60 @@
  TextureHandle new_dynamic_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 gxFormat,
                                       const char* label) noexcept;
  TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept;
+--- a/lib/webgpu/gpu.cpp
++++ b/lib/webgpu/gpu.cpp
+@@ -39,6 +39,9 @@
+ #include "../rt/rt_device.hpp"
+ #include "../rt/rt_interop.hpp"
+ #endif
++#if defined(__ANDROID__)
++#include <sys/system_properties.h>
++#endif
+ 
+ namespace aurora::gx {
+ void clear_copy_texture_cache() noexcept;
+@@ -80,6 +83,7 @@ bool g_textureComponentSwizzleSupported = false;
+ bool g_sharedTextureSupported = false;
+ bool g_sharedFenceSupported = false;
+ bool g_clipDistancesSupported = false;
++bool g_shaderF16Enabled = false;
+ static std::atomic_bool g_shuttingDown = false;
+ 
+ namespace {
+@@ -981,6 +985,7 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+     g_astcTexturesSupported = false;
+     g_textureComponentSwizzleSupported = false;
+     g_clipDistancesSupported = false;
++    g_shaderF16Enabled = false;
+     wgpu::SupportedFeatures supportedFeatures;
+     g_adapter.GetFeatures(&supportedFeatures);
+     for (size_t i = 0; i < supportedFeatures.featureCount; ++i) {
+@@ -1021,6 +1026,16 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+         requiredFeatures.push_back(feature);
+         g_clipDistancesSupported = true;
+       }
++      // The TEV in half precision, for a headset A/B, before starting the
++      // game: `adb shell setprop debug.partyboard.shader_f16 1` (off by default).
++      if (feature == wgpu::FeatureName::ShaderF16) {
++        char value[PROP_VALUE_MAX] = {};
++        __system_property_get("debug.partyboard.shader_f16", value);
++        if (value[0] == '1' && value[1] == '\0') {
++          requiredFeatures.push_back(feature);
++          g_shaderF16Enabled = true;
++        }
++      }
+ #endif
+     }
+ #ifdef _WIN32
+--- a/lib/webgpu/gpu.hpp
++++ b/lib/webgpu/gpu.hpp
+@@ -58,6 +58,9 @@ extern bool g_sharedTextureSupported;
+ extern bool g_sharedFenceSupported;
+ // Clip distances: a headset's two eyes drawn in one instanced draw (gfx/stereo.cpp).
+ extern bool g_clipDistancesSupported;
++// The GX shaders' TEV in half precision (gx/shader.cpp): the device has f16
++// and a headset asked for it (debug.partyboard.shader_f16 1).
++extern bool g_shaderF16Enabled;
+ 
+ bool initialize(AuroraBackend backend, bool allowCpu);
+ void shutdown();

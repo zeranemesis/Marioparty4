@@ -13,6 +13,7 @@
 
 #include "xr_util.hpp"
 #include "adaptive_quality.hpp"
+#include "frame_pacing.hpp"
 
 #include <EGL/eglext.h>
 #include <android/hardware_buffer.h>
@@ -36,6 +37,7 @@ struct StereoFrame {
   float hudWidth, hudHeight;
   uint32_t eyeWidth, eyeHeight; // drawn part of each eye's half (dynamic resolution)
   uint32_t generation;          // of the images the lease is in
+  uint32_t drawHud;             // 1: draw the interface into its image this frame
 };
 
 class StereoView {
@@ -50,26 +52,43 @@ public:
   // XR thread: the newest image the game drew, copied into the swapchain; the
   // layer showing it (or the previous one), nullptr before the first.
   const XrCompositionLayerBaseHeader* layer(XrSpace space, const void* next);
-  const XrCompositionLayerBaseHeader* hud_layer(XrSpace viewSpace, const void* next);
+  // The game's interface (scores, messages) as a quad at `pose` in `space`:
+  // quest_xr.cpp stands it at the back of the model. nullptr while hidden.
+  const XrCompositionLayerBaseHeader* hud_layer(XrSpace space, const XrPosef& pose, XrExtent2Df size,
+                                                const void* next);
+  // The screen the interface shows on, like a stadium's: a dark face with a
+  // bezel around the interface's quad (same pose and size), to submit just
+  // before hud_layer. nullptr while the interface is hidden.
+  const XrCompositionLayerBaseHeader* hud_screen_layer(XrSpace space, const XrPosef& pose, XrExtent2Df size);
+  // The bezel, as a part of the interface's width on each side.
+  static constexpr float kHudBezel = 0.025f;
 
   // Game thread (PartyBoardQuest_StereoFrame): an image and the view to draw it with.
   bool game_frame(StereoFrame& out);
-  // Game thread: the images, to register with Aurora.
-  bool images(void** buffers, uint32_t capacity, uint32_t& count, uint32_t& width, uint32_t& height,
-              uint32_t& generation, uint32_t& eyeHeight, uint32_t& hudWidth, uint32_t& hudHeight);
+  // Game thread: the images, to register with Aurora: `count` eye images
+  // (width x height, the eyes side by side) and as many HUD images.
+  bool images(void** eyeBuffers, void** hudBuffers, uint32_t capacity, uint32_t& count, uint32_t& width,
+              uint32_t& height, uint32_t& generation, uint32_t& hudWidth, uint32_t& hudHeight);
   uint32_t generation() const;
   // Aurora's render thread: the frame drawing `image` went to the GPU.
   void submitted(uint32_t image, uint64_t tag, int syncFd, bool hasWorld = false);
   void set_screen_required(bool required);
   void set_board_mode(bool board);
   bool screen_required() const;
+  // A minigame is on show (the game's 3D world, not a board): quest_xr.cpp
+  // stands it where the board's screen is.
+  bool minigame_mode() const;
   bool world_only() const;
   bool world_visible() const { return mShown && mShownHasWorld; }
   // A camera with no view never enqueues GPU work: return its lease explicitly.
   void cancelled(uint32_t image, uint64_t tag);
 
-  // XR thread, each frame before update(): the display time being prepared.
-  void set_frame_time(XrTime time);
+  // XR thread, each frame before update(): the display time being prepared,
+  // and the display's period.
+  void set_frame_time(XrTime time, XrDuration period = 0);
+  // Game thread, its frame done: when to start the next one (steady-clock
+  // nanoseconds), on the display's schedule; 0 when not paced (FramePacer).
+  int64_t next_frame_start(int64_t nowNs, float targetHz);
   // How far ahead of this frame the game's next image will be seen: measured
   // from the images already shown, for the eye poses given to the game.
   XrDuration prediction() const;
@@ -83,9 +102,12 @@ private:
   friend struct StereoViewTestAccess;
   enum class State { Free, Drawing, Ready, Copying };
   struct Slot {
-    AHardwareBuffer* buffer = nullptr;
+    AHardwareBuffer* buffer = nullptr; // the eyes, side by side
     EGLImageKHR eglImage = EGL_NO_IMAGE_KHR;
     GLuint texture = 0;
+    AHardwareBuffer* hudBuffer = nullptr; // the interface, drawn by the same frame
+    EGLImageKHR hudEglImage = EGL_NO_IMAGE_KHR;
+    GLuint hudTexture = 0;
     State state = State::Free;
     uint64_t tag = 0;
     int fence = -1;
@@ -95,6 +117,9 @@ private:
     XrView views[2]{};
     uint32_t renderWidth = 0, renderHeight = 0; // drawn part of each eye's half
     XrTime leaseTime = 0;                       // the XR frame the game took it in
+    int64_t startNs = 0;                        // its frame's paced start, 0 when not paced
+    int64_t dueNs = 0;                          // the look it is for, 0: as soon as finished
+    bool hud = false;                           // its interface image was drawn
   };
 
   // Dynamic resolution, once a second (caller holds mMutex).
@@ -115,7 +140,7 @@ public:
 private:
 
   void release_slot(Slot& slot);
-  Slot* newest_completed(); // Caller holds mMutex.
+  Slot* newest_completed(int64_t lookNs); // Caller holds mMutex.
 
   EGLDisplay mDisplay = EGL_NO_DISPLAY;
   XrInstance mInstance = XR_NULL_HANDLE;
@@ -126,12 +151,19 @@ private:
   uint32_t mHudPixelsWidth = 1600, mHudPixelsHeight = 1200;
   bool mHudShown = false;
   XrCompositionLayerQuad mHudLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
+  // The screen behind the interface: one static image, drawn once.
+  XrSwapchain mHudScreenSwapchain = XR_NULL_HANDLE;
+  XrCompositionLayerQuad mHudScreenLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
+  void create_hud_screen();
   std::vector<XrSwapchainImageOpenGLESKHR> mSwapchainImages;
   uint32_t mEyeWidth = 0; // an eye's half of the swapchain: the largest drawn size
   uint32_t mEyeHeight = 0;
   uint32_t mRecommendedEyeWidth = 0;
-  uint32_t mImageEyeWidth = 0, mImageEyeHeight = 0; // the ring's images: the drawn size
+  uint32_t mImageEyeWidth = 0, mImageEyeHeight = 0; // the ring's images: the drawn size or larger
   bool mResizePending = false;
+  ImageSizePolicy mImageSize;  // when the images follow the drawn size (adapt_resolution())
+  uint32_t mResizeCount = 0;   // the controller's, for the log
+  std::chrono::steady_clock::time_point mResizeRetryAt{}; // after a failed allocation
   uint32_t mDesiredHudWidth = 1600;
   int64_t mSwapchainFormat = 0;
 
@@ -167,14 +199,37 @@ private:
   AdaptiveQuality mQuality;
   QualitySample mQualitySample;
   uint32_t mAdaptLeases = 0, mAdaptRingFull = 0, mCalmSeconds = 0;
+  // The intervals between the game's image requests this second, and the
+  // hitches counted in the last one (adapt_resolution()).
+  std::chrono::steady_clock::time_point mLastRequestAt{};
+  std::vector<float> mRequestIntervals;
+  uint32_t mLastSlow = 0;
   std::chrono::steady_clock::time_point mAdaptAt = std::chrono::steady_clock::now();
   // Pose prediction: this XR frame's display time, and the measured delay
   // between taking an image and showing it (moving average, nanoseconds).
   XrTime mFrameTime = 0;
   double mLatencyNs = 0;
+  double mLatencyMinMs = 0, mLatencyMaxMs = 0; // this stats window
+  // The game's frames on the display's schedule (next_frame_start()), and
+  // what shows it works: display frames each new image stayed on show (1, 2,
+  // 3, 4 or more), this stats window.
+  FramePacer mPacer;
+  XrDuration mPeriodNs = 0;
+  bool mPacing = true;             // debug.partyboard.xr_pacing=0 turns it off
+  bool mStartGiven = false;        // a start the next lease belongs to
+  int64_t mGivenStartNs = 0, mGivenDueNs = 0;
+  uint32_t mFramesSinceNew = 0;
+  bool mHoldCounted = false;       // an image shown since the layer came back
+  std::chrono::steady_clock::time_point mLastLayerAt{};
+  std::array<uint32_t, 4> mHolds{};
   bool mScreenHidden = false;
   // The interface is copied at 30 Hz: text and scores need no more.
   std::chrono::steady_clock::time_point mHudCopiedAt{};
+  // The interface is drawn every other image the game makes (30 Hz at 60),
+  // the rate it is copied at: `adb shell setprop debug.partyboard.hud_rate
+  // full` draws it in every image (read every 2 s).
+  bool mHudEveryImage = false;
+  bool mHudLastLease = false; // the previous lease drew it
 
   // The last image shown, resubmitted until the game draws the next one.
   uint64_t mPresentedTag = 0;

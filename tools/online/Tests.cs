@@ -76,6 +76,39 @@ static class Tests {
         var router=IPAddress.Parse("192.168.1.1");
         Check(Gateway.SafeUrl(new Uri("http://192.168.1.1:5000/control"),router),"local gateway URL");
         foreach(string url in new[]{"http://example.org/x","http://127.0.0.1/x","file:///C:/test","http://user@192.168.1.1/x","http://192.168.1.1/x#fragment"}) Check(!Gateway.SafeUrl(new Uri(url),router),"untrusted URL rejected");
+        // Fixed port: bounds, and the manual fallback's address sources.
+        Check(NetworkSettings.Valid(0) && NetworkSettings.Valid(1024) && NetworkSettings.Valid(65534),"fixed port accepts automatic and its range");
+        Check(!NetworkSettings.Valid(1023) && !NetworkSettings.Valid(65535),"fixed port rejects privileged ports and leaves room for port + 1");
+        {
+            var savedPort=NetworkSettings.Port;var savedAddress=NetworkSettings.PublicAddress;
+            try {
+                var lan=new Route{Local=IPAddress.Parse("192.168.1.2"),Router=IPAddress.Parse("192.168.1.1")};
+                Func<byte[],byte[]> silent=q=>{throw new IOException("La box ne répond pas.");};
+                Func<byte[],byte[]> reports=q=>new byte[]{0,128,0,0,0,0,0,1,82,64,1,2};
+                Func<byte[],byte[]> nested=q=>new byte[]{0,128,0,0,0,0,0,1,192,168,0,1};
+                NetworkSettings.Port=40000;NetworkSettings.PublicAddress=null;
+                var fromBox=new Gateway(lan,40000,40000,false,reports).AsManual(40000);
+                Check(fromBox.Port==40000 && fromBox.Address.Equals(IPAddress.Parse("82.64.1.2")),"manual port takes the address the box reports");
+                fromBox.Renew();fromBox.Dispose();
+                Reject(()=>new Gateway(lan,40000,40000,false,silent).AsManual(40000),"manual port without any address is refused");
+                NetworkSettings.PublicAddress=IPAddress.Parse("5.6.7.8");
+                Check(new Gateway(lan,40000,40000,false,silent).AsManual(40000).Address.Equals(IPAddress.Parse("5.6.7.8")),"manual port falls back to the typed address");
+                Check(new Gateway(lan,40000,40000,true,nested).AsManual(40001).Address.Equals(IPAddress.Parse("5.6.7.8")),"a box behind another network is not trusted for the address");
+                // No opening at all: a salon for this network only.
+                var local=new Gateway(lan,40000,40000,false,silent).AsLocal();
+                Check(local.LocalOnly && local.Port==40000 && local.Address.Equals(IPAddress.Parse("192.168.1.2")),"no opening falls back to a local-network salon");
+                local.Renew();local.Dispose();
+                var exposed=new Route{Local=IPAddress.Parse("82.64.1.2"),Router=IPAddress.Parse("192.168.1.1")};
+                Reject(()=>new Gateway(exposed,40000,40000,false,silent).AsLocal(),"no local salon without a private address");
+                var lanInvite=new Invitation{Address=IPAddress.Parse("192.168.1.2"),Port=40000,LocalAddress=IPAddress.Parse("192.168.1.2"),LocalPort=40000,Expires=DateTime.UtcNow.AddMinutes(30),Fingerprint=Wire.Random(16),Token=Wire.Random(16),Build=Wire.Random(32)};
+                var lanDecoded=Invitation.Decode(lanInvite.Encode());
+                Check(lanDecoded.Address.Equals(IPAddress.Parse("192.168.1.2")) && lanDecoded.Port==40000,"a local-network invitation is accepted");
+                lanInvite.Address=IPAddress.Parse("192.168.1.9");
+                Reject(()=>Invitation.Decode(lanInvite.Encode()),"a private address that is not the local path is refused");
+                lanInvite.Address=IPAddress.Parse("192.168.1.2");lanInvite.LocalPort=40002;
+                Reject(()=>Invitation.Decode(lanInvite.Encode()),"a local invitation whose ports disagree is refused");
+            } finally {NetworkSettings.Port=savedPort;NetworkSettings.PublicAddress=savedAddress;}
+        }
         byte[] key=Wire.Random(12);var request=Gateway.PcpRequest(IPAddress.Parse("192.168.1.2"),key,32000,32000,120);
         Check(request.Length==60 && request[36]==6 && request[18]==255 && Gateway.U32(request,4)==120,"PCP request");
         var reply=(byte[])request.Clone();reply[1]=129;Array.Clear(reply,44,16);reply[54]=reply[55]=255;reply[56]=8;reply[57]=8;reply[58]=8;reply[59]=8;

@@ -11,7 +11,7 @@ namespace quest {
 struct StereoViewTestAccess {
   static void presented(StereoView& view, uint64_t tag) { view.mPresentedTag = tag; }
   static int completed(StereoView& view) {
-    auto* slot = view.newest_completed();
+    auto* slot = view.newest_completed(0);
     return slot ? static_cast<int>(slot - view.mSlots.data()) : -1;
   }
   static void enable(StereoView& view) { view.mEnabled = true; }
@@ -87,11 +87,11 @@ int main() {
   }
   quest::StereoView view;
   // A separately composited HUD must not show stale menus before a world.
-  assert(view.hud_layer(XR_NULL_HANDLE, nullptr) == nullptr);
+  assert(view.hud_layer(XR_NULL_HANDLE, XrPosef{{0, 0, 0, 1}, {0, 0, 0}}, XrExtent2Df{0.72f, 0.54f}, nullptr) == nullptr);
   quest::StereoViewTestAccess::enable(view);
   quest::StereoFrame frame{};
   view.set_screen_required(true);
-  assert(view.hud_layer(XR_NULL_HANDLE, nullptr) == nullptr);
+  assert(view.hud_layer(XR_NULL_HANDLE, XrPosef{{0, 0, 0, 1}, {0, 0, 0}}, XrExtent2Df{0.72f, 0.54f}, nullptr) == nullptr);
   assert(view.screen_required() && !view.game_frame(frame) && !view.world_only());
   view.set_screen_required(false);
   assert(!view.screen_required() && view.world_only());

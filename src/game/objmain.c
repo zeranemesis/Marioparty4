@@ -10,6 +10,10 @@
 #include "game/minigame_seq.h"
 #include "game/window.h"
 
+#ifdef TARGET_PC
+#include "port/quest_stereo.h"
+#endif
+
 #define OM_OVL_HIS_MAX 16
 #define OM_MAX_GROUPS 10
 
@@ -91,7 +95,12 @@ static void omWatchOverlayProc(void)
                 pcOvlToKill = DLL_NONE;
             }
 #endif
+#ifdef TARGET_PC
+            /* Meta Quest: a board or a minigame waits for the table's calibration. */
+            if (omnextovl >= 0 && fadeStat == 0 && !PartyBoard_QuestHoldOverlay(omnextovl)) {
+#else
             if (omnextovl >= 0 && fadeStat == 0) {
+#endif
                 HuPrcSleep(0);
                 OSReport("++++++++++++++++++++ Start New OVL %d (EVT:%d STAT:0x%08x) ++++++++++++++++++\n", omnextovl, omnextovlevtno, omnextovlstat);
                 HuMemHeapDump(HuMemHeapPtrGet(HEAP_SYSTEM), -1);

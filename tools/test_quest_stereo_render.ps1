@@ -14,12 +14,9 @@ $tests = Join-Path $PSScriptRoot 'tests/stereo_render'
 $aurora = Join-Path $repo 'extern/aurora'
 $deps = Join-Path $repo 'build/android-arm64-quest/_deps'
 $out = Join-Path $repo 'build/quest-stereo-render'
-# A missing Quest build tree is a prerequisite this machine lacks, not a
-# failure: exit 2 is run_all_tests.ps1's "this environment cannot run me".
-if (-not (Test-Path "$deps/fmt-src")) {
-    Write-Output 'not applicable: configure build/android-arm64-quest once, its sources are reused here'
-    exit 2
-}
+# Without that tree this environment cannot run the test: run_all_tests.ps1
+# reports exit 2 as not applicable rather than failed.
+if (-not (Test-Path "$deps/fmt-src")) { Write-Output 'not applicable: configure build/android-arm64-quest once, its sources are reused here'; exit 2 }
 New-Item -ItemType Directory -Force $out, "$out/shaders", "$out/scene" | Out-Null
 
 $version = (Select-String -Path "$aurora/CMakeLists.txt" -Pattern 'AURORA_DAWN_VERSION "([^"]+)"').Matches[0].Groups[1].Value
@@ -68,6 +65,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Shader generation failed.' }
 & "$out/validate.exe" @(Get-ChildItem "$out/shaders/*.wgsl" | ForEach-Object FullName) 2>$null
 if ($LASTEXITCODE -ne 0) { throw 'Generated shaders rejected by Dawn.' }
 & "$out/harness.exe" "$out/scene" scene
+# The TEV operand wrap as before, for render.exe's comparison.
+$env:AURORA_TEV_OVERFLOW_ALL = '1'
+& "$out/harness.exe" "$out/scene" scene | Out-Null
+$env:AURORA_TEV_OVERFLOW_ALL = $null
 & "$out/render.exe" "$out/scene" 2>$null
 if ($LASTEXITCODE -ne 0) { throw 'Instanced stereo does not match per-eye rendering.' }
 Write-Output 'PASS: generated shaders valid, instanced stereo identical to per-eye rendering'

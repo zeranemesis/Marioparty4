@@ -6,6 +6,7 @@
 // nothing elsewhere, or while the headset shows only the flat screen.
 
 #include "game/hu3d.h"
+#include "game/object.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,6 +26,13 @@ void PartyBoard_StereoObserveBounds(Mtx modelView, const HuVecF *min, const HuVe
 // An object the headset should not draw: a backdrop around the player (sky, skybox).
 BOOL PartyBoard_StereoBackdrop(float x, float y, float z, float radius);
 BOOL PartyBoard_StereoSphereVisible(float x, float y, float z, float radius);
+// Around each object hsfdraw.c draws (ObjDraw): its draws skip the eyes' cut
+// when its bounds cannot reach the other eye.
+void PartyBoard_StereoObjectBegin(Mtx modelView, const HuVecF *min, const HuVecF *max);
+void PartyBoard_StereoObjectEnd(void);
+// Before `next` (a board or a minigame) starts: true while the headset asks for
+// the table's calibration. Never in an online game.
+BOOL PartyBoard_QuestHoldOverlay(OMOVL next);
 
 #ifdef __cplusplus
 }
