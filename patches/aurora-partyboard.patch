@@ -2357,10 +2357,10 @@ index 0000000..4e8f27c
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_accel.hpp b/lib/rt/rt_accel.hpp
 new file mode 100644
-index 0000000..1eaa2ea
+index 0000000..9642110
 --- /dev/null
 +++ b/lib/rt/rt_accel.hpp
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,173 @@
 +#pragma once
 +
 +#include <cstddef>
@@ -2427,6 +2427,12 @@ index 0000000..1eaa2ea
 +// hole-shaped light, but it stops a surface that is mostly holes from occluding
 +// as though it were solid. Only meaningful with MaterialCutout set.
 +enum : uint32_t {
++  // Bits 4 to 7: how much of the surface the game's own combiners take away
++  // on top of what its texture shows, in fifteenths -- the alpha of a vertex
++  // or of the material fading it out. 0 leaves it whole, which is every
++  // surface that carries nothing there.
++  MaterialFadeShift = 4u,
++  MaterialFadeMask = 0xfu,
 +  MaterialOpacityShift = 8u,
 +  MaterialOpacityMask = 0xffu,
 +  // Top half of the word: which thumbnail in the ray tracing texture registry
@@ -2530,10 +2536,10 @@ index 0000000..1eaa2ea
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_capture.cpp b/lib/rt/rt_capture.cpp
 new file mode 100644
-index 0000000..d3d3ed6
+index 0000000..274a436
 --- /dev/null
 +++ b/lib/rt/rt_capture.cpp
-@@ -0,0 +1,2944 @@
+@@ -0,0 +1,3186 @@
 +#include "rt_capture.hpp"
 +
 +#include "rt_accel.hpp"
@@ -2723,6 +2729,17 @@ index 0000000..d3d3ed6
 +uint32_t g_drawsBlended = 0;
 +// Draws blended additively, which the rays leave out while g_skipAdditive holds.
 +uint32_t g_drawsAdditive = 0;
++// What the game's own combiners leave of a surface -- a vertex or a material
++// alpha fading it out -- counted in what it blocks. On by default;
++// AURORA_RT_RASTER_ALPHA=0 goes by the texture alone, as before, and the A/B
++// bench compares the two on one frame with AURORA_RT_AB=rasterAlpha=0.
++bool g_rasterAlpha = true;
++// This frame: triangles such an alpha takes something from, those it takes
++// everything from, and the draws whose alpha combiners are not modelled and
++// are left whole.
++uint32_t g_trianglesFaded = 0;
++uint32_t g_trianglesFadedOut = 0;
++uint32_t g_drawsAlphaUnmodelled = 0;
 +// How the see-through draws are spread across mean alpha, in tenths. The
 +// primary ray steps past anything under PRIMARY_OPACITY_FLOOR, and where that
 +// floor belongs is a property of the game's art rather than a matter of taste.
@@ -3206,9 +3223,11 @@ index 0000000..d3d3ed6
 +
 +// Vertex colours drive the indirect bounce: a ray that hits geometry brings back
 +// what that surface looks like, which is what turns a grey occlusion term into
-+// coloured bounced light.
-+bool decode_colour(const uint8_t* p, GXCompType type, bool le, Vec3& out) noexcept {
++// coloured bounced light. `alpha` is the same vertex's alpha, 1 where the
++// format carries none: the game fades its particles through it.
++bool decode_colour(const uint8_t* p, GXCompType type, bool le, Vec3& out, float& alpha) noexcept {
 +  const auto u8n = [](uint8_t v) { return static_cast<float>(v) / 255.f; };
++  alpha = 1.f;
 +  switch (type) {
 +  case GX_RGB565: {
 +    const uint16_t v = le ? read_u16_le(p) : read_u16_be(p);
@@ -3219,14 +3238,18 @@ index 0000000..d3d3ed6
 +  }
 +  case GX_RGB8:
 +  case GX_RGBX8:
++    out = Vec3{u8n(p[0]), u8n(p[1]), u8n(p[2])};
++    return true;
 +  case GX_RGBA8:
 +    out = Vec3{u8n(p[0]), u8n(p[1]), u8n(p[2])};
++    alpha = u8n(p[3]);
 +    return true;
 +  case GX_RGBA4: {
 +    const uint16_t v = le ? read_u16_le(p) : read_u16_be(p);
 +    out = Vec3{static_cast<float>((v >> 12) & 0xF) / 15.f,
 +               static_cast<float>((v >> 8) & 0xF) / 15.f,
 +               static_cast<float>((v >> 4) & 0xF) / 15.f};
++    alpha = static_cast<float>(v & 0xF) / 15.f;
 +    return true;
 +  }
 +  case GX_RGBA6: {
@@ -3235,11 +3258,162 @@ index 0000000..d3d3ed6
 +    out = Vec3{static_cast<float>((v >> 18) & 0x3F) / 63.f,
 +               static_cast<float>((v >> 12) & 0x3F) / 63.f,
 +               static_cast<float>((v >> 6) & 0x3F) / 63.f};
++    alpha = static_cast<float>(v & 0x3F) / 63.f;
 +    return true;
 +  }
 +  default:
 +    return false;
 +  }
++}
++
++// The constant a stage's alpha combiner reads. False for a selector that does
++// not exist.
++bool konst_alpha(GXTevKAlphaSel sel, float& out) noexcept {
++  const auto value = static_cast<uint32_t>(sel);
++  if (value <= 0x07u) {
++    out = static_cast<float>(8u - value) / 8.f;
++    return true;
++  }
++  if (value >= 0x10u && value <= 0x1fu) {
++    // K0 to K3, then which of their four components.
++    out = g_gxState.kcolors[(value - 0x10u) & 3u][(value - 0x10u) >> 2];
++    return true;
++  }
++  return false;
++}
++
++// The alpha the game's combiners hand to the blend, run the way the rasterizer
++// runs them (gx/shader.cpp): every active stage in turn, for a texel of alpha
++// `texture` and the two channels' rasterized alphas. False when a stage does
++// something this does not follow -- a compare, an alpha bump -- and the caller
++// then leaves the surface whole.
++bool combine_alpha(float texture, const float raster[2], float& out) noexcept {
++  float regs[4];
++  for (uint32_t i = 0; i < 4; ++i) {
++    regs[i] = g_gxState.colorRegs[i].w();
++  }
++  for (uint8_t s = 0; s < g_gxState.numTevStages && s < g_gxState.tevStages.size(); ++s) {
++    const auto& stage = g_gxState.tevStages[s];
++    bool known = true;
++    const auto read = [&](GXTevAlphaArg arg) -> float {
++      switch (arg) {
++      case GX_CA_APREV:
++        return regs[0];
++      case GX_CA_A0:
++        return regs[1];
++      case GX_CA_A1:
++        return regs[2];
++      case GX_CA_A2:
++        return regs[3];
++      case GX_CA_TEXA:
++        return texture;
++      case GX_CA_RASA:
++        switch (stage.channelId) {
++        case GX_COLOR0:
++        case GX_ALPHA0:
++        case GX_COLOR0A0:
++          return raster[0];
++        case GX_COLOR1:
++        case GX_ALPHA1:
++        case GX_COLOR1A1:
++          return raster[1];
++        case GX_COLOR_ZERO:
++        case GX_COLOR_NULL:
++          return 0.f;
++        default:
++          known = false;
++          return 1.f;
++        }
++      case GX_CA_KONST: {
++        float konst = 1.f;
++        known = konst_alpha(stage.kaSel, konst) && known;
++        return konst;
++      }
++      default:
++        return 0.f;
++      }
++    };
++    const float a = read(stage.alphaPass.a);
++    const float b = read(stage.alphaPass.b);
++    const float c = read(stage.alphaPass.c);
++    const float d = read(stage.alphaPass.d);
++    const auto& op = stage.alphaOp;
++    if (!known || (op.op != GX_TEV_ADD && op.op != GX_TEV_SUB)) {
++      return false;
++    }
++    const float mixed = a + (b - a) * c;
++    float value = (op.op == GX_TEV_SUB ? -mixed : mixed) + d;
++    value += op.bias == GX_TB_ADDHALF ? 0.5f : (op.bias == GX_TB_SUBHALF ? -0.5f : 0.f);
++    value *= op.scale == GX_CS_SCALE_2 ? 2.f
++             : op.scale == GX_CS_SCALE_4 ? 4.f
++             : op.scale == GX_CS_DIVIDE_2 ? 0.5f
++                                          : 1.f;
++    const float low = op.clamp ? 0.f : -4.f;
++    const float high = op.clamp ? 1.f : 4.f;
++    value = value < low ? low : (value > high ? high : value);
++    const auto reg = static_cast<uint32_t>(op.outReg);
++    regs[reg < 4u ? reg : 0u] = value;
++  }
++  out = regs[0] < 0.f ? 0.f : (regs[0] > 1.f ? 1.f : regs[0]);
++  return true;
++}
++
++// Whether a fragment of this alpha survives the game's alpha compare.
++bool alpha_compare_passes(float alpha) noexcept {
++  const auto& compare = g_gxState.alphaCompare;
++  const auto value = static_cast<uint32_t>(alpha * 255.f + 0.5f);
++  const auto test = [value](GXCompare comp, uint32_t ref) {
++    switch (comp) {
++    case GX_NEVER:
++      return false;
++    case GX_LESS:
++      return value < ref;
++    case GX_EQUAL:
++      return value == ref;
++    case GX_LEQUAL:
++      return value <= ref;
++    case GX_GREATER:
++      return value > ref;
++    case GX_NEQUAL:
++      return value != ref;
++    case GX_GEQUAL:
++      return value >= ref;
++    default:
++      return true;
++    }
++  };
++  const bool first = test(compare.comp0, compare.ref0 & 0xffu);
++  const bool second = test(compare.comp1, compare.ref1 & 0xffu);
++  switch (compare.op) {
++  case GX_AOP_AND:
++    return first && second;
++  case GX_AOP_OR:
++    return first || second;
++  case GX_AOP_XOR:
++    return first != second;
++  default:
++    return first == second;
++  }
++}
++
++// How much of a surface is left where its texture is solid, by the game's own
++// state: the alpha its combiners produce there if the blend then weighs the
++// surface by it, and nothing at all if the alpha compare throws the fragment
++// away. `modelled` goes false, and the surface stays whole, when the combiners
++// do something combine_alpha does not follow.
++float surface_remainder(float raster0, float raster1, bool& modelled) noexcept {
++  const float raster[2] = {raster0, raster1};
++  float alpha = 1.f;
++  if (!combine_alpha(1.f, raster, alpha)) {
++    modelled = false;
++    return 1.f;
++  }
++  if (!alpha_compare_passes(alpha)) {
++    return 0.f;
++  }
++  const bool weighed = g_gxState.blendMode == GX_BM_BLEND && g_gxState.blendFacSrc == GX_BL_SRCALPHA &&
++                       g_gxState.blendFacDst == GX_BL_INVSRCALPHA;
++  return weighed ? alpha : 1.f;
 +}
 +
 +// Row-vector times 3x4 matrix, matching the generated shader:
@@ -3979,6 +4153,32 @@ index 0000000..d3d3ed6
 +  std::vector<Vec3> nrmsView;
 +  std::vector<Vec3> nrmsLocal;
 +  std::vector<Vec3> uvs;
++  // What the game's alpha leaves of the surface at each vertex; filled only
++  // where it comes from the vertex itself, the draw's own value otherwise.
++  std::vector<float> remainders;
++  // The alpha channel's material is the vertex colour or a register. Lit, it
++  // is that scaled by the lights, which this takes at their full value.
++  const auto& alphaChannel0 = g_gxState.colorChannelConfig[GX_ALPHA0];
++  const auto& alphaChannel1 = g_gxState.colorChannelConfig[GX_ALPHA1];
++  const float rasterAlpha1 = alphaChannel1.matSrc == GX_SRC_REG
++                                 ? g_gxState.colorChannelState[GX_ALPHA1].matColor.w()
++                                 : 1.f;
++  const bool alphaFromVertex =
++      !ortho && alphaChannel0.matSrc == GX_SRC_VTX && colourLayout.present && colourBytes != 0;
++  bool alphaModelled = true;
++  const float drawRemainder =
++      ortho ? 1.f
++            : surface_remainder(alphaChannel0.matSrc == GX_SRC_REG
++                                    ? g_gxState.colorChannelState[GX_ALPHA0].matColor.w()
++                                    : 1.f,
++                                rasterAlpha1, alphaModelled);
++  if (alphaFromVertex) {
++    remainders.reserve(vtxCount);
++  }
++  // A vertex alpha is eight bits at most, and a draw uses a handful of them:
++  // the combiners are run once per value rather than once per vertex.
++  float remainderOf[256];
++  bool remainderKnown[256] = {};
 +  uvs.reserve(vtxCount);
 +  locals.reserve(vtxCount);
 +  verts.reserve(vtxCount);
@@ -4060,9 +4260,21 @@ index 0000000..d3d3ed6
 +        csrc = vtx + colourLayout.offset;
 +      }
 +      Vec3 vertexColour{1.f, 1.f, 1.f};
-+      if (csrc != nullptr && decode_colour(csrc, colourFmt.type, cle, vertexColour)) {
++      float vertexAlpha = 1.f;
++      if (csrc != nullptr && decode_colour(csrc, colourFmt.type, cle, vertexColour, vertexAlpha)) {
 +        colour = Vec3{albedo.x * vertexColour.x, albedo.y * vertexColour.y,
 +                      albedo.z * vertexColour.z};
++      } else {
++        vertexAlpha = 1.f;
++      }
++      if (alphaFromVertex) {
++        const auto level = static_cast<uint32_t>(vertexAlpha * 255.f + 0.5f) & 0xffu;
++        if (!remainderKnown[level]) {
++          remainderKnown[level] = true;
++          remainderOf[level] =
++              surface_remainder(static_cast<float>(level) / 255.f, rasterAlpha1, alphaModelled);
++        }
++        remainders.push_back(remainderOf[level]);
 +      }
 +    }
 +    cols.push_back(colour);
@@ -4277,8 +4489,22 @@ index 0000000..d3d3ed6
 +        g_viewHash = mix64(mix64(mix64(g_viewHash, verts[idx].x), verts[idx].y), verts[idx].z);
 +      }
 +    }
-+    g_materials.push_back(material);
-+    g_contentHash = (g_contentHash ^ material) * 0x100000001b3ull;
++    // What the game's alpha takes from this triangle, in fifteenths. Always
++    // recorded; whether the rays heed it is the trace's FeatureRasterAlpha.
++    uint32_t triangleMaterial = material;
++    const float left = alphaFromVertex && remainders.size() == verts.size()
++                           ? (remainders[ia] + remainders[ib] + remainders[ic]) * (1.f / 3.f)
++                           : drawRemainder;
++    const uint32_t kept = static_cast<uint32_t>((left < 0.f ? 0.f : (left > 1.f ? 1.f : left)) * 15.f + 0.5f);
++    if (kept < 15u) {
++      triangleMaterial |= (15u - kept) << accel::MaterialFadeShift;
++      ++g_trianglesFaded;
++      if (kept == 0u) {
++        ++g_trianglesFadedOut;
++      }
++    }
++    g_materials.push_back(triangleMaterial);
++    g_contentHash = (g_contentHash ^ triangleMaterial) * 0x100000001b3ull;
 +  };
 +
 +  const auto recordDraw = [&] {
@@ -4297,6 +4523,9 @@ index 0000000..d3d3ed6
 +    group.triangleCount = triangles;
 +    std::memcpy(group.transform, drawTransform, sizeof(group.transform));
 +    group.additive = (material & accel::MaterialAdditive) != 0u;
++    if (!alphaModelled) {
++      ++g_drawsAlphaUnmodelled;
++    }
 +    group.projection = projIndex == SIZE_MAX ? accel::NoProjection : static_cast<uint8_t>(projIndex);
 +    group.identity = rejectedInDraw != 0u
 +                         ? 0u
@@ -4455,6 +4684,12 @@ index 0000000..d3d3ed6
 +      Log.info("Geometry drawn through another projection {}",
 +               g_skipOtherProjection ? "left out of the rays" : "traced");
 +    }
++    if (const char* env = std::getenv("AURORA_RT_RASTER_ALPHA")) {
++      g_rasterAlpha = env[0] != '0';
++      Log.info("A surface blocks by {}",
++               g_rasterAlpha ? "its texture and the alpha the game's combiners leave of it"
++                             : "its texture alone");
++    }
 +    if (const char* env = std::getenv("AURORA_RT_OBJECT_MOTION")) {
 +      g_objectMotion = env[0] != '0';
 +      Log.info("Each surface's previous position taken from {}",
@@ -4486,7 +4721,7 @@ index 0000000..d3d3ed6
 +                                                 "aoRadius",  "bounce",        "denoisePhi",
 +                                                 "denoisePasses", "debugMode", "alphaTest",
 +                                                 "additive", "shadowStratify", "otherProjection",
-+                                                 "objectMotion"};
++                                                 "objectMotion", "rasterAlpha"};
 +      bool known = false;
 +      if (const char* eq = std::strchr(env, '='); eq != nullptr) {
 +        const std::string name(env, eq);
@@ -4504,7 +4739,7 @@ index 0000000..d3d3ed6
 +      } else {
 +        Log.warn("AURORA_RT_AB ignored: expected name=value, name one of aoSamples, shadowSamples, "
 +                 "lightRadius, aoRadius, bounce, denoisePhi, denoisePasses, debugMode, alphaTest, "
-+                 "additive, shadowStratify, otherProjection, objectMotion");
++                 "additive, shadowStratify, otherProjection, objectMotion, rasterAlpha");
 +      }
 +    }
 +    // Frame numbers are a poor handle: the counter runs uncapped through boot,
@@ -4608,6 +4843,9 @@ index 0000000..d3d3ed6
 +    g_lastDrawOrtho = false;
 +    g_drawsBlended = 0;
 +    g_drawsAdditive = 0;
++    g_trianglesFaded = 0;
++    g_trianglesFadedOut = 0;
++    g_drawsAlphaUnmodelled = 0;
 +    for (uint32_t& bucket : g_opacityHistogram) {
 +      bucket = 0;
 +    }
@@ -5212,7 +5450,8 @@ index 0000000..d3d3ed6
 +                    (g_skipAdditive ? trace::FeatureSkipAdditive : 0u) |
 +                    (g_stratifiedShadow ? trace::FeatureStratifiedShadow : 0u) |
 +                    (g_skipOtherProjection ? trace::FeatureSkipOtherProjection : 0u) |
-+                    (g_objectMotion ? trace::FeatureObjectMotion : 0u);
++                    (g_objectMotion ? trace::FeatureObjectMotion : 0u) |
++                    (g_rasterAlpha ? trace::FeatureRasterAlpha : 0u);
 +  std::memcpy(params.prevProj, previousProjection, sizeof(params.prevProj));
 +  params.havePrevious = havePreviousProjection;
 +  params.reflectionRange = shadowRange; // the scene's own size bounds both
@@ -5273,6 +5512,10 @@ index 0000000..d3d3ed6
 +      probe.features =
 +          value != 0.0 ? (probe.features | trace::FeatureObjectMotion)
 +                       : (probe.features & ~static_cast<uint32_t>(trace::FeatureObjectMotion));
++    } else if (g_abName == "rasterAlpha") {
++      probe.features =
++          value != 0.0 ? (probe.features | trace::FeatureRasterAlpha)
++                       : (probe.features & ~static_cast<uint32_t>(trace::FeatureRasterAlpha));
 +    }
 +    if (!trace::run(probe, "rt_ab_b.pfm")) {
 +      Log.error("A/B bench: the B trace failed");
@@ -5443,6 +5686,11 @@ index 0000000..d3d3ed6
 +             g_drawsTotal, g_drawsAlphaTested, g_drawsBlended, g_drawsReflective,
 +             g_drawsSingularMatrix, g_drawsAdditive,
 +             g_skipAdditive ? "left out of the rays" : "traced");
++    Log.info("Alpha of the vertices and the material ({}): takes something from {} triangles this "
++             "frame and everything from {} of them; {} draws left whole, their alpha combiners not "
++             "being modelled",
++             g_rasterAlpha ? "counted" : "ignored", g_trianglesFaded, g_trianglesFadedOut,
++             g_drawsAlphaUnmodelled);
 +    Log.info("Traced view {:.0f}x{:.0f} at {:.0f},{:.0f}: {}; {} frames since start were a split screen and "
 +             "left untouched",
 +             g_tracedViewport[2], g_tracedViewport[3], g_tracedViewport[0], g_tracedViewport[1],
@@ -7498,10 +7746,10 @@ index 0000000..c83f92c
 +} // namespace aurora::rt::trace
 diff --git a/lib/rt/rt_trace.hpp b/lib/rt/rt_trace.hpp
 new file mode 100644
-index 0000000..b955ea8
+index 0000000..0b5c270
 --- /dev/null
 +++ b/lib/rt/rt_trace.hpp
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,160 @@
 +#pragma once
 +
 +#include <cstdint>
@@ -7559,6 +7807,11 @@ index 0000000..b955ea8
 +  // applied, which is how the history was looked up before -- the A/B bench
 +  // compares the two.
 +  FeatureObjectMotion = 1u << 7,
++  // Count what the game's combiners leave of a surface -- a vertex or a
++  // material alpha fading it out -- in what it blocks. Off, a surface blocks by
++  // its texture alone, which is how it behaved before -- the A/B bench compares
++  // the two.
++  FeatureRasterAlpha = 1u << 8,
 +};
 +
 +struct TraceParams {
@@ -7659,10 +7912,10 @@ index 0000000..b955ea8
 +} // namespace aurora::rt::trace
 diff --git a/lib/rt/shaders/rt_ao.hlsl b/lib/rt/shaders/rt_ao.hlsl
 new file mode 100644
-index 0000000..b0bf843
+index 0000000..7941237
 --- /dev/null
 +++ b/lib/rt/shaders/rt_ao.hlsl
-@@ -0,0 +1,902 @@
+@@ -0,0 +1,929 @@
 +// Ray traced ambient occlusion for PartyBoard.
 +//
 +// Primary visibility is traced rather than rasterised: with inline RayQuery the
@@ -7813,6 +8066,7 @@ index 0000000..b0bf843
 +#define FEATURE_STRATIFIED_SHADOW 32u
 +#define FEATURE_SKIP_OTHER_PROJECTION 64u
 +#define FEATURE_OBJECT_MOTION 128u
++#define FEATURE_RASTER_ALPHA 256u
 +
 +#define MOTION_OBJECT 1u
 +#define MOTION_CAMERA 2u
@@ -7881,6 +8135,8 @@ index 0000000..b0bf843
 +#define MATERIAL_CUTOUT 2u
 +#define MATERIAL_TRANSLUCENT 4u
 +#define MATERIAL_ADDITIVE 8u
++#define MATERIAL_FADE_SHIFT 4u
++#define MATERIAL_FADE_MASK 0xfu
 +#define MATERIAL_OPACITY_SHIFT 8u
 +#define MATERIAL_OPACITY_MASK 0xffu
 +#define MATERIAL_THUMBNAIL_SHIFT 16u
@@ -7934,11 +8190,25 @@ index 0000000..b0bf843
 +// occludes like a wall and so does a bubble. Not alpha testing -- the light it
 +// lets through is uniform rather than hole-shaped -- but far closer than
 +// counting every hit whole.
-+float hit_opacity(uint material) {
-+  if ((material & (MATERIAL_CUTOUT | MATERIAL_TRANSLUCENT)) == 0u) {
++// What is left of a surface once the game's own combiners have faded it: the
++// alpha a vertex or the material carries, which the texture knows nothing of. A
++// particle dying out keeps its texture to the end, and this is what makes it
++// stop blocking. 1 with the feature off and for every surface that carries
++// nothing there, which leaves everything below as it was.
++float surface_fade(uint material) {
++  if ((gFeatures & FEATURE_RASTER_ALPHA) == 0u) {
 +    return 1.0f;
 +  }
-+  return float((material >> MATERIAL_OPACITY_SHIFT) & MATERIAL_OPACITY_MASK) * (1.0f / 255.0f);
++  return 1.0f - float((material >> MATERIAL_FADE_SHIFT) & MATERIAL_FADE_MASK) * (1.0f / 15.0f);
++}
++
++float hit_opacity(uint material) {
++  const float fade = surface_fade(material);
++  if ((material & (MATERIAL_CUTOUT | MATERIAL_TRANSLUCENT)) == 0u) {
++    return fade;
++  }
++  return float((material >> MATERIAL_OPACITY_SHIFT) & MATERIAL_OPACITY_MASK) * (1.0f / 255.0f) *
++         fade;
 +}
 +
 +bool has_thumbnail(uint material) {
@@ -7962,11 +8232,13 @@ index 0000000..b0bf843
 +  const uint material = gMaterials[prim];
 +  // Holes only: a uniformly translucent surface keeps its whole-texture weight.
 +  if ((material & MATERIAL_CUTOUT) == 0u || !has_thumbnail(material)) {
-+    return 1.0f;
++    // No texel to ask. A surface the game is fading out lets through what its
++    // fade says; anything else is whole, as before.
++    return surface_fade(material) < 1.0f ? hit_opacity(material) : 1.0f;
 +  }
 +  uint packed;
 +  thumbnail_texel(material, hit_texcoord(prim, bary), packed);
-+  return texel_alpha(packed);
++  return texel_alpha(packed) * surface_fade(material);
 +}
 +
 +// For the rays that pick a surface -- the primary and the reflection -- a
@@ -8502,7 +8774,10 @@ index 0000000..b0bf843
 +      debugColour = float3((m & MATERIAL_CUTOUT) != 0u ? 1.0f : 0.0f,
 +                           (m & MATERIAL_TRANSLUCENT) != 0u ? 1.0f : 0.0f,
 +                           (m & MATERIAL_REFLECTIVE) != 0u ? 1.0f : 0.0f);
-+      if (m == 0u) {
++      // The flags alone: a plain solid surface carries a thumbnail in the same
++      // word, and testing the whole word painted every textured one black,
++      // which is how a miss reads.
++      if ((m & 0xfu) == 0u) {
 +        debugColour = float3(0.35f, 0.35f, 0.35f);
 +      }
 +      // Yellow additive: red and green together, which a cut-out and a
@@ -8510,6 +8785,11 @@ index 0000000..b0bf843
 +      if ((m & MATERIAL_ADDITIVE) != 0u) {
 +        debugColour = float3(1.0f, 1.0f, 0.0f);
 +      }
++      // Towards magenta by what the game's alpha takes from the surface,
++      // whether or not the rays heed it: with the feature on, most of what
++      // would show here is no longer what the primary ray stops on.
++      const float gone = float((m >> MATERIAL_FADE_SHIFT) & MATERIAL_FADE_MASK) * (1.0f / 15.0f);
++      debugColour = lerp(debugColour, float3(1.0f, 0.0f, 1.0f), gone);
 +    } else if (gDebugMode == DEBUG_MASK) {
 +      debugColour = float3(0.0f, 0.0f, 0.0f);
 +    } else if (gDebugMode == DEBUG_TEXCOORD) {

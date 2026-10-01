@@ -3267,3 +3267,80 @@ translucide passe devant puis derrière la surface de l'eau.
 sa durée — une séquence de 90 frames était coupée à 80 — et `-ArmDelaySeconds`
 règle l'attente avant la prise : quatre secondes par défaut, moins pour prendre
 l'ouverture d'une scène.
+
+## L'alpha des sommets et du matériau compte dans ce qu'une surface bloque (1er octobre 2026)
+
+La capture lisait la transparence d'une surface dans sa texture, et là
+seulement. Le jeu en éteint aussi par l'alpha de leurs sommets ou de leur
+matériau :
+
+- `particleFunc` (`src/game/hsfanim.c`) règle l'alpha d'une particule sur
+  l'alpha de sa texture **multiplié par celui de la couleur de ses sommets** —
+  c'est ainsi qu'une particule s'éteint, texture intacte ;
+- `hsfdraw.c` passe l'alpha d'un modèle par des constantes, des registres et
+  l'alpha rasterisé, sur plusieurs étages.
+
+Une particule presque éteinte, ou une particule morte restée en place avec un
+alpha nul, arrêtait donc les rayons comme une surface pleine. C'est la famille
+du défaut 3 relevé le 15 septembre — les rayons de lumière de m401Dll,
+« translucides par leur couleur de sommet » —, resté ouvert depuis ; je n'ai pas
+vérifié ces rayons-là un par un.
+
+### Ce qui est fait
+
+La capture **fait tourner les combineurs d'alpha du jeu comme le rasteriseur**
+(`gx/shader.cpp`) : chaque étage actif, ses quatre entrées, l'opération, le
+biais, l'échelle, la saturation ; les constantes, les registres ; l'alpha
+rasterisé, qui vient du sommet ou du registre du matériau selon le canal. Elle
+le fait pour un texel plein, puis applique la comparaison d'alpha du jeu — un
+fragment qu'elle rejette ne laisse rien — et regarde si le mélange pondère bien
+la surface par cet alpha.
+
+Ce qui reste de la surface va, par triangle et en quinzièmes, dans quatre bits
+libres du mot matériau. Le tracé le multiplie dans le test alpha par texel et
+dans l'opacité moyenne. Un alpha de sommet tient sur huit bits et un draw n'en
+utilise qu'une poignée : les combineurs tournent une fois par valeur, pas une
+fois par sommet.
+
+`AURORA_RT_RASTER_ALPHA=0` rend l'ancienne lecture, `AURORA_RT_AB=rasterAlpha=0`
+compare sur une frame. La vue des matériaux tire vers le magenta ce que l'alpha
+retire à une surface. Elle montre aussi en gris une surface pleine texturée :
+elle testait le mot matériau entier, vignette comprise, et peignait donc en
+noir — la couleur d'un rayon qui n'a rien touché — toute surface pleine qui
+portait une texture.
+
+### Mesuré, sur une même frame
+
+| | triangles concernés | dont entièrement | pixels changés | écart moyen sur ceux-là |
+|---|---|---|---|---|
+| plateau | 3 | 3 | 0 | — |
+| plateau, autre frame | 803 | 3 | 10 162 (0,8 %) | 0,0016 |
+| m401Dll | 8 606 | 4 036 | 324 496 (26 %) | 0,0127 |
+| m401Dll, autre frame | 6 686 | 3 080 | 339 971 (28 %) | 0,0119 |
+
+Sur m401Dll, vues brutes : l'occlusion change sur 168 533 pixels (13,7 %), de
+0,049 en moyenne ; l'ombre sur 6 827 (0,56 %). **Les carrés gris que les bulles
+posaient sur la scène disparaissent** — deux colonnes de quads presque éteints
+que le tracé ombrait comme des surfaces — et le dessous du plafond s'éclaircit :
+la surface au-dessus, que la vue des matériaux montre découpée et entamée d'un
+tiers par son alpha, ne bloque plus qu'à proportion.
+
+Aucun draw dont les combineurs n'aient pu être suivis, sur le plateau comme sur
+m401Dll. Test nul A/B : 0 pixel sur 1 228 800.
+
+### Ce que ce lot n'est pas
+
+J'ai écrit plus haut que cet alpha était la piste pour le quad plein écran de
+m401Dll. **C'était faux** : la particule en cause a un alpha de 0,82, elle n'est
+pas éteinte. La cause est dans la section suivante. Ce lot corrige un autre
+défaut, réel, que la même lecture du code a fait trouver.
+
+### Ce qui reste
+
+- Une surface éteinte qui n'est pas découpée reste, pour la traversée, de la
+  géométrie opaque : un rayon d'ombre s'arrête sur la première qu'il trouve et
+  la compte selon son poids, sans voir ce qu'il y a derrière. C'est la limite
+  qu'avaient déjà les surfaces uniformément translucides.
+- Un canal alpha éclairé est pris à la valeur de son matériau, comme si les
+  lumières le laissaient entier.
+- Quinze niveaux : un reste au-dessus de 0,97 compte pour entier.
