@@ -537,6 +537,18 @@
           "value": true
         }
       }
+    },
+    {
+      "name": "switch-libnx-aurora-probe",
+      "displayName": "Nintendo Switch (libnx + Dawn and Aurora probes)",
+      "inherits": "switch-libnx-dawn-probe",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "PARTYBOARD_SWITCH_AURORA_PROBE": {
+          "type": "BOOL",
+          "value": true
+        }
+      }
     }
   ],
   "buildPresets": [

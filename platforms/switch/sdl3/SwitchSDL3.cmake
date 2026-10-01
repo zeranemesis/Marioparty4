@@ -4,6 +4,8 @@
 #
 # Defines the imported target SDL3::SDL3-static, like an SDL3 package would.
 
+include_guard(GLOBAL)
+
 include(ExternalProject)
 
 # Keep in step with AURORA_SDL3_REF in extern/aurora/CMakeLists.txt.

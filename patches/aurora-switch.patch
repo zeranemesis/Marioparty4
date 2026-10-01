@@ -1,0 +1,103 @@
+diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
+index 7fb3e4e..b3f53c4 100644
+--- a/lib/webgpu/gpu.cpp
++++ b/lib/webgpu/gpu.cpp
+@@ -25,6 +25,13 @@
+ #if defined(__ANDROID__)
+ #include <sys/system_properties.h>
+ #endif
++#if defined(__SWITCH__)
++#include <EGL/egl.h>
++#include <dawn/native/OpenGLBackend.h>
++
++// libnx (switch.h is not included: its integer typedefs clash with Dolphin's).
++extern "C" struct NWindow* nwindowGetDefault(void);
++#endif
+ 
+ namespace aurora::gx {
+ void clear_copy_texture_cache() noexcept;
+@@ -694,7 +701,39 @@ static void flush_released_surfaces() {
+   g_device.Tick();
+ }
+ 
++#if defined(__SWITCH__)
++// Dawn cannot load libEGL on libnx: it is handed switch-mesa's display and
++// loader instead (RequestAdapterOptionsGetGLProc).
++static EGLDisplay switch_egl_display() {
++  static const EGLDisplay display = [] {
++    EGLDisplay d = eglGetDisplay(EGL_DEFAULT_DISPLAY);
++    if (d != EGL_NO_DISPLAY && eglInitialize(d, nullptr, nullptr) == EGL_FALSE) {
++      Log.error("eglInitialize failed: {:#x}", eglGetError());
++      d = EGL_NO_DISPLAY;
++    }
++    return d;
++  }();
++  return display;
++}
++#endif
++
+ static bool create_surface() {
++#if defined(__SWITCH__)
++  // The console has one window, libnx's default NWindow, and WebGPU no
++  // surface source for it: Dawn's OpenGL ES backend presents to it through
++  // EGL (cmake/PatchDawnForSwitch.cmake adds this entry point).
++  release_surface();
++  flush_released_surfaces();
++  g_surface = wgpu::Surface::Acquire(
++      dawn::native::opengl::CreateSurfaceFromEGLNativeWindow(g_instance.Get(), nwindowGetDefault()));
++  if (!g_surface) {
++    Log.error("Failed to create surface");
++    return false;
++  }
++  g_surfaceGeneration = window::surface_generation();
++  Log.info("Created surface generation {}", g_surfaceGeneration);
++  return true;
++#else
+   SDL_Window* window = window::get_sdl_window();
+   if (window == nullptr) {
+     Log.error("Failed to create surface: no window");
+@@ -719,6 +758,7 @@ static bool create_surface() {
+   g_surfaceGeneration = window::surface_generation();
+   Log.info("Created surface generation {}", g_surfaceGeneration);
+   return true;
++#endif
+ }
+ 
+ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -756,11 +796,21 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+     }
+   }
+   {
+-    const wgpu::RequestAdapterOptions options{
++    // Dawn only offers its OpenGL and OpenGL ES backends at the Compatibility
++    // feature level: asking for Core finds no adapter.
++    const bool glBackend = backend == wgpu::BackendType::OpenGL || backend == wgpu::BackendType::OpenGLES;
++    wgpu::RequestAdapterOptions options{
++        .featureLevel = glBackend ? wgpu::FeatureLevel::Compatibility : wgpu::FeatureLevel::Core,
+         .powerPreference = wgpu::PowerPreference::HighPerformance,
+         .backendType = backend,
+         .compatibleSurface = g_surface,
+     };
++#if defined(__SWITCH__)
++    dawn::native::opengl::RequestAdapterOptionsGetGLProc glProc;
++    glProc.getProc = reinterpret_cast<dawn::native::opengl::EGLGetProcProc>(eglGetProcAddress);
++    glProc.display = switch_egl_display();
++    options.nextInChain = &glProc;
++#endif
+     const auto future = g_instance.RequestAdapter(
+         &options, wgpu::CallbackMode::WaitAnyOnly,
+         [](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, wgpu::StringView message) {
+diff --git a/lib/window.cpp b/lib/window.cpp
+index 9ad7953..a62efa8 100644
+--- a/lib/window.cpp
++++ b/lib/window.cpp
+@@ -282,7 +282,9 @@ bool create_window(AuroraBackend backend) {
+ #ifdef DAWN_ENABLE_BACKEND_OPENGL
+   case BACKEND_OPENGL:
+   case BACKEND_OPENGLES:
++#if !defined(__SWITCH__) // On the Switch, Dawn owns EGL on the NWindow; SDL keeps out.
+     flags |= SDL_WINDOW_OPENGL;
++#endif
+     break;
+ #endif
+ #endif

@@ -139,6 +139,36 @@ The NRO shows SDL's drivers, the base and pref paths, a file round trip
 through `SDL_IOStream`, and every connected gamepad live; hold **A** for a
 440 Hz tone, **+** quits.
 
+### Aurora probe
+
+Aurora itself (its GX-on-WebGPU renderer, window, input and caches) now
+builds for the Switch, on top of the two probes above:
+
+```sh
+# CI applies patches/aurora-*.patch to extern/aurora first, Switch last.
+cmake --preset switch-libnx-aurora-probe
+cmake --build build/switch-libnx-aurora-probe --target partyboard_switch_aurora_nro --parallel
+```
+
+`partyboard-switch-aurora-probe.nro` is Aurora's own `simple` example
+(initialise, then clear the screen through `GXSetCopyClear` every frame) with
+a cycling colour; **+** quits. `aurora/SwitchAurora.cmake` builds
+`extern/aurora` against the Switch Dawn and SDL3 and devkitPro's portlibs
+(zlib, libpng, FreeType, zstd). What the Switch needs on top:
+
+- `patches/aurora-switch.patch`: the WebGPU surface goes on libnx's default
+  `NWindow` through Dawn's EGL entry point, Dawn gets switch-mesa's EGL
+  display and loader, and SDL stays out of EGL. It also asks for the
+  `Compatibility` feature level on OpenGL and OpenGL ES, the only level Dawn
+  offers there; Aurora asked for `Core`, which finds no adapter on those
+  backends (the OpenGL ES fallback on other platforms has the same problem).
+- SQLite (Aurora's pipeline caches) is built with `SQLITE_OS_OTHER` and
+  `aurora/sqlite_vfs_switch.c`: SQLite's demo VFS for embedded systems plus
+  pthread mutexes, since its unix VFS needs `ioctl`, `mmap` and file locks.
+- Tracy's thread-id and login lookups get a libnx case
+  (`aurora/PatchTracyForSwitch.cmake`), and Dear ImGui's fork/exec "open in
+  shell" is compiled out.
+
 ## Current integration boundary
 
 The intended renderer chain is now:
