@@ -1,6 +1,7 @@
 #include "partyboard_switch/egl.hpp"
 
 #include <cstdio>
+#include <cstring>
 
 namespace {
 
@@ -137,4 +138,42 @@ bool PartyBoardSwitch_SwapBuffers() {
     return g_display != EGL_NO_DISPLAY &&
            g_surface != EGL_NO_SURFACE &&
            eglSwapBuffers(g_display, g_surface) == EGL_TRUE;
+}
+
+namespace {
+
+bool hasExtension(const char* extensions, const char* name) {
+    if (!extensions || !name || !*name || std::strchr(name, ' '))
+        return false;
+
+    const size_t nameLen = std::strlen(name);
+    const char* cursor = extensions;
+    while ((cursor = std::strstr(cursor, name)) != nullptr) {
+        const bool startsAtBoundary = cursor == extensions || cursor[-1] == ' ';
+        const char after = cursor[nameLen];
+        const bool endsAtBoundary = after == '\0' || after == ' ';
+        if (startsAtBoundary && endsAtBoundary)
+            return true;
+        cursor += nameLen;
+    }
+    return false;
+}
+
+} // namespace
+
+bool PartyBoardSwitch_EglHasDawnRequirements() {
+    if (g_display == EGL_NO_DISPLAY)
+        return false;
+
+    const char* extensions = eglQueryString(g_display, EGL_EXTENSIONS);
+    const bool robust =
+        hasExtension(extensions, "EGL_EXT_create_context_robustness");
+    const bool sync =
+        hasExtension(extensions, "EGL_KHR_fence_sync") ||
+        hasExtension(extensions, "EGL_KHR_reusable_sync");
+
+    std::printf("Dawn EGL requirements: robustness=%s sync=%s\n",
+                robust ? "yes" : "no",
+                sync ? "yes" : "no");
+    return robust && sync;
 }
