@@ -164,6 +164,10 @@ int main(int, char**) {
         return EXIT_FAILURE;
     }
 
+    // Report the exact EGL requirements Dawn's OpenGL backend checks during
+    // adapter discovery. The normal render probe still runs if they are absent.
+    PartyBoardSwitch_EglHasDawnRequirements();
+
     if (!initScene()) {
         PartyBoardSwitch_EglShutdown();
         return EXIT_FAILURE;
