@@ -1,12 +1,14 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstdio>
+#include <cmath>
 
 #include <switch.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <glad/glad.h>
 #include <dolphin/pad.h>
+#include <dolphin/mtx.h>
 
 namespace {
 
@@ -208,6 +210,20 @@ void shutdownScene() {
     g_program = 0;
 }
 
+bool auroraMtxSelfTest() {
+    Mtx transform{};
+    MTXTrans(transform, 4.0f, 5.0f, 6.0f);
+
+    const Vec source{1.0f, 2.0f, 3.0f};
+    Vec result{};
+    MTXMultVec(transform, &source, &result);
+
+    constexpr float epsilon = 0.0001f;
+    return std::fabs(result.x - 5.0f) < epsilon &&
+           std::fabs(result.y - 7.0f) < epsilon &&
+           std::fabs(result.z - 9.0f) < epsilon;
+}
+
 void renderFrame(float pulse, u32 width, u32 height) {
     glViewport(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
 
@@ -223,6 +239,11 @@ void renderFrame(float pulse, u32 width, u32 height) {
 } // namespace
 
 int main(int, char**) {
+    if (!auroraMtxSelfTest()) {
+        std::printf("Aurora MTX ARM64 self-test failed\n");
+        return EXIT_FAILURE;
+    }
+
     NWindow* window = nwindowGetDefault();
 
     u32 width = 1280;
