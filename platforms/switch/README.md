@@ -54,3 +54,79 @@ Once this renders correctly on hardware, the next step is to replace the test sc
 6. then add HID mapping, filesystem paths, audio and REL loading one subsystem at a time.
 
 This probe is deliberately isolated so it cannot regress the current Windows/Android/Apple targets.
+
+
+## CMake bring-up builds
+
+The Switch target is now integrated into the repository's root CMake without
+configuring the desktop PartyBoard dependency stack.
+
+Normal native probe:
+
+```sh
+cmake --preset switch-libnx-bootstrap
+cmake --build build/switch-libnx-bootstrap --target partyboard_switch_nro --parallel
+```
+
+This compiles:
+
+- the libnx/EGL/OpenGL render probe;
+- the native four-player GameCube `PADRead` backend;
+- Aurora's real `dolphin/mtx` implementation for AArch64;
+- the Aurora MTX runtime self-test;
+- the EGL extension check required by Dawn's OpenGL backend.
+
+The generated file is:
+
+```text
+build/switch-libnx-bootstrap/platforms/switch/partyboard-switch-probe.nro
+```
+
+### Experimental Dawn probe
+
+Dawn is the renderer used below Aurora's GX layer. It does not officially know
+libnx, so its Switch work is kept behind a separate opt-in target:
+
+```sh
+cmake --preset switch-libnx-dawn-probe
+cmake --build build/switch-libnx-dawn-probe --target partyboard_switch_dawn_nro --parallel
+```
+
+The experiment uses the same Dawn revision pinned by Aurora and enables only
+the OpenGL ES backend. A build-only patch teaches Dawn that `__SWITCH__` is a
+POSIX-like platform; the upstream Aurora/Dawn submodules remain untouched.
+
+If the NRO reaches hardware, its screen is intentionally diagnostic:
+
+- **green**: external libnx EGL display -> Dawn OpenGLES adapter -> WebGPU device
+  -> WebGPU texture succeeded;
+- **red**: one of those stages failed.
+
+Dawn itself requires `EGL_EXT_create_context_robustness` and either
+`EGL_KHR_fence_sync` or `EGL_KHR_reusable_sync` for this adapter path. The
+normal probe prints whether the Switch Mesa/Nouveau EGL stack exposes them.
+
+## Current integration boundary
+
+The intended renderer chain is now:
+
+```text
+Mario Party 4 GX calls
+        |
+        v
+Aurora GX / WebGPU
+        |
+        v
+Dawn OpenGLES
+        |
+        v
+PartyBoardSwitch EGL boundary
+        |
+        v
+Mesa / Nouveau -> NWindow -> libnx
+```
+
+The next renderer milestone is not to duplicate GX in a Switch-only renderer.
+It is to make Dawn's headless/external-EGL OpenGLES device compile on libnx,
+then replace Aurora's desktop `wgpu::Surface` presentation with a Switch
+presentation bridge.
