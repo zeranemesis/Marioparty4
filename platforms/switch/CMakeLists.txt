@@ -14,6 +14,7 @@ find_program(PARTYBOARD_ELF2NRO elf2nro
 add_executable(partyboard_switch_probe
     source/main.cpp
     source/switch_pad.cpp
+    source/switch_egl.cpp
 
     # First real Aurora compatibility-layer code compiled for ARM64/libnx.
     ${CMAKE_SOURCE_DIR}/extern/aurora/lib/dolphin/mtx/mtx.c
@@ -41,6 +42,7 @@ target_compile_options(partyboard_switch_probe PRIVATE
 )
 
 target_include_directories(partyboard_switch_probe PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${LIBNX}/include"
     "${PORTLIBS}/include"
     "${CMAKE_SOURCE_DIR}/extern/aurora/include"
