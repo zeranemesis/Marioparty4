@@ -14,7 +14,7 @@ uint32_t g_height = 720;
 
 } // namespace
 
-bool PartyBoardSwitch_EglInitialize() {
+bool PartyBoardSwitch_EglInitializeDisplay() {
     if (g_display != EGL_NO_DISPLAY)
         return true;
 
@@ -29,9 +29,20 @@ bool PartyBoardSwitch_EglInitialize() {
 
     if (eglInitialize(g_display, nullptr, nullptr) == EGL_FALSE) {
         std::printf("eglInitialize failed: 0x%x\n", eglGetError());
-        PartyBoardSwitch_EglShutdown();
+        g_display = EGL_NO_DISPLAY;
+        g_window = nullptr;
         return false;
     }
+
+    return true;
+}
+
+bool PartyBoardSwitch_EglInitialize() {
+    if (g_context != EGL_NO_CONTEXT && g_surface != EGL_NO_SURFACE)
+        return true;
+
+    if (!PartyBoardSwitch_EglInitializeDisplay())
+        return false;
 
     if (eglBindAPI(EGL_OPENGL_API) == EGL_FALSE) {
         std::printf("eglBindAPI failed: 0x%x\n", eglGetError());
