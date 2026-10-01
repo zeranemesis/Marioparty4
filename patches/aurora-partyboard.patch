@@ -443,7 +443,7 @@ index 2d7f795..4997c20 100644
  }
  
 diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
-index eff0c65..432ac44 100644
+index eff0c65..704bc2f 100644
 --- a/lib/gfx/common.cpp
 +++ b/lib/gfx/common.cpp
 @@ -1,6 +1,7 @@
@@ -491,7 +491,7 @@ index eff0c65..432ac44 100644
    } data;
  };
  } // namespace aurora::gfx
-@@ -177,6 +194,14 @@ struct RenderPass {
+@@ -177,6 +194,19 @@ struct RenderPass {
    bool hasStencil = false;
    bool offscreen = false;
    bool observable = false;
@@ -503,10 +503,15 @@ index eff0c65..432ac44 100644
 +  // Whether any 3D geometry reached this pass at all. A pass with none has
 +  // nothing to shade; a pass with 3D and no 2D still does.
 +  bool rtHasScene = false;
++  // The pass began on the picture of one that had drawn 3D, without clearing it:
++  // the scene is in this pass too, though no 3D draw is. A game that copies its
++  // frame for a distortion effect and carries on, as m423Dll does, ends its
++  // frame in such a pass.
++  bool rtInheritedScene = false;
    bool captureDepthSnapshot = false;
    bool sealed = false;
    std::vector<tex_palette_conv::ConvRequest> paletteConvs;
-@@ -333,6 +358,20 @@ static FrameOp capture_frame_op(FramePacket& frame, FrameOpType type, uint32_t i
+@@ -333,6 +363,20 @@ static FrameOp capture_frame_op(FramePacket& frame, FrameOpType type, uint32_t i
    return op;
  }
  
@@ -527,7 +532,7 @@ index eff0c65..432ac44 100644
  static void seal_pass(FramePacket& frame, uint32_t passIndex) {
    if (passIndex >= frame.renderPasses.size()) {
      return;
-@@ -341,6 +380,65 @@ static void seal_pass(FramePacket& frame, uint32_t passIndex) {
+@@ -341,6 +385,67 @@ static void seal_pass(FramePacket& frame, uint32_t passIndex) {
    if (pass.sealed) {
      return;
    }
@@ -549,7 +554,8 @@ index eff0c65..432ac44 100644
 +  // quads put the picture, a player's shadow blown up across the whole field and
 +  // over the scoreboard. A pass that draws 3D and also copies some of it, as
 +  // m401Dll does in every frame, is still composited.
-+  const bool eligible = (pass.rtHasScene || g_rtCompositeAnyPass) && boundary != SIZE_MAX &&
++  const bool eligible = rt::whole_frame() &&
++                        (pass.rtHasScene || pass.rtInheritedScene || g_rtCompositeAnyPass) && boundary != SIZE_MAX &&
 +                        boundary <= pass.commands.size() && !pass.offscreen && !pass.resolveTarget;
 +  // Every pass, not only the one that gets the composition: a frame that draws
 +  // its scene into one pass and shows it through another is only visible as a
@@ -590,10 +596,11 @@ index eff0c65..432ac44 100644
 +  }
 +  pass.rtBoundary = SIZE_MAX;
 +  pass.rtHasScene = false;
++  pass.rtInheritedScene = false;
    pass.sealed = true;
  }
  
-@@ -550,6 +648,29 @@ void set_scissor(const ClipRect& cmd) noexcept {
+@@ -550,6 +655,29 @@ void set_scissor(const ClipRect& cmd) noexcept {
    }
  }
  
@@ -623,7 +630,24 @@ index eff0c65..432ac44 100644
  template <>
  void push_draw_command(clear::DrawData data) {
    push_draw_command(ShaderDrawCommand{.type = ShaderType::Clear, .clear = data});
-@@ -1031,7 +1152,11 @@ static std::optional<size_t> acquire_mapped_staging_buffer() {
+@@ -564,6 +692,8 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
+                   Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat) {
+   // Resolve current render pass
+   auto& prevPass = current_render_passes()[g_currentRenderPass];
++  // Read before the pass is sealed further down, which resets it.
++  const bool prevScene = prevPass.rtHasScene || prevPass.rtInheritedScene;
+   prevPass.resolveTarget = std::move(texture);
+   prevPass.resolveRect = rect;
+   prevPass.resolveFormat = resolveFormat;
+@@ -597,6 +727,7 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
+       .hasDepth = prevPass.hasDepth,
+       .hasStencil = prevPass.hasStencil,
+   };
++  newPass.rtInheritedScene = prevScene && !(clearColor && clearAlpha);
+   newPass.commands.reserve(2048);
+   current_render_passes().emplace_back(std::move(newPass));
+   ++g_currentRenderPass;
+@@ -1031,7 +1162,11 @@ static std::optional<size_t> acquire_mapped_staging_buffer() {
  }
  
  bool begin_frame() {
@@ -635,7 +659,7 @@ index eff0c65..432ac44 100644
    const size_t frameSlot = acquire_frame_slot();
    const auto stagingSlot = acquire_mapped_staging_buffer();
    if (!stagingSlot) {
-@@ -1108,6 +1233,9 @@ void finish() {
+@@ -1108,6 +1243,9 @@ void finish() {
  
  void end_frame(EndFrameCallback callback) {
    ZoneScoped;
@@ -645,7 +669,7 @@ index eff0c65..432ac44 100644
    ASSERT(!g_inOffscreen, "end_frame called while offscreen rendering is active");
    ASSERT(g_currentRenderPass == UINT32_MAX, "end_frame called before finish finalized the current render pass");
    auto& frame = current_frame_packet();
-@@ -1424,6 +1552,27 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
+@@ -1424,6 +1562,27 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
        pass.InsertDebugMarker(wgpu::StringView(g_debugMarkers[cmd.data.debugMarkerIndex]));
  #endif
      } break;
@@ -1528,10 +1552,10 @@ index 7ec451d..4eb8f1c 100644
  enum class DrawKind : uint32_t {
 diff --git a/lib/rt/rt_accel.cpp b/lib/rt/rt_accel.cpp
 new file mode 100644
-index 0000000..42b33ba
+index 0000000..73a9e69
 --- /dev/null
 +++ b/lib/rt/rt_accel.cpp
-@@ -0,0 +1,682 @@
+@@ -0,0 +1,683 @@
 +#include "rt_accel.hpp"
 +
 +#include "rt_device.hpp"
@@ -2078,9 +2102,10 @@ index 0000000..42b33ba
 +      instance = {};
 +      std::memcpy(&instance.Transform[0][0], groups[i].transform, 12 * sizeof(float));
 +      instance.InstanceID = groups[i].firstTriangle;
-+      // 0x02 for additive light, 0x01 for everything else: a ray that
-+      // includes only 0x01 goes straight through a glow or a light shaft.
-+      instance.InstanceMask = groups[i].additive ? 0x02 : 0x01;
++      // 0x02 for additive light, 0x04 for geometry drawn through another
++      // projection than the traced one, 0x01 for everything else: a ray that
++      // leaves a bit out goes straight through what carries it.
++      instance.InstanceMask = groups[i].additive ? 0x02 : groups[i].otherProjection ? 0x04 : 0x01;
 +      instance.InstanceContributionToHitGroupIndex = 0;
 +      instance.AccelerationStructure = blasAddress + g_blasOffsets[i];
 +    }
@@ -2216,10 +2241,10 @@ index 0000000..42b33ba
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_accel.hpp b/lib/rt/rt_accel.hpp
 new file mode 100644
-index 0000000..20409f5
+index 0000000..485eb99
 --- /dev/null
 +++ b/lib/rt/rt_accel.hpp
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,120 @@
 +#pragma once
 +
 +#include <cstddef>
@@ -2309,7 +2334,17 @@ index 0000000..20409f5
 +  // since the instance mask that leaves additive light out of the rays is per
 +  // group.
 +  bool additive = false;
++  // Index of the perspective projection the group's draws went through, in the
++  // order the frame first used them; NoProjection when it could not be told.
++  // Groups never mix two either.
++  uint8_t projection = 0xff;
++  // Drawn through a projection other than the one the rays are built with,
++  // decided once the frame is over. Such geometry sits in view space where its
++  // own camera put it, not where the traced one sees it.
++  bool otherProjection = false;
 +};
++
++inline constexpr uint8_t NoProjection = 0xff;
 +
 +bool build(const float* positions, const float* colours, const float* normals,
 +           const float* texcoords, const uint32_t* materials, size_t vertexCount, uint64_t contentHash,
@@ -2332,10 +2367,10 @@ index 0000000..20409f5
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_capture.cpp b/lib/rt/rt_capture.cpp
 new file mode 100644
-index 0000000..8d841e2
+index 0000000..4b2cccb
 --- /dev/null
 +++ b/lib/rt/rt_capture.cpp
-@@ -0,0 +1,2533 @@
+@@ -0,0 +1,2608 @@
 +#include "rt_capture.hpp"
 +
 +#include "rt_accel.hpp"
@@ -2477,6 +2512,24 @@ index 0000000..8d841e2
 +// noise. On by default; AURORA_RT_SHADOW_STRATIFY=0 restores the white noise,
 +// and the A/B bench compares the two with AURORA_RT_AB=shadowStratify=0.
 +bool g_stratifiedShadow = true;
++// Geometry drawn through another perspective projection than the traced one,
++// left out of the rays. On by default; AURORA_RT_OTHER_PROJECTION=0 traces it
++// where its own camera placed it, and the A/B bench compares the two with
++// AURORA_RT_AB=otherProjection=0.
++bool g_skipOtherProjection = true;
++// The projection the rays are built with this frame, and how much geometry went
++// through the others.
++size_t g_tracedProjection = 0;
++uint64_t g_otherProjectionTriangles = 0;
++uint32_t g_otherProjectionGroups = 0;
++// Whether the traced view fills the frame. The rays are built for one camera
++// over the whole screen, so a split screen -- m411Dll, m414Dll and m439Dll in
++// four quarters, m427Dll, m428Dll and m430Dll in two halves -- cannot be traced
++// as it stands: one quarter's terms would be stretched over all four. Such a
++// frame is left as the game drew it, and counted.
++bool g_wholeFrame = true;
++uint32_t g_framesSplit = 0;
++float g_tracedViewport[4] = {0.f, 0.f, 0.f, 0.f};
 +bool g_armed = false;
 +// Every call that reaches the hook, before any filtering: separates "the"
 +// geometry was rejected" from "the geometry never arrived".
@@ -2659,6 +2712,12 @@ index 0000000..8d841e2
 +// whichever happened to be set last.
 +struct FrameProjection {
 +  float params[4];
++  // The viewport the draws went to, in the game's own units. Two cameras can
++  // share a projection to the last bit and still be two views: m423Dll films a
++  // close-up for its stadium screen with the main camera's perspective, into a
++  // 320x240 viewport, and that close-up traced as part of the scene laid a
++  // character the size of the pitch over it.
++  float viewport[4];
 +  uint64_t triangles;
 +};
 +std::vector<FrameProjection> g_projections;
@@ -3298,6 +3357,8 @@ index 0000000..8d841e2
 +
 +uint32_t debug_mode() noexcept { return g_debugMode; }
 +
++bool whole_frame() noexcept { return g_wholeFrame; }
++
 +void capture_draw(GXPrimitive prim, GXVtxFmt fmt, uint16_t vtxCount, const uint8_t* vtxData,
 +                  uint32_t vtxSize) noexcept {
 +  ++g_drawsSeen;
@@ -3365,8 +3426,11 @@ index 0000000..8d841e2
 +
 +    // Which of the frame's projections this draw belongs to. Bounded because a
 +    // frame with more than a handful is pathological and the search is linear.
++    const auto& logical = g_gxState.logicalViewport;
++    const float viewport[4] = {logical.left, logical.top, logical.width, logical.height};
 +    for (size_t i = 0; i < g_projections.size(); ++i) {
-+      if (std::memcmp(g_projections[i].params, g_projParams, sizeof(g_projParams)) == 0) {
++      if (std::memcmp(g_projections[i].params, g_projParams, sizeof(g_projParams)) == 0 &&
++          std::memcmp(g_projections[i].viewport, viewport, sizeof(viewport)) == 0) {
 +        projIndex = i;
 +        break;
 +      }
@@ -3375,6 +3439,7 @@ index 0000000..8d841e2
 +      projIndex = g_projections.size();
 +      FrameProjection entry{};
 +      std::memcpy(entry.params, g_projParams, sizeof(entry.params));
++      std::memcpy(entry.viewport, viewport, sizeof(entry.viewport));
 +      g_projections.push_back(entry);
 +    }
 +
@@ -4007,6 +4072,7 @@ index 0000000..8d841e2
 +    group.triangleCount = triangles;
 +    std::memcpy(group.transform, drawTransform, sizeof(group.transform));
 +    group.additive = (material & accel::MaterialAdditive) != 0u;
++    group.projection = projIndex == SIZE_MAX ? accel::NoProjection : static_cast<uint8_t>(projIndex);
 +
 +    // Consecutive draws of one model share its matrix, and their triangles are
 +    // already adjacent, so they can share a structure. Each group costs a BLAS
@@ -4014,10 +4080,11 @@ index 0000000..8d841e2
 +    // one large one -- measured at 186 ms for 1296 of them.
 +    if (!g_groups.empty()) {
 +      accel::DrawGroup& last = g_groups.back();
-+      // Additive light is never merged with a solid draw: the instance mask
-+      // that keeps it out of the rays belongs to the whole group.
++      // Additive light is never merged with a solid draw, nor one projection
++      // with another: the instance mask that keeps either out of the rays
++      // belongs to the whole group.
 +      if (last.firstTriangle + last.triangleCount == group.firstTriangle &&
-+          last.additive == group.additive &&
++          last.additive == group.additive && last.projection == group.projection &&
 +          std::memcmp(last.transform, group.transform, sizeof(group.transform)) == 0) {
 +        last.triangleCount += group.triangleCount;
 +        if (measureCamera) {
@@ -4150,6 +4217,11 @@ index 0000000..8d841e2
 +      g_stratifiedShadow = env[0] != '0';
 +      Log.info("Shadow disc sampled {}", g_stratifiedShadow ? "in strata" : "by white noise");
 +    }
++    if (const char* env = std::getenv("AURORA_RT_OTHER_PROJECTION")) {
++      g_skipOtherProjection = env[0] != '0';
++      Log.info("Geometry drawn through another projection {}",
++               g_skipOtherProjection ? "left out of the rays" : "traced");
++    }
 +    if (const char* env = std::getenv("AURORA_RT_SEQUENCE")) {
 +      const int frames = std::atoi(env);
 +      g_sequenceFrames = frames <= 0 ? 0u : static_cast<uint32_t>(frames > 240 ? 240 : frames);
@@ -4175,7 +4247,7 @@ index 0000000..8d841e2
 +      static constexpr const char* kAbNames[] = {"aoSamples", "shadowSamples", "lightRadius",
 +                                                 "aoRadius",  "bounce",        "denoisePhi",
 +                                                 "denoisePasses", "debugMode", "alphaTest",
-+                                                 "additive", "shadowStratify"};
++                                                 "additive", "shadowStratify", "otherProjection"};
 +      bool known = false;
 +      if (const char* eq = std::strchr(env, '='); eq != nullptr) {
 +        const std::string name(env, eq);
@@ -4193,7 +4265,7 @@ index 0000000..8d841e2
 +      } else {
 +        Log.warn("AURORA_RT_AB ignored: expected name=value, name one of aoSamples, shadowSamples, "
 +                 "lightRadius, aoRadius, bounce, denoisePhi, denoisePasses, debugMode, alphaTest, "
-+                 "additive, shadowStratify");
++                 "additive, shadowStratify, otherProjection");
 +      }
 +    }
 +    // Frame numbers are a poor handle: the counter runs uncapped through boot,
@@ -4417,6 +4489,40 @@ index 0000000..8d841e2
 +  // underneath the dispatch until the scene got larger.
 +  trace::wait_idle();
 +
++  // One projection has to stand for the whole screen, so it is the one covering
++  // the most geometry rather than whichever draw came last. Decided before the
++  // build, because the groups drawn through any other one are marked for the
++  // rays to leave out: they sit in view space where their own camera put them --
++  // in most mini-games a few thousand triangles drawn with a camera of their
++  // own, which in m423Dll threw a character's shadow across the whole pitch.
++  g_tracedProjection = 0;
++  for (size_t i = 1; i < g_projections.size(); ++i) {
++    if (g_projections[i].triangles > g_projections[g_tracedProjection].triangles) {
++      g_tracedProjection = i;
++    }
++  }
++  // Three quarters of the console's 640x480 in each direction counts as the
++  // whole frame: several games inset their view by a ten-pixel border.
++  if (g_tracedProjection < g_projections.size()) {
++    std::memcpy(g_tracedViewport, g_projections[g_tracedProjection].viewport, sizeof(g_tracedViewport));
++    g_wholeFrame = g_tracedViewport[2] >= 480.f && g_tracedViewport[3] >= 360.f;
++  } else {
++    g_wholeFrame = true;
++  }
++  if (!g_wholeFrame) {
++    ++g_framesSplit;
++  }
++  g_otherProjectionTriangles = 0;
++  g_otherProjectionGroups = 0;
++  for (auto& group : g_groups) {
++    group.otherProjection = group.projection != accel::NoProjection &&
++                            group.projection != g_tracedProjection;
++    if (group.otherProjection) {
++      g_otherProjectionTriangles += group.triangleCount;
++      ++g_otherProjectionGroups;
++    }
++  }
++
 +  ++g_buildCalls;
 +  if (!accel::build(reinterpret_cast<const float*>(g_triangles.data()),
 +                    reinterpret_cast<const float*>(g_colours.data()),
@@ -4598,22 +4704,14 @@ index 0000000..8d841e2
 +    return;
 +  }
 +
-+  // One projection has to stand for the whole screen, so it is the one covering
-+  // the most geometry rather than whichever draw came last. Where a frame uses
-+  // only one -- which is the common case -- this picks that one and changes
-+  // nothing.
++  // The projection chosen before the build. Where a frame uses only one --
++  // which is the common case -- that is the one, and nothing changes.
 +  if (g_projections.size() > g_maxProjections) {
 +    g_maxProjections = g_projections.size();
 +  }
 +  const float* chosenProj = g_projParams;
-+  if (!g_projections.empty()) {
-+    size_t best = 0;
-+    for (size_t i = 1; i < g_projections.size(); ++i) {
-+      if (g_projections[i].triangles > g_projections[best].triangles) {
-+        best = i;
-+      }
-+    }
-+    chosenProj = g_projections[best].params;
++  if (g_tracedProjection < g_projections.size()) {
++    chosenProj = g_projections[g_tracedProjection].params;
 +  }
 +
 +  trace::TraceParams params;
@@ -4629,7 +4727,8 @@ index 0000000..8d841e2
 +  params.shadowSamples = g_shadowSamples;
 +  params.features = g_features | (g_alphaTest ? trace::FeatureAlphaTest : 0u) |
 +                    (g_skipAdditive ? trace::FeatureSkipAdditive : 0u) |
-+                    (g_stratifiedShadow ? trace::FeatureStratifiedShadow : 0u);
++                    (g_stratifiedShadow ? trace::FeatureStratifiedShadow : 0u) |
++                    (g_skipOtherProjection ? trace::FeatureSkipOtherProjection : 0u);
 +  std::memcpy(params.viewDelta, g_viewDelta, sizeof(params.viewDelta));
 +  std::memcpy(params.prevProj, g_prevProjParams, sizeof(params.prevProj));
 +  params.haveViewDelta = g_haveViewDelta && g_havePrevProj;
@@ -4683,6 +4782,10 @@ index 0000000..8d841e2
 +      probe.features =
 +          value != 0.0 ? (probe.features | trace::FeatureStratifiedShadow)
 +                       : (probe.features & ~static_cast<uint32_t>(trace::FeatureStratifiedShadow));
++    } else if (g_abName == "otherProjection") {
++      probe.features =
++          value != 0.0 ? (probe.features | trace::FeatureSkipOtherProjection)
++                       : (probe.features & ~static_cast<uint32_t>(trace::FeatureSkipOtherProjection));
 +    }
 +    if (!trace::run(probe, "rt_ab_b.pfm")) {
 +      Log.error("A/B bench: the B trace failed");
@@ -4841,6 +4944,13 @@ index 0000000..8d841e2
 +             g_drawsTotal, g_drawsAlphaTested, g_drawsBlended, g_drawsReflective,
 +             g_drawsSingularMatrix, g_drawsAdditive,
 +             g_skipAdditive ? "left out of the rays" : "traced");
++    Log.info("Traced view {:.0f}x{:.0f} at {:.0f},{:.0f}: {}; {} frames since start were a split screen and "
++             "left untouched",
++             g_tracedViewport[2], g_tracedViewport[3], g_tracedViewport[0], g_tracedViewport[1],
++             g_wholeFrame ? "the whole frame" : "a split screen, not composited", g_framesSplit);
++    Log.info("Drawn through another projection or viewport than the traced one: {} triangles in {} groups, {}",
++             g_otherProjectionTriangles, g_otherProjectionGroups,
++             g_skipOtherProjection ? "left out of the rays" : "traced");
 +    // More than one means part of the picture is being traced through a
 +    // projection it was not drawn with, which lands the occlusion in the wrong
 +    // place across everything that used the other one.
@@ -4871,10 +4981,10 @@ index 0000000..8d841e2
 +} // namespace aurora::rt
 diff --git a/lib/rt/rt_capture.hpp b/lib/rt/rt_capture.hpp
 new file mode 100644
-index 0000000..5653f4f
+index 0000000..c380e2a
 --- /dev/null
 +++ b/lib/rt/rt_capture.hpp
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,61 @@
 +#pragma once
 +
 +#include <dolphin/gx.h>
@@ -4910,6 +5020,10 @@ index 0000000..5653f4f
 +// shows a diagnostic instead of multiplying by it: a shadow buffer read through
 +// a multiply is the frame times the shadow, which is the thing being diagnosed.
 +uint32_t debug_mode() noexcept;
++// False while the traced view is one part of a split screen: the terms then
++// describe that part alone and must not be laid over the whole frame. Decided at
++// the end of a frame, so the composition reads the previous frame's answer.
++bool whole_frame() noexcept;
 +
 +// Runtime toggle. Off by default; the game's video settings drive it. A plain
 +// setter keeps the engine layer free of the game's configuration types.
@@ -6855,10 +6969,10 @@ index 0000000..0661f23
 +} // namespace aurora::rt::trace
 diff --git a/lib/rt/rt_trace.hpp b/lib/rt/rt_trace.hpp
 new file mode 100644
-index 0000000..f3c7b91
+index 0000000..daa6222
 --- /dev/null
 +++ b/lib/rt/rt_trace.hpp
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,145 @@
 +#pragma once
 +
 +#include <cstdint>
@@ -6905,6 +7019,11 @@ index 0000000..f3c7b91
 +  // per sample. Off, the white noise, which is how the penumbra was sampled
 +  // before -- the A/B bench compares the two.
 +  FeatureStratifiedShadow = 1u << 5,
++  // Leave out of every ray the geometry drawn through another perspective
++  // projection than the one the rays are built with. Off, it is traced where
++  // its own camera placed it, which is how it behaved before -- the A/B bench
++  // compares the two.
++  FeatureSkipOtherProjection = 1u << 6,
 +};
 +
 +struct TraceParams {
@@ -7001,10 +7120,10 @@ index 0000000..f3c7b91
 +} // namespace aurora::rt::trace
 diff --git a/lib/rt/shaders/rt_ao.hlsl b/lib/rt/shaders/rt_ao.hlsl
 new file mode 100644
-index 0000000..d064df2
+index 0000000..ab8115b
 --- /dev/null
 +++ b/lib/rt/shaders/rt_ao.hlsl
-@@ -0,0 +1,791 @@
+@@ -0,0 +1,801 @@
 +// Ray traced ambient occlusion for PartyBoard.
 +//
 +// Primary visibility is traced rather than rasterised: with inline RayQuery the
@@ -7123,12 +7242,22 @@ index 0000000..d064df2
 +#define FEATURE_ALPHA_TEST 8u
 +#define FEATURE_SKIP_ADDITIVE 16u
 +#define FEATURE_STRATIFIED_SHADOW 32u
++#define FEATURE_SKIP_OTHER_PROJECTION 64u
 +
-+// Which instances a ray visits. Additive groups carry mask 0x02 and everything
-+// else 0x01 (rt_accel.cpp): light that is only added to the picture neither
-+// occludes nor casts a shadow, and a primary ray lands on the surface behind it.
++// Which instances a ray visits. Additive groups carry mask 0x02, groups drawn
++// through another projection than the traced one 0x04, and everything else
++// 0x01 (rt_accel.cpp): light that is only added to the picture neither occludes
++// nor casts a shadow, geometry placed by a camera the rays are not built with
++// neither does either, and a primary ray lands on the surface behind them.
 +uint ray_mask() {
-+  return (gFeatures & FEATURE_SKIP_ADDITIVE) != 0u ? 0x01u : 0xFFu;
++  uint mask = 0xFFu;
++  if ((gFeatures & FEATURE_SKIP_ADDITIVE) != 0u) {
++    mask &= ~0x02u;
++  }
++  if ((gFeatures & FEATURE_SKIP_OTHER_PROJECTION) != 0u) {
++    mask &= ~0x04u;
++  }
++  return mask;
 +}
 +
 +// How much of a reflective surface the traced reflection replaces. The game

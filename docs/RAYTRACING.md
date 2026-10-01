@@ -2974,3 +2974,94 @@ m410Dll et m448Dll demande deux runs tracés, et ils attendent : le 28 septembre
 au matin, un `llama-server` étranger à ce travail occupait tout le processeur, le
 jeu tournait à 12 images par seconde, et la navigation par menus, cadencée en
 temps réel, n'arrivait plus au bout.
+
+## La silhouette de m423Dll, troisième explication, et cette fois la bonne (1er octobre 2026)
+
+Deux explications de ce défaut sont écrites plus haut, et les deux sont fausses.
+
+- Le 16 septembre : « le jeu dessine son terrain dans trois copies et les affiche
+  comme des quads ». Non. Le code de `m423Dll/main.c` montre que la copie pleine
+  image sert un effet de distorsion — seize bulles à texture indirecte — et
+  qu'elle est faite sans effacer : la scène reste dans la passe suivante.
+- Le 28 septembre : « m410Dll a exactement le motif de m423Dll et est le candidat
+  suivant ». Le motif commun était cet effet de distorsion, qui n'est pas la
+  cause. m410Dll et m448Dll n'ont qu'une caméra plein écran.
+
+### Ce que c'était
+
+m423Dll filme un **gros plan pour l'écran géant « LIVE » du stade** : une seconde
+caméra, `Hu3DCameraCreate(1)`, rend la scène dans un viewport de 320 × 240, que
+`fn_1_12A0` copie dans une texture puis efface. Cette caméra a la **même
+perspective au bit près** que la caméra principale — 45°, 50 à 50 000, rapport
+1,2. La capture regroupait les draws par projection : elle prenait donc la
+géométrie du gros plan pour de la scène, et la plaçait, dans l'espace vue, là où
+la caméra principale regarde. Un personnage filmé de près devenait un personnage
+grand comme le terrain, et les rayons le trouvaient.
+
+Le tri par projection essayé le 16 septembre ne pouvait pas le séparer : même
+projection. Ce qui distingue les deux caméras est **le viewport**.
+
+### Comment je me suis trompé deux fois de plus en route
+
+Deux relevés du terme tracé, ombre puis occlusion, pendant le chrono : tous deux
+justes, sans silhouette. J'en ai conclu que l'hypothèse était réfutée. Elle ne
+l'était pas — sur ces deux frames **l'écran LIVE était éteint**. La reproduction
+avec l'ancienne règle de composition a montré la silhouette et, dans la même
+image, l'écran LIVE allumé sur le même personnage de dos. Un relevé ne réfute
+une hypothèse que s'il est pris dans les conditions où elle s'applique.
+
+### Le correctif
+
+- **Capture** : les draws sont regroupés par projection *et* viewport ; les
+  groupes ne fusionnent pas d'un ensemble à l'autre ; à la fin de la frame,
+  l'ensemble qui couvre le plus de triangles est celui qu'on trace, et les
+  autres portent le masque d'instance 0x04, que les rayons laissent de côté.
+  `AURORA_RT_OTHER_PROJECTION=0` les retrace, `AURORA_RT_AB=otherProjection=0`
+  compare sur une frame.
+- **Composition** : la règle du 16 septembre — pas de composition dans une passe
+  sans 3D — coupait le ray tracing de m423Dll, dont la passe affichée reprend
+  l'image de la précédente sans y redessiner de 3D. Une passe qui commence sur
+  l'image d'une passe à 3D, sans l'effacer, **hérite de sa scène** et reçoit la
+  composition.
+
+### Mesuré
+
+m423Dll, écran LIVE actif, chrono à 30 et 29 :
+
+| | silhouette | composition | triangles écartés |
+|---|---|---|---|
+| avant, ancienne règle | oui | 300 sur 300 | 0 |
+| règle du 16 septembre | non | 29 frames sur 1 070 | 0 |
+| maintenant | **non** | **300 sur 300** | 19 210, en 62 groupes |
+
+Sans régression ailleurs : test nul A/B sur le plateau à 0 pixel sur 1 228 800,
+aucun triangle écarté ; m401Dll composé sur 669 frames sur 669, 7 123 triangles
+d'une autre vue écartés.
+
+### Ce que la même lecture du code a fait apparaître : l'écran partagé
+
+Chercher dans `src/REL` les `Hu3DCameraViewportSet` qui ne couvrent pas l'écran
+donne, en une commande, les mini-jeux en écran partagé : m411Dll, m414Dll et
+m439Dll en quatre quarts, m427Dll, m428Dll et m430Dll en deux moitiés, m429Dll
+et m432Dll à découpe variable, m434Dll et m451Dll avec une vue en 320 × 240.
+
+Le tracé construit ses rayons pour **une** caméra sur tout l'écran. Sur ces
+jeux, l'image tracée était donc fausse depuis le début — quatre scènes
+superposées dans le même espace vue — et le balayage des 48, qui ne regardait
+que les bornes et le compte des compositions, ne pouvait pas le voir. Ce sont
+aussi les plus coûteux du balayage : m429Dll et m439Dll traçaient quatre fois la
+scène.
+
+En attendant de tracer chaque vue séparément, une frame dont la vue tracée ne
+couvre pas les trois quarts de l'écran dans chaque direction **n'est pas
+composée** : le jeu s'affiche comme sans ray tracing, ce qui est juste, au lieu
+d'un terme faux. Le rapport les compte. Sur m439Dll : 1 197 frames laissées
+telles quelles ; sur le plateau, 0 ; sur m423Dll, 1.
+
+### Ce qui reste
+
+- **L'écran partagé n'a pas de ray tracing.** Le vrai remède est un tracé par
+  vue : des rayons par viewport, chacun avec sa géométrie.
+- Les mini-jeux qui copient l'image pour un effet (m405, m410, m416, m417, m421,
+  m427, m430, m440, m448) n'ont pas été revus un par un ; le code dit qu'ils
+  n'ont pas de seconde caméra.
