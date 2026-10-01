@@ -3344,3 +3344,75 @@ défaut, réel, que la même lecture du code a fait trouver.
 - Un canal alpha éclairé est pris à la valeur de son matériau, comme si les
   lumières le laissaient entier.
 - Quinze niveaux : un reste au-dessus de 0,97 compte pour entier.
+
+## Le rayon primaire s'arrête où la caméra du jeu coupe (1er octobre 2026)
+
+Le quad qui couvrait tout l'écran de m401Dll pendant deux ou trois frames, et
+faisait refuser tout l'historique, a maintenant sa cause — et ce n'est aucune
+des deux que j'avais avancées.
+
+### Comment elle a été trouvée
+
+Un diagnostic de plus, `AURORA_RT_BIG_TRIANGLES` : pendant une séquence, l'état
+de tout draw dont un triangle couvre la moitié de l'écran ou traverse le plan de
+la caméra. Sur les frames en cause, un seul draw en plus des six habituels :
+
+- 80 quads — un système de particules du jeu ;
+- un quad à **1 à 3,6 unités de la caméra**, qui couvre 100 % de l'écran ;
+- alpha de sommet 0,82, texture découpée : la particule n'est pas éteinte.
+
+La caméra de m401Dll coupe à **100**. Le jeu ne dessine donc pas ce quad : il
+est devant son plan proche. Le rayon primaire, lui, partait de la caméra
+elle-même et s'y arrêtait sur tout l'écran : pendant ces frames, les termes
+tracés étaient ceux d'un quad que personne ne voit.
+
+### Ce qui est fait
+
+Les plans proche et lointain sont lus dans la projection du jeu, vue par vue —
+GX envoie la profondeur vue sur `p4·z + p5` divisé par `−z`, soit −1 au plan
+proche et 0 au plan lointain, d'où proche = `p5 / (p4 − 1)` et lointain =
+`p5 / p4`. Le rayon primaire part du premier et s'arrête au second ; le long
+d'un rayon oblique ces distances sont divisées par ce que le rayon avance en
+profondeur.
+
+Seul le rayon primaire est coupé : ce qui est hors de l'image projette toujours
+son ombre. `AURORA_RT_CLIP_PLANES=0` rend l'ancien rayon,
+`AURORA_RT_AB=clipPlanes=0` compare sur une frame.
+
+### Mesuré
+
+L'ouverture de m401Dll, 200 frames à partir d'une demi-seconde, vue historique.
+Frames dont la part acceptée tombe de plus de cinq points sous la médiane :
+
+| | premier run | second run |
+|---|---|---|
+| rayon coupé | 0 | 0 |
+| rayon non coupé | 16 | 15 |
+
+Avec le rayon coupé, la part acceptée ne descend jamais sous 96,1 %.
+
+Sur une frame ordinaire, coupé contre non coupé : 0 pixel changé sur le plateau,
+1 317 sur m401Dll (0,1 %). Plans relevés : 100 et 23 000 sur le plateau, 100 et
+25 000 sur m401Dll. Test nul A/B : 0 pixel sur 1 228 800.
+
+**Le coût**, pour ce lot et le précédent ensemble, build d'avant les deux contre
+build d'après, intercalés, deux tours : le tracé passe de 2,03 et 2,06 ms à 1,99
+et 2,05 ms sur le plateau, de 1,38 et 1,41 ms à 1,34 et 1,36 ms sur m401Dll ; la
+période de frame reste entre 6,7 et 7,9 ms dans les deux builds. Rien de
+mesurable.
+
+### Ce que je retiens
+
+Trois explications pour un même défaut, dont deux fausses : l'appariement
+croisé entre deux vues, puis l'alpha des sommets. Les deux étaient plausibles à
+la lecture du code et chacune a fait corriger quelque chose de vrai ; aucune
+n'était la cause. Ce qui a tranché, c'est de faire dire au programme, sur la
+frame en cause, quel draw couvrait l'écran.
+
+### Ce qui reste
+
+- Le plafond de m401Dll est encore refusé par la distance sur deux frames par
+  moments : un quad translucide passe devant puis derrière la surface de l'eau.
+  C'est une vraie désoccultation.
+- Une vue dont les draws n'ont pas tous les mêmes plans prend le plus proche des
+  plans proches et le plus lointain des lointains.

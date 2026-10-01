@@ -2536,10 +2536,10 @@ index 0000000..9642110
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_capture.cpp b/lib/rt/rt_capture.cpp
 new file mode 100644
-index 0000000..274a436
+index 0000000..376d3eb
 --- /dev/null
 +++ b/lib/rt/rt_capture.cpp
-@@ -0,0 +1,3186 @@
+@@ -0,0 +1,3297 @@
 +#include "rt_capture.hpp"
 +
 +#include "rt_accel.hpp"
@@ -2740,6 +2740,10 @@ index 0000000..274a436
 +uint32_t g_trianglesFaded = 0;
 +uint32_t g_trianglesFadedOut = 0;
 +uint32_t g_drawsAlphaUnmodelled = 0;
++// The primary ray clipped where the game's projection clips. On by default;
++// AURORA_RT_CLIP_PLANES=0 runs it from the camera itself, as before, and the
++// A/B bench compares the two on one frame with AURORA_RT_AB=clipPlanes=0.
++bool g_clipPlanes = true;
 +// How the see-through draws are spread across mean alpha, in tenths. The
 +// primary ray steps past anything under PRIMARY_OPACITY_FLOOR, and where that
 +// floor belongs is a property of the game's art rather than a matter of taste.
@@ -2919,6 +2923,11 @@ index 0000000..274a436
 +  // 320x240 viewport, and that close-up traced as part of the scene laid a
 +  // character the size of the pitch over it.
 +  float viewport[4];
++  // Its near and far planes, as distances in front of the camera: the nearest
++  // near and the furthest far of the draws that went through it, 0 while none
++  // could be told.
++  float clipNear;
++  float clipFar;
 +  uint64_t triangles;
 +};
 +std::vector<FrameProjection> g_projections;
@@ -3837,6 +3846,24 @@ index 0000000..274a436
 +      std::memcpy(entry.viewport, viewport, sizeof(entry.viewport));
 +      g_projections.push_back(entry);
 +    }
++    // The planes this draw is clipped by, from the projection's depth row:
++    // GX maps view z to p4*z + p5 over -z, -1 at the near plane and 0 at the
++    // far one, which gives near = p5 / (p4 - 1) and far = p5 / p4.
++    if (projIndex != SIZE_MAX) {
++      const float p4 = proj.m2[2];
++      const float p5 = proj.m2[3];
++      if (std::isfinite(p4) && std::isfinite(p5) && (p4 > 1e-9f || p4 < -1e-9f) &&
++          (p4 - 1.f > 1e-9f || p4 - 1.f < -1e-9f)) {
++        const float nearPlane = p5 / (p4 - 1.f);
++        const float farPlane = p5 / p4;
++        if (nearPlane > 0.f && farPlane > nearPlane && std::isfinite(farPlane)) {
++          FrameProjection& entry = g_projections[projIndex];
++          entry.clipNear = entry.clipNear > 0.f && entry.clipNear < nearPlane ? entry.clipNear
++                                                                              : nearPlane;
++          entry.clipFar = entry.clipFar > farPlane ? entry.clipFar : farPlane;
++        }
++      }
++    }
 +
 +    // Keep the brightest light of the frame to cast shadows from. GX lights live
 +    // in view space, like the geometry, so no extra transform is needed.
@@ -4445,6 +4472,7 @@ index 0000000..274a436
 +  // Triangles this draw lost to an unusable position. One that lost any no
 +  // longer lines up with itself from one frame to the next.
 +  uint32_t rejectedInDraw = 0;
++  bool loggedBig = false;
 +  const auto emit = [&](size_t ia, size_t ib, size_t ic) {
 +    // A position that is not a usable number stops here, before it reaches the
 +    // scene bounds or the acceleration structure. m402Dll and m405Dll produced
@@ -4487,6 +4515,67 @@ index 0000000..274a436
 +                            outPositions[idx].z);
 +      if (measureCamera) {
 +        g_viewHash = mix64(mix64(mix64(g_viewHash, verts[idx].x), verts[idx].y), verts[idx].z);
++      }
++    }
++    // AURORA_RT_BIG_TRIANGLES: under a sequence dump, the state of every draw
++    // with a triangle that fills half the screen or crosses the camera's own
++    // plane -- what a ray then meets everywhere at once.
++    static const bool traceBig = [] {
++      const char* env = std::getenv("AURORA_RT_BIG_TRIANGLES");
++      return env != nullptr && env[0] != '0';
++    }();
++    if (traceBig && !loggedBig && g_abArmed && g_sequenceWritten < g_sequenceFrames) {
++      float lo[2] = {1.f, 1.f};
++      float hi[2] = {-1.f, -1.f};
++      uint32_t behind = 0;
++      for (const size_t idx : {ia, ib, ic}) {
++        const Vec3& v = verts[idx];
++        if (v.z > -1e-3f) {
++          ++behind;
++          continue;
++        }
++        const float x = (v.x / -v.z) * g_projParams[0] - g_projParams[1];
++        const float y = (v.y / -v.z) * g_projParams[2] - g_projParams[3];
++        lo[0] = x < lo[0] ? x : lo[0];
++        hi[0] = x > hi[0] ? x : hi[0];
++        lo[1] = y < lo[1] ? y : lo[1];
++        hi[1] = y > hi[1] ? y : hi[1];
++      }
++      const auto clip = [](float v) { return v < -1.f ? -1.f : (v > 1.f ? 1.f : v); };
++      const float area = behind == 3u ? 0.f
++                                      : (clip(hi[0]) - clip(lo[0])) * (clip(hi[1]) - clip(lo[1]));
++      if ((behind > 0u && behind < 3u) || area >= 2.f) {
++        loggedBig = true;
++        const auto& stage0 = g_gxState.tevStages[0];
++        const auto& ac = g_gxState.alphaCompare;
++        Log.info("Big triangle at sequence frame {}: draw {} prim {:#x} {} vertices, material {:#010x}, "
++                 "{:.0f}% of the screen, {} corners behind the camera, view z {:.1f} {:.1f} {:.1f}; "
++                 "blend {} src {} dst {}; depth test {} write {}; alpha compare {} {} op {} {} {}; "
++                 "{} stages, stage 0 alpha a{} b{} c{} d{} ka {:#x} channel {} map {}; alpha channel "
++                 "0 mat {} lit {}, register alpha {:.3f}; draw remainder {:.3f}, from vertices {}, "
++                 "corner remainders {:.3f} {:.3f} {:.3f}; coverage map {} avg alpha {:.3f} holes {:.3f} "
++                 "thumbnail {}; additive {}",
++                 g_sequenceWritten, g_drawsSeen, static_cast<int>(prim), vtxCount, material,
++                 area * 25.f, behind, verts[ia].z, verts[ib].z, verts[ic].z,
++                 static_cast<int>(g_gxState.blendMode), static_cast<int>(g_gxState.blendFacSrc),
++                 static_cast<int>(g_gxState.blendFacDst), g_gxState.depthCompare,
++                 g_gxState.depthUpdate, static_cast<int>(ac.comp0), ac.ref0,
++                 static_cast<int>(ac.op), static_cast<int>(ac.comp1), ac.ref1,
++                 g_gxState.numTevStages, static_cast<int>(stage0.alphaPass.a),
++                 static_cast<int>(stage0.alphaPass.b), static_cast<int>(stage0.alphaPass.c),
++                 static_cast<int>(stage0.alphaPass.d), static_cast<int>(stage0.kaSel),
++                 static_cast<int>(stage0.channelId), static_cast<int>(stage0.texMapId),
++                 static_cast<int>(alphaChannel0.matSrc), alphaChannel0.lightingEnabled,
++                 g_gxState.colorChannelState[GX_ALPHA0].matColor.w(), drawRemainder,
++                 alphaFromVertex,
++                 alphaFromVertex && remainders.size() == verts.size() ? remainders[ia] : -1.f,
++                 alphaFromVertex && remainders.size() == verts.size() ? remainders[ib] : -1.f,
++                 alphaFromVertex && remainders.size() == verts.size() ? remainders[ic] : -1.f,
++                 seeThrough != nullptr ? "bound" : "none",
++                 seeThrough != nullptr ? seeThrough->ref->averageAlpha : -1.f,
++                 seeThrough != nullptr ? seeThrough->ref->cutoutFraction : -1.f,
++                 (material >> accel::MaterialThumbnailShift) & accel::MaterialThumbnailMask,
++                 (material & accel::MaterialAdditive) != 0u);
 +      }
 +    }
 +    // What the game's alpha takes from this triangle, in fifteenths. Always
@@ -4684,6 +4773,12 @@ index 0000000..274a436
 +      Log.info("Geometry drawn through another projection {}",
 +               g_skipOtherProjection ? "left out of the rays" : "traced");
 +    }
++    if (const char* env = std::getenv("AURORA_RT_CLIP_PLANES")) {
++      g_clipPlanes = env[0] != '0';
++      Log.info("The primary ray {}",
++               g_clipPlanes ? "starts and ends where the game's projection clips"
++                            : "runs from the camera itself");
++    }
 +    if (const char* env = std::getenv("AURORA_RT_RASTER_ALPHA")) {
 +      g_rasterAlpha = env[0] != '0';
 +      Log.info("A surface blocks by {}",
@@ -4721,7 +4816,7 @@ index 0000000..274a436
 +                                                 "aoRadius",  "bounce",        "denoisePhi",
 +                                                 "denoisePasses", "debugMode", "alphaTest",
 +                                                 "additive", "shadowStratify", "otherProjection",
-+                                                 "objectMotion", "rasterAlpha"};
++                                                 "objectMotion", "rasterAlpha", "clipPlanes"};
 +      bool known = false;
 +      if (const char* eq = std::strchr(env, '='); eq != nullptr) {
 +        const std::string name(env, eq);
@@ -4739,7 +4834,8 @@ index 0000000..274a436
 +      } else {
 +        Log.warn("AURORA_RT_AB ignored: expected name=value, name one of aoSamples, shadowSamples, "
 +                 "lightRadius, aoRadius, bounce, denoisePhi, denoisePasses, debugMode, alphaTest, "
-+                 "additive, shadowStratify, otherProjection, objectMotion, rasterAlpha");
++                 "additive, shadowStratify, otherProjection, objectMotion, rasterAlpha, "
++                 "clipPlanes");
 +      }
 +    }
 +    // Frame numbers are a poor handle: the counter runs uncapped through boot,
@@ -5451,7 +5547,12 @@ index 0000000..274a436
 +                    (g_stratifiedShadow ? trace::FeatureStratifiedShadow : 0u) |
 +                    (g_skipOtherProjection ? trace::FeatureSkipOtherProjection : 0u) |
 +                    (g_objectMotion ? trace::FeatureObjectMotion : 0u) |
-+                    (g_rasterAlpha ? trace::FeatureRasterAlpha : 0u);
++                    (g_rasterAlpha ? trace::FeatureRasterAlpha : 0u) |
++                    (g_clipPlanes ? trace::FeatureClipPlanes : 0u);
++  if (g_tracedProjection < g_projections.size()) {
++    params.clipNear = g_projections[g_tracedProjection].clipNear;
++    params.clipFar = g_projections[g_tracedProjection].clipFar;
++  }
 +  std::memcpy(params.prevProj, previousProjection, sizeof(params.prevProj));
 +  params.havePrevious = havePreviousProjection;
 +  params.reflectionRange = shadowRange; // the scene's own size bounds both
@@ -5516,6 +5617,10 @@ index 0000000..274a436
 +      probe.features =
 +          value != 0.0 ? (probe.features | trace::FeatureRasterAlpha)
 +                       : (probe.features & ~static_cast<uint32_t>(trace::FeatureRasterAlpha));
++    } else if (g_abName == "clipPlanes") {
++      probe.features =
++          value != 0.0 ? (probe.features | trace::FeatureClipPlanes)
++                       : (probe.features & ~static_cast<uint32_t>(trace::FeatureClipPlanes));
 +    }
 +    if (!trace::run(probe, "rt_ab_b.pfm")) {
 +      Log.error("A/B bench: the B trace failed");
@@ -5686,6 +5791,12 @@ index 0000000..274a436
 +             g_drawsTotal, g_drawsAlphaTested, g_drawsBlended, g_drawsReflective,
 +             g_drawsSingularMatrix, g_drawsAdditive,
 +             g_skipAdditive ? "left out of the rays" : "traced");
++    Log.info("Primary ray {}: near plane {:.2f}, far plane {:.0f}",
++             g_clipPlanes ? "clipped where the game's projection clips" : "not clipped",
++             g_tracedProjection < g_projections.size() ? g_projections[g_tracedProjection].clipNear
++                                                       : 0.f,
++             g_tracedProjection < g_projections.size() ? g_projections[g_tracedProjection].clipFar
++                                                       : 0.f);
 +    Log.info("Alpha of the vertices and the material ({}): takes something from {} triangles this "
 +             "frame and everything from {} of them; {} draws left whole, their alpha combiners not "
 +             "being modelled",
@@ -6471,10 +6582,10 @@ index 0000000..b805129
 +} // namespace aurora::rt::textures
 diff --git a/lib/rt/rt_trace.cpp b/lib/rt/rt_trace.cpp
 new file mode 100644
-index 0000000..c83f92c
+index 0000000..9686650
 --- /dev/null
 +++ b/lib/rt/rt_trace.cpp
-@@ -0,0 +1,1269 @@
+@@ -0,0 +1,1275 @@
 +#include "rt_trace.hpp"
 +
 +#include "rt_accel.hpp"
@@ -6627,9 +6738,13 @@ index 0000000..c83f92c
 +  uint32_t frameIndex;
 +  // The previous frame's projection parameters; all zero when there is none.
 +  float prevProj[4];
++  // Near and far planes of the projection, in front of the camera; 0 for none.
++  float clipNear;
++  float clipFar;
++  float pad0[2];
 +};
 +// HLSL packs a cbuffer in float4 rows, so the size has to stay a multiple of 16.
-+static_assert(sizeof(Constants) == 112, "constants must stay 28 DWORDs");
++static_assert(sizeof(Constants) == 128, "constants must stay 32 DWORDs");
 +
 +// Must match the cbuffer in rt_denoise.hlsl exactly.
 +struct DenoiseConstants {
@@ -7435,6 +7550,8 @@ index 0000000..c83f92c
 +  if (params.havePrevious) {
 +    std::memcpy(constants.prevProj, params.prevProj, sizeof(constants.prevProj));
 +  }
++  constants.clipNear = params.clipNear;
++  constants.clipFar = params.clipFar;
 +
 +  ID3D12DescriptorHeap* heaps[] = {g_uavHeap.Get()};
 +  g_cmdList->SetDescriptorHeaps(1, heaps);
@@ -7746,10 +7863,10 @@ index 0000000..c83f92c
 +} // namespace aurora::rt::trace
 diff --git a/lib/rt/rt_trace.hpp b/lib/rt/rt_trace.hpp
 new file mode 100644
-index 0000000..0b5c270
+index 0000000..082829f
 --- /dev/null
 +++ b/lib/rt/rt_trace.hpp
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,169 @@
 +#pragma once
 +
 +#include <cstdint>
@@ -7812,6 +7929,10 @@ index 0000000..0b5c270
 +  // its texture alone, which is how it behaved before -- the A/B bench compares
 +  // the two.
 +  FeatureRasterAlpha = 1u << 8,
++  // Start and end the primary ray where the game's projection clips. Off, it
++  // runs from the camera itself to 100 000 units, which is how it ran before
++  // -- the A/B bench compares the two.
++  FeatureClipPlanes = 1u << 9,
 +};
 +
 +struct TraceParams {
@@ -7863,6 +7984,11 @@ index 0000000..0b5c270
 +  // history stays at the same pixel.
 +  float prevProj[4] = {0.f, 0.f, 0.f, 0.f};
 +  bool havePrevious = false;
++  // The near and far planes of the traced projection, as distances in front of
++  // the camera; both 0 when they could not be told, which leaves the primary
++  // ray unclipped.
++  float clipNear = 0.f;
++  float clipFar = 0.f;
 +  // Per-trace denoiser overrides; negative keeps the global setting.
 +  float luminancePhi = -1.f;
 +  int32_t denoisePasses = -1;
@@ -7912,10 +8038,10 @@ index 0000000..0b5c270
 +} // namespace aurora::rt::trace
 diff --git a/lib/rt/shaders/rt_ao.hlsl b/lib/rt/shaders/rt_ao.hlsl
 new file mode 100644
-index 0000000..7941237
+index 0000000..e7d09b6
 --- /dev/null
 +++ b/lib/rt/shaders/rt_ao.hlsl
-@@ -0,0 +1,929 @@
+@@ -0,0 +1,946 @@
 +// Ray traced ambient occlusion for PartyBoard.
 +//
 +// Primary visibility is traced rather than rasterised: with inline RayQuery the
@@ -8056,6 +8182,9 @@ index 0000000..7941237
 +  uint gFrameIndex;
 +  // gProj as it was in the previous frame; all zero when there was none.
 +  float4 gProjPrev;
++  // x and y: the near and far planes of the game's projection, as distances in
++  // front of the camera; 0 when unknown.
++  float4 gClip;
 +};
 +
 +#define FEATURE_AO 1u
@@ -8067,6 +8196,7 @@ index 0000000..7941237
 +#define FEATURE_SKIP_OTHER_PROJECTION 64u
 +#define FEATURE_OBJECT_MOTION 128u
 +#define FEATURE_RASTER_ALPHA 256u
++#define FEATURE_CLIP_PLANES 512u
 +
 +#define MOTION_OBJECT 1u
 +#define MOTION_CAMERA 2u
@@ -8358,6 +8488,19 @@ index 0000000..7941237
 +  ray.Direction = dir;
 +  ray.TMin = 0.0f;
 +  ray.TMax = 100000.0f;
++  // The rasterizer draws nothing nearer than its near plane nor further than
++  // its far one, and the primary ray stands for it: a bubble a few units from
++  // the lens is not in the game's picture, and stopping on it shaded a quad
++  // nobody sees across the whole frame. The planes are distances in front of
++  // the camera, so along a slanted ray they sit further out. Only this ray is
++  // clipped: what is out of the picture still casts its shadow.
++  if ((gFeatures & FEATURE_CLIP_PLANES) != 0u && gClip.x > 0.0f) {
++    const float along = 1.0f / max(-dir.z, 1e-6f);
++    ray.TMin = gClip.x * along;
++    if (gClip.y > gClip.x) {
++      ray.TMax = gClip.y * along;
++    }
++  }
 +
 +  // No culling flag: GX winding varies across draws, so both faces must hit.
 +  //
@@ -8370,7 +8513,7 @@ index 0000000..7941237
 +  // and shade what is on screen. Bounded, because each step is a fresh
 +  // traversal, and only pixels that land on such a surface pay for it.
 +  RayQuery<TRAVERSAL_FLAGS> primary;
-+  float primaryFrom = 0.0f;
++  float primaryFrom = ray.TMin;
 +  [loop] for (uint skip = 0u; skip < MAX_PRIMARY_SKIPS; ++skip) {
 +    RayDesc stepRay = ray;
 +    stepRay.TMin = primaryFrom;
