@@ -1,0 +1,1027 @@
+#include "app.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+
+#include <sys/stat.h>
+
+#include "image.hpp"
+
+namespace partyboard::launcher {
+
+namespace {
+
+constexpr float W = Renderer::kWidth;
+constexpr float H = Renderer::kHeight;
+
+// GameCube indigo, with the Switch's cyan selection highlight on top.
+constexpr Color kBgTop = rgb(0x2A2266);
+constexpr Color kBgBottom = rgb(0x0D0A26);
+constexpr Color kAccent = rgb(0x35D6FF);
+constexpr Color kAccentLight = rgb(0xC4F4FF);
+constexpr Color kText = rgb(0xFFFFFF);
+constexpr Color kTextSoft = rgb(0xC9C3F5);
+constexpr Color kTextDim = rgb(0x8F88C9);
+constexpr Color kPanel = rgb(0x1B1550);
+constexpr Color kPanelRow = rgb(0x2A2370);
+constexpr Color kInk = rgb(0x1B1446);
+constexpr Color kGreen = rgb(0x48D38A);
+constexpr Color kOrange = rgb(0xFFB347);
+constexpr Color kRed = rgb(0xFF6B7A);
+constexpr Color kGrey = rgb(0xA6A1D1);
+constexpr Color kPlayerColors[4] = {rgb(0xFF4D6D), rgb(0x3B82FF), rgb(0xFFD23B), rgb(0x3BD67A)};
+
+constexpr float kCardHeight = 340.0f;
+constexpr float kCardAspect = 0.72f; // GameCube case
+constexpr float kShelfBaseline = 468.0f;
+
+constexpr int kOptionRows = 5;
+
+constexpr uint32_t kDirections = kButtonUp | kButtonDown | kButtonLeft | kButtonRight;
+
+bool fileExists(const std::string& path) {
+    struct stat st{};
+    return !path.empty() && stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+}
+
+Str regionName(char code) {
+    switch (code) {
+    case 'E': return Str::RegionUsa;
+    case 'J': return Str::RegionJapan;
+    case 'P': case 'D': case 'F': case 'S': case 'I': case 'U': case 'X': case 'Y': return Str::RegionEurope;
+    default: return Str::RegionOther;
+    }
+}
+
+Str statusText(Compatibility compatibility) {
+    switch (compatibility) {
+    case Compatibility::Supported: return Str::StatusSupported;
+    case Compatibility::UnsupportedRegion: return Str::StatusUnsupportedRegion;
+    case Compatibility::OtherGame: return Str::StatusOtherGame;
+    case Compatibility::Unreadable: break;
+    }
+    return Str::StatusUnreadable;
+}
+
+Color statusColor(Compatibility compatibility) {
+    switch (compatibility) {
+    case Compatibility::Supported: return kGreen;
+    case Compatibility::UnsupportedRegion: return kOrange;
+    case Compatibility::OtherGame: return kGrey;
+    case Compatibility::Unreadable: break;
+    }
+    return kRed;
+}
+
+// Stable per-game hue for generated covers of discs we know nothing about.
+Color hashedColor(const std::string& key, float lightness) {
+    uint32_t h = 2166136261u;
+    for (char c : key)
+        h = (h ^ static_cast<uint8_t>(c)) * 16777619u;
+    const float hue = static_cast<float>(h % 360) / 360.0f;
+    auto channel = [&](float offset) {
+        return lightness * (0.55f + 0.45f * std::cos(6.2831853f * (hue + offset)));
+    };
+    return {channel(0.0f), channel(0.33f), channel(0.67f), 1.0f};
+}
+
+std::string format(const char* pattern, unsigned value) {
+    char buffer[128];
+    std::snprintf(buffer, sizeof(buffer), pattern, value);
+    return buffer;
+}
+
+} // namespace
+
+App::App(Platform& platform, Renderer& renderer) : m_platform(platform), m_r(renderer) {}
+
+App::~App() { releaseTextures(); }
+
+void App::init() {
+    loadSettings(m_platform.settingsPath(), m_settings);
+    m_systemLanguage = m_platform.systemLanguage();
+    m_language = m_settings.resolveLanguage(m_systemLanguage);
+    m_now = m_last = m_platform.now();
+    m_shelfFadeStart = m_now;
+    rescan(false);
+}
+
+void App::releaseTextures() {
+    for (GameVisual& visual : m_visuals) {
+        m_r.destroyTexture(visual.banner);
+        m_r.destroyTexture(visual.cover);
+    }
+    m_visuals.clear();
+}
+
+void App::rescan(bool announce) {
+    const std::string previous = m_selected < m_games.size() ? m_games[m_selected].path : m_settings.lastGame;
+    releaseTextures();
+    m_games = scanLibrary(m_platform.gameDirectories(), m_platform.coversDirectory(), m_language);
+    m_visuals.resize(m_games.size());
+    for (size_t i = 0; i < m_games.size(); ++i) {
+        const GameEntry& game = m_games[i];
+        if (game.disc.hasBanner())
+            m_visuals[i].banner = m_r.createTexture(kBannerWidth, kBannerHeight, game.disc.bannerRgba.data(), false);
+        Image cover;
+        if (!game.coverPath.empty() && loadPng(game.coverPath, cover))
+            m_visuals[i].cover = m_r.createTexture(cover.width, cover.height, cover.rgba.data(), true);
+    }
+
+    m_selected = 0;
+    for (size_t i = 0; i < m_games.size(); ++i) {
+        if (m_games[i].path == previous)
+            m_selected = i;
+    }
+    m_scroll = static_cast<float>(m_selected);
+    if (announce)
+        showToast(format(t(Str::GamesFound), static_cast<unsigned>(m_games.size())));
+}
+
+void App::refreshLanguage() {
+    m_language = m_settings.resolveLanguage(m_systemLanguage);
+}
+
+void App::persistSettings() { saveSettings(m_platform.settingsPath(), m_settings); }
+
+void App::openOverlay(Overlay overlay) {
+    m_overlay = overlay;
+    m_overlayDrawn = overlay;
+    m_platform.playSound(overlay == Overlay::Dialog ? Sound::Error : Sound::Open, 0.8f);
+}
+
+void App::closeOverlay() {
+    if (m_overlay == Overlay::Options)
+        persistSettings();
+    m_overlay = Overlay::None;
+    m_platform.playSound(Sound::Back, 0.8f);
+}
+
+void App::showDialog(Str title, Str body, std::string detail) {
+    m_dialogTitle = t(title);
+    m_dialogBody = t(body);
+    m_dialogDetail = std::move(detail);
+    openOverlay(Overlay::Dialog);
+}
+
+void App::showToast(std::string message) {
+    m_toast = std::move(message);
+    m_toastUntil = m_now + 2.6;
+}
+
+std::string App::findEngine() const {
+    if (fileExists(m_settings.enginePath))
+        return m_settings.enginePath;
+    for (const std::string& candidate : m_platform.engineCandidates()) {
+        if (fileExists(candidate))
+            return candidate;
+    }
+    return {};
+}
+
+void App::requestLaunch() {
+    if (m_selected >= m_games.size()) {
+        m_platform.playSound(Sound::Error);
+        return;
+    }
+    const GameEntry& game = m_games[m_selected];
+    if (!game.launchable()) {
+        showDialog(Str::LaunchUnsupportedTitle, Str::LaunchUnsupportedBody, t(statusText(game.compatibility)));
+        return;
+    }
+    const std::string engine = findEngine();
+    if (engine.empty()) {
+        const std::vector<std::string> candidates = m_platform.engineCandidates();
+        showDialog(Str::LaunchEngineMissingTitle, Str::LaunchEngineMissingBody,
+                   candidates.empty() ? std::string{} : candidates.front());
+        return;
+    }
+
+    m_settings.lastGame = game.path;
+    persistSettings();
+    m_launchArgs = buildLaunchArgs(engine, game.path, m_platform.selfPath(), m_settings, m_language);
+    m_platform.playSound(Sound::Select);
+    m_launchStart = m_now;
+    if (m_settings.bootAnimation) {
+        m_screen = Screen::Boot;
+        m_boot.start(m_now);
+    } else {
+        m_screen = Screen::Launching;
+    }
+}
+
+void App::finishLaunch() {
+    if (m_platform.launch(m_launchArgs) == LaunchResult::Scheduled) {
+        m_quit = true;
+        return;
+    }
+    m_screen = Screen::Shelf;
+    m_shelfFadeStart = m_now;
+    showDialog(Str::LaunchFailedTitle, Str::LaunchFailedBody, m_launchArgs.empty() ? std::string{} : m_launchArgs[0]);
+}
+
+uint32_t App::navigation(const InputState& input) {
+    uint32_t held = input.held & kDirections;
+    if (std::fabs(input.stickX) > 0.55f || std::fabs(input.stickY) > 0.55f) {
+        if (std::fabs(input.stickX) > std::fabs(input.stickY))
+            held |= input.stickX > 0 ? kButtonRight : kButtonLeft;
+        else
+            held |= input.stickY > 0 ? kButtonUp : kButtonDown;
+    }
+    uint32_t primary = 0;
+    for (uint32_t bit : {kButtonUp, kButtonDown, kButtonLeft, kButtonRight}) {
+        if (held & bit) {
+            primary = bit;
+            break;
+        }
+    }
+    if (primary != m_repeatDir) {
+        m_repeatDir = primary;
+        m_repeatSince = m_repeatLast = m_now;
+        return primary;
+    }
+    if (primary && m_now - m_repeatSince > 0.38 && m_now - m_repeatLast > 0.085) {
+        m_repeatLast = m_now;
+        return primary;
+    }
+    return 0;
+}
+
+void App::updateShelf(const InputState& input, uint32_t nav) {
+    if (nav & (kButtonLeft | kButtonRight)) {
+        const size_t before = m_selected;
+        if ((nav & kButtonLeft) && m_selected > 0)
+            --m_selected;
+        if ((nav & kButtonRight) && m_selected + 1 < m_games.size())
+            ++m_selected;
+        if (m_selected != before)
+            m_platform.playSound(Sound::Move, 0.7f);
+    }
+    if (input.pressed & kButtonA)
+        requestLaunch();
+    else if (input.pressed & kButtonX)
+        openOverlay(Overlay::Options);
+    else if (input.pressed & kButtonY)
+        openOverlay(Overlay::Controllers);
+    else if (input.pressed & kButtonMinus)
+        rescan(true);
+    else if (input.pressed & kButtonPlus)
+        m_quit = true;
+}
+
+void App::cycleOption(int row, int delta) {
+    auto wrap3 = [delta](int value) { return (value + delta + 3) % 3; };
+    switch (row) {
+    case 0: m_settings.bootAnimation = !m_settings.bootAnimation; break;
+    case 1: m_settings.aspect = static_cast<AspectMode>(wrap3(static_cast<int>(m_settings.aspect))); break;
+    case 2: m_settings.filter = static_cast<ScreenFilter>(wrap3(static_cast<int>(m_settings.filter))); break;
+    case 3:
+        m_settings.language = static_cast<LanguagePref>(wrap3(static_cast<int>(m_settings.language)));
+        refreshLanguage();
+        break;
+    case 4: m_settings.rumble = !m_settings.rumble; break;
+    default: break;
+    }
+    m_platform.playSound(Sound::Move, 0.8f);
+}
+
+void App::updateOptions(const InputState& input, uint32_t nav) {
+    if (nav & kButtonUp && m_optionRow > 0) {
+        --m_optionRow;
+        m_platform.playSound(Sound::Move, 0.7f);
+    }
+    if (nav & kButtonDown && m_optionRow + 1 < kOptionRows) {
+        ++m_optionRow;
+        m_platform.playSound(Sound::Move, 0.7f);
+    }
+    if (nav & kButtonLeft)
+        cycleOption(m_optionRow, -1);
+    if ((nav & kButtonRight) || (input.pressed & kButtonA))
+        cycleOption(m_optionRow, 1);
+    if (input.pressed & (kButtonB | kButtonX))
+        closeOverlay();
+}
+
+void App::updateControllers(const InputState& input, uint32_t nav) {
+    constexpr int kRows = 11;
+    if (nav & kButtonUp && m_mapRow > 0) {
+        --m_mapRow;
+        m_platform.playSound(Sound::Move, 0.7f);
+    }
+    if (nav & kButtonDown && m_mapRow + 1 < kRows) {
+        ++m_mapRow;
+        m_platform.playSound(Sound::Move, 0.7f);
+    }
+    if (input.pressed & kButtonY) {
+        m_platform.playSound(Sound::Select, 0.8f);
+        if (!m_platform.showControllerApplet())
+            showToast(t(Str::ControllersAppletFailed));
+        m_slots = m_platform.controllers();
+    }
+    if (input.pressed & kButtonB)
+        closeOverlay();
+}
+
+void App::updateDialog(const InputState& input) {
+    if (input.pressed & (kButtonA | kButtonB))
+        closeOverlay();
+}
+
+bool App::frame() {
+    if (!m_platform.beginFrame())
+        return false;
+
+    m_now = m_platform.now();
+    const float dt = static_cast<float>(std::clamp(m_now - m_last, 0.0, 0.1));
+    m_last = m_now;
+
+    if (m_now >= m_statusRefresh) {
+        m_status = m_platform.status();
+        m_slots = m_platform.controllers();
+        m_statusRefresh = m_now + 1.0;
+    }
+
+    const InputState input = m_platform.input();
+    const uint32_t nav = navigation(input);
+
+    switch (m_screen) {
+    case Screen::Shelf:
+        switch (m_overlay) {
+        case Overlay::None: updateShelf(input, nav); break;
+        case Overlay::Options: updateOptions(input, nav); break;
+        case Overlay::Controllers: updateControllers(input, nav); break;
+        case Overlay::Dialog: updateDialog(input); break;
+        }
+        break;
+    case Screen::Boot:
+        m_boot.update(m_now, (input.held & kButtonZR) != 0, m_platform);
+        if (m_boot.elapsed(m_now) > 0.6 && (input.pressed & (kButtonA | kButtonB | kButtonPlus)))
+            m_boot.skip(m_now);
+        break;
+    case Screen::Launching:
+        break;
+    }
+
+    const float target = m_overlay != Overlay::None ? 1.0f : 0.0f;
+    m_overlayAnim += (target - m_overlayAnim) * (1.0f - std::exp(-dt * 16.0f));
+    if (m_overlay == Overlay::None && m_overlayAnim < 0.01f) {
+        m_overlayAnim = 0.0f;
+        m_overlayDrawn = Overlay::None;
+    }
+    m_scroll += (static_cast<float>(m_selected) - m_scroll) * (1.0f - std::exp(-dt * 12.0f));
+
+    m_r.beginFrame(m_platform.framebufferWidth(), m_platform.framebufferHeight(), m_platform.presentFramebuffer(),
+                   static_cast<float>(m_now));
+    if (m_screen == Screen::Boot) {
+        m_boot.draw(m_r, m_now);
+    } else {
+        drawShelf();
+        if (m_screen == Screen::Launching) {
+            const float fade = phase(m_now, m_launchStart, 0.3);
+            m_r.rect(0, 0, W, H, withAlpha(rgb(0x000000), fade));
+        }
+    }
+    m_r.endFrame();
+    m_platform.endFrame();
+
+    if (m_screen == Screen::Boot && m_boot.finished(m_now))
+        finishLaunch();
+    else if (m_screen == Screen::Launching && m_now - m_launchStart >= 0.3)
+        finishLaunch();
+
+    return !m_quit;
+}
+
+// ---------------------------------------------------------------------------
+// Drawing
+// ---------------------------------------------------------------------------
+
+float App::pulse() const { return 0.5f + 0.5f * std::sin(static_cast<float>(m_now) * 4.2f); }
+
+void App::drawEmblem(float cx, float cy, float size, float alpha) {
+    // Flat isometric cube: top, left and right faces.
+    const float s = size * 0.5f;
+    const float h = s * 0.5774f; // tan(30)
+    const float top[8] = {cx, cy - s, cx + s * 0.866f, cy - s + h, cx, cy - s + 2 * h, cx - s * 0.866f, cy - s + h};
+    const float left[8] = {cx - s * 0.866f, cy - s + h, cx, cy - s + 2 * h, cx, cy + s, cx - s * 0.866f, cy + s - h};
+    const float right[8] = {cx, cy - s + 2 * h, cx + s * 0.866f, cy - s + h, cx + s * 0.866f, cy + s - h, cx, cy + s};
+    m_r.quad(top, withAlpha(rgb(0xB3A8FF), alpha));
+    m_r.quad(left, withAlpha(rgb(0x7062E6), alpha));
+    m_r.quad(right, withAlpha(rgb(0x4A3DB8), alpha));
+}
+
+float App::drawButtonGlyph(float cx, float cy, const char* glyph, float radius, float alpha) {
+    const float size = radius * (std::strlen(glyph) > 1 ? 0.9f : 1.15f);
+    const float textWidth = m_r.measure(FontWeight::Bold, size, glyph);
+    const float width = std::max(radius * 2.0f, textWidth + radius * 1.1f);
+    m_r.roundRect(cx - width * 0.5f, cy - radius, width, radius * 2.0f, radius, withAlpha(rgb(0xF4F2FF), alpha));
+    const float lh = m_r.lineHeight(FontWeight::Bold, size);
+    m_r.text(FontWeight::Bold, size, cx, cy - lh * 0.5f, glyph, withAlpha(kInk, alpha), Align::Center);
+    return width;
+}
+
+void App::drawHints(const std::vector<Hint>& hints, float right, float y, float alpha) {
+    float x = right;
+    for (auto it = hints.rbegin(); it != hints.rend(); ++it) {
+        const char* label = t(it->label);
+        const float labelWidth = m_r.measure(FontWeight::Regular, 19.0f, label);
+        x -= labelWidth;
+        m_r.text(FontWeight::Regular, 19.0f, x, y - m_r.lineHeight(FontWeight::Regular, 19.0f) * 0.5f, label,
+                 withAlpha(kText, alpha));
+        const float glyphWidth = std::max(26.0f, m_r.measure(FontWeight::Bold, 12.0f, it->glyph) + 14.0f);
+        x -= 9.0f + glyphWidth * 0.5f;
+        drawButtonGlyph(x, y, it->glyph, 13.0f, alpha);
+        x -= glyphWidth * 0.5f + 28.0f;
+    }
+}
+
+void App::drawHeader() {
+    // Rotating emblem cube, rendered in its own small 3D viewport.
+    {
+        constexpr float size = 54.0f;
+        m_r.begin3D(38.0f, 18.0f, size, size);
+        const Vec3 eye{2.5f, 2.0f, 2.5f};
+        const Mat4 vp = Mat4::perspective(30.0f * kPi / 180.0f, 1.0f, 0.1f, 20.0f) *
+                        Mat4::lookAt(eye, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f});
+        const Mat4 model = Mat4::rotate(static_cast<float>(m_now) * 0.5f, {0.0f, 1.0f, 0.0f});
+        m_r.cube(vp, model, eye, rgb(0x8B7DFF), 0.3f);
+        m_r.end3D();
+    }
+    const float titleWidth = m_r.text(FontWeight::Bold, 30.0f, 104.0f, 22.0f, t(Str::AppTitle), kText);
+    m_r.text(FontWeight::Regular, 18.0f, 104.0f + titleWidth + 14.0f, 32.0f, t(Str::AppSubtitle), kTextSoft);
+
+    // Clock and battery, like the Switch HOME menu.
+    float x = 1236.0f;
+    if (m_status.hour >= 0) {
+        char clock[16];
+        std::snprintf(clock, sizeof(clock), "%02d:%02d", m_status.hour, m_status.minute);
+        x -= m_r.text(FontWeight::Bold, 24.0f, x, 26.0f, clock, kText, Align::Right) + 22.0f;
+    }
+    if (m_status.battery >= 0) {
+        const float bw = 36.0f;
+        const float bh = 18.0f;
+        const float by = 31.0f;
+        x -= bw + 4.0f;
+        m_r.roundRectOutline(x, by, bw, bh, 4.0f, 2.0f, withAlpha(kText, 0.9f));
+        m_r.roundRect(x + bw + 1.0f, by + 5.0f, 3.0f, bh - 10.0f, 1.5f, withAlpha(kText, 0.9f));
+        const float level = std::clamp(m_status.battery / 100.0f, 0.0f, 1.0f);
+        const Color fill = m_status.battery <= 15 && !m_status.charging ? kRed : (m_status.charging ? kGreen : kText);
+        m_r.roundRect(x + 3.5f, by + 3.5f, (bw - 7.0f) * level, bh - 7.0f, 2.0f, fill);
+        char percent[8];
+        std::snprintf(percent, sizeof(percent), "%d%%", m_status.battery);
+        m_r.text(FontWeight::Regular, 17.0f, x - 8.0f, 30.0f, percent, kTextSoft, Align::Right);
+    }
+}
+
+void App::drawGeneratedCover(const GameEntry& game, const GameVisual& visual, float x, float y, float w, float h,
+                             float s) {
+    Color top, bottom;
+    switch (game.compatibility) {
+    case Compatibility::Supported:
+        top = rgb(0x5AA9FF);
+        bottom = rgb(0x283CC4);
+        break;
+    case Compatibility::UnsupportedRegion:
+        top = rgb(0xC77DFF);
+        bottom = rgb(0x5B2BB5);
+        break;
+    case Compatibility::OtherGame:
+        top = hashedColor(game.disc.gameId, 0.85f);
+        bottom = hashedColor(game.disc.gameId, 0.35f);
+        break;
+    case Compatibility::Unreadable:
+        top = rgb(0x6B6790);
+        bottom = rgb(0x36334F);
+        break;
+    }
+    const float radius = 14.0f * s;
+    m_r.roundRectGradient(x, y, w, h, radius, top, bottom);
+    // A soft light from the top-left, like a glossy case insert.
+    m_r.softRect(x - w * 0.2f, y - h * 0.15f, w * 0.9f, h * 0.55f, w * 0.4f, w * 0.3f, withAlpha(kText, 0.10f));
+
+    // Case header strip with the cube mark.
+    const float band = 30.0f * s;
+    m_r.roundRect(x, y, w, band, radius, rgb(0x16113F));
+    m_r.rect(x, y + band * 0.5f, w, band * 0.5f, rgb(0x16113F));
+    drawEmblem(x + 20.0f * s, y + band * 0.5f, 18.0f * s, 1.0f);
+    m_r.text(FontWeight::Bold, 12.0f * s, x + 35.0f * s, y + band * 0.5f - m_r.lineHeight(FontWeight::Bold, 12.0f * s) * 0.5f,
+             "GAMECUBE", kText, Align::Left, 2.4f * s);
+
+    const float bw = w - 28.0f * s;
+    const float bh = bw / 3.0f;
+    const float bx = x + 14.0f * s;
+    const float by = y + band + 16.0f * s;
+    if (visual.banner) {
+        m_r.softRect(bx, by + 4.0f * s, bw, bh, 6.0f * s, 8.0f * s, withAlpha(rgb(0x000000), 0.35f));
+        m_r.roundRect(bx - 3.0f * s, by - 3.0f * s, bw + 6.0f * s, bh + 6.0f * s, 8.0f * s, withAlpha(kText, 0.92f));
+        m_r.image(visual.banner, bx, by, bw, bh, {}, 6.0f * s);
+    } else {
+        drawEmblem(x + w * 0.5f, by + bh * 0.5f, bh * 0.95f, 0.9f);
+    }
+
+    const std::vector<std::string> lines = m_r.wrap(FontWeight::Bold, 21.0f * s, game.title(m_language), w - 28.0f * s);
+    float ty = by + bh + 16.0f * s;
+    for (size_t i = 0; i < lines.size() && i < 3; ++i) {
+        const std::string line = m_r.ellipsize(FontWeight::Bold, 21.0f * s, lines[i], w - 24.0f * s);
+        m_r.text(FontWeight::Bold, 21.0f * s, x + w * 0.5f + 1.0f, ty + 1.5f, line, withAlpha(rgb(0x000000), 0.35f), Align::Center);
+        m_r.text(FontWeight::Bold, 21.0f * s, x + w * 0.5f, ty, line, kText, Align::Center);
+        ty += 25.0f * s;
+    }
+
+    // A mini-disc peeking out of the case, centred in the space left between
+    // the title and the footer.
+    const float footerTop = y + h - 36.0f * s;
+    const float discR = std::min(w * 0.28f, (footerTop - ty) * 0.5f - 6.0f * s);
+    if (discR > 24.0f * s) {
+        const float dcx = x + w * 0.5f;
+        const float dcy = (ty + footerTop) * 0.5f;
+        m_r.circle(dcx, dcy + 3.0f * s, discR, withAlpha(rgb(0x000000), 0.25f));
+        m_r.circle(dcx, dcy, discR, rgb(0xE4E1F4));
+        m_r.softRect(dcx - discR, dcy - discR, discR * 1.2f, discR * 1.2f, discR * 0.6f, discR * 0.4f,
+                     withAlpha(rgb(0xB8F0FF), 0.35f));
+        m_r.softRect(dcx - discR * 0.1f, dcy - discR * 0.1f, discR * 1.1f, discR * 1.1f, discR * 0.55f, discR * 0.4f,
+                     withAlpha(rgb(0xFFC6F0), 0.3f));
+        m_r.ring(dcx, dcy, discR * 0.72f, 1.0f * s, withAlpha(rgb(0x9C97C0), 0.5f));
+        m_r.circle(dcx, dcy, discR * 0.36f, rgb(0xC9C5E2));
+        m_r.circle(dcx, dcy, discR * 0.14f, bottom);
+    }
+
+    // Footer: game ID and region chip.
+    const float fy = y + h - 30.0f * s;
+    if (!game.disc.gameId.empty()) {
+        m_r.text(FontWeight::Regular, 13.0f * s, x + 14.0f * s, fy, game.disc.gameId, withAlpha(kText, 0.8f));
+        const char* region = t(regionName(game.disc.regionCode()));
+        const float rw = m_r.measure(FontWeight::Bold, 12.0f * s, region) + 16.0f * s;
+        m_r.roundRect(x + w - 14.0f * s - rw, fy - 2.0f * s, rw, 20.0f * s, 10.0f * s, withAlpha(rgb(0x000000), 0.3f));
+        m_r.text(FontWeight::Bold, 12.0f * s, x + w - 14.0f * s - rw * 0.5f, fy, region, kText, Align::Center);
+    }
+}
+
+void App::drawCard(size_t index, float cx, float bottom, float scale, float focus) {
+    const GameEntry& game = m_games[index];
+    const GameVisual& visual = m_visuals[index];
+    const float h = kCardHeight * scale;
+    const float w = h * kCardAspect;
+    const float x = cx - w * 0.5f;
+    const float y = bottom - h;
+    const float radius = 14.0f * scale;
+
+    m_r.softRect(x + 8.0f, y + 16.0f, w - 16.0f, h - 6.0f, radius, 24.0f, withAlpha(rgb(0x000000), 0.5f));
+    if (focus > 0.01f) {
+        m_r.softRect(x - 12.0f, y - 12.0f, w + 24.0f, h + 24.0f, radius + 10.0f, 18.0f,
+                     withAlpha(kAccent, 0.32f * focus));
+    }
+
+    if (visual.cover) {
+        // Fill the card, cropping the cover to the case aspect.
+        const float textureAspect = static_cast<float>(visual.cover.width) / static_cast<float>(visual.cover.height);
+        const float cardAspect = w / h;
+        float u0 = 0, v0 = 0, u1 = 1, v1 = 1;
+        if (textureAspect > cardAspect) {
+            const float keep = cardAspect / textureAspect;
+            u0 = (1.0f - keep) * 0.5f;
+            u1 = 1.0f - u0;
+        } else {
+            const float keep = textureAspect / cardAspect;
+            v0 = (1.0f - keep) * 0.5f;
+            v1 = 1.0f - v0;
+        }
+        m_r.image(visual.cover, x, y, w, h, {}, radius, u0, v0, u1, v1);
+    } else {
+        drawGeneratedCover(game, visual, x, y, w, h, scale);
+    }
+
+    if (!game.launchable()) {
+        m_r.roundRect(x, y, w, h, radius, withAlpha(rgb(0x0B0820), 0.38f));
+        const Color badge = statusColor(game.compatibility);
+        m_r.circle(x + w - 22.0f * scale, y + 48.0f * scale, 14.0f * scale, badge);
+        m_r.text(FontWeight::Bold, 18.0f * scale, x + w - 22.0f * scale,
+                 y + 48.0f * scale - m_r.lineHeight(FontWeight::Bold, 18.0f * scale) * 0.5f, "!", kInk, Align::Center);
+    }
+    if (focus < 0.99f)
+        m_r.roundRect(x, y, w, h, radius, withAlpha(rgb(0x0B0820), 0.42f * (1.0f - focus)));
+
+    if (focus > 0.01f) {
+        const Color ring = mixColor(kAccent, kAccentLight, pulse());
+        m_r.roundRectOutline(x - 7.0f, y - 7.0f, w + 14.0f, h + 14.0f, radius + 7.0f, 5.0f, withAlpha(ring, focus));
+    }
+}
+
+void App::drawInfo() {
+    if (m_selected >= m_games.size())
+        return;
+    const GameEntry& game = m_games[m_selected];
+    const float x = 120.0f;
+
+    const Color status = statusColor(game.compatibility);
+    const char* statusLabel = t(statusText(game.compatibility));
+    const float pillWidth = m_r.measure(FontWeight::Bold, 16.0f, statusLabel) + 50.0f;
+    const float pillX = 1160.0f - pillWidth;
+    m_r.roundRect(pillX, 500.0f, pillWidth, 34.0f, 17.0f, withAlpha(status, 0.18f));
+    m_r.roundRectOutline(pillX, 500.0f, pillWidth, 34.0f, 17.0f, 1.5f, withAlpha(status, 0.7f));
+    m_r.circle(pillX + 20.0f, 517.0f, 6.0f, status);
+    m_r.text(FontWeight::Bold, 16.0f, pillX + 34.0f, 517.0f - m_r.lineHeight(FontWeight::Bold, 16.0f) * 0.5f,
+             statusLabel, kText);
+    if (game.launchable())
+        m_r.text(FontWeight::Regular, 17.0f, 1160.0f, 546.0f, t(Str::Players), kTextSoft, Align::Right);
+
+    const float textWidth = pillX - x - 30.0f;
+    m_r.text(FontWeight::Bold, 32.0f, x, 494.0f, m_r.ellipsize(FontWeight::Bold, 32.0f, game.title(m_language), textWidth),
+             kText);
+
+    std::string meta;
+    auto append = [&meta](const std::string& part) {
+        if (part.empty())
+            return;
+        if (!meta.empty())
+            meta += "  \xC2\xB7  ";
+        meta += part;
+    };
+    append(game.maker(m_language));
+    if (game.error == DiscError::None) {
+        append(t(regionName(game.disc.regionCode())));
+        append(format(t(Str::Revision), game.disc.revision));
+        append(game.disc.gameId);
+    }
+    append(discFormatName(game.disc.format));
+    m_r.text(FontWeight::Regular, 18.0f, x, 540.0f, m_r.ellipsize(FontWeight::Regular, 18.0f, meta, textWidth), kTextSoft);
+
+    std::string description = game.description(m_language);
+    if (description.empty() && game.error == DiscError::None && !game.disc.hasBanner())
+        description = t(Str::BannerMissing);
+    if (description.empty() && game.error != DiscError::None)
+        description = game.fileName;
+    const std::vector<std::string> lines = m_r.wrap(FontWeight::Regular, 18.0f, description, textWidth);
+    for (size_t i = 0; i < lines.size() && i < 2; ++i)
+        m_r.text(FontWeight::Regular, 18.0f, x, 572.0f + 26.0f * static_cast<float>(i), lines[i], withAlpha(kText, 0.82f));
+}
+
+void App::drawEmptyState() {
+    const float x = 250.0f, y = 150.0f, w = 780.0f, h = 330.0f;
+    m_r.softRect(x, y + 12.0f, w, h, 24.0f, 30.0f, withAlpha(rgb(0x000000), 0.45f));
+    m_r.roundRect(x, y, w, h, 24.0f, withAlpha(kPanel, 0.92f));
+    m_r.roundRectOutline(x, y, w, h, 24.0f, 1.5f, withAlpha(kTextDim, 0.4f));
+    drawEmblem(W * 0.5f, y + 70.0f, 64.0f, 1.0f);
+    m_r.text(FontWeight::Bold, 30.0f, W * 0.5f, y + 118.0f, t(Str::NoGamesTitle), kText, Align::Center);
+    m_r.text(FontWeight::Regular, 19.0f, W * 0.5f, y + 166.0f, t(Str::NoGamesBody), kTextSoft, Align::Center);
+    const std::vector<std::string> dirs = m_platform.gameDirectories();
+    const std::string dir = dirs.empty() ? std::string{} : dirs.front();
+    const float dw = m_r.measure(FontWeight::Bold, 20.0f, dir) + 40.0f;
+    m_r.roundRect(W * 0.5f - dw * 0.5f, y + 200.0f, dw, 42.0f, 21.0f, withAlpha(rgb(0x000000), 0.35f));
+    m_r.text(FontWeight::Bold, 20.0f, W * 0.5f, y + 221.0f - m_r.lineHeight(FontWeight::Bold, 20.0f) * 0.5f, dir,
+             kAccentLight, Align::Center);
+    m_r.text(FontWeight::Regular, 17.0f, W * 0.5f, y + 266.0f, t(Str::NoGamesFormats), kTextDim, Align::Center);
+}
+
+void App::drawFooter() {
+    m_r.rect(40.0f, 660.0f, W - 80.0f, 1.0f, withAlpha(kText, 0.16f));
+
+    // Player lamps, lit for each connected controller.
+    float x = 44.0f;
+    for (int p = 0; p < 4; ++p) {
+        const bool on = m_slots.player[p] || (p == 0 && m_slots.handheld);
+        char label[8];
+        std::snprintf(label, sizeof(label), t(Str::ControllersPlayer), static_cast<unsigned>(p + 1));
+        const float lw = 44.0f;
+        if (on)
+            m_r.roundRect(x, 676.0f, lw, 26.0f, 13.0f, kPlayerColors[p]);
+        else
+            m_r.roundRectOutline(x, 676.0f, lw, 26.0f, 13.0f, 1.5f, withAlpha(kTextDim, 0.6f));
+        m_r.text(FontWeight::Bold, 14.0f, x + lw * 0.5f, 689.0f - m_r.lineHeight(FontWeight::Bold, 14.0f) * 0.5f, label,
+                 on ? kInk : kTextDim, Align::Center);
+        x += lw + 8.0f;
+    }
+
+    std::vector<Hint> hints;
+    if (!m_games.empty())
+        hints.push_back({"A", Str::Play});
+    hints.push_back({"X", Str::Options});
+    hints.push_back({"Y", Str::Controllers});
+    if (m_games.empty())
+        hints.push_back({"-", Str::Refresh});
+    hints.push_back({"+", Str::Quit});
+    drawHints(hints, 1240.0f, 689.0f);
+}
+
+void App::drawShelf() {
+    const float intro = easeOutCubic(phase(m_now, m_shelfFadeStart, 0.6));
+    m_r.background(kBgTop, kBgBottom, 1.0f);
+    drawHeader();
+
+    if (m_games.empty()) {
+        drawEmptyState();
+    } else {
+        const float lift = (1.0f - intro) * 40.0f;
+        // Far cards first so the selected one overlaps its neighbours.
+        std::vector<size_t> order(m_games.size());
+        for (size_t i = 0; i < order.size(); ++i)
+            order[i] = i;
+        std::sort(order.begin(), order.end(), [this](size_t a, size_t b) {
+            return std::fabs(static_cast<float>(a) - m_scroll) > std::fabs(static_cast<float>(b) - m_scroll);
+        });
+        for (size_t i : order) {
+            const float offset = static_cast<float>(i) - m_scroll;
+            const float distance = std::fabs(offset);
+            const float near = std::min(distance, 1.0f);
+            const float travel = distance <= 1.0f ? distance * 248.0f : 248.0f + (distance - 1.0f) * 214.0f;
+            const float cx = W * 0.5f + (offset < 0 ? -travel : travel);
+            if (cx < -260.0f || cx > W + 260.0f)
+                continue;
+            const float scale = 1.0f - 0.2f * near;
+            const float bob = (1.0f - near) * (10.0f + 2.0f * std::sin(static_cast<float>(m_now) * 2.0f));
+            drawCard(i, cx, kShelfBaseline - bob + lift, scale, 1.0f - near);
+        }
+        drawInfo();
+    }
+    drawFooter();
+    drawToast();
+
+    if (m_overlayDrawn != Overlay::None) {
+        const float anim = easeOutCubic(m_overlayAnim);
+        switch (m_overlayDrawn) {
+        case Overlay::Options: drawOptions(anim); break;
+        case Overlay::Controllers: drawControllers(anim); break;
+        case Overlay::Dialog: drawDialog(anim); break;
+        case Overlay::None: break;
+        }
+    }
+
+    if (intro < 1.0f)
+        m_r.rect(0, 0, W, H, withAlpha(rgb(0x000000), 1.0f - phase(m_now, m_shelfFadeStart, 0.45)));
+}
+
+void App::drawOptions(float anim) {
+    m_r.rect(0, 0, W, H, withAlpha(rgb(0x05030F), 0.55f * anim));
+    const float pw = 560.0f;
+    const float px = W - pw * anim;
+    m_r.softRect(px - 30.0f, 0, 60.0f, H, 0.0f, 24.0f, withAlpha(rgb(0x000000), 0.5f * anim));
+    m_r.rect(px, 0, pw, H, kPanel);
+
+    m_r.text(FontWeight::Bold, 30.0f, px + 44.0f, 40.0f, t(Str::OptionsTitle), kText);
+
+    struct Row {
+        Str label;
+        Str value;
+        Str help;
+    };
+    const Str aspects[3] = {Str::Aspect43, Str::AspectStretch, Str::AspectWide};
+    const Str filters[3] = {Str::FilterNone, Str::FilterSmooth, Str::FilterScanlines};
+    const Str languages[3] = {Str::LanguageAuto, Str::LanguageFrench, Str::LanguageEnglish};
+    const Row rows[kOptionRows] = {
+        {Str::OptBootAnimation, m_settings.bootAnimation ? Str::ValueOnSingular : Str::ValueOffSingular,
+         Str::OptBootAnimationHelp},
+        {Str::OptAspect, aspects[static_cast<int>(m_settings.aspect)], Str::OptAspectHelp},
+        {Str::OptFilter, filters[static_cast<int>(m_settings.filter)], Str::OptFilterHelp},
+        {Str::OptLanguage, languages[static_cast<int>(m_settings.language)], Str::OptLanguageHelp},
+        {Str::OptRumble, m_settings.rumble ? Str::ValueOn : Str::ValueOff, Str::OptRumbleHelp},
+    };
+
+    float y = 108.0f;
+    for (int i = 0; i < kOptionRows; ++i) {
+        const bool selected = i == m_optionRow;
+        const float rx = px + 24.0f;
+        const float rw = pw - 48.0f;
+        const float rh = 62.0f;
+        m_r.roundRect(rx, y, rw, rh, 12.0f, selected ? kPanelRow : withAlpha(kPanelRow, 0.35f));
+        if (selected) {
+            const Color ring = mixColor(kAccent, kAccentLight, pulse());
+            m_r.roundRectOutline(rx - 3.0f, y - 3.0f, rw + 6.0f, rh + 6.0f, 14.0f, 3.0f, ring);
+        }
+        const float mid = y + rh * 0.5f;
+        m_r.text(FontWeight::Regular, 20.0f, rx + 22.0f, mid - m_r.lineHeight(FontWeight::Regular, 20.0f) * 0.5f,
+                 t(rows[i].label), kText);
+        const float valueRight = rx + rw - 40.0f;
+        const float valueWidth =
+            m_r.text(FontWeight::Bold, 20.0f, valueRight, mid - m_r.lineHeight(FontWeight::Bold, 20.0f) * 0.5f,
+                     t(rows[i].value), selected ? kAccentLight : kTextSoft, Align::Right);
+        if (selected) {
+            const float ax = valueRight + 14.0f;
+            m_r.triangle(ax, mid - 7.0f, ax + 8.0f, mid, ax, mid + 7.0f, kAccentLight);
+            const float bx = valueRight - valueWidth - 14.0f;
+            m_r.triangle(bx, mid - 7.0f, bx, mid + 7.0f, bx - 8.0f, mid, kAccentLight);
+        }
+        y += rh + 14.0f;
+    }
+
+    // Help for the focused row.
+    const std::vector<std::string> help =
+        m_r.wrap(FontWeight::Regular, 18.0f, t(rows[m_optionRow].help), pw - 100.0f);
+    float hy = y + 12.0f;
+    for (const std::string& line : help) {
+        m_r.text(FontWeight::Regular, 18.0f, px + 44.0f, hy, line, kTextSoft);
+        hy += 26.0f;
+    }
+
+    // Where the engine was found, so a missing install is visible here too.
+    const std::string engine = findEngine();
+    const std::string engineLine = std::string(t(Str::EngineLabel)) + " : " +
+                                   (engine.empty() ? t(Str::EngineMissing) : t(Str::EngineInstalled));
+    m_r.circle(px + 52.0f, 618.0f, 6.0f, engine.empty() ? kOrange : kGreen);
+    m_r.text(FontWeight::Regular, 16.0f, px + 66.0f, 618.0f - m_r.lineHeight(FontWeight::Regular, 16.0f) * 0.5f,
+             engineLine, kTextDim);
+
+    m_r.rect(px + 24.0f, 660.0f, pw - 48.0f, 1.0f, withAlpha(kText, 0.16f));
+    drawHints({{"A", Str::Change}, {"B", Str::Back}}, px + pw - 40.0f, 689.0f);
+}
+
+void App::drawGameCubeController(float cx, float cy, int highlight) {
+    const Color body = rgb(0x5A4FCF);
+    const Color outline = rgb(0x2E2470);
+    const Color recess = rgb(0x372D8F);
+    const Color grey = rgb(0xCFCBE6);
+
+    // Shoulders sit behind the body; only their top edge shows.
+    m_r.roundRect(cx - 238.0f, cy - 134.0f, 160.0f, 46.0f, 18.0f, rgb(0xB8B3D9));
+    m_r.roundRect(cx + 78.0f, cy - 134.0f, 160.0f, 46.0f, 18.0f, rgb(0xB8B3D9));
+    m_r.roundRect(cx + 112.0f, cy - 148.0f, 100.0f, 24.0f, 9.0f, rgb(0x8C7CF5));
+
+    // Body: two grips angled outwards and the centre, each drawn over a
+    // slightly larger dark copy that becomes the outline.
+    const float grip = 0.42f;
+    m_r.rotatedRoundRect(cx - 150.0f, cy + 50.0f, 150.0f, 236.0f, 75.0f, grip, outline);
+    m_r.rotatedRoundRect(cx + 150.0f, cy + 50.0f, 150.0f, 236.0f, 75.0f, -grip, outline);
+    m_r.roundRect(cx - 234.0f, cy - 116.0f, 468.0f, 178.0f, 89.0f, outline);
+    m_r.rotatedRoundRect(cx - 150.0f, cy + 50.0f, 142.0f, 228.0f, 71.0f, grip, body);
+    m_r.rotatedRoundRect(cx + 150.0f, cy + 50.0f, 142.0f, 228.0f, 71.0f, -grip, body);
+    m_r.roundRect(cx - 230.0f, cy - 112.0f, 460.0f, 170.0f, 85.0f, body);
+    m_r.softRect(cx - 200.0f, cy - 104.0f, 400.0f, 64.0f, 32.0f, 20.0f, withAlpha(kText, 0.12f));
+
+    // Control stick with its octagonal gate.
+    m_r.circle(cx - 152.0f, cy - 22.0f, 47.0f, recess);
+    m_r.circle(cx - 152.0f, cy - 22.0f, 32.0f, grey);
+    m_r.ring(cx - 152.0f, cy - 22.0f, 22.0f, 3.0f, rgb(0xAFAAD0));
+
+    // D-pad.
+    m_r.circle(cx - 78.0f, cy + 70.0f, 32.0f, recess);
+    m_r.roundRect(cx - 104.0f, cy + 62.0f, 52.0f, 16.0f, 4.0f, grey);
+    m_r.roundRect(cx - 86.0f, cy + 44.0f, 16.0f, 52.0f, 4.0f, grey);
+
+    // C stick.
+    m_r.circle(cx + 78.0f, cy + 70.0f, 32.0f, recess);
+    m_r.circle(cx + 78.0f, cy + 70.0f, 19.0f, rgb(0xFFD23B));
+    m_r.text(FontWeight::Bold, 15.0f, cx + 78.0f, cy + 70.0f - m_r.lineHeight(FontWeight::Bold, 15.0f) * 0.5f, "C",
+             rgb(0x8A6A00), Align::Center);
+
+    // START/PAUSE.
+    m_r.circle(cx, cy - 18.0f, 11.0f, grey);
+
+    // Face buttons: big green A, small red B, kidney X and Y.
+    m_r.rotatedRoundRect(cx + 206.0f, cy - 34.0f, 24.0f, 62.0f, 12.0f, -0.35f, grey);
+    m_r.rotatedRoundRect(cx + 138.0f, cy - 82.0f, 62.0f, 24.0f, 12.0f, -0.2f, grey);
+    m_r.circle(cx + 150.0f, cy - 22.0f, 34.0f, rgb(0x2FBF71));
+    m_r.circle(cx + 98.0f, cy + 16.0f, 18.0f, rgb(0xE8434B));
+    const float letter = 22.0f;
+    m_r.text(FontWeight::Bold, letter, cx + 150.0f, cy - 22.0f - m_r.lineHeight(FontWeight::Bold, letter) * 0.5f, "A",
+             rgb(0x0F5F35), Align::Center);
+    m_r.text(FontWeight::Bold, 14.0f, cx + 98.0f, cy + 16.0f - m_r.lineHeight(FontWeight::Bold, 14.0f) * 0.5f, "B",
+             rgb(0x7A1218), Align::Center);
+    m_r.text(FontWeight::Bold, 14.0f, cx + 206.0f, cy - 34.0f - m_r.lineHeight(FontWeight::Bold, 14.0f) * 0.5f, "X",
+             rgb(0x5A5675), Align::Center);
+    m_r.text(FontWeight::Bold, 14.0f, cx + 138.0f, cy - 82.0f - m_r.lineHeight(FontWeight::Bold, 14.0f) * 0.5f, "Y",
+             rgb(0x5A5675), Align::Center);
+    m_r.text(FontWeight::Bold, 13.0f, cx - 158.0f, cy - 129.0f, "L", rgb(0x5A5675), Align::Center);
+    m_r.text(FontWeight::Bold, 13.0f, cx + 224.0f, cy - 129.0f, "R", rgb(0x5A5675), Align::Center);
+    m_r.text(FontWeight::Bold, 13.0f, cx + 162.0f, cy - 145.0f, "Z", kText, Align::Center);
+
+    // Pulsing ring on the control selected in the mapping list.
+    struct Spot {
+        float x, y, r;
+    };
+    constexpr Spot spots[11] = {
+        {150, -22, 34}, {98, 16, 18},    {206, -34, 30}, {138, -82, 30}, {162, -136, 28}, {-158, -120, 28},
+        {158, -120, 28}, {0, -18, 11},   {-152, -22, 47}, {78, 70, 32},  {-78, 70, 32},
+    };
+    if (highlight >= 0 && highlight < 11) {
+        const Spot& s = spots[highlight];
+        const Color ring = mixColor(kAccent, kAccentLight, pulse());
+        m_r.ring(cx + s.x, cy + s.y, s.r + 9.0f + 3.0f * pulse(), 4.0f, ring);
+    }
+}
+
+void App::drawControllers(float anim) {
+    m_r.rect(0, 0, W, H, withAlpha(rgb(0x05030F), 0.6f * anim));
+    const float rise = (1.0f - anim) * 40.0f;
+    const float x = 70.0f, y = 50.0f + rise, w = 1140.0f, h = 600.0f;
+    m_r.softRect(x, y + 14.0f, w, h, 28.0f, 30.0f, withAlpha(rgb(0x000000), 0.5f * anim));
+    m_r.roundRect(x, y, w, h, 28.0f, withAlpha(kPanel, anim));
+
+    m_r.text(FontWeight::Bold, 30.0f, x + 48.0f, y + 32.0f, t(Str::ControllersTitle), withAlpha(kText, anim));
+    m_r.text(FontWeight::Regular, 18.0f, x + 48.0f, y + 74.0f, t(Str::ControllersSubtitle), withAlpha(kTextSoft, anim));
+
+    drawGameCubeController(x + 330.0f, y + 300.0f, m_mapRow);
+
+    // GameCube control -> Switch control, matching platforms/switch/source/switch_pad.cpp.
+    struct Mapping {
+        const char* gc;
+        Color gcColor;
+        const char* sw;
+        const char* detail;
+    };
+    const Mapping maps[11] = {
+        {"A", rgb(0x2FBF71), "B", t(Str::MapBottomButton)},
+        {"B", rgb(0xE8434B), "A", t(Str::MapRightButton)},
+        {"X", rgb(0xCFCBE6), "Y", t(Str::MapLeftButton)},
+        {"Y", rgb(0xCFCBE6), "X", t(Str::MapTopButton)},
+        {"Z", rgb(0x8C7CF5), "ZR", ""},
+        {"L", rgb(0xB8B3D9), "L", t(Str::MapOrZL)},
+        {"R", rgb(0xB8B3D9), "R", ""},
+        {t(Str::MapStart), rgb(0xCFCBE6), "+", ""},
+        {t(Str::MapStick), rgb(0xCFCBE6), "L", t(Str::MapLeftStick)},
+        {t(Str::MapCStick), rgb(0xFFD23B), "R", t(Str::MapRightStick)},
+        {t(Str::MapDpad), rgb(0xCFCBE6), nullptr, t(Str::MapDirectional)},
+    };
+    float my = y + 116.0f;
+    const float mx = x + 690.0f;
+    for (int i = 0; i < 11; ++i) {
+        const bool selected = i == m_mapRow;
+        const float rowH = 31.0f;
+        if (selected)
+            m_r.roundRect(mx - 14.0f, my - 2.0f, 420.0f, rowH + 4.0f, 10.0f, withAlpha(kPanelRow, anim));
+        const float mid = my + rowH * 0.5f;
+        const float chipW = std::max(34.0f, m_r.measure(FontWeight::Bold, 14.0f, maps[i].gc) + 20.0f);
+        m_r.roundRect(mx, mid - 13.0f, chipW, 26.0f, 13.0f, withAlpha(maps[i].gcColor, anim));
+        m_r.text(FontWeight::Bold, 14.0f, mx + chipW * 0.5f, mid - m_r.lineHeight(FontWeight::Bold, 14.0f) * 0.5f,
+                 maps[i].gc, withAlpha(kInk, anim), Align::Center);
+        const float arrowX = mx + 150.0f;
+        m_r.rect(arrowX - 18.0f, mid - 1.0f, 18.0f, 2.0f, withAlpha(kTextDim, anim));
+        m_r.triangle(arrowX - 26.0f, mid, arrowX - 18.0f, mid - 5.0f, arrowX - 18.0f, mid + 5.0f, withAlpha(kTextDim, anim));
+        float glyphW = 26.0f;
+        if (maps[i].sw) {
+            glyphW = drawButtonGlyph(arrowX + 20.0f, mid, maps[i].sw, 13.0f, anim);
+        } else {
+            // Directional buttons: a small cross instead of a letter.
+            m_r.circle(arrowX + 20.0f, mid, 13.0f, withAlpha(rgb(0xF4F2FF), anim));
+            m_r.roundRect(arrowX + 11.0f, mid - 3.0f, 18.0f, 6.0f, 1.5f, withAlpha(kInk, anim));
+            m_r.roundRect(arrowX + 17.0f, mid - 9.0f, 6.0f, 18.0f, 1.5f, withAlpha(kInk, anim));
+        }
+        if (*maps[i].detail) {
+            m_r.text(FontWeight::Regular, 17.0f, arrowX + 30.0f + glyphW * 0.5f + 4.0f,
+                     mid - m_r.lineHeight(FontWeight::Regular, 17.0f) * 0.5f, maps[i].detail,
+                     withAlpha(selected ? kText : kTextSoft, anim));
+        }
+        my += rowH + 3.0f;
+    }
+
+    // Player slots.
+    float sx = x + 48.0f;
+    const float sy = y + h - 78.0f;
+    for (int p = 0; p < 4; ++p) {
+        const bool on = m_slots.player[p] || (p == 0 && m_slots.handheld);
+        m_r.roundRect(sx, sy, 140.0f, 52.0f, 14.0f, withAlpha(kPanelRow, anim));
+        m_r.circle(sx + 24.0f, sy + 26.0f, 9.0f, withAlpha(on ? kPlayerColors[p] : kTextDim, anim * (on ? 1.0f : 0.5f)));
+        char label[8];
+        std::snprintf(label, sizeof(label), t(Str::ControllersPlayer), static_cast<unsigned>(p + 1));
+        m_r.text(FontWeight::Bold, 17.0f, sx + 42.0f, sy + 6.0f, label, withAlpha(kText, anim));
+        const char* state = on ? (p == 0 && m_slots.handheld && !m_slots.player[0] ? t(Str::ControllersHandheld)
+                                                                                  : t(Str::ControllersConnected))
+                               : t(Str::ControllersEmpty);
+        m_r.text(FontWeight::Regular, 13.0f, sx + 42.0f, sy + 28.0f, state, withAlpha(kTextSoft, anim));
+        sx += 152.0f;
+    }
+
+    drawHints({{"Y", Str::ControllersChangeGrip}, {"B", Str::Back}}, x + w - 40.0f, sy + 26.0f, anim);
+}
+
+void App::drawDialog(float anim) {
+    m_r.rect(0, 0, W, H, withAlpha(rgb(0x05030F), 0.6f * anim));
+    const float w = 660.0f;
+    const std::vector<std::string> body = m_r.wrap(FontWeight::Regular, 19.0f, m_dialogBody, w - 96.0f);
+    const float h = 170.0f + 28.0f * static_cast<float>(body.size()) + (m_dialogDetail.empty() ? 0.0f : 58.0f);
+    const float x = (W - w) * 0.5f;
+    const float y = (H - h) * 0.5f + (1.0f - anim) * 30.0f;
+    m_r.softRect(x, y + 14.0f, w, h, 24.0f, 30.0f, withAlpha(rgb(0x000000), 0.5f * anim));
+    m_r.roundRect(x, y, w, h, 24.0f, withAlpha(kPanel, anim));
+    m_r.roundRectOutline(x, y, w, h, 24.0f, 1.5f, withAlpha(kTextDim, 0.4f * anim));
+
+    m_r.text(FontWeight::Bold, 26.0f, x + 48.0f, y + 34.0f, m_dialogTitle, withAlpha(kText, anim));
+    float ty = y + 82.0f;
+    for (const std::string& line : body) {
+        m_r.text(FontWeight::Regular, 19.0f, x + 48.0f, ty, line, withAlpha(kTextSoft, anim));
+        ty += 28.0f;
+    }
+    if (!m_dialogDetail.empty()) {
+        const std::string detail = m_r.ellipsize(FontWeight::Bold, 18.0f, m_dialogDetail, w - 130.0f);
+        const float dw = m_r.measure(FontWeight::Bold, 18.0f, detail) + 36.0f;
+        m_r.roundRect(x + 48.0f, ty + 8.0f, dw, 40.0f, 20.0f, withAlpha(rgb(0x000000), 0.35f * anim));
+        m_r.text(FontWeight::Bold, 18.0f, x + 66.0f, ty + 28.0f - m_r.lineHeight(FontWeight::Bold, 18.0f) * 0.5f, detail,
+                 withAlpha(kAccentLight, anim));
+    }
+    drawHints({{"A", Str::Ok}}, x + w - 44.0f, y + h - 40.0f, anim);
+}
+
+void App::drawToast() {
+    if (m_toast.empty() || m_now >= m_toastUntil)
+        return;
+    const float remaining = static_cast<float>(m_toastUntil - m_now);
+    const float alpha = std::min(1.0f, remaining / 0.3f) * std::min(1.0f, (2.6f - remaining) / 0.2f);
+    const float tw = m_r.measure(FontWeight::Regular, 18.0f, m_toast) + 48.0f;
+    const float x = (W - tw) * 0.5f;
+    m_r.roundRect(x, 600.0f, tw, 42.0f, 21.0f, withAlpha(rgb(0x0B0820), 0.9f * alpha));
+    m_r.roundRectOutline(x, 600.0f, tw, 42.0f, 21.0f, 1.5f, withAlpha(kAccent, 0.6f * alpha));
+    m_r.text(FontWeight::Regular, 18.0f, W * 0.5f, 621.0f - m_r.lineHeight(FontWeight::Regular, 18.0f) * 0.5f, m_toast,
+             withAlpha(kText, alpha), Align::Center);
+}
+
+} // namespace partyboard::launcher

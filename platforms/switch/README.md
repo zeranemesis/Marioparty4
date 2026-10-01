@@ -56,6 +56,15 @@ Once this renders correctly on hardware, the next step is to replace the test sc
 This probe is deliberately isolated so it cannot regress the current Windows/Android/Apple targets.
 
 
+## GameCube launcher
+
+`launcher/` holds a Switch 2-style GameCube front end for the port: a shelf
+of the GameCube discs on the SD card (with their real banners), a cube boot
+animation, options and controller screens. It is its own NRO and chain-loads
+the engine. The preset below builds it as `partyboard_switch_launcher_nro`;
+see [launcher/README.md](launcher/README.md) for the SD layout, the engine
+arguments and the headless preview.
+
 ## CMake bring-up builds
 
 The Switch target is now integrated into the repository's root CMake without

@@ -1,0 +1,52 @@
+#pragma once
+
+// Launcher options, persisted as a small INI file, and the command line
+// handed to the engine NRO.
+//
+// Engine contract (argv after the NRO path, all optional except the disc):
+//   --disc-image=<path>        same meaning as PARTYBOARD_DISC_IMAGE on desktop
+//   --aspect=4:3|stretch|wide  4:3 pillarbox, stretched 16:9, adaptive widescreen
+//   --filter=none|smooth|crt
+//   --lang=fr|en
+//   --rumble=on|off
+//   --launcher=<launcher NRO>  where to return to when the game exits
+
+#include <string>
+#include <vector>
+
+#include "i18n.hpp"
+
+namespace partyboard::launcher {
+
+enum class AspectMode : unsigned char { Original43, Stretch169, Wide169 };
+enum class ScreenFilter : unsigned char { None, Smooth, Scanlines };
+enum class LanguagePref : unsigned char { Auto, French, English };
+
+struct Settings {
+    bool bootAnimation = true;
+    AspectMode aspect = AspectMode::Original43;
+    ScreenFilter filter = ScreenFilter::None;
+    LanguagePref language = LanguagePref::Auto;
+    bool rumble = true;
+    std::string lastGame;   // path of the last launched image, to reselect it
+    std::string enginePath; // optional override of the engine NRO location
+
+    Language resolveLanguage(Language system) const;
+};
+
+bool loadSettings(const std::string& path, Settings& out);
+bool saveSettings(const std::string& path, const Settings& settings);
+
+std::vector<std::string> buildLaunchArgs(const std::string& enginePath,
+                                         const std::string& discPath,
+                                         const std::string& launcherPath,
+                                         const Settings& settings,
+                                         Language language);
+
+// Joins argv for libnx envSetNextLoad, quoting arguments with spaces.
+std::string joinArgv(const std::vector<std::string>& args);
+
+// mkdir -p that understands the "sdmc:/" device prefix.
+bool makeDirectories(const std::string& path);
+
+} // namespace partyboard::launcher

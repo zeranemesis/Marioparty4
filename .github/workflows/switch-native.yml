@@ -11,6 +11,13 @@ on:
       - "cmake/**"
       - "platforms/switch/**"
       - "extern/aurora"
+  pull_request:
+    paths:
+      - ".github/workflows/switch-native.yml"
+      - "CMakeLists.txt"
+      - "CMakePresets.json"
+      - "cmake/**"
+      - "platforms/switch/**"
   workflow_dispatch:
 
 concurrency:
@@ -64,10 +71,14 @@ jobs:
       - name: Build NRO
         run: cmake --build build/switch-libnx-bootstrap --target partyboard_switch_nro --parallel 2
 
+      - name: Build launcher NRO
+        run: cmake --build build/switch-libnx-bootstrap --target partyboard_switch_launcher_nro --parallel 2
+
       - name: Inspect output
         run: |
           ls -lh build/switch-libnx-bootstrap/platforms/switch/partyboard-switch-probe.*
           file build/switch-libnx-bootstrap/platforms/switch/partyboard-switch-probe.elf || true
+          ls -lh build/switch-libnx-bootstrap/platforms/switch/launcher/partyboard-launcher.*
 
       - name: Upload NRO
         uses: actions/upload-artifact@v4
@@ -76,6 +87,47 @@ jobs:
           path: |
             build/switch-libnx-bootstrap/platforms/switch/partyboard-switch-probe.nro
             build/switch-libnx-bootstrap/platforms/switch/partyboard-switch-probe.elf
+          if-no-files-found: error
+
+      - name: Upload launcher NRO
+        uses: actions/upload-artifact@v4
+        with:
+          name: partyboard-switch-launcher
+          path: |
+            build/switch-libnx-bootstrap/platforms/switch/launcher/partyboard-launcher.nro
+            build/switch-libnx-bootstrap/platforms/switch/launcher/partyboard-launcher.elf
+          if-no-files-found: error
+
+  launcher-host:
+    name: Launcher tests and screenshots
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libegl-dev libgles-dev libegl-mesa0 libgl1-mesa-dri \
+            libfreetype-dev libpng-dev zlib1g-dev fonts-dejavu-core
+
+      - name: Build
+        run: |
+          cmake -S platforms/switch/launcher -B build/launcher-host -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build/launcher-host --parallel 2
+
+      - name: Unit tests
+        run: ctest --test-dir build/launcher-host --output-on-failure
+
+      - name: Render screenshots
+        run: platforms/switch/launcher/tools/render-previews.sh build/launcher-host build/launcher-screens
+
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: partyboard-switch-launcher-screens
+          path: build/launcher-screens/*.png
           if-no-files-found: error
 
   dawn-probe:

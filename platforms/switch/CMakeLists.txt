@@ -99,6 +99,10 @@ message(STATUS "  libnx:     ${LIBNX}")
 message(STATUS "  portlibs:  ${PORTLIBS}")
 message(STATUS "  output:    ${PARTYBOARD_SWITCH_NRO}")
 
+# GameCube-style launcher (game shelf + boot animation) that chain-loads the
+# engine NRO. Independent of the probe above.
+add_subdirectory(launcher)
+
 
 option(PARTYBOARD_SWITCH_DAWN_PROBE
     "Cross-compile a minimal Dawn/OpenGLES adapter probe for libnx"
