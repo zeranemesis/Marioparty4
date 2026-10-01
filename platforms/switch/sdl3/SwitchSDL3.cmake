@@ -29,6 +29,7 @@ ExternalProject_Add(partyboard_switch_sdl3
         "${GIT_EXECUTABLE}" apply --whitespace=nowarn "${_pb_sdl3_dir}/0001-libnx-backend.patch"
         COMMAND "${GIT_EXECUTABLE}" apply --whitespace=nowarn "${_pb_sdl3_dir}/0002-egl-context-attributes.patch"
         COMMAND "${GIT_EXECUTABLE}" apply --whitespace=nowarn "${_pb_sdl3_dir}/0003-audio-keep-buffers-queued.patch"
+        COMMAND "${GIT_EXECUTABLE}" apply --whitespace=nowarn "${_pb_sdl3_dir}/0004-joystick-local-players.patch"
     CMAKE_ARGS
         "-DCMAKE_TOOLCHAIN_FILE=${DEVKITPRO}/cmake/Switch.cmake"
         "-DCMAKE_INSTALL_PREFIX=${_pb_sdl3_prefix}"

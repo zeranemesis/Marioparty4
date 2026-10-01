@@ -1,3 +1,19 @@
+diff --git a/lib/dolphin/pad/pad.cpp b/lib/dolphin/pad/pad.cpp
+index 56656aa..5393bbd 100644
+--- a/lib/dolphin/pad/pad.cpp
++++ b/lib/dolphin/pad/pad.cpp
+@@ -440,6 +440,11 @@ BOOL PADInit() {
+   // four controllers, so party mode and the minigame modes started with four
+   // human players and nobody to play three of them.
+   g_keyboardBindings[0].m_mappingsSet = true;
++#elif defined(__SWITCH__)
++  // The Switch has no keyboard. A port is connected when a controller is on
++  // it (one per Npad, player N on port N), so the game counts its human
++  // players from the controllers actually there, as on a GameCube.
++  std::ranges::for_each(g_keyboardBindings, [](auto& state) { state.m_mappingsSet = false; });
+ #else
+   std::ranges::for_each(g_keyboardBindings, [](auto& state) { state.m_mappingsSet = true; });
+ #endif
 diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
 index 3f86df1..23e2b6f 100644
 --- a/lib/gfx/common.cpp

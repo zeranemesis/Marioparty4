@@ -50,6 +50,10 @@ public:
         }
 
         padConfigureInput(8, HidNpadStyleSet_NpadStandard | HidNpadStyleTag_NpadGc);
+        // A single Joy-Con is one player's controller held sideways, as in the
+        // game (platforms/switch/sdl3, patch 0004): the controller applet then
+        // offers that grip.
+        hidSetNpadJoyHoldType(HidNpadJoyHoldType_Horizontal);
         padInitializeAny(&m_pad);
 
         m_plReady = R_SUCCEEDED(plInitialize(PlServiceType_User));

@@ -218,14 +218,25 @@ over nodlite. What differs:
   sections of their own and reset whenever the game links it again.
 - **Mbed TLS** gets a Switch configuration (`game/mbedtls_switch_config.h`):
   no clock or timer, entropy from libnx's random generator.
+- **Controllers, for local multiplayer**: SDL3's Switch joystick driver
+  (`sdl3/0004-joystick-local-players.patch`) gives each Npad, No1 to No4,
+  its own gamepad and player index, connected and disconnected live; the
+  console's attached Joy-Cons are player 1. Pro Controllers, Joy-Con pairs,
+  single Joy-Cons held sideways and GameCube controllers on the USB adapter
+  all work, with rumble. The layout is the one the launcher's controller
+  screen shows (`source/switch_pad.cpp`). `aurora-switch.patch` leaves out
+  the keyboard Aurora otherwise puts on every port, so the game sees as many
+  players as there are controllers; the launcher's **Y** on that screen
+  opens the system applet to connect or rearrange them.
 - **Process setup** (`game/switch_app_init.c`, libnx's `userAppInit`):
   romfs mounted and made the working directory (the port opens `res/...`
   relative to it), BSD sockets, nxlink stdio, and SDL's preference path on
   `sdmc:/switch/partyboard`.
 
-It has not run on a console yet; the next work is the runtime: the disc path
-from the launcher, input, audio, and Aurora's renderer at Dawn's
-`Compatibility` level.
+It has not run on a console yet; the next work is the runtime on hardware:
+the disc path from the launcher, audio, and performance of Aurora's renderer
+at Dawn's `Compatibility` level (checked on Mesa above, not yet on the
+Switch's GPU).
 
 ## Current integration boundary
 
