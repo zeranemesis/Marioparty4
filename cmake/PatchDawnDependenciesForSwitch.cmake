@@ -46,3 +46,27 @@ if(NOT _thread_identity_content MATCHES "defined\\(__SWITCH__\\)")
     file(WRITE "${_thread_identity}" "${_thread_identity_content}")
     message(STATUS "Patched Abseil thread identity signal handling for libnx")
 endif()
+
+
+set(_elf_mem_image "${_absl_root}/absl/debugging/internal/elf_mem_image.h")
+if(NOT EXISTS "${_elf_mem_image}")
+    message(FATAL_ERROR "Dawn's Abseil elf_mem_image.h was not found")
+endif()
+
+file(READ "${_elf_mem_image}" _elf_mem_image_content)
+if(NOT _elf_mem_image_content MATCHES "!defined\\(__SWITCH__\\)")
+    # libnx/newlib produces ELF binaries but does not provide the glibc-style
+    # <link.h> runtime loader interfaces used by Abseil's in-memory symbol
+    # image support. Disable that optional debugging facility on Switch.
+    string(REPLACE
+        "!defined(__XTENSA__)"
+        "!defined(__XTENSA__) && !defined(__SWITCH__)"
+        _elf_mem_image_content "${_elf_mem_image_content}")
+
+    if(NOT _elf_mem_image_content MATCHES "!defined\\(__SWITCH__\\)")
+        message(FATAL_ERROR "Failed to disable Abseil ELF memory image on libnx")
+    endif()
+
+    file(WRITE "${_elf_mem_image}" "${_elf_mem_image_content}")
+    message(STATUS "Disabled Abseil ELF memory image support on libnx")
+endif()
