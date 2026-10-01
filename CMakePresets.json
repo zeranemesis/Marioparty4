@@ -503,6 +503,28 @@
         "x-windows-ci",
         "windows-arm64-msvc"
       ]
+    },
+    {
+      "name": "switch-libnx-bootstrap",
+      "displayName": "Nintendo Switch (libnx bootstrap)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/switch-libnx.cmake",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
+      "name": "switch-libnx-dawn-probe",
+      "displayName": "Nintendo Switch (libnx + Dawn probe)",
+      "inherits": "switch-libnx-bootstrap",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "PARTYBOARD_SWITCH_DAWN_PROBE": {
+          "type": "BOOL",
+          "value": true
+        }
+      }
     }
   ],
   "buildPresets": [

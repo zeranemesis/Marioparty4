@@ -1,0 +1,131 @@
+name: Switch native bring-up
+
+on:
+  push:
+    branches:
+      - switch-native-bootstrap
+    paths:
+      - ".github/workflows/switch-native.yml"
+      - "CMakeLists.txt"
+      - "CMakePresets.json"
+      - "cmake/**"
+      - "platforms/switch/**"
+      - "extern/aurora"
+  workflow_dispatch:
+
+concurrency:
+  group: switch-native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bootstrap:
+    name: libnx bootstrap
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkita64:20260219
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Apply PartyBoard Aurora patches
+        shell: bash
+        run: |
+          git -C extern/aurora apply --check ../../patches/aurora-partyboard.patch
+          git -C extern/aurora apply ../../patches/aurora-partyboard.patch
+          git -C extern/aurora apply --check ../../patches/aurora-render-fixes.patch
+          git -C extern/aurora apply ../../patches/aurora-render-fixes.patch
+          git -C extern/aurora apply --check ../../patches/aurora-android-surface-deadlock.patch
+          git -C extern/aurora apply ../../patches/aurora-android-surface-deadlock.patch
+          git -C extern/aurora apply --check ../../patches/aurora-mobile-one-local-player.patch
+          git -C extern/aurora apply ../../patches/aurora-mobile-one-local-player.patch
+          git -C extern/aurora apply --check ../../patches/aurora-render-worker-idle.patch
+          git -C extern/aurora apply ../../patches/aurora-render-worker-idle.patch
+          git -C extern/aurora apply --check ../../patches/aurora-quest-stereo.patch
+          git -C extern/aurora apply ../../patches/aurora-quest-stereo.patch
+          git -C extern/aurora apply --check ../../patches/aurora-android-surface-generation.patch
+          git -C extern/aurora apply ../../patches/aurora-android-surface-generation.patch
+          git -C extern/aurora apply --check ../../patches/aurora-quest-quality.patch
+          git -C extern/aurora apply ../../patches/aurora-quest-quality.patch
+
+      - name: Toolchain info
+        run: |
+          echo "DEVKITPRO=$DEVKITPRO"
+          "$DEVKITPRO/devkitA64/bin/aarch64-none-elf-g++" --version
+          cmake --version
+          ninja --version
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Configure
+        run: cmake --preset switch-libnx-bootstrap
+
+      - name: Build NRO
+        run: cmake --build build/switch-libnx-bootstrap --target partyboard_switch_nro --parallel 2
+
+      - name: Inspect output
+        run: |
+          ls -lh build/switch-libnx-bootstrap/platforms/switch/partyboard-switch-probe.*
+          file build/switch-libnx-bootstrap/platforms/switch/partyboard-switch-probe.elf || true
+
+      - name: Upload NRO
+        uses: actions/upload-artifact@v4
+        with:
+          name: partyboard-switch-probe
+          path: |
+            build/switch-libnx-bootstrap/platforms/switch/partyboard-switch-probe.nro
+            build/switch-libnx-bootstrap/platforms/switch/partyboard-switch-probe.elf
+          if-no-files-found: error
+
+  dawn-probe:
+    name: Dawn OpenGLES probe
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    container:
+      image: devkitpro/devkita64:20260219
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Apply PartyBoard Aurora patches
+        shell: bash
+        run: |
+          git -C extern/aurora apply --check ../../patches/aurora-partyboard.patch
+          git -C extern/aurora apply ../../patches/aurora-partyboard.patch
+          git -C extern/aurora apply --check ../../patches/aurora-render-fixes.patch
+          git -C extern/aurora apply ../../patches/aurora-render-fixes.patch
+          git -C extern/aurora apply --check ../../patches/aurora-android-surface-deadlock.patch
+          git -C extern/aurora apply ../../patches/aurora-android-surface-deadlock.patch
+          git -C extern/aurora apply --check ../../patches/aurora-mobile-one-local-player.patch
+          git -C extern/aurora apply ../../patches/aurora-mobile-one-local-player.patch
+          git -C extern/aurora apply --check ../../patches/aurora-render-worker-idle.patch
+          git -C extern/aurora apply ../../patches/aurora-render-worker-idle.patch
+          git -C extern/aurora apply --check ../../patches/aurora-quest-stereo.patch
+          git -C extern/aurora apply ../../patches/aurora-quest-stereo.patch
+          git -C extern/aurora apply --check ../../patches/aurora-android-surface-generation.patch
+          git -C extern/aurora apply ../../patches/aurora-android-surface-generation.patch
+          git -C extern/aurora apply --check ../../patches/aurora-quest-quality.patch
+          git -C extern/aurora apply ../../patches/aurora-quest-quality.patch
+
+      - name: Prepare container git ownership
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Configure Dawn probe
+        run: cmake --preset switch-libnx-dawn-probe
+
+      - name: Build Dawn probe NRO
+        run: cmake --build build/switch-libnx-dawn-probe --target partyboard_switch_dawn_nro --parallel 2
+
+      - name: Upload Dawn probe
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: partyboard-switch-dawn-probe
+          path: |
+            build/switch-libnx-dawn-probe/platforms/switch/partyboard-switch-dawn-probe.nro
+            build/switch-libnx-dawn-probe/platforms/switch/partyboard-switch-dawn-probe.elf
+          if-no-files-found: error

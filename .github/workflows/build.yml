@@ -2,6 +2,8 @@ name: Build
 
 on:
   push:
+    branches-ignore:
+      - switch-native-bootstrap
     paths-ignore:
       - '*.md'
       - '*LICENSE'

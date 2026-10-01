@@ -67,6 +67,23 @@ endif()
 message(STATUS "Party Board version set to ${PARTY_BOARD_WC_DESCRIBE}")
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 project(partyboard LANGUAGES C CXX VERSION ${PARTY_BOARD_VERSION_STRING})
+
+option(PARTYBOARD_SWITCH_BOOTSTRAP
+    "Build only the native Nintendo Switch/libnx bring-up target"
+    OFF)
+
+# The first Switch milestone deliberately stops before desktop-oriented
+# dependencies (Aurora/Dawn/SDL3, RmlUi, nod, etc.) are configured. This keeps
+# the libnx toolchain usable while those dependencies are audited and replaced
+# or adapted one at a time. Normal desktop/mobile builds never enter this path.
+if (PARTYBOARD_SWITCH_BOOTSTRAP)
+    if (NOT PARTYBOARD_SWITCH)
+        message(FATAL_ERROR
+            "PARTYBOARD_SWITCH_BOOTSTRAP requires cmake/toolchains/switch-libnx.cmake")
+    endif()
+    add_subdirectory(platforms/switch)
+    return()
+endif()
 if (APPLE)
     enable_language(OBJC)
 endif ()
