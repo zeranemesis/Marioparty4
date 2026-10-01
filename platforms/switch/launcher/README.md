@@ -45,9 +45,9 @@ artifact (see [Previewing without a console](#previewing-without-a-console)).
   while it runs for the party-coloured variant and its alternate chime. **A**,
   **B** or **+** skips it.
 - **Options.** Startup animation, aspect ratio (4:3, stretched 16:9,
-  widescreen 16:9), screen filter (none, smooth, CRT lines), language
-  (automatic/French/English) and rumble. Saved to
-  `config/partyboard/launcher.ini` and passed to the engine.
+  widescreen 16:9) and language (automatic/French/English). Saved to
+  `config/partyboard/launcher.ini`; aspect and language are passed to the
+  engine, which applies them for the session without touching its own config.
 - **Controllers.** Shows the GameCube controller with the button each Switch
   control produces, which players are connected, and opens the system
   "Change grip/order" applet with **Y**.
@@ -110,17 +110,18 @@ that supports it (hbmenu/hbloader). The arguments are:
 ```text
 sdmc:/switch/partyboard/partyboard.nro
   --disc-image=<path>          same meaning as PARTYBOARD_DISC_IMAGE on desktop
-  --aspect=4:3|stretch|wide
-  --filter=none|smooth|crt
-  --lang=fr|en
-  --rumble=on|off
+  --aspect=4:3|stretch|wide    locked 4:3, stretched, adaptive widescreen
+  --lang=fr|en                 game language on PAL discs
   --mod-list=<active-mods.txt> CubeShelf mod roots, same as PARTYBOARD_MOD_LIST on desktop
   --launcher=<launcher NRO>    so the engine can return to the shelf on exit
 ```
 
-The full engine does not run on Switch yet (see `../README.md`). Until it
-does, choosing a game shows **PartyBoard engine not found** with the path it
-expects; the options panel also shows whether the engine is installed.
+The engine parses these in `src/port/launch_args.cpp` (applied at the config
+Override layer, never saved); the launcher's unit tests link that parser to
+check both ends agree. The full engine does not run on Switch yet (see
+`../README.md`). Until it does, choosing a game shows **PartyBoard engine not
+found** with the path it expects; the options panel also shows whether the
+engine is installed.
 
 ## Building
 

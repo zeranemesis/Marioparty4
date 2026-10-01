@@ -18,6 +18,7 @@
 #include "disc.hpp"
 #include "image.hpp"
 #include "json.hpp"
+#include "port/launch_args.hpp"
 #include "library.hpp"
 #include "mods.hpp"
 #include "paths.hpp"
@@ -409,9 +410,7 @@ void testSettings() {
     Settings out;
     out.bootAnimation = false;
     out.aspect = AspectMode::Wide169;
-    out.filter = ScreenFilter::Scanlines;
     out.language = LanguagePref::English;
-    out.rumble = false;
     out.lastGame = "sdmc:/partyboard/games/Mario Party 4 (USA).iso";
     CHECK(saveSettings(path, out));
 
@@ -419,9 +418,7 @@ void testSettings() {
     CHECK(loadSettings(path, in));
     CHECK_EQ(in.bootAnimation, false);
     CHECK(in.aspect == AspectMode::Wide169);
-    CHECK(in.filter == ScreenFilter::Scanlines);
     CHECK(in.language == LanguagePref::English);
-    CHECK_EQ(in.rumble, false);
     CHECK_EQ(in.lastGame, out.lastGame);
     CHECK(in.resolveLanguage(Language::French) == Language::English);
     Settings automatic;
@@ -430,12 +427,34 @@ void testSettings() {
     const std::vector<std::string> args =
         buildLaunchArgs("sdmc:/switch/partyboard/partyboard.nro", out.lastGame,
                         "sdmc:/switch/partyboard-launcher.nro", out, Language::French);
-    CHECK_EQ(args.size(), 7u);
+    CHECK_EQ(args.size(), 5u);
     CHECK_EQ(args[1], "--disc-image=sdmc:/partyboard/games/Mario Party 4 (USA).iso");
     CHECK_EQ(args[2], "--aspect=wide");
-    CHECK_EQ(args[3], "--filter=crt");
-    CHECK_EQ(args[4], "--lang=fr");
-    CHECK_EQ(args[5], "--rumble=off");
+    CHECK_EQ(args[3], "--lang=fr");
+    CHECK_EQ(args[4], "--launcher=sdmc:/switch/partyboard-launcher.nro");
+
+    // The other side of the contract: the engine's own parser
+    // (src/port/launch_args.cpp) understands everything the launcher sends.
+    const std::vector<std::string> withMods =
+        buildLaunchArgs("sdmc:/switch/partyboard/partyboard.nro", out.lastGame, "sdmc:/switch/partyboard-launcher.nro",
+                        out, Language::French, "sdmc:/cubeshelf/Mods/GMPE01_00/active-mods.txt");
+    std::vector<std::string_view> views(withMods.begin(), withMods.end());
+    const partyboard::launch::LaunchArgs engine = partyboard::launch::parse(views);
+    CHECK_EQ(engine.discImage, out.lastGame);
+    CHECK(engine.aspect == partyboard::launch::AspectArg::Wide);
+    CHECK(engine.language == partyboard::launch::LanguageArg::French);
+    CHECK_EQ(engine.modList, "sdmc:/cubeshelf/Mods/GMPE01_00/active-mods.txt");
+    CHECK_EQ(engine.launcherPath, "sdmc:/switch/partyboard-launcher.nro");
+    CHECK(engine.ignored.empty());
+    for (const AspectMode mode : {AspectMode::Original43, AspectMode::Stretch169, AspectMode::Wide169}) {
+        Settings s;
+        s.aspect = mode;
+        const std::vector<std::string> a = buildLaunchArgs("e", "d", "", s, Language::English);
+        std::vector<std::string_view> v(a.begin(), a.end());
+        const partyboard::launch::LaunchArgs parsed = partyboard::launch::parse(v);
+        CHECK(parsed.aspect.has_value());
+        CHECK(parsed.language == partyboard::launch::LanguageArg::English);
+    }
     CHECK_EQ(joinArgv({"sdmc:/a.nro", "--x=1", "--disc-image=sdmc:/a b.iso"}),
              "sdmc:/a.nro --x=1 \"--disc-image=sdmc:/a b.iso\"");
 }

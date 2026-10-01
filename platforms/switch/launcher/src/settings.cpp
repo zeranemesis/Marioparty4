@@ -19,15 +19,6 @@ const char* aspectKey(AspectMode mode) {
     return "4:3";
 }
 
-const char* filterKey(ScreenFilter filter) {
-    switch (filter) {
-    case ScreenFilter::Smooth: return "smooth";
-    case ScreenFilter::Scanlines: return "crt";
-    case ScreenFilter::None: break;
-    }
-    return "none";
-}
-
 const char* languageKey(LanguagePref language) {
     switch (language) {
     case LanguagePref::French: return "fr";
@@ -91,13 +82,6 @@ bool loadSettings(const std::string& path, Settings& out) {
                 out.aspect = AspectMode::Wide169;
             else if (value == "4:3")
                 out.aspect = AspectMode::Original43;
-        } else if (key == "filter") {
-            if (value == "smooth")
-                out.filter = ScreenFilter::Smooth;
-            else if (value == "crt")
-                out.filter = ScreenFilter::Scanlines;
-            else if (value == "none")
-                out.filter = ScreenFilter::None;
         } else if (key == "language") {
             if (value == "fr")
                 out.language = LanguagePref::French;
@@ -105,8 +89,6 @@ bool loadSettings(const std::string& path, Settings& out) {
                 out.language = LanguagePref::English;
             else if (value == "auto")
                 out.language = LanguagePref::Auto;
-        } else if (key == "rumble") {
-            out.rumble = parseBool(value, out.rumble);
         } else if (key == "last_game") {
             out.lastGame = value;
         } else if (key == "engine") {
@@ -128,9 +110,7 @@ bool saveSettings(const std::string& path, const Settings& settings) {
     std::fprintf(file, "# PartyBoard GameCube launcher\n");
     std::fprintf(file, "boot_animation=%s\n", settings.bootAnimation ? "on" : "off");
     std::fprintf(file, "aspect=%s\n", aspectKey(settings.aspect));
-    std::fprintf(file, "filter=%s\n", filterKey(settings.filter));
     std::fprintf(file, "language=%s\n", languageKey(settings.language));
-    std::fprintf(file, "rumble=%s\n", settings.rumble ? "on" : "off");
     if (!settings.lastGame.empty())
         std::fprintf(file, "last_game=%s\n", settings.lastGame.c_str());
     if (!settings.enginePath.empty())
@@ -148,9 +128,7 @@ std::vector<std::string> buildLaunchArgs(const std::string& enginePath,
     args.push_back(enginePath);
     args.push_back("--disc-image=" + discPath);
     args.push_back(std::string("--aspect=") + aspectKey(settings.aspect));
-    args.push_back(std::string("--filter=") + filterKey(settings.filter));
     args.push_back(std::string("--lang=") + (language == Language::French ? "fr" : "en"));
-    args.push_back(std::string("--rumble=") + (settings.rumble ? "on" : "off"));
     if (!modList.empty())
         args.push_back("--mod-list=" + modList);
     if (!launcherPath.empty())

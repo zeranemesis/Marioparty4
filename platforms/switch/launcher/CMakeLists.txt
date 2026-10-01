@@ -163,7 +163,11 @@ add_executable(partyboard_launcher_preview host/preview_main.cpp)
 target_compile_options(partyboard_launcher_preview PRIVATE ${PARTYBOARD_LAUNCHER_WARNINGS})
 target_link_libraries(partyboard_launcher_preview PRIVATE partyboard_launcher_demo)
 
-add_executable(partyboard_launcher_tests tests/launcher_tests.cpp)
+# The tests also link the engine's argument parser, to check both ends of the
+# launcher -> engine contract.
+add_executable(partyboard_launcher_tests tests/launcher_tests.cpp
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../src/port/launch_args.cpp")
+target_include_directories(partyboard_launcher_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../include")
 target_compile_options(partyboard_launcher_tests PRIVATE ${PARTYBOARD_LAUNCHER_WARNINGS})
 target_link_libraries(partyboard_launcher_tests PRIVATE partyboard_launcher_demo)
 

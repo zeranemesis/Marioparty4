@@ -39,7 +39,7 @@ constexpr float kCardHeight = 340.0f;
 constexpr float kCardAspect = 0.72f; // GameCube case
 constexpr float kShelfBaseline = 468.0f;
 
-constexpr int kOptionRows = 5;
+constexpr int kOptionRows = 3;
 
 constexpr uint32_t kDirections = kButtonUp | kButtonDown | kButtonLeft | kButtonRight;
 
@@ -442,12 +442,10 @@ void App::cycleOption(int row, int delta) {
     switch (row) {
     case 0: m_settings.bootAnimation = !m_settings.bootAnimation; break;
     case 1: m_settings.aspect = static_cast<AspectMode>(wrap3(static_cast<int>(m_settings.aspect))); break;
-    case 2: m_settings.filter = static_cast<ScreenFilter>(wrap3(static_cast<int>(m_settings.filter))); break;
-    case 3:
+    case 2:
         m_settings.language = static_cast<LanguagePref>(wrap3(static_cast<int>(m_settings.language)));
         refreshLanguage();
         break;
-    case 4: m_settings.rumble = !m_settings.rumble; break;
     default: break;
     }
     m_platform.playSound(Sound::Move, 0.8f);
@@ -1066,15 +1064,12 @@ void App::drawOptions(float anim) {
         Str help;
     };
     const Str aspects[3] = {Str::Aspect43, Str::AspectStretch, Str::AspectWide};
-    const Str filters[3] = {Str::FilterNone, Str::FilterSmooth, Str::FilterScanlines};
     const Str languages[3] = {Str::LanguageAuto, Str::LanguageFrench, Str::LanguageEnglish};
     const Row rows[kOptionRows] = {
         {Str::OptBootAnimation, m_settings.bootAnimation ? Str::ValueOnSingular : Str::ValueOffSingular,
          Str::OptBootAnimationHelp},
         {Str::OptAspect, aspects[static_cast<int>(m_settings.aspect)], Str::OptAspectHelp},
-        {Str::OptFilter, filters[static_cast<int>(m_settings.filter)], Str::OptFilterHelp},
         {Str::OptLanguage, languages[static_cast<int>(m_settings.language)], Str::OptLanguageHelp},
-        {Str::OptRumble, m_settings.rumble ? Str::ValueOn : Str::ValueOff, Str::OptRumbleHelp},
     };
 
     float y = 108.0f;
