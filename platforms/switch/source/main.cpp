@@ -4,104 +4,12 @@
 #include <cmath>
 
 #include <switch.h>
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
 #include <glad/glad.h>
 #include <dolphin/pad.h>
 #include <dolphin/mtx.h>
+#include "partyboard_switch/egl.hpp"
 
 namespace {
-
-EGLDisplay g_display = EGL_NO_DISPLAY;
-EGLContext g_context = EGL_NO_CONTEXT;
-EGLSurface g_surface = EGL_NO_SURFACE;
-
-GLuint g_program = 0;
-GLuint g_vao = 0;
-GLuint g_vbo = 0;
-
-bool initEgl(NWindow* window) {
-    g_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-    if (g_display == EGL_NO_DISPLAY) {
-        std::printf("eglGetDisplay failed: 0x%x\n", eglGetError());
-        return false;
-    }
-
-    if (eglInitialize(g_display, nullptr, nullptr) == EGL_FALSE) {
-        std::printf("eglInitialize failed: 0x%x\n", eglGetError());
-        return false;
-    }
-
-    if (eglBindAPI(EGL_OPENGL_API) == EGL_FALSE) {
-        std::printf("eglBindAPI failed: 0x%x\n", eglGetError());
-        return false;
-    }
-
-    const EGLint configAttribs[] = {
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
-        EGL_RED_SIZE, 8,
-        EGL_GREEN_SIZE, 8,
-        EGL_BLUE_SIZE, 8,
-        EGL_ALPHA_SIZE, 8,
-        EGL_DEPTH_SIZE, 24,
-        EGL_STENCIL_SIZE, 8,
-        EGL_NONE,
-    };
-
-    EGLConfig config = nullptr;
-    EGLint configCount = 0;
-    if (eglChooseConfig(g_display, configAttribs, &config, 1, &configCount) == EGL_FALSE ||
-        configCount == 0) {
-        std::printf("eglChooseConfig failed: 0x%x\n", eglGetError());
-        return false;
-    }
-
-    g_surface = eglCreateWindowSurface(g_display, config, window, nullptr);
-    if (g_surface == EGL_NO_SURFACE) {
-        std::printf("eglCreateWindowSurface failed: 0x%x\n", eglGetError());
-        return false;
-    }
-
-    const EGLint contextAttribs[] = {
-        EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR,
-        EGL_CONTEXT_MAJOR_VERSION_KHR, 4,
-        EGL_CONTEXT_MINOR_VERSION_KHR, 3,
-        EGL_NONE,
-    };
-
-    g_context = eglCreateContext(g_display, config, EGL_NO_CONTEXT, contextAttribs);
-    if (g_context == EGL_NO_CONTEXT) {
-        std::printf("eglCreateContext failed: 0x%x\n", eglGetError());
-        return false;
-    }
-
-    if (eglMakeCurrent(g_display, g_surface, g_surface, g_context) == EGL_FALSE) {
-        std::printf("eglMakeCurrent failed: 0x%x\n", eglGetError());
-        return false;
-    }
-
-    return true;
-}
-
-void shutdownEgl() {
-    if (g_display == EGL_NO_DISPLAY)
-        return;
-
-    eglMakeCurrent(g_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-
-    if (g_context != EGL_NO_CONTEXT) {
-        eglDestroyContext(g_display, g_context);
-        g_context = EGL_NO_CONTEXT;
-    }
-
-    if (g_surface != EGL_NO_SURFACE) {
-        eglDestroySurface(g_display, g_surface);
-        g_surface = EGL_NO_SURFACE;
-    }
-
-    eglTerminate(g_display);
-    g_display = EGL_NO_DISPLAY;
-}
 
 GLuint compileShader(GLenum type, const char* source) {
     GLuint shader = glCreateShader(type);
@@ -244,23 +152,20 @@ int main(int, char**) {
         return EXIT_FAILURE;
     }
 
-    NWindow* window = nwindowGetDefault();
-
-    u32 width = 1280;
-    u32 height = 720;
-    nwindowGetDimensions(window, &width, &height);
-
-    if (!initEgl(window))
+    if (!PartyBoardSwitch_EglInitialize())
         return EXIT_FAILURE;
+
+    const u32 width = PartyBoardSwitch_FramebufferWidth();
+    const u32 height = PartyBoardSwitch_FramebufferHeight();
 
     if (!gladLoadGL()) {
         std::printf("gladLoadGL failed\n");
-        shutdownEgl();
+        PartyBoardSwitch_EglShutdown();
         return EXIT_FAILURE;
     }
 
     if (!initScene()) {
-        shutdownEgl();
+        PartyBoardSwitch_EglShutdown();
         return EXIT_FAILURE;
     }
 
@@ -287,11 +192,11 @@ int main(int, char**) {
         // not a second libnx-only input path.
         const float pulse = aHeld ? 1.0f : static_cast<float>((frame / 90u) & 1u);
         renderFrame(pulse, width, height);
-        eglSwapBuffers(g_display, g_surface);
+        PartyBoardSwitch_SwapBuffers();
         ++frame;
     }
 
     shutdownScene();
-    shutdownEgl();
+    PartyBoardSwitch_EglShutdown();
     return EXIT_SUCCESS;
 }
