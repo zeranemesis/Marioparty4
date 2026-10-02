@@ -687,8 +687,11 @@ extern "C" int port_main(int argc, char* argv[]) {
         aurora_set_ray_traced_ao(ao || shadows || reflections);
         aurora_set_ray_tracing_quality(partyboard::getSettings().video.rayTracingQuality);
     }
+    // The quality first: it is what a temporal upscaler (DLSS, XeSS, FSR 3) starts from. One that
+    // cannot run on this machine leaves the frame to FSR 1; aurora settles that, not this.
+    aurora_set_upscale_quality(partyboard::getSettings().video.upscaleQuality.getValue());
     aurora_set_resampler(static_cast<AuroraSampler>(
-        std::clamp(partyboard::getSettings().video.upscaler.getValue(), 0, static_cast<int>(SAMPLER_FSR1))));
+        std::clamp(partyboard::getSettings().video.upscaler.getValue(), 0, static_cast<int>(SAMPLER_FSR3))));
 
 #ifdef PARTY_BOARD_DISCORD
     partyboard::discord::initialize();

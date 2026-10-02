@@ -35,6 +35,8 @@ UserSettings g_userSettings = {
         .enableRayTracedReflections {"video.enableRayTracedReflections", true},
         .rayTracingQuality {"video.rayTracingQuality", 2},
         .upscaler {"video.upscaler", 0},
+        // Quality: the internal frame 1.5 times smaller per side.
+        .upscaleQuality {"video.upscaleQuality", 1},
     },
 
     .audio = {
@@ -127,6 +129,7 @@ void registerSettings() {
     Register(g_userSettings.video.enableRayTracedReflections);
     Register(g_userSettings.video.rayTracingQuality);
     Register(g_userSettings.video.upscaler);
+    Register(g_userSettings.video.upscaleQuality);
 
     // Audio
     Register(g_userSettings.audio.masterVolume);

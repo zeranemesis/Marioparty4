@@ -72,6 +72,8 @@ inline std::string ui_translate(std::string_view text)
         {"Unlock Bowser's Gnarly Party", "Déverrouiller la fête infernale de Bowser"}, {"Frame Rate", "Fréquence d’images"},
         {"Lock 4:3 Aspect Ratio", "Verrouiller le format 4:3"}, {"Adaptive Widescreen HUD", "HUD écran large adaptatif"},
         {"Internal Resolution", "Résolution interne"}, {"Shadow Resolution", "Résolution des ombres"},
+        {"Upscaling", "Mise à l’échelle"}, {"Upscale Quality", "Qualité de la mise à l’échelle"}, {"unavailable", "indisponible"},
+        {"Native AA", "Anticrénelage natif"}, {"Quality", "Qualité"}, {"Balanced", "Équilibré"}, {"Performance", "Performances"}, {"Ultra Performance", "Ultra performances"},
         {"Pause On Focus Lost", "Pause si la fenêtre perd le focus"}, {"Skip Party Board Main Menu", "Ignorer le menu principal Party Board"},
         {"Skip Game Boot Sequence", "Ignorer le démarrage du jeu"}, {"Off", "Désactivées"}, {"All", "Toutes"}, {"Some", "Certaines"},
         {"Clear All Achievements", "Effacer tous les succès"}, {"Are you sure?", "Confirmer ?"}, {"No controller assigned", "Aucune manette assignée"},

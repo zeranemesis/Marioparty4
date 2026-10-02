@@ -44,8 +44,42 @@ namespace partyboard::ui {
 // Ray tracing quality levels; the order matches kQualityLevels in aurora's
 // rt_capture.cpp, and High is what the pass did before the setting existed.
 constexpr const char *kRayTracingQualityNames[] = { "Low", "Medium", "High", "Ultra" };
-constexpr const char *kUpscalerNames[] = { "Bilinear", "Area", "FSR 1" };
+// In the order of AuroraSampler. The last three are the temporal upscalers.
+constexpr const char *kUpscalerNames[] = { "Bilinear", "Area", "FSR 1", "DLSS", "XeSS", "FSR 3" };
+// The levels aurora_set_upscale_quality takes, in its order.
+constexpr const char *kUpscaleQualityNames[] = { "Native AA", "Quality", "Balanced", "Performance", "Ultra Performance" };
 namespace {
+
+    // How many of kUpscalerNames this build offers. The temporal upscalers only
+    // exist where aurora has quality levels for them, which is on Windows:
+    // elsewhere they are left out rather than listed as forever unavailable.
+    int upscaler_count()
+    {
+        return aurora_upscale_quality_levels() > 0 ? 6 : 3;
+    }
+
+    // The upscaling mode the settings hold, kept to the ones this build offers.
+    int configured_upscaler()
+    {
+        return std::clamp(getSettings().video.upscaler.getValue(), 0, upscaler_count() - 1);
+    }
+
+    bool is_temporal_upscaler(int mode)
+    {
+        return mode >= static_cast<int>(SAMPLER_DLSS) && mode <= static_cast<int>(SAMPLER_FSR3);
+    }
+
+    // A mode's name, which says so when the mode cannot run on this machine: its
+    // library is not beside the game, or the graphics card does not run it. The
+    // frame is then enlarged by FSR 1, and nothing else on screen would tell.
+    Rml::String upscaler_label(int mode)
+    {
+        Rml::String label { kUpscalerNames[mode] };
+        if (!aurora_upscaler_available(static_cast<AuroraSampler>(mode))) {
+            label = fmt::format("{} ({})", label, ui_translate("unavailable"));
+        }
+        return label;
+    }
 
     struct LanguageChoice {
         const char *name;
@@ -528,32 +562,87 @@ SettingsWindow::SettingsWindow(bool prelaunch)
             });
         leftPane.register_control(leftPane.add_select_button({
                                       .key = "Upscaling",
-                                      .getValue = [] {
-                                          return Rml::String { kUpscalerNames[std::clamp(
-                                              getSettings().video.upscaler.getValue(), 0, 2)] };
-                                      },
+                                      .getValue = [] { return upscaler_label(configured_upscaler()); },
                                       .isModified = [] {
                                           return getSettings().video.upscaler.getValue()
                                               != getSettings().video.upscaler.getDefaultValue();
                                       },
                                   }),
             rightPane, [](Pane &pane) {
-                for (int mode = 0; mode < 3; ++mode) {
-                    pane.add_button({
-                                        .text = Rml::String { kUpscalerNames[mode] },
-                                        .isSelected = [mode] { return getSettings().video.upscaler.getValue() == mode; },
-                                    })
-                        .on_pressed([mode] {
-                            getSettings().video.upscaler.setValue(mode);
-                            aurora_set_resampler(static_cast<AuroraSampler>(mode));
-                            config::Save();
-                        });
+                const int count = upscaler_count();
+                for (int mode = 0; mode < count; ++mode) {
+                    auto &button = pane.add_button({
+                        .text = upscaler_label(mode),
+                        .isSelected = [mode] { return configured_upscaler() == mode; },
+                    });
+                    button.on_pressed([mode] {
+                        getSettings().video.upscaler.setValue(mode);
+                        aurora_set_resampler(static_cast<AuroraSampler>(mode));
+                        config::Save();
+                    });
+                    // One that cannot run here is listed, and says so, but cannot be picked: picked, it
+                    // would be FSR 1 under another name.
+                    if (!aurora_upscaler_available(static_cast<AuroraSampler>(mode))) {
+                        button.set_disabled(true);
+                    }
                 }
                 pane.add_rml("<br/>How the internal frame is fitted to the window. FSR 1 (AMD FidelityFX Super "
                              "Resolution 1.0) enlarges a smaller frame along its edges and sharpens it; it only acts "
                              "when Internal Resolution is below the window's, and a larger frame is reduced with the "
                              "area filter whatever is chosen here.");
+                if (count > 3) {
+                    pane.add_rml("<br/>DLSS, XeSS and FSR 3 rebuild the picture from several frames instead. While one "
+                                 "of them runs, the game is drawn smaller than the window by the ratio set under "
+                                 "Upscale Quality, in place of Internal Resolution, and a fraction of a pixel apart "
+                                 "from one frame to the next; the picture is then brought to the window's size using "
+                                 "the game's depth and motion. Menus and loading screens have neither and are "
+                                 "enlarged by FSR 1.<br/><br/>They need a Windows PC with a graphics card that "
+                                 "supports DirectX Raytracing, and their own library beside the game; DLSS also needs "
+                                 "a GeForce RTX card. One marked unavailable lacks one of these on this machine.");
+                }
             });
+        if (aurora_upscale_quality_levels() > 0) {
+            leftPane.register_control(leftPane.add_select_button({
+                                          .key = "Upscale Quality",
+                                          .getValue = [] {
+                                              return Rml::String { kUpscaleQualityNames[std::clamp(
+                                                  getSettings().video.upscaleQuality.getValue(), 0, 4)] };
+                                          },
+                                          // Only DLSS, XeSS and FSR 3 have the frame drawn at a size of their
+                                          // own, and only when they run: the others enlarge whatever Internal
+                                          // Resolution gives.
+                                          .isDisabled = [] {
+                                              const int mode = configured_upscaler();
+                                              return !is_temporal_upscaler(mode)
+                                                  || !aurora_upscaler_available(static_cast<AuroraSampler>(mode));
+                                          },
+                                          .isModified = [] {
+                                              return getSettings().video.upscaleQuality.getValue()
+                                                  != getSettings().video.upscaleQuality.getDefaultValue();
+                                          },
+                                      }),
+                rightPane, [](Pane &pane) {
+                    const int levels = std::min(aurora_upscale_quality_levels(), 5);
+                    for (int level = 0; level < levels; ++level) {
+                        pane.add_button({
+                                            .text = Rml::String { kUpscaleQualityNames[level] },
+                                            .isSelected = [level] {
+                                                return std::clamp(getSettings().video.upscaleQuality.getValue(), 0, 4) == level;
+                                            },
+                                        })
+                            .on_pressed([level] {
+                                getSettings().video.upscaleQuality.setValue(level);
+                                aurora_set_upscale_quality(level);
+                                config::Save();
+                            });
+                    }
+                    pane.add_rml("<br/>How much smaller than the window DLSS, XeSS and FSR 3 have the game drawn: not "
+                                 "at all at Native AA, which only smooths the picture, then 1.5, 1.7, 2 and 3 times "
+                                 "smaller per side. A smaller frame costs less and keeps less detail. It takes the "
+                                 "place of Internal Resolution while one of the three runs, and has no effect with "
+                                 "Bilinear, Area or FSR 1.");
+                });
+        }
         leftPane.register_control(leftPane.add_select_button({
                                       .key = "Frame Rate",
                                       .getValue = [] {

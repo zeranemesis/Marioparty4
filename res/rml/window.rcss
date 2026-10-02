@@ -199,6 +199,11 @@ button:not(:disabled):active {
     box-shadow: #00b4fa 0 0 0 2dp;
 }
 
+button:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+
 button.modal-btn {
     flex: 1 1 0;
     text-align: center;

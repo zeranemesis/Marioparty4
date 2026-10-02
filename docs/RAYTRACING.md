@@ -3499,3 +3499,224 @@ de suite avec un upscaler branché : c'est là qu'il sera contrôlé.
   propres pixels ; un effet qui réutilise l'image de la frame précédente
   tremblerait d'autant.
 - L'interface n'est pas décalée, puisqu'elle est en projection orthographique.
+
+## DLSS, XeSS et FSR 3 (2 et 3 octobre 2026)
+
+Les trois upscalers temporels tournent, chacun par le SDK officiel de son
+fabricant : DLSS par NVIDIA Streamline 2.14.1 (NGX 310.9.1), XeSS par la
+bibliothèque d'Intel (libxess 2.0.2, livrée avec le SDK 3.0.2), FSR 3 par
+l'API FidelityFX d'AMD (FSR 3.1.5, SDK 2.3.0). Réglage « Upscaling » du menu
+vidéo, entrées DLSS, XeSS et FSR 3, et « Upscale Quality » : Native AA, Quality,
+Balanced, Performance, Ultra Performance — l'image dessinée 1, 1,5, 1,7, 2 ou
+3 fois plus petite par côté que la fenêtre. Ils marchent avec ou sans les
+termes de ray tracing.
+
+### Comment c'est fait
+
+Les trois demandent la même chose : l'image à sa taille de rendu, la
+profondeur et le mouvement de ce que montre chaque pixel, et le décalage
+sous-pixel de la frame. Seul le tracé connaît la profondeur et le mouvement,
+d'où l'architecture :
+
+- **Le tracé garde, par frame, la profondeur et le mouvement** au format des
+  SDK (R32_FLOAT, 0 au plan proche et 1 au plan lointain ; R16G16_FLOAT en
+  pixels, « où était la surface moins où elle est », sans décalage), dans un
+  anneau de quatre jeux repérés par le numéro de la frame : la frame est
+  présentée plus tard, par le thread de rendu, qui les retrouve par ce numéro.
+- **Sans ray tracing**, la capture s'arme quand même pour l'upscaler : la
+  frame est tracée pour ses seuls rayons primaires, et rien du tracé n'est posé
+  sur l'image. 0,15 ms de GPU à 853 × 640 sur l'écran titre.
+- **L'upscaler tourne sur le périphérique de ray tracing.** Dawn copie l'image
+  dans une texture partagée, l'hôte la convertit en RGBA, lance le SDK, et Dawn
+  présente la texture que le SDK écrit. Des clôtures ordonnent les deux
+  périphériques ; aucune attente CPU sur le chemin.
+- **La fenêtre dessine plus petit** du rapport demandé. Quand le SDK arrondit
+  ce rapport autrement — XeSS veut 854 × 640 là où 1280 / 1,5 donne 853 —, la
+  fenêtre est priée une fois de la taille exacte qu'il nomme.
+- **Le décalage sous-pixel ne tourne que si les frames sont réellement
+  upscalées** : une frame présentée autrement le montrerait comme un tremblement.
+- **Tout est optionnel**, au build (un SDK absent de `extern/sdk` n'est pas
+  compilé) comme à l'exécution (une DLL absente, un GPU qui refuse : l'entrée est
+  marquée indisponible et l'image est agrandie par FSR 1 comme avant). Une
+  erreur du SDK en cours de route l'éteint pour la session, et la fenêtre
+  reprend sa taille.
+
+**DLSS, uniquement par Streamline**, et sans lier sa bibliothèque d'import :
+celle-ci définit aussi `D3D12CreateDevice`, `CreateDXGIFactory2` et le reste de
+ce que d3d12 et dxgi exportent, pour les hôtes qui la laissent se substituer à
+eux ; le périphérique de ray tracing doit venir des vraies. `sl.interposer.dll`
+est donc chargée à la main, **après vérification de sa signature NVIDIA**, et
+ses points d'entrée pris par leur nom, comme le prévoit le guide du hooking
+manuel. Aucun des deux drapeaux de mise à jour par le réseau n'est donné. Mais
+la bibliothèque de production de Streamline lance de toute façon, à son
+démarrage, l'outil de mise à jour du pilote NVIDIA (`nvngx_update.exe`) ; l'hôte
+ne peut pas l'en empêcher, et sans ces drapeaux elle ne charge rien de ce qu'il
+apporte, sauf réglage de l'utilisateur dans le pilote.
+
+Le travail a été partagé entre trois agents — côté frame, côté présentation,
+build et SDK — sur un contrat d'interfaces posé avant ; l'intégration, les
+corrections qu'elle a demandées et toutes les mesures sont faites ensuite.
+
+### Ce que les essais ont fait trouver
+
+**Sur cette machine, ni l'upscaler ni FSR 1 n'étaient jamais appelés.** Quand
+la couche RmlUi dessine quelque chose, c'est elle qui pose l'image du jeu à
+l'écran, et elle l'agrandissait elle-même, bilinéairement. Elle dessine dès que
+le compteur d'images est affiché, qu'une notification passe, ou — ici en
+permanence — que l'avertissement « aucune manette assignée » est à l'écran.
+Dans le run fait avec des diagnostics à l'entrée de ce chemin, aucune des
+quelque 11 700 frames n'a atteint la présentation où FSR 1 et l'upscaler se
+branchent. Corrigé : quand plus que le bilinéaire est demandé,
+l'image est d'abord agrandie, par le même code que sans la couche, et la
+couche lit le résultat. L'agrandissement se fait au point de la frame où la
+couche commence, sur le thread de rendu ; rien ne peut y être soumis tant que
+le tampon de staging de la frame est mappé, donc la partie déjà enregistrée est
+mise de côté et soumise, agrandie, juste avant le reste.
+
+**Ce qui corrige l'entrée FSR 1 du 1er octobre.** Sa vérification visuelle a
+été faite sur cette machine, avertissement affiché : ce que j'ai jugé « net
+sur les arêtes » était l'agrandissement bilinéaire de RmlUi, pas FSR 1. Mesuré
+maintenant, ouverture de m401Dll dessinée à 640 × 480 dans la fenêtre
+1280 × 960, couche affichée, six captures d'écran chacune : gradient moyen
+0,0129 en bilinéaire, **0,0178 avec FSR 1, +38 %**, et les six valeurs de FSR 1
+au-dessus des six du bilinéaire. Avec le bilinéaire, le chemin est inchangé.
+
+Et trois défauts du code nouveau, trouvés par les agents en relisant, avant
+tout essai : les cibles de profondeur et de mouvement pouvaient être libérées
+pendant que l'upscaler les lisait encore sur sa file ; l'historique du tracé
+restait périmé après des frames sans terme ; Streamline renvoyait une erreur
+d'intégration à chaque frame faute du drapeau de marquage par frame. Tous
+corrigés avant le premier lancement.
+
+### Mesuré
+
+**Méthode.** Deux runs ne montrent jamais la même image, donc rien n'est
+comparé d'un run à l'autre. L'hôte écrit, sur 40 frames consécutives, l'image
+qu'il reçoit et celle qu'il rend, avec le décalage de chaque frame
+(`AURORA_UPSCALE_DUMP`). Chaque pixel d'entrée est un échantillon de la scène
+pris à un endroit connu : sur ce qui ne bouge pas, poser ces échantillons à
+leur place sur la grille de la fenêtre reconstruit l'image à sa taille. C'est
+la référence, propre à chaque run. On y compare la sortie de l'upscaler et
+l'agrandissement bilinéaire de la même entrée, sur les blocs immobiles :
+
+- PSNR contre la référence ;
+- netteté, en pourcentage de celle de la référence ;
+- scintillement, c'est-à-dire l'écart type d'une frame à l'autre.
+
+L'outil a d'abord été validé sur une image synthétique dont on connaît la
+réponse : il retrouve le bon signe et voit le signe inversé.
+
+**Le décalage dessiné par le rasteriseur est enfin mesuré.** C'était le point
+laissé ouvert le 2 octobre. Posés avec le décalage tel qu'il est donné, les
+échantillons qui tombent sur un même pixel concordent : écart 0,0041. Posés
+avec le décalage inversé : 0,0068. Sur chaque run, à chaque niveau, ce critère
+dit que le signe est le bon. L'image dessinée bouge donc du décalage
+enregistré, dans le sens enregistré.
+
+**À « Quality » (853 × 640 vers 1280 × 960), ouverture immobile de m401Dll,
+ray tracing actif :**
+
+| | PSNR sortie | PSNR bilinéaire | netteté | scintillement |
+|---|---|---|---|---|
+| tuyauterie seule (`test`) | 45,40 dB | 45,30 dB | 96 % | 0,0034 |
+| FSR 3.1.5 | 43,01 dB | 45,35 dB | 102 % | 0,0023 (0,0035) |
+| XeSS 2.0.2 | 50,36 dB | 43,45 dB | 93 % | 0,0013 (0,0044) |
+| DLSS | 53,15 dB | 45,09 dB | 100 % | 0,0009 (0,0035) |
+
+La ligne `test` est un agrandissement bilinéaire fait sur l'autre
+périphérique : elle égale le bilinéaire, ce qui valide la chaîne et le dump.
+XeSS et DLSS s'approchent de la référence de 7 et 8 dB de plus que le
+bilinéaire, et scintillent trois à quatre fois moins. FSR 3 est plus net et
+plus stable que le bilinéaire, mais plus loin de la référence.
+
+**Le signe du décalage donné aux SDK.** On donne au SDK le décalage inversé
+(`AURORA_UPSCALE_JITTER_SIGN=-1`). Chacun reconstruit alors l'image qui
+correspond au décalage reçu : sa sortie se rapproche de la référence au signe
+inversé et s'éloigne de la bonne.
+
+| | PSNR, bon signe | PSNR, signe inversé | netteté |
+|---|---|---|---|
+| FSR 3 | 41,30 dB | 42,22 dB | 89 % (102 % avec le signe donné) |
+| XeSS | 42,95 dB | 47,32 dB | 80 % (93 %) |
+| DLSS | 45,70 dB | 52,07 dB | 84 % (100 %) |
+
+Le signe que l'on donne est donc le bon pour les trois.
+
+**Le sens du mouvement donné aux SDK.** Mesure sur le survol d'ouverture du
+plateau, où 97 % de l'image bouge, en donnant le mouvement inversé
+(`AURORA_UPSCALE_MOTION_SIGN=-1`). Ce qui bouge n'a pas de référence ; la
+sortie est donc comparée à l'agrandissement bilinéaire de la même frame.
+
+| | netteté / bilinéaire | écart au bilinéaire |
+|---|---|---|
+| FSR 3, mouvement donné | 99 % | 30,34 dB |
+| FSR 3, mouvement inversé | 90 % | 25,95 dB |
+| XeSS, mouvement donné | 99 % | 29,50 dB |
+| XeSS, mouvement inversé | 89 % | 25,88 dB |
+| DLSS, mouvement donné | 102 % | 29,66 dB |
+| DLSS, mouvement inversé | 100 % | 30,98 dB |
+
+Pour FSR 3 et XeSS, inversé est nettement pire : l'historique est posé au
+mauvais endroit et étalé. **Pour DLSS, ces deux nombres ne départagent pas.**
+Les recadrages, eux, le font : arêtes propres et anticrénelées dans le sens
+donné, contours dédoublés dans l'autre (`work/c13-dlss-board*/upscale/crop_016.png`).
+Le sens donné est celui que documentent les trois SDK.
+
+**Les autres niveaux**, même ouverture, ray tracing actif. Chaque case donne le
+PSNR de la sortie contre la référence, puis celui du bilinéaire entre
+parenthèses.
+
+| | Native AA | Quality 1,5 | Balanced 1,7 | Performance 2 | Ultra Perf. 3 |
+|---|---|---|---|---|---|
+| FSR 3 | 47,57 (43,57) | 43,01 (45,35) | 41,04 (44,88) | 39,12 (43,62) | 37,59 (41,22) |
+| XeSS | 53,05 (46,22) | 50,36 (43,45) | 49,38 (41,53) | 50,40 (43,67) | 49,67 (41,09) |
+| DLSS | 53,41 (43,56) | 53,15 (45,09) | 51,36 (44,58) | 49,92 (43,71) | 49,71 (41,34) |
+
+À trois fois plus petit, la référence est rebâtie à partir de 40 frames pour
+9 pixels de sortie par pixel d'entrée : elle est plus grossière, et ses
+chiffres valent pour comparer entre eux, pas dans l'absolu.
+
+**Sans ray tracing**, à « Quality », sur l'ouverture de m401Dll : FSR 3 fait
+45,07 dB contre 42,56 pour le bilinéaire, XeSS 49,94 contre 42,46, DLSS
+52,12 contre 42,36. FSR 3 passe alors au-dessus du bilinéaire. Avec les
+termes de ray tracing, il passe en dessous à chaque niveau qui agrandit
+(−2,3 à −4,5 dB), et au-dessus seulement à Native AA (+4,0 dB).
+Mon hypothèse : le bruit résiduel des termes tracés, que l'historique de FSR
+traite comme du changement. Elle n'est pas établie.
+
+**Coût.** Sur le plateau, vsync coupée et 240 images par seconde demandées,
+la période est de 7,3 à 7,5 ms avec la tuyauterie seule et de 7,5 à 7,7 ms
+avec DLSS à « Quality ». Ce sont des chiffres de cadence, pas des temps GPU :
+le jeu est limité ailleurs, et le coût propre de chaque SDK n'est pas isolé.
+
+Test nul A/B sans upscaler : 0 pixel sur 1 228 800. Tous les runs : aucune
+erreur de ray tracing ni de l'upscaler.
+
+### Ce qui n'est pas vérifié, et les limites
+
+- **Seule une RTX 5090 a été essayée.** XeSS y tourne sur son chemin
+  multi-fabricant ; ni Radeon ni Arc n'ont été vues.
+- **L'interface est agrandie avec la scène.** Elle n'est pas décalée, mais
+  l'upscaler la traite comme le reste : texte possiblement adouci, aucun masque
+  donné aux SDK. Ce n'est pas mesuré.
+- **Un écran partagé n'est pas upscalé** : la profondeur et le mouvement d'une
+  seule caméra ne décrivent aucune des parties. Il est agrandi par FSR 1.
+- **L'écran des réglages** ne sait pas qu'un upscaler s'est éteint en cours de
+  route. Il le montre choisi pendant que FSR 1 tourne.
+- **FSR 3 avec le ray tracing** : voir plus haut, cause non établie.
+- **Le réseau en ligne** : un upscaler temporel remplace la résolution interne
+  que le mode en ligne impose. Aucun chemin du rendu vers la simulation n'a été
+  trouvé, mais ce n'est pas prouvé. C'est une décision à prendre.
+- **Livrer les DLL.** Les licences de Streamline/DLSS, de XeSS et de FidelityFX
+  encadrent leur redistribution : décision D2.
+
+### Outils
+
+- `tools/test_raytracing.ps1` : `-Upscaler test|fsr3|xess|dlss`,
+  `-UpscaleQuality`, `-UpscaleDump N`, `-UpscaleJitterSign -1` et
+  `-UpscaleMotionSign -1`.
+- `tools/measure_upscaler.py` mesure les dumps ; il saute les coupes de scène.
+- Variables : `AURORA_UPSCALER`, `AURORA_UPSCALE_QUALITY`,
+  `AURORA_UPSCALE_DUMP`, `AURORA_UPSCALE_JITTER_SIGN`,
+  `AURORA_UPSCALE_MOTION_SIGN` et `AURORA_UPSCALE_DEBUG`, qui rend les SDK
+  bavards.

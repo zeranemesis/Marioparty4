@@ -71,8 +71,15 @@ struct UserSettings {
         // middle level, so this is what a card with less headroom turns down.
         ConfigVar<int> rayTracingQuality;
         // How the internal frame is fitted to the window: 0 bilinear, 1 area,
-        // 2 FSR 1. FSR 1 only acts when the internal frame is the smaller one.
+        // 2 FSR 1, 3 DLSS, 4 XeSS, 5 FSR 3. FSR 1 only acts when the internal
+        // frame is the smaller one. The last three run on the ray tracing
+        // device, whether or not a ray traced term is on, and set the size of
+        // the internal frame themselves; where one cannot run, the frame is
+        // enlarged by FSR 1 as under 2.
         ConfigVar<int> upscaler;
+        // What DLSS, XeSS and FSR 3 start from: 0 the size of the window, then
+        // smaller by 1.5, 1.7, 2 and 3 per side. Ignored by the other three.
+        ConfigVar<int> upscaleQuality;
     } video;
 
     struct {
