@@ -497,12 +497,26 @@ Write-Host ("  bornes de scene : {0} non finies et {1} absurdes sur {2} rapports
 # second eligible pass is the direct signature of the term being applied twice;
 # the count per report is the coarse one -- reports come every 300 frames, and
 # the double application measured 600.
+#
+# A report is only printed on a frame that traced, so one that falls on a frame
+# without geometry is skipped and the next covers 600 frames: 598 compositions
+# then read as twice per frame and failed a run that composited once. The
+# count is taken against the frames the report really covers, which the
+# "end_frame calls" line of the same report gives.
 $compositeLines = @($sceneLines | Select-String -Pattern 'Composition ran (\d+) time\(s\) since the last report; (\d+) further passes')
+$frameLines = @($sceneLines | Select-String -Pattern 'end_frame calls (\d+),')
 $compositeMax = 0
 $compositeExtra = 0
-foreach ($line in $compositeLines) {
+for ($i = 0; $i -lt $compositeLines.Count; $i++) {
+    $line = $compositeLines[$i]
     $count = [int]$line.Matches[0].Groups[1].Value
-    if ($count -gt $compositeMax) { $compositeMax = $count }
+    $covered = 300
+    if ($frameLines.Count -eq $compositeLines.Count -and $i -gt 0) {
+        $covered = [int]$frameLines[$i].Matches[0].Groups[1].Value - [int]$frameLines[$i - 1].Matches[0].Groups[1].Value
+        if ($covered -lt 300) { $covered = 300 }
+    }
+    $per300 = [int][math]::Round($count * 300.0 / $covered)
+    if ($per300 -gt $compositeMax) { $compositeMax = $per300 }
     # Cumulative in the engine, so the last report carries the total.
     $compositeExtra = [int]$line.Matches[0].Groups[2].Value
 }
