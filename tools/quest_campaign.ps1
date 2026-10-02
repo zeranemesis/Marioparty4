@@ -51,7 +51,8 @@ $switches = @('debug.partyboard.sort_opaque', 'debug.partyboard.stereo_crossing'
               'debug.partyboard.xr_priority', 'debug.partyboard.stereo_msaa', 'debug.partyboard.opaque_blend',
               'debug.partyboard.hud_rate', 'debug.partyboard.xr_pacing', 'debug.partyboard.anisotropy',
               'debug.partyboard.shader_f16', 'debug.partyboard.freeze', 'debug.partyboard.visibility_mask',
-              'debug.partyboard.skip_draws', 'debug.partyboard.render_hz', 'debug.partyboard.alpha_test')
+              'debug.partyboard.skip_draws', 'debug.partyboard.render_hz', 'debug.partyboard.alpha_test',
+              'debug.partyboard.eye_depth', 'debug.partyboard.eye_f16', 'debug.partyboard.eye_msaa')
 $freeze = if ($NoFreeze) { '' } else { '1' }
 $live = @(
     @{ name = 'reference';     props = @{ 'debug.partyboard.eye_scale' = $eye } },
@@ -80,6 +81,12 @@ $live = @(
     @{ name = 'skip-fog';       props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.skip_draws' = 'fog' } },
     @{ name = 'alpha-off';        props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.alpha_test' = 'opaque-off' } },
     @{ name = 'alpha-off-aniso4'; props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.alpha_test' = 'opaque-off'; 'debug.partyboard.anisotropy' = '4' } },
+    # 16-bit depth and the half-precision TEV are the defaults since build 166.
+    @{ name = 'depth32';          props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.eye_depth' = '32' } },
+    @{ name = 'f32';              props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.eye_f16' = '0' } },
+    @{ name = 'msaa1';            props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.eye_msaa' = '1' } },
+    @{ name = 'full-precision';   props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.eye_depth' = '32'; 'debug.partyboard.eye_f16' = '0' } },
+    @{ name = 'all-cheap';        props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.alpha_test' = 'opaque-off'; 'debug.partyboard.anisotropy' = '4' } },
     @{ name = 'render-120';     props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.render_hz' = '0' } },
     @{ name = 'reference-end'; props = @{ 'debug.partyboard.eye_scale' = $eye } }
 )

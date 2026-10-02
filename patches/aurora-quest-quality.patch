@@ -118,6 +118,17 @@
  
    if (passInfo.captureDepthSnapshot) {
      depth_peek::encode_frame_snapshot(cmd, passInfo.copySourceDepthView, passInfo.targetSize, passInfo.msaaSamples);
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -956,7 +956,7 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
+     // A half-precision TEV (debug.partyboard.shader_f16) on a device without
+     // f16 would fail validation, which is fatal: skipped, like a bad count.
+     if constexpr (requires { config.shaderConfig.halfPrecision; }) {
+-      if (config.shaderConfig.halfPrecision && !webgpu::g_shaderF16Enabled) {
++      if (config.shaderConfig.halfPrecision && !webgpu::g_shaderF16Supported) {
+         ++invalidRows;
+         continue;
+       }
 --- a/lib/gfx/render_worker.cpp
 +++ b/lib/gfx/render_worker.cpp
 @@ -6,8 +6,57 @@
@@ -388,6 +399,15 @@
 +} // namespace aurora::gfx
 --- a/lib/gfx/stereo.cpp
 +++ b/lib/gfx/stereo.cpp
+@@ -53,7 +53,7 @@ uint32_t g_eyeHeight = 0, g_hudWidth = 0, g_hudHeight = 0;
+ // the game: `adb shell setprop debug.partyboard.stereo_msaa 1` (no MSAA).
+ // WebGPU only has 1 and 4 samples: any other value keeps 4 (2x aborted the
+ // game on its first eye frame, 2026-09-28).
+-uint32_t stereo_samples() {
++uint32_t startup_samples() {
+   static const uint32_t samples = [] {
+     char value[PROP_VALUE_MAX] = {};
+     __system_property_get("debug.partyboard.stereo_msaa", value);
 @@ -105,6 +105,12 @@ bool g_loggedGeometry = false;
  uint32_t g_frameEyeWidth = 0, g_frameEyeHeight = 0;
  // Whether this frame draws the HUD image (AuroraStereoSetHud).
@@ -429,7 +449,7 @@
  // Headset A/B switches, read again every 2 s so a capture can flip them
  // without restarting the game. On the Toad board (Quest 3, build 118,
  // 2026-09-28) the sort with the opaque blend off shaded 35% fewer fragments
-@@ -154,11 +181,22 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
+@@ -154,13 +181,40 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
  //                                        across the table, where 8x reads the
  //                                        most texels: an A/B tells what the
  //                                        textures cost before compressing them
@@ -449,16 +469,47 @@
 +  // measurement first: a cut-out texel (alpha 0) of such a draw then writes
 +  // depth and may hide what is behind it.
 +  bool alphaTestOff = false;
++  // Live A/Bs of what the trace showed (docs/quest-optimization.md): the
++  // eyes' pass in 63 bins (4x MSAA, 32-bit depth: 32 bytes a pixel in tile
++  // memory) and 46-50 ALU instructions a fragment.
++  //   debug.partyboard.eye_depth 32   32-bit depth (16 by default: 24 bytes a
++  //                                   pixel, larger bins; -5% for the eyes' pass)
++  //   debug.partyboard.eye_f16 0      the TEV in full precision (half by
++  //                                   default where the GPU has it; -8%)
++  //   debug.partyboard.eye_msaa 1|4   the eyes' samples (stereo_msaa: at start;
++  //                                   1x was -22%, but its edges alias)
++  // Measured on the frozen Toad board, Quest 3, 2026-10-02.
++  bool depth16 = true;
++  bool f16 = true;
++  uint32_t msaa = 0; // 0: stereo_msaa's
  };
  Switches g_switches;
++
++// The eyes' samples this frame: eye_msaa, else stereo_msaa's at start.
++uint32_t stereo_samples() { return g_switches.msaa != 0 ? g_switches.msaa : startup_samples(); }
  std::chrono::steady_clock::time_point g_switchesAt{};
-@@ -183,12 +221,31 @@ void refresh_switches() {
+ 
+ void refresh_switches() {
+@@ -183,12 +237,44 @@ void refresh_switches() {
    __system_property_get("debug.partyboard.anisotropy", value);
    const std::string_view anisotropy{value};
    read.anisotropy = anisotropy == "1" ? 1 : anisotropy == "2" ? 2 : anisotropy == "4" ? 4 : anisotropy == "16" ? 16 : 8;
 +  value[0] = '\0';
 +  __system_property_get("debug.partyboard.visibility_mask", value);
 +  read.hiddenArea = value[0] != '0';
++  value[0] = '\0';
++  __system_property_get("debug.partyboard.eye_depth", value);
++  read.depth16 = std::string_view{value} != "32";
++  value[0] = '\0';
++  __system_property_get("debug.partyboard.eye_f16", value);
++  read.f16 = value[0] != '0' && webgpu::g_shaderF16Supported;
++  value[0] = '\0';
++  __system_property_get("debug.partyboard.eye_msaa", value);
++  read.msaa = value[0] == '1' ? 1u : value[0] == '4' ? 4u : 0u;
++  if (read.depth16 != g_switches.depth16 || read.f16 != g_switches.f16 || read.msaa != g_switches.msaa) {
++    Log.info("Stereo: eyes' depth {} bits, TEV {}, MSAA {}x (eye_depth, eye_f16, eye_msaa)", read.depth16 ? 16 : 32,
++             read.f16 ? "half precision" : "full precision", read.msaa != 0 ? read.msaa : startup_samples());
++  }
 +  value[0] = '\0';
 +  __system_property_get("debug.partyboard.alpha_test", value);
 +  read.alphaTestOff = std::string_view{value} == "opaque-off";
@@ -487,7 +538,18 @@
    }
    g_switches = read;
    // New samplers from the next draw on (gx.cpp builds them per descriptor).
-@@ -397,9 +454,34 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -360,6 +446,10 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+   }
+   auto spatialConfig = config;
+   spatialConfig.msaaSamples = stereo_samples();
++  spatialConfig.shaderConfig.depth16 = g_switches.depth16 ? 1 : 0;
++  if (g_switches.f16) {
++    spatialConfig.shaderConfig.halfPrecision = 1;
++  }
+   if (spatialConfig.colorUpdate) {
+     spatialConfig.alphaUpdate = true; // transparent MR targets need coverage
+   }
+@@ -397,9 +487,34 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
                      config.blendFacDst == GX_BL_INVSRCALPHA)),
    };
    g_statSortable += order.sortable;
@@ -522,14 +584,43 @@
    // An object that reaches both eyes, drawn once per eye when asked: no
    // fragment test, so the GPU keeps rejecting its hidden fragments early.
    const bool crossingPerEye = g_switches.crossingPerEye && inObject && !g_uncut;
-@@ -506,6 +588,16 @@ void end_frame() noexcept {
+@@ -491,21 +606,39 @@ void end_frame() noexcept {
+   // Same sample count and formats as the game's frame, so its pipelines draw here too.
+   const auto& config = webgpu::g_graphicsConfig;
+   const uint32_t samples = stereo_samples();
+-  if (samples > 1 && (g_color.size.width != g_width || g_color.size.height != g_height)) {
++  const auto depthFormat = g_switches.depth16 ? wgpu::TextureFormat::Depth16Unorm : config.depthFormat;
++  // Remade when the size, the samples or the depth format change (live switches).
++  const auto stale = [&](const webgpu::TextureWithSampler& target, wgpu::TextureFormat format, uint32_t width,
++                         uint32_t height) {
++    return !target.texture || target.size.width != width || target.size.height != height || target.format != format ||
++           target.texture.GetSampleCount() != samples;
++  };
++  if (samples > 1 && stale(g_color, config.surfaceConfiguration.format, g_width, g_height)) {
+     g_color = create_target(config.surfaceConfiguration.format, samples, g_width, g_height, "Stereo color");
+   }
+-  if (g_depth.size.width != g_width || g_depth.size.height != g_height) {
+-    g_depth = create_target(config.depthFormat, samples, g_width, g_height, "Stereo depth");
++  if (stale(g_depth, depthFormat, g_width, g_height)) {
++    g_depth = create_target(depthFormat, samples, g_width, g_height, "Stereo depth");
+   }
+-  if (samples > 1 && (g_hudColor.size.width != g_hudWidth || g_hudColor.size.height != g_hudHeight)) {
++  if (samples > 1 && stale(g_hudColor, config.surfaceConfiguration.format, g_hudWidth, g_hudHeight)) {
+     g_hudColor = create_target(config.surfaceConfiguration.format, samples, g_hudWidth, g_hudHeight, "Stereo HUD color");
+   }
+-  if (g_hudDepth.size.width != g_hudWidth || g_hudDepth.size.height != g_hudHeight) {
+-    g_hudDepth = create_target(config.depthFormat, samples, g_hudWidth, g_hudHeight, "Stereo HUD depth");
++  if (stale(g_hudDepth, depthFormat, g_hudWidth, g_hudHeight)) {
++    g_hudDepth = create_target(depthFormat, samples, g_hudWidth, g_hudHeight, "Stereo HUD depth");
+   }
  
    const bool hasWorld = !g_eyeDraws[0].empty();
    const size_t worldDraws = g_eyeDraws[0].size();
 +  {
 +    std::lock_guard lock{g_hiddenMutex};
 +    for (int eye = 0; eye < 2; ++eye) {
-+      if (g_switches.hiddenArea && hasWorld) {
++      // The hidden area's clear pipeline has the game's depth format.
++      if (g_switches.hiddenArea && hasWorld && !g_switches.depth16) {
 +        g_frameHidden[eye] = g_hiddenArea[eye];
 +      } else {
 +        g_frameHidden[eye].clear();
@@ -539,7 +630,7 @@
    const uint32_t eyeStride = g_width / 2;
    PassDesc desc{
        .color = samples > 1 ? g_color.view : image.view,
-@@ -524,6 +616,7 @@ void end_frame() noexcept {
+@@ -524,6 +657,7 @@ void end_frame() noexcept {
        .instanced = &g_eyeInstanced,
        .order = &g_eyeOrder,
        .sortOpaque = g_switches.sortOpaque,
@@ -547,7 +638,7 @@
        .drawHud = g_frameDrawHud,
    };
    enqueue_pass(desc);
-@@ -573,6 +666,15 @@ void end_frame() noexcept {
+@@ -573,6 +707,15 @@ void end_frame() noexcept {
               recorded != 0 ? g_statSortable * 100 / recorded : 0, g_switches.sortOpaque ? " (sorted)" : "",
               recorded != 0 ? g_statCrossingPerEye * 100 / recorded : 0);
      g_statInstanced = g_statPerEye = g_statSortable = g_statCrossingPerEye = 0;
@@ -563,7 +654,7 @@
      statsAt = now;
      statFrames = statWorld = statHud = 0;
      statWorldMax = 0;
-@@ -622,8 +724,128 @@ void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept
+@@ -622,8 +765,128 @@ void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept
  #endif
  }
  
@@ -692,7 +783,7 @@
    for (const auto& accessed : g_accessed) {
      Image target;
      {
-@@ -827,6 +1049,22 @@ extern "C" void AuroraStereoSetSortKey(float key) {
+@@ -827,6 +1090,22 @@ extern "C" void AuroraStereoSetSortKey(float key) {
  #endif
  }
  
@@ -845,6 +936,31 @@
  TextureHandle new_dynamic_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 gxFormat,
                                       const char* label) noexcept;
  TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept;
+--- a/lib/gx/gx.cpp
++++ b/lib/gx/gx.cpp
+@@ -668,7 +668,7 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
+   const float depthBias = (UseReversedZ ? -1.0f : 1.0f) * std::bit_cast<float>(config.polygonOffsetBits);
+   const float depthBiasSlopeScale = (UseReversedZ ? -1.0f : 1.0f) * std::bit_cast<float>(config.polygonOffsetScaleBits);
+   const wgpu::DepthStencilState depthStencil{
+-      .format = g_graphicsConfig.depthFormat,
++      .format = config.shaderConfig.depth16 ? wgpu::TextureFormat::Depth16Unorm : g_graphicsConfig.depthFormat,
+       .depthWriteEnabled = config.depthCompare && config.depthUpdate,
+       .depthCompare = config.depthCompare ? to_compare_function(config.depthFunc) : wgpu::CompareFunction::Always,
+       .depthBias = round_away_from_zero<int32_t>(depthBias),
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -478,7 +478,10 @@ struct ShaderConfig {
+   // The TEV in half precision (shader.cpp, webgpu::g_shaderF16Enabled): from
+   // pad2's spare bits, 0 elsewhere, so other pipelines keep their hash.
+   u8 halfPrecision : 1 = 0;
+-  u8 pad2 : 7 = 0;
++  // A 16-bit depth target (a headset's eyes, gfx/stereo.cpp's eye_depth): from
++  // pad2's spare bits too, 0 elsewhere.
++  u8 depth16 : 1 = 0;
++  u8 pad2 : 6 = 0;
+   std::array<AttrConfig, MaxVtxAttr> attrs;
+   std::array<TevSwap, MaxTevSwap> tevSwapTable;
+   std::array<TevStage, MaxTevStages> tevStages;
 --- a/lib/webgpu/gpu.cpp
 +++ b/lib/webgpu/gpu.cpp
 @@ -22,6 +22,9 @@
@@ -857,16 +973,17 @@
  
  namespace aurora::gx {
  void clear_copy_texture_cache() noexcept;
-@@ -61,6 +64,8 @@ bool g_bcTexturesSupported = false;
+@@ -61,6 +64,9 @@ bool g_bcTexturesSupported = false;
  bool g_astcTexturesSupported = false;
  bool g_textureComponentSwizzleSupported = false;
  bool g_clipDistancesSupported = false;
 +bool g_shaderF16Enabled = false;
++bool g_shaderF16Supported = false;
 +bool g_timestampsEnabled = false;
  static std::atomic_bool g_shuttingDown = false;
  
  namespace {
-@@ -839,6 +844,7 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -839,6 +845,7 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
      g_astcTexturesSupported = false;
      g_textureComponentSwizzleSupported = false;
      g_clipDistancesSupported = false;
@@ -874,7 +991,7 @@
      wgpu::SupportedFeatures supportedFeatures;
      g_adapter.GetFeatures(&supportedFeatures);
      for (size_t i = 0; i < supportedFeatures.featureCount; ++i) {
-@@ -866,6 +872,26 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -866,6 +873,27 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
          requiredFeatures.push_back(feature);
          g_clipDistancesSupported = true;
        }
@@ -891,10 +1008,11 @@
 +      // The TEV in half precision, for a headset A/B, before starting the
 +      // game: `adb shell setprop debug.partyboard.shader_f16 1` (off by default).
 +      if (feature == wgpu::FeatureName::ShaderF16) {
++        requiredFeatures.push_back(feature);
++        g_shaderF16Supported = true;
 +        char value[PROP_VALUE_MAX] = {};
 +        __system_property_get("debug.partyboard.shader_f16", value);
 +        if (value[0] == '1' && value[1] == '\0') {
-+          requiredFeatures.push_back(feature);
 +          g_shaderF16Enabled = true;
 +        }
 +      }
@@ -903,13 +1021,16 @@
  #ifdef WEBGPU_DAWN
 --- a/lib/webgpu/gpu.hpp
 +++ b/lib/webgpu/gpu.hpp
-@@ -55,6 +55,11 @@ extern bool g_astcTexturesSupported;
+@@ -55,6 +55,14 @@ extern bool g_astcTexturesSupported;
  extern bool g_textureComponentSwizzleSupported;
  // Clip distances: a headset's two eyes drawn in one instanced draw (gfx/stereo.cpp).
  extern bool g_clipDistancesSupported;
 +// The GX shaders' TEV in half precision (gx/shader.cpp): the device has f16
 +// and a headset asked for it (debug.partyboard.shader_f16 1).
 +extern bool g_shaderF16Enabled;
++// The device has shader-f16 (requested whenever offered): a headset's eyes
++// may switch to the half-precision TEV live (gfx/stereo.cpp's eye_f16).
++extern bool g_shaderF16Supported;
 +// GPU timestamps around the headset's eye and HUD passes (gfx/stereo.cpp).
 +extern bool g_timestampsEnabled;
  

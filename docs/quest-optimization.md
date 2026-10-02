@@ -283,6 +283,21 @@ A/B courts (scene figee, ecart a la reference juste avant) : anisotrope 4x -1,5 
 
 Conclusion : deux moities. Les bins (63 par image, chacun rejouant les dessins visibles) et le binning, sans shader ; et le cout du TEV emule (46 instructions par fragment). Prochaines etapes : profondeur 16 bits pour les yeux (bins plus grands), TEV en demi-precision et TEV genere plus court, plus de dessins pour les deux yeux a la fois.
 
+### 9 quater. Build 166 : par defaut, a verifier sur casque
+
+Mesures en direct (scene figee, 421 dessins par oeil, en cycles : ms x MHz) : profondeur 16 bits -5 %, TEV en demi-precision -8 %, MSAA 1x -22 % (crenelage), lot "test alpha coupe + anisotrope 4x" -3 %. Les pixels et les shaders ne sont pas le coeur du cout : 44 % de pixels en moins ne donnaient que -9 %. Ce qui coute, ce sont les dessins rejoues dans chacune des 63 tuiles (le MSAA 1x en divise le nombre par 4).
+
+Actifs par defaut depuis le build 166, chacun avec son interrupteur :
+
+- profondeur 16 bits pour les yeux (`debug.partyboard.eye_depth 32` pour revenir), avec le plan proche a 10 cm au lieu de 5 (pas de profondeur de 0,3 mm a 1,4 m) ;
+- TEV en demi-precision pour les yeux, si le GPU a `shader-f16` (`debug.partyboard.eye_f16 0`) ;
+- affichage a 90 Hz, chaque image neuve (`debug.partyboard.display_hz 120` pour revenir a 120 Hz et 60 images neuves) ;
+- anneau de 4 images (`debug.partyboard.ring 3`).
+
+A verifier demain : pas de scintillement des cases et chemins (profondeur 16 bits), couleurs et degrades (demi-precision), 90 images/s tenues sans saccade (`Stereo perf` worldNew, `Game perf` stutters, `Stereo GPU`), et la fluidite ressentie. La premiere partie compile les nouveaux pipelines : quelques secondes d'objets manquants a la premiere vue du plateau.
+
+Prochaine piste, la plus grosse : moins de dessins par tuile (objets qui touchent les deux yeux dessines une seule fois, `stereo_crossing 0` a mesurer proprement ; fusion des dessins consecutifs de meme materiau).
+
 ### 10. Stabilite et contenu
 
 1. Retour au jeu apres une longue pause (le build 109 n'a ete teste que sur cinq retours courts), et reprise apres Space Setup : ligne `Layers:` et garde « table sous le sol ».

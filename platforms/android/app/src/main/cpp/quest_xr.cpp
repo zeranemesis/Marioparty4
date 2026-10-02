@@ -690,9 +690,13 @@ void set_passthrough(App& app, bool on) {
   }
 }
 
-// The display rate to ask for, among those the headset offers: the fastest,
-// or `adb shell setprop debug.partyboard.display_hz 72` (72, 80, 90, 120: the
-// offered rate closest to it). The game then renders at that rate below
+// The display rate to ask for, among those the headset offers: the one
+// closest to 90 Hz, or `adb shell setprop debug.partyboard.display_hz 120`
+// (72, 80, 90, 120: the offered rate closest to it). At 120 Hz the board got
+// 60 new images/s (each shown twice: not smooth when the head moves), 80 at
+// most when asked for all 120; at 90 every image is a new one, which the GPU
+// holds with the eyes' half-precision TEV and 16-bit depth (8.7 ms for the
+// eyes' pass at 640 MHz before them, about 7.6 after; 2026-10-02). The game then renders at that rate below
 // 110 Hz, every displayed image a new one, and at half of it from 110 Hz up
 // (src/port/imgui.cpp). At 120 Hz each image is shown twice, and the
 // compositor, which corrects the head's rotation but not its translation,
@@ -704,7 +708,7 @@ float preferred_refresh_rate(const std::vector<float>& rates) {
   }
   char value[PROP_VALUE_MAX] = {};
   __system_property_get("debug.partyboard.display_hz", value);
-  const float wanted = static_cast<float>(std::atof(value));
+  const float wanted = value[0] != '\0' ? static_cast<float>(std::atof(value)) : 90.0f;
   float chosen = *std::max_element(rates.begin(), rates.end());
   if (wanted > 0.0f) {
     chosen = *std::min_element(rates.begin(), rates.end(), [wanted](float a, float b) {

@@ -19,7 +19,10 @@ StereoView* g_stereoView = nullptr;
 namespace {
 
 // The eyes' depth range, in meters: from a hand's width to across the room.
-constexpr float kNear = 0.05f;
+// 10 cm: the eyes' depth is 16 bits (gfx/stereo.cpp's eye_depth), whose step
+// is about z^2 / (near * 65536) with the reversed depth: 0.3 mm at the board's
+// 1.4 m, against 0.6 mm with the 5 cm near plane used before.
+constexpr float kNear = 0.1f;
 constexpr float kFar = 100.0f;
 
 // Dynamic resolution never draws less than half of the eyes' images.
