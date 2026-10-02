@@ -186,6 +186,7 @@ struct Extensions {
   bool sceneCapture = false; // opening Space Setup from the game
   bool visibilityMask = false; // the lenses' hidden pixels, skipped by the eyes' draws
   bool layerDepth = false;     // the model's depth to the compositor (StereoView::enable_depth_layer)
+  bool spaceWarp = false;      // Application SpaceWarp (StereoView::enable_space_warp)
 };
 
 struct App {
@@ -349,6 +350,7 @@ bool create_instance(App& app) {
   ext.perfMetrics = optional(PerfMetrics::kExtension);
   ext.visibilityMask = optional(XR_KHR_VISIBILITY_MASK_EXTENSION_NAME);
   ext.layerDepth = optional(XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME);
+  ext.spaceWarp = optional(XR_FB_SPACE_WARP_EXTENSION_NAME);
   ext.anchors = std::ranges::all_of(TableAnchor::kExtensions,
                                     [&](const char* name) { return has_extension(available, name); });
   if (ext.anchors) {
@@ -1779,6 +1781,7 @@ bool set_up(App& app, JNIEnv* env) {
   } else {
     app.stereo.load_hidden_area(app.extensions.visibilityMask);
     if (app.extensions.layerDepth) app.stereo.enable_depth_layer(app.instance, app.session);
+    if (app.extensions.spaceWarp) app.stereo.enable_space_warp(app.instance, app.system, app.session);
   }
   g_followCamera.store(app.table.followCamera, std::memory_order_relaxed);
   app.stereo.set_quality_cap(quality_cap(app.table.resolution));

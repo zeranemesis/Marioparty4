@@ -93,6 +93,14 @@ public:
   // XR thread, each frame: the plane's center (stage space, +Y its normal)
   // and its half size in meters; 0 for none.
   void set_depth_plane(const XrPosef& center, float halfExtent);
+  // XR_FB_space_warp (Application SpaceWarp), once the extension is enabled:
+  // motion vectors and depth at the runtime's recommended size, joined to the
+  // eyes' layer, so the compositor makes every other displayed frame from the
+  // last image (the game draws half the display rate: 60 new images at 120
+  // Hz). The board stands still on the table: its motion vectors are zero,
+  // and its depth is set_depth_plane's. Off unless `debug.partyboard.space_warp
+  // 1` (read every 2 s), until seen on the headset.
+  void enable_space_warp(XrInstance instance, XrSystemId system, XrSession session);
   bool screen_required() const;
   // A minigame is on show (the game's 3D world, not a board): quest_xr.cpp
   // stands it where the board's screen is.
@@ -191,8 +199,17 @@ private:
   XrCompositionLayerQuad mHudLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
   // The screen behind the interface: one static image, drawn once.
   XrSwapchain mHudScreenSwapchain = XR_NULL_HANDLE;
-  // The depth layer (enable_depth_layer).
+  // The depth layer (enable_depth_layer) and Application SpaceWarp.
+  bool ensure_depth_program();
+  bool plane_corners(float corners[12]);
+  void plane_mvp(const XrView& view, float mvp[16]) const;
   bool draw_depth(const Slot& slot);
+  bool draw_space_warp(const Slot& slot);
+  XrSwapchain mMotionSwapchain = XR_NULL_HANDLE, mMotionDepthSwapchain = XR_NULL_HANDLE;
+  std::vector<XrSwapchainImageOpenGLESKHR> mMotionImages, mMotionDepthImages;
+  uint32_t mMotionWidth = 0, mMotionHeight = 0; // per eye
+  bool mSpaceWarpWanted = false, mSpaceWarpShown = false;
+  XrCompositionLayerSpaceWarpInfoFB mSpaceWarpInfos[2]{};
   XrSwapchain mDepthSwapchain = XR_NULL_HANDLE;
   std::vector<XrSwapchainImageOpenGLESKHR> mDepthImages;
   GLuint mDepthFbo = 0, mDepthProgram = 0;

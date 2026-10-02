@@ -379,6 +379,15 @@ void StereoView::destroy() {
     xrDestroySwapchain(mDepthSwapchain);
     mDepthSwapchain = XR_NULL_HANDLE;
   }
+  if (mMotionSwapchain != XR_NULL_HANDLE) {
+    xrDestroySwapchain(mMotionSwapchain);
+    mMotionSwapchain = XR_NULL_HANDLE;
+  }
+  if (mMotionDepthSwapchain != XR_NULL_HANDLE) {
+    xrDestroySwapchain(mMotionDepthSwapchain);
+    mMotionDepthSwapchain = XR_NULL_HANDLE;
+  }
+  mSpaceWarpShown = false;
   if (mDepthProgram != 0) {
     glDeleteProgram(mDepthProgram);
     mDepthProgram = 0;
@@ -393,37 +402,8 @@ void StereoView::destroy() {
   mPresentedTag = 0;
 }
 
-void StereoView::enable_depth_layer(XrInstance instance, XrSession session) {
-  uint32_t formatCount = 0;
-  xrEnumerateSwapchainFormats(session, 0, &formatCount, nullptr);
-  std::vector<int64_t> formats(formatCount);
-  xrEnumerateSwapchainFormats(session, formatCount, &formatCount, formats.data());
-  constexpr int64_t kDepth16 = 0x81A5, kDepth24 = 0x81A6; // GL_DEPTH_COMPONENT16/24
-  const int64_t format = std::ranges::find(formats, kDepth16) != formats.end()   ? kDepth16
-                         : std::ranges::find(formats, kDepth24) != formats.end() ? kDepth24
-                                                                                 : 0;
-  if (format == 0) {
-    LOGW("Depth layer: no depth swapchain format offered");
-    return;
-  }
-  XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
-  info.usageFlags = XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-  info.format = format;
-  info.sampleCount = 1;
-  info.width = mEyeWidth * 2;
-  info.height = mEyeHeight;
-  info.faceCount = 1;
-  info.arraySize = 1;
-  info.mipCount = 1;
-  if (!check(instance, xrCreateSwapchain(session, &info, &mDepthSwapchain), "xrCreateSwapchain (depth)")) {
-    mDepthSwapchain = XR_NULL_HANDLE;
-    return;
-  }
-  uint32_t count = 0;
-  xrEnumerateSwapchainImages(mDepthSwapchain, 0, &count, nullptr);
-  mDepthImages.assign(count, {XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR});
-  xrEnumerateSwapchainImages(mDepthSwapchain, count, &count,
-                             reinterpret_cast<XrSwapchainImageBaseHeader*>(mDepthImages.data()));
+bool StereoView::ensure_depth_program() {
+  if (mDepthProgram != 0) return true;
   // The plane's four corners, from a uniform, through each eye's projection;
   // depth only.
   const char* vertexSource = R"(#version 300 es
@@ -433,7 +413,8 @@ void main() { gl_Position = mvp * vec4(corners[gl_VertexID], 1.0); }
 )";
   const char* fragmentSource = R"(#version 300 es
 precision mediump float;
-void main() {}
+layout(location = 0) out vec4 motion;
+void main() { motion = vec4(0.0); }
 )";
   const auto compile = [](GLenum type, const char* source) {
     const GLuint shader = glCreateShader(type);
@@ -448,23 +429,126 @@ void main() {}
     }
     return shader;
   };
-  mDepthProgram = glCreateProgram();
+  const GLuint program = glCreateProgram();
   const GLuint vs = compile(GL_VERTEX_SHADER, vertexSource), fs = compile(GL_FRAGMENT_SHADER, fragmentSource);
-  glAttachShader(mDepthProgram, vs);
-  glAttachShader(mDepthProgram, fs);
-  glLinkProgram(mDepthProgram);
+  glAttachShader(program, vs);
+  glAttachShader(program, fs);
+  glLinkProgram(program);
   glDeleteShader(vs);
   glDeleteShader(fs);
   GLint linked = 0;
-  glGetProgramiv(mDepthProgram, GL_LINK_STATUS, &linked);
-  mDepthMvpLocation = glGetUniformLocation(mDepthProgram, "mvp");
-  mDepthCornersLocation = glGetUniformLocation(mDepthProgram, "corners");
-  glGenFramebuffers(1, &mDepthFbo);
-  LOGI("Depth layer: %ux%u, format 0x%llx, %u images, program %s (debug.partyboard.depth_layer 1 to submit it)",
-       info.width, info.height, static_cast<unsigned long long>(format), count, linked ? "ready" : "failed");
+  glGetProgramiv(program, GL_LINK_STATUS, &linked);
   if (!linked) {
+    LOGW("Depth layer: program failed to link");
+    glDeleteProgram(program);
+    return false;
+  }
+  mDepthProgram = program;
+  mDepthMvpLocation = glGetUniformLocation(program, "mvp");
+  mDepthCornersLocation = glGetUniformLocation(program, "corners");
+  glGenFramebuffers(1, &mDepthFbo);
+  return true;
+}
+
+namespace {
+// A swapchain of `format` (one of `wanted`, the first offered) for both eyes
+// side by side, and its images; XR_NULL_HANDLE when none.
+XrSwapchain make_swapchain(XrInstance instance, XrSession session, std::initializer_list<int64_t> wanted,
+                           XrSwapchainUsageFlags usage, uint32_t width, uint32_t height,
+                           std::vector<XrSwapchainImageOpenGLESKHR>& images, const char* what, int64_t& chosen) {
+  uint32_t formatCount = 0;
+  xrEnumerateSwapchainFormats(session, 0, &formatCount, nullptr);
+  std::vector<int64_t> formats(formatCount);
+  xrEnumerateSwapchainFormats(session, formatCount, &formatCount, formats.data());
+  chosen = 0;
+  for (const int64_t format : wanted) {
+    if (std::ranges::find(formats, format) != formats.end()) {
+      chosen = format;
+      break;
+    }
+  }
+  if (chosen == 0) {
+    LOGW("%s: no swapchain format offered", what);
+    return XR_NULL_HANDLE;
+  }
+  XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+  info.usageFlags = usage;
+  info.format = chosen;
+  info.sampleCount = 1;
+  info.width = width;
+  info.height = height;
+  info.faceCount = 1;
+  info.arraySize = 1;
+  info.mipCount = 1;
+  XrSwapchain swapchain = XR_NULL_HANDLE;
+  if (!check(instance, xrCreateSwapchain(session, &info, &swapchain), what)) return XR_NULL_HANDLE;
+  uint32_t count = 0;
+  xrEnumerateSwapchainImages(swapchain, 0, &count, nullptr);
+  images.assign(count, {XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR});
+  xrEnumerateSwapchainImages(swapchain, count, &count, reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data()));
+  return swapchain;
+}
+
+constexpr int64_t kDepth16 = 0x81A5, kDepth24 = 0x81A6; // GL_DEPTH_COMPONENT16/24
+constexpr int64_t kRgba16f = 0x881A;                    // GL_RGBA16F
+
+// One swapchain image acquired and waited for; false: none (nothing to release).
+bool acquire_image(XrSwapchain swapchain, uint32_t& index) {
+  XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+  XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+  wait.timeout = XR_INFINITE_DURATION;
+  if (XR_FAILED(xrAcquireSwapchainImage(swapchain, &acquire, &index))) return false;
+  if (XR_FAILED(xrWaitSwapchainImage(swapchain, &wait))) {
+    XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    xrReleaseSwapchainImage(swapchain, &release);
+    return false;
+  }
+  return true;
+}
+
+bool release_image(XrSwapchain swapchain) {
+  XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+  return XR_SUCCEEDED(xrReleaseSwapchainImage(swapchain, &release));
+}
+} // namespace
+
+void StereoView::enable_depth_layer(XrInstance instance, XrSession session) {
+  int64_t format = 0;
+  mDepthSwapchain = make_swapchain(instance, session, {kDepth16, kDepth24}, XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                   mEyeWidth * 2, mEyeHeight, mDepthImages, "Depth layer", format);
+  if (mDepthSwapchain == XR_NULL_HANDLE) return;
+  const bool ready = ensure_depth_program();
+  LOGI("Depth layer: %ux%u, format 0x%llx, %zu images, program %s (debug.partyboard.depth_layer 1 to submit it)",
+       mEyeWidth * 2, mEyeHeight, static_cast<unsigned long long>(format), mDepthImages.size(), ready ? "ready" : "failed");
+  if (!ready) {
     xrDestroySwapchain(mDepthSwapchain);
     mDepthSwapchain = XR_NULL_HANDLE;
+  }
+}
+
+void StereoView::enable_space_warp(XrInstance instance, XrSystemId system, XrSession session) {
+  XrSystemSpaceWarpPropertiesFB spaceWarp{XR_TYPE_SYSTEM_SPACE_WARP_PROPERTIES_FB};
+  XrSystemProperties properties{XR_TYPE_SYSTEM_PROPERTIES};
+  properties.next = &spaceWarp;
+  if (!check(instance, xrGetSystemProperties(instance, system, &properties), "xrGetSystemProperties (space warp)") ||
+      spaceWarp.recommendedMotionVectorImageRectWidth == 0) {
+    LOGW("Space warp: no recommended motion vector size");
+    return;
+  }
+  mMotionWidth = spaceWarp.recommendedMotionVectorImageRectWidth;
+  mMotionHeight = spaceWarp.recommendedMotionVectorImageRectHeight;
+  int64_t motionFormat = 0, depthFormat = 0;
+  mMotionSwapchain = make_swapchain(instance, session, {kRgba16f}, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT,
+                                    mMotionWidth * 2, mMotionHeight, mMotionImages, "Space warp motion", motionFormat);
+  mMotionDepthSwapchain = make_swapchain(instance, session, {kDepth24, kDepth16}, XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                         mMotionWidth * 2, mMotionHeight, mMotionDepthImages, "Space warp depth", depthFormat);
+  const bool ready = mMotionSwapchain != XR_NULL_HANDLE && mMotionDepthSwapchain != XR_NULL_HANDLE && ensure_depth_program();
+  LOGI("Space warp: motion vectors %ux%u per eye, depth 0x%llx, %s (debug.partyboard.space_warp 1 to use it)",
+       mMotionWidth, mMotionHeight, static_cast<unsigned long long>(depthFormat), ready ? "ready" : "unavailable");
+  if (!ready) {
+    if (mMotionSwapchain != XR_NULL_HANDLE) xrDestroySwapchain(mMotionSwapchain);
+    if (mMotionDepthSwapchain != XR_NULL_HANDLE) xrDestroySwapchain(mMotionDepthSwapchain);
+    mMotionSwapchain = mMotionDepthSwapchain = XR_NULL_HANDLE;
   }
 }
 
@@ -474,10 +558,8 @@ void StereoView::set_depth_plane(const XrPosef& center, float halfExtent) {
   mDepthPlaneHalf = halfExtent;
 }
 
-// The plane's depth into the next depth image, for both eyes of `slot`, with
-// a GL projection (depth 0 at near, 1 at far): what mDepthInfos tell the
-// compositor. The caller holds no lock; the GL context is the XR thread's.
-bool StereoView::draw_depth(const Slot& slot) {
+// The plane's corners in stage space, as a triangle strip; false: no plane.
+bool StereoView::plane_corners(float corners[12]) {
   XrPosef plane;
   float half;
   {
@@ -486,25 +568,47 @@ bool StereoView::draw_depth(const Slot& slot) {
     half = mDepthPlaneHalf;
   }
   if (half <= 0.0f) return false;
-  uint32_t index = 0;
-  XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-  XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-  wait.timeout = XR_INFINITE_DURATION;
-  if (XR_FAILED(xrAcquireSwapchainImage(mDepthSwapchain, &acquire, &index))) return false;
-  if (XR_FAILED(xrWaitSwapchainImage(mDepthSwapchain, &wait))) {
-    XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-    xrReleaseSwapchainImage(mDepthSwapchain, &release);
-    return false;
-  }
-  float corners[12];
-  const float signs[4][2] = {{-1, -1}, {1, -1}, {-1, 1}, {1, 1}}; // a triangle strip
+  const float signs[4][2] = {{-1, -1}, {1, -1}, {-1, 1}, {1, 1}};
   for (int i = 0; i < 4; ++i) {
     const XrVector3f p = add(plane.position, rotate(plane.orientation, {signs[i][0] * half, 0.0f, signs[i][1] * half}));
     corners[i * 3] = p.x;
     corners[i * 3 + 1] = p.y;
     corners[i * 3 + 2] = p.z;
   }
+  return true;
+}
+
+// Stage space -> the eye's GL clip space (column-major; depth 0 at kNear, 1
+// at kFar once in the window): what the depth infos tell the compositor.
+void StereoView::plane_mvp(const XrView& view, float mvp[16]) const {
+  const XrPosef toEye = inverse(view.pose);
+  const XrVector3f x = rotate(toEye.orientation, {1, 0, 0}), y = rotate(toEye.orientation, {0, 1, 0}),
+                   z = rotate(toEye.orientation, {0, 0, 1});
+  const float viewM[16] = {x.x, x.y, x.z, 0, y.x, y.y, y.z, 0, z.x, z.y, z.z, 0,
+                           toEye.position.x, toEye.position.y, toEye.position.z, 1};
+  const float l = std::tan(view.fov.angleLeft), r = std::tan(view.fov.angleRight);
+  const float d = std::tan(view.fov.angleDown), u = std::tan(view.fov.angleUp);
+  const float projM[16] = {2.0f / (r - l), 0, 0, 0,
+                           0, 2.0f / (u - d), 0, 0,
+                           (r + l) / (r - l), (u + d) / (u - d), -(kFar + kNear) / (kFar - kNear), -1,
+                           0, 0, -2.0f * kFar * kNear / (kFar - kNear), 0};
+  for (int c = 0; c < 4; ++c) {
+    for (int row = 0; row < 4; ++row) {
+      mvp[c * 4 + row] = projM[0 * 4 + row] * viewM[c * 4 + 0] + projM[1 * 4 + row] * viewM[c * 4 + 1] +
+                         projM[2 * 4 + row] * viewM[c * 4 + 2] + projM[3 * 4 + row] * viewM[c * 4 + 3];
+    }
+  }
+}
+
+// The plane's depth into the next depth image, for both eyes of `slot`, at
+// the eyes' drawn rectangles. The caller holds no lock; the GL context is the
+// XR thread's.
+bool StereoView::draw_depth(const Slot& slot) {
+  float corners[12];
+  uint32_t index = 0;
+  if (!plane_corners(corners) || !acquire_image(mDepthSwapchain, index)) return false;
   glBindFramebuffer(GL_FRAMEBUFFER, mDepthFbo);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, mDepthImages[index].image, 0);
   const GLenum none = GL_NONE;
   glDrawBuffers(1, &none);
@@ -518,26 +622,8 @@ bool StereoView::draw_depth(const Slot& slot) {
   glUseProgram(mDepthProgram);
   glUniform3fv(mDepthCornersLocation, 4, corners);
   for (uint32_t eye = 0; eye < 2; ++eye) {
-    const XrView& view = slot.views[eye];
-    // Stage -> eye (column-major), then the eye's GL projection.
-    const XrPosef toEye = inverse(view.pose);
-    const XrVector3f x = rotate(toEye.orientation, {1, 0, 0}), y = rotate(toEye.orientation, {0, 1, 0}),
-                     z = rotate(toEye.orientation, {0, 0, 1});
-    const float viewM[16] = {x.x, x.y, x.z, 0, y.x, y.y, y.z, 0, z.x, z.y, z.z, 0,
-                             toEye.position.x, toEye.position.y, toEye.position.z, 1};
-    const float l = std::tan(view.fov.angleLeft), r = std::tan(view.fov.angleRight);
-    const float d = std::tan(view.fov.angleDown), u = std::tan(view.fov.angleUp);
-    const float projM[16] = {2.0f / (r - l), 0, 0, 0,
-                             0, 2.0f / (u - d), 0, 0,
-                             (r + l) / (r - l), (u + d) / (u - d), -(kFar + kNear) / (kFar - kNear), -1,
-                             0, 0, -2.0f * kFar * kNear / (kFar - kNear), 0};
     float mvp[16];
-    for (int c = 0; c < 4; ++c) {
-      for (int rr = 0; rr < 4; ++rr) {
-        mvp[c * 4 + rr] = projM[0 * 4 + rr] * viewM[c * 4 + 0] + projM[1 * 4 + rr] * viewM[c * 4 + 1] +
-                          projM[2 * 4 + rr] * viewM[c * 4 + 2] + projM[3 * 4 + rr] * viewM[c * 4 + 3];
-      }
-    }
+    plane_mvp(slot.views[eye], mvp);
     glUniformMatrix4fv(mDepthMvpLocation, 1, GL_FALSE, mvp);
     glViewport(static_cast<GLint>(eye * mEyeWidth), static_cast<GLint>((mEyeHeight - slot.renderHeight) / 2),
                static_cast<GLsizei>(slot.renderWidth), static_cast<GLsizei>(slot.renderHeight));
@@ -546,10 +632,53 @@ bool StereoView::draw_depth(const Slot& slot) {
   glDisable(GL_DEPTH_TEST);
   glUseProgram(0);
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
-  XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-  return XR_SUCCEEDED(xrReleaseSwapchainImage(mDepthSwapchain, &release));
+  return release_image(mDepthSwapchain);
 }
 
+// Application SpaceWarp's images for `slot`: motion vectors all zero (the
+// board stands still in the room; only the head moves, which the compositor
+// knows) and the plane's depth, each eye over its whole half (the same field
+// of view as the eyes' drawn rectangle).
+bool StereoView::draw_space_warp(const Slot& slot) {
+  float corners[12];
+  uint32_t motionIndex = 0, depthIndex = 0;
+  if (!plane_corners(corners)) return false;
+  if (!acquire_image(mMotionSwapchain, motionIndex)) return false;
+  if (!acquire_image(mMotionDepthSwapchain, depthIndex)) {
+    release_image(mMotionSwapchain);
+    return false;
+  }
+  glBindFramebuffer(GL_FRAMEBUFFER, mDepthFbo);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, mMotionImages[motionIndex].image, 0);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, mMotionDepthImages[depthIndex].image, 0);
+  const GLenum color = GL_COLOR_ATTACHMENT0;
+  glDrawBuffers(1, &color);
+  glDisable(GL_SCISSOR_TEST);
+  glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+  glDepthMask(GL_TRUE);
+  glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+  glClearDepthf(1.0f);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  glEnable(GL_DEPTH_TEST);
+  glDepthFunc(GL_LESS);
+  glDisable(GL_CULL_FACE);
+  glDisable(GL_BLEND);
+  glUseProgram(mDepthProgram);
+  glUniform3fv(mDepthCornersLocation, 4, corners);
+  for (uint32_t eye = 0; eye < 2; ++eye) {
+    float mvp[16];
+    plane_mvp(slot.views[eye], mvp);
+    glUniformMatrix4fv(mDepthMvpLocation, 1, GL_FALSE, mvp);
+    glViewport(static_cast<GLint>(eye * mMotionWidth), 0, static_cast<GLsizei>(mMotionWidth),
+               static_cast<GLsizei>(mMotionHeight));
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+  }
+  glDisable(GL_DEPTH_TEST);
+  glUseProgram(0);
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  const bool motionReleased = release_image(mMotionSwapchain);
+  return release_image(mMotionDepthSwapchain) && motionReleased;
+}
 void StereoView::load_hidden_area(bool available) {
   if (!available) {
     LOGI("Hidden area: XR_KHR_visibility_mask unavailable, every pixel is drawn");
@@ -1193,6 +1322,9 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
       if (!keepBoard && mDepthWanted && mDepthSwapchain != XR_NULL_HANDLE) {
         mDepthShown = draw_depth(*newest);
       }
+      if (!keepBoard && mSpaceWarpWanted && mMotionSwapchain != XR_NULL_HANDLE) {
+        mSpaceWarpShown = draw_space_warp(*newest);
+      }
       if (hudReady) {
         mHudCopiedAt = hudNow;
         g_gl.copyImage(newest->hudTexture, GL_TEXTURE_2D, 0, 0, 0, 0,
@@ -1313,6 +1445,14 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
         mDepthWanted = depthWanted;
         if (!depthWanted) mDepthShown = false;
       }
+      char spaceWarp[PROP_VALUE_MAX] = {};
+      __system_property_get("debug.partyboard.space_warp", spaceWarp);
+      const bool spaceWarpWanted = spaceWarp[0] == '1' && mMotionSwapchain != XR_NULL_HANDLE;
+      if (spaceWarpWanted != mSpaceWarpWanted) {
+        LOGI("Space warp: %s (debug.partyboard.space_warp)", spaceWarpWanted ? "on" : "off");
+        mSpaceWarpWanted = spaceWarpWanted;
+        if (!spaceWarpWanted) mSpaceWarpShown = false;
+      }
       char hudRate[PROP_VALUE_MAX] = {};
       __system_property_get("debug.partyboard.hud_rate", hudRate);
       const bool everyImage = std::strcmp(hudRate, "full") == 0;
@@ -1354,6 +1494,22 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
       depth.nearZ = kNear;
       depth.farZ = kFar;
       view.next = &depth;
+    }
+    if (mSpaceWarpWanted && mSpaceWarpShown) {
+      auto& warp = mSpaceWarpInfos[eye];
+      warp = {XR_TYPE_COMPOSITION_LAYER_SPACE_WARP_INFO_FB};
+      warp.next = view.next;
+      warp.motionVectorSubImage.swapchain = mMotionSwapchain;
+      warp.motionVectorSubImage.imageRect = {{static_cast<int32_t>(eye * mMotionWidth), 0},
+                                             {static_cast<int32_t>(mMotionWidth), static_cast<int32_t>(mMotionHeight)}};
+      warp.appSpaceDeltaPose = {{0, 0, 0, 1}, {0, 0, 0}}; // the stage does not move
+      warp.depthSubImage.swapchain = mMotionDepthSwapchain;
+      warp.depthSubImage.imageRect = warp.motionVectorSubImage.imageRect;
+      warp.minDepth = 0.0f;
+      warp.maxDepth = 1.0f;
+      warp.nearZ = kNear;
+      warp.farZ = kFar;
+      view.next = &warp;
     }
   }
   mLayer = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
