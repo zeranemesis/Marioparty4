@@ -136,6 +136,10 @@ bool StereoView::init(XrInstance instance, XrSession session, XrSystemId system,
     return false;
   }
 
+  char ringProperty[PROP_VALUE_MAX]{};
+  __system_property_get("debug.partyboard.ring", ringProperty);
+  if (const int ring = std::atoi(ringProperty); ring >= 2 && ring <= 6) mSlotCount = static_cast<size_t>(ring);
+  LOGI("Stereo: ring of %zu images (debug.partyboard.ring=%s)", mSlotCount, ringProperty[0] != '\0' ? ringProperty : "unset");
   char timerProperty[PROP_VALUE_MAX]{};
   __system_property_get("debug.partyboard.gpu_timing", timerProperty);
   const auto* extensions = reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
@@ -275,7 +279,7 @@ bool StereoView::allocate_images(uint32_t eyeWidth, uint32_t eyeHeight, uint32_t
     glBindTexture(GL_TEXTURE_2D, 0);
     return true;
   };
-  std::array<Slot, 3> replacement;
+  std::vector<Slot> replacement(mSlotCount);
   for (auto& slot : replacement) {
     if (!make(eyeWidth * 2, eyeHeight, slot.buffer, slot.eglImage, slot.texture) ||
         !make(hudWidth, hudWidth * 3 / 4, slot.hudBuffer, slot.hudEglImage, slot.hudTexture)) {
@@ -303,7 +307,7 @@ bool StereoView::allocate_images(uint32_t eyeWidth, uint32_t eyeHeight, uint32_t
 
 void StereoView::free_images() { free_images(mSlots); }
 
-void StereoView::free_images(std::array<Slot, 3>& slots) {
+void StereoView::free_images(std::vector<Slot>& slots) {
   const auto release = [this](AHardwareBuffer*& buffer, EGLImageKHR& eglImage, GLuint& texture) {
     if (texture != 0) {
       glDeleteTextures(1, &texture);
@@ -385,56 +389,79 @@ void StereoView::load_hidden_area(bool available) {
     LOGW("Hidden area: xrGetVisibilityMaskKHR missing");
     return;
   }
-  std::vector<XrVector2f> outline[2];
-  for (uint32_t eye = 0; eye < 2; ++eye) {
-    // The visible area's outline: whatever is outside it is hidden.
+  // One mask of an eye, its points in index order (empty: none).
+  const auto read = [&](uint32_t eye, XrVisibilityMaskTypeKHR type, XrResult& result) {
+    std::vector<XrVector2f> points;
     XrVisibilityMaskKHR mask{XR_TYPE_VISIBILITY_MASK_KHR};
-    if (XR_FAILED(getMask(mSession, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, eye,
-                          XR_VISIBILITY_MASK_TYPE_LINE_LOOP_KHR, &mask)) ||
-        mask.vertexCountOutput < 3) {
-      LOGW("Hidden area: no visible outline for eye %u", eye);
-      return;
-    }
-    outline[eye].resize(mask.vertexCountOutput);
+    result = getMask(mSession, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, eye, type, &mask);
+    if (XR_FAILED(result) || mask.vertexCountOutput == 0 || mask.indexCountOutput == 0) return points;
+    std::vector<XrVector2f> vertices(mask.vertexCountOutput);
     std::vector<uint32_t> indices(mask.indexCountOutput);
     mask.vertexCapacityInput = mask.vertexCountOutput;
-    mask.vertices = outline[eye].data();
+    mask.vertices = vertices.data();
     mask.indexCapacityInput = mask.indexCountOutput;
     mask.indices = indices.data();
-    if (XR_FAILED(getMask(mSession, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, eye,
-                          XR_VISIBILITY_MASK_TYPE_LINE_LOOP_KHR, &mask))) {
-      LOGW("Hidden area: outline of eye %u unreadable", eye);
-      return;
+    result = getMask(mSession, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, eye, type, &mask);
+    if (XR_FAILED(result)) return points;
+    for (const uint32_t index : indices) {
+      if (index < vertices.size()) points.push_back(vertices[index]);
     }
-    // A line loop's indices give its vertices' order.
-    if (!indices.empty()) {
-      std::vector<XrVector2f> ordered;
-      ordered.reserve(indices.size());
-      for (const uint32_t index : indices) {
-        if (index < outline[eye].size()) ordered.push_back(outline[eye][index]);
-      }
-      outline[eye] = std::move(ordered);
+    return points;
+  };
+  // The visible outline (whatever is outside it is hidden), else the hidden
+  // triangles: the runtime may give either.
+  std::vector<XrVector2f> outline[2], triangles[2];
+  for (uint32_t eye = 0; eye < 2; ++eye) {
+    XrResult loopResult = XR_SUCCESS, meshResult = XR_SUCCESS;
+    outline[eye] = read(eye, XR_VISIBILITY_MASK_TYPE_LINE_LOOP_KHR, loopResult);
+    if (outline[eye].size() < 3) {
+      outline[eye].clear();
+      triangles[eye] = read(eye, XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR, meshResult);
+      triangles[eye].resize(triangles[eye].size() / 3 * 3);
+    }
+    LOGI("Hidden area, eye %u: outline %zu points (result %d), hidden mesh %zu triangles (result %d)", eye,
+         outline[eye].size(), loopResult, triangles[eye].size() / 3, meshResult);
+    if (outline[eye].empty() && triangles[eye].empty()) {
+      LOGW("Hidden area: none given for eye %u, every pixel is drawn", eye);
+      return;
     }
   }
   std::lock_guard lock{mMutex};
-  mVisibleOutline[0] = std::move(outline[0]);
-  mVisibleOutline[1] = std::move(outline[1]);
+  for (int eye = 0; eye < 2; ++eye) {
+    mVisibleOutline[eye] = std::move(outline[eye]);
+    mHiddenTriangles[eye] = std::move(triangles[eye]);
+  }
   mHiddenPending = true;
 }
 
 namespace {
 
-// Rectangles of an eye's image (0..1, from its top-left) wholly outside the
-// lenses' visible outline, on a grid: a cell counts when no edge of the
-// outline crosses it and its center is outside. Each row's runs of such
-// cells are one rectangle, and a run equal to the one above extends it.
-std::vector<float> hidden_rects(const std::vector<XrVector2f>& outline, const XrFovf& fov, float& hiddenPart) {
+// Rectangles of an eye's image (0..1, from its top-left) the lenses never
+// show, on a grid. With the visible outline, a cell counts when no edge of
+// the outline crosses it and its center is outside; with the hidden
+// triangles, when one triangle holds its four corners. Each row's runs of
+// such cells are one rectangle, and a run equal to the one above extends it.
+std::vector<float> hidden_rects(const std::vector<XrVector2f>& outline, const std::vector<XrVector2f>& triangles,
+                                const XrFovf& fov, float& hiddenPart) {
   constexpr int kGrid = 48;
   const float l = std::tan(fov.angleLeft), r = std::tan(fov.angleRight);
   const float d = std::tan(fov.angleDown), u = std::tan(fov.angleUp);
-  std::vector<std::array<float, 2>> points;
+  const auto to_image = [&](const XrVector2f& v) { return std::array<float, 2>{(v.x - l) / (r - l), (u - v.y) / (u - d)}; };
+  std::vector<std::array<float, 2>> points, corners;
   points.reserve(outline.size());
-  for (const auto& v : outline) points.push_back({(v.x - l) / (r - l), (u - v.y) / (u - d)});
+  for (const auto& v : outline) points.push_back(to_image(v));
+  corners.reserve(triangles.size());
+  for (const auto& v : triangles) corners.push_back(to_image(v));
+  // Whether (x, y) is inside triangle t, edges included.
+  const auto in_triangle = [&](size_t t, float x, float y) {
+    const auto& a = corners[t];
+    const auto& b = corners[t + 1];
+    const auto& c = corners[t + 2];
+    const float d1 = (x - b[0]) * (a[1] - b[1]) - (a[0] - b[0]) * (y - b[1]);
+    const float d2 = (x - c[0]) * (b[1] - c[1]) - (b[0] - c[0]) * (y - c[1]);
+    const float d3 = (x - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (y - a[1]);
+    return !((d1 < 0.f || d2 < 0.f || d3 < 0.f) && (d1 > 0.f || d2 > 0.f || d3 > 0.f));
+  };
   const auto inside = [&](float x, float y) {
     bool in = false;
     for (size_t i = 0, j = points.size() - 1; i < points.size(); j = i++) {
@@ -475,9 +502,15 @@ std::vector<float> hidden_rects(const std::vector<XrVector2f>& outline, const Xr
       bool hidden = false;
       if (col < kGrid) {
         const float x0 = static_cast<float>(col) / kGrid, x1 = static_cast<float>(col + 1) / kGrid;
-        hidden = !inside((x0 + x1) * 0.5f, (y0 + y1) * 0.5f);
-        for (size_t i = 0, j = points.size() - 1; hidden && i < points.size(); j = i++) {
-          hidden = !crosses(points[j], points[i], x0, y0, x1, y1);
+        if (!points.empty()) {
+          hidden = !inside((x0 + x1) * 0.5f, (y0 + y1) * 0.5f);
+          for (size_t i = 0, j = points.size() - 1; hidden && i < points.size(); j = i++) {
+            hidden = !crosses(points[j], points[i], x0, y0, x1, y1);
+          }
+        } else {
+          for (size_t t = 0; !hidden && t + 2 < corners.size(); t += 3) {
+            hidden = in_triangle(t, x0, y0) && in_triangle(t, x1, y0) && in_triangle(t, x0, y1) && in_triangle(t, x1, y1);
+          }
         }
         hiddenCells += hidden;
       }
@@ -519,18 +552,35 @@ uint32_t StereoView::hidden_area(uint32_t eye, float* rects, uint32_t capacity, 
 }
 
 void StereoView::update(const XrView (&views)[2], const XrPosef& world, float scale, bool enabled, float hudWidth, float hudHeight) {
+  // Headset measurements (debug.partyboard.freeze 1, with the game's frozen
+  // simulation): the eyes keep the views they had, so every image of an A/B
+  // is the very same work whatever the head does (the compositor still
+  // places each image with the poses it was drawn with).
+  static bool frozen = false;
+  static auto frozenReadAt = std::chrono::steady_clock::time_point{};
+  if (const auto now = std::chrono::steady_clock::now(); now - frozenReadAt >= std::chrono::seconds(1)) {
+    frozenReadAt = now;
+    char value[PROP_VALUE_MAX]{};
+    __system_property_get("debug.partyboard.freeze", value);
+    const bool wanted = value[0] == '1';
+    if (wanted != frozen) LOGI("Stereo: eyes' views %s (debug.partyboard.freeze)", wanted ? "frozen" : "following the head");
+    frozen = wanted;
+  }
   std::lock_guard lock{mMutex};
-  mViews[0] = views[0];
-  mViews[1] = views[1];
+  if (!frozen || !(mViews[0].fov.angleRight > mViews[0].fov.angleLeft)) {
+    mViews[0] = views[0];
+    mViews[1] = views[1];
+  }
   if (mHiddenPending && views[0].fov.angleRight > views[0].fov.angleLeft &&
       views[1].fov.angleRight > views[1].fov.angleLeft) {
     mHiddenPending = false;
     float part[2]{};
-    for (int eye = 0; eye < 2; ++eye) mHiddenRects[eye] = hidden_rects(mVisibleOutline[eye], views[eye].fov, part[eye]);
+    for (int eye = 0; eye < 2; ++eye) {
+      mHiddenRects[eye] = hidden_rects(mVisibleOutline[eye], mHiddenTriangles[eye], views[eye].fov, part[eye]);
+    }
     ++mHiddenVersion;
-    LOGI("Hidden area: left %zu rectangles (%.1f%% of the eye), right %zu (%.1f%%), outline %zu/%zu points",
-         mHiddenRects[0].size() / 4, part[0] * 100.f, mHiddenRects[1].size() / 4, part[1] * 100.f,
-         mVisibleOutline[0].size(), mVisibleOutline[1].size());
+    LOGI("Hidden area: left %zu rectangles (%.1f%% of the eye), right %zu (%.1f%%)", mHiddenRects[0].size() / 4,
+         part[0] * 100.f, mHiddenRects[1].size() / 4, part[1] * 100.f);
   }
   pose_matrix(world, scale, mWorld);
   mEnabled = enabled && mSwapchain != XR_NULL_HANDLE;
@@ -559,6 +609,11 @@ bool StereoView::game_frame(StereoFrame& out) {
   if (free == mSlots.end()) {
     ++mRingFullCount;
     ++mAdaptRingFull;
+    for (const auto& slot : mSlots) {
+      mFullDrawing += slot.state == State::Drawing;
+      mFullReady += slot.state == State::Ready;
+      mFullCopying += slot.state == State::Copying;
+    }
     return false; // the headset is behind: this frame goes to the flat screen only
   }
   ++mLeaseCount;
@@ -579,6 +634,8 @@ bool StereoView::game_frame(StereoFrame& out) {
   out.drawHud = free->hud ? 1 : 0;
   out.generation = mGeneration;
   free->state = State::Drawing;
+  free->leaseNs = steady_ns();
+  free->submitNs = 0;
   free->tag = mNextTag++;
   free->views[0] = mViews[0];
   free->views[1] = mViews[1];
@@ -702,7 +759,7 @@ void StereoView::adapt_resolution() {
 bool StereoView::images(void** eyeBuffers, void** hudBuffers, uint32_t capacity, uint32_t& count, uint32_t& width,
                         uint32_t& height, uint32_t& generation, uint32_t& hudWidth, uint32_t& hudHeight) {
   std::lock_guard lock{mMutex};
-  if (capacity < mSlots.size() || mSlots[0].buffer == nullptr || mSlots[0].hudBuffer == nullptr) {
+  if (mSlots.empty() || capacity < mSlots.size() || mSlots[0].buffer == nullptr || mSlots[0].hudBuffer == nullptr) {
     return false;
   }
   // Each buffer gets a reference for the caller, who imports it outside this
@@ -771,6 +828,7 @@ void StereoView::submitted(uint32_t image, uint64_t tag, int syncFd, bool hasWor
     return;
   }
   mSlots[image].state = State::Ready;
+  mSlots[image].submitNs = steady_ns();
   mSlots[image].fence = syncFd;
   mSlots[image].hasWorld = hasWorld;
 }
@@ -874,7 +932,8 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
     }
   }
   // When the GPU finished it, before EGL takes the fence.
-  const int64_t finishedNs = newest != nullptr && newest->startNs != 0 ? fence_signal_time_ns(fence) : 0;
+  const int64_t doneNs = newest != nullptr ? fence_signal_time_ns(fence) : 0;
+  const int64_t finishedNs = newest != nullptr && newest->startNs != 0 ? doneNs : 0;
 
   // Dynamic resolution changed: new images at the new size, once every image
   // is back (game_frame() gives no lease meanwhile).
@@ -1014,6 +1073,15 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
     }
     std::lock_guard lock{mMutex};
     if (finishedNs > newest->startNs) mPacer.finished(finishedNs - newest->startNs);
+    {
+      const int64_t copyNs = steady_ns();
+      if (newest->submitNs > newest->leaseNs && newest->leaseNs != 0) mStageRecord.add(newest->submitNs - newest->leaseNs);
+      if (doneNs > newest->submitNs && newest->submitNs != 0) {
+        mStageGpu.add(doneNs - newest->submitNs);
+        mStageWait.add(copyNs - doneNs);
+      }
+      if (newest->leaseNs != 0) mStageTotal.add(copyNs - newest->leaseNs);
+    }
     mCopyMaxMs = std::max(mCopyMaxMs,
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - copyStart).count());
     if (copyFence != nullptr) {
@@ -1047,6 +1115,13 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
           mDestinationAcquireMaxMs[1], mDestinationWaitMaxMs[1], mHolds[0], mHolds[1], mHolds[2], mHolds[3],
           mLatencyMinMs, mLatencyMaxMs, mPacing, mPacer.work_ns() / 1e6, static_cast<long long>(mPacer.looks()),
           mPacer.phase_ns() / 1e6);
+      LOGI("Stereo pipeline: images=%u record=%.1f/%.1fms gpu=%.1f/%.1fms wait=%.1f/%.1fms total=%.1f/%.1fms "
+           "(avg/max) ring=%zu full=%u (at full, images drawing/ready/copying: %u/%u/%u)",
+           mStageTotal.count, mStageRecord.avg(), mStageRecord.max, mStageGpu.avg(), mStageGpu.max, mStageWait.avg(),
+           mStageWait.max, mStageTotal.avg(), mStageTotal.max, mSlots.size(), mRingFullCount, mFullDrawing, mFullReady,
+           mFullCopying);
+      mStageRecord = mStageGpu = mStageWait = mStageTotal = Stage{};
+      mFullDrawing = mFullReady = mFullCopying = 0;
       mHolds.fill(0);
       mLatencyMinMs = mLatencyMaxMs = 0;
       // A/B switch, read every 2 s: `adb shell setprop debug.partyboard.xr_pacing 0`.

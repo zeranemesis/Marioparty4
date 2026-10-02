@@ -94,6 +94,126 @@
    std::vector<uint32_t> sequence;
    if (desc.order != nullptr && desc.order->size() == leftDraws.size()) {
      sequence = stereo::draw_sequence(*desc.order, desc.sortOpaque);
+@@ -1460,16 +1499,23 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+     stereo::begin_access(passInfo.stereoImage, passInfo.stereoTag, passInfo.stereoHasWorld, passInfo.stereoHud);
+   }
+   const auto label = fmt::format("Render pass {}", passIndex);
++  // The headset's eyes' pass and its HUD's: timed by the GPU (stereo.cpp).
++  const bool eyesPass = passInfo.stereoImage >= 0;
++  const bool hudPass = !eyesPass && passInfo.label == "Stereo HUD";
+   const wgpu::RenderPassDescriptor renderPassDescriptor{
+       .label = passInfo.label.empty() ? label.c_str() : passInfo.label.c_str(),
+       .colorAttachmentCount = attachments.size(),
+       .colorAttachments = attachments.data(),
+       .depthStencilAttachment = depthStencilAttachmentPtr,
++      .timestampWrites = eyesPass || hudPass ? stereo::pass_timestamps(hudPass) : nullptr,
+   };
+ 
+   auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
+   render_pass(pass, frame, passInfo);
+   pass.End();
++  if (renderPassDescriptor.timestampWrites != nullptr) {
++    stereo::pass_timestamps_resolve(cmd, hudPass);
++  }
+ 
+   if (passInfo.captureDepthSnapshot) {
+     depth_peek::encode_frame_snapshot(cmd, passInfo.copySourceDepthView, passInfo.targetSize, passInfo.msaaSamples);
+--- a/lib/gfx/render_worker.cpp
++++ b/lib/gfx/render_worker.cpp
+@@ -6,8 +6,57 @@
+ 
+ #include <tracy/Tracy.hpp>
+ 
++#include "../internal.hpp"
++
+ namespace aurora::gfx::render_worker {
+ namespace {
++Module Log("aurora::gfx::render_worker");
++
++// The worker's time per kind of item, every 5 s ("Render worker"): how long
++// it encodes a frame's passes and submits them, how busy it is, and how far
++// behind the game it runs (items waiting). On a headset, a worker near 100%
++// busy caps the images per second before the GPU does.
++struct ItemStat {
++  double sum = 0, max = 0;
++  uint32_t count = 0;
++};
++ItemStat g_itemStats[5];
++double g_busyMs = 0;
++size_t g_queueMax = 0;
++// The game thread waiting for a free frame slot (FrameSlotPool::acquire):
++// the worker or the GPU behind the game.
++std::atomic<int64_t> g_slotWaitNs = 0, g_slotWaitMaxNs = 0;
++std::atomic<uint32_t> g_slotWaits = 0;
++std::chrono::steady_clock::time_point g_statsAt = std::chrono::steady_clock::now();
++
++void record_item(ItemType type, std::chrono::steady_clock::duration took) {
++  const double ms = std::chrono::duration<double, std::milli>(took).count();
++  auto& stat = g_itemStats[std::min<size_t>(static_cast<size_t>(type), std::size(g_itemStats) - 1)];
++  stat.sum += ms;
++  stat.max = std::max(stat.max, ms);
++  ++stat.count;
++  g_busyMs += ms;
++  const auto now = std::chrono::steady_clock::now();
++  const double elapsed = std::chrono::duration<double, std::milli>(now - g_statsAt).count();
++  if (elapsed < 5000.0) {
++    return;
++  }
++  const auto avg = [](const ItemStat& s) { return s.count != 0 ? s.sum / s.count : 0.0; };
++  const auto& begin = g_itemStats[static_cast<size_t>(ItemType::BeginFrame)];
++  const auto& encode = g_itemStats[static_cast<size_t>(ItemType::EncodePass)];
++  const auto& end = g_itemStats[static_cast<size_t>(ItemType::EndFrame)];
++  const double frames = end.count != 0 ? end.count : 1;
++  Log.info("Render worker: {} frames, per frame begin {:.2f} ms, passes {:.2f} ms ({} passes, max {:.2f}), "
++           "end/submit {:.2f} ms (max {:.2f}), busy {:.0f}%, queue max {}; game waited for a frame slot {} times, "
++           "{:.1f} ms in all (max {:.1f})",
++           end.count, begin.sum / frames, encode.sum / frames, static_cast<uint32_t>(encode.count / frames), encode.max,
++           avg(end), end.max, 100.0 * g_busyMs / elapsed, g_queueMax, g_slotWaits.exchange(0),
++           g_slotWaitNs.exchange(0) / 1e6, g_slotWaitMaxNs.exchange(0) / 1e6);
++  for (auto& s : g_itemStats) s = {};
++  g_busyMs = 0;
++  g_queueMax = 0;
++  g_statsAt = now;
++}
+ constexpr size_t QueueCapacity = 256;
+ // Nothing runs on a timeout (the loop just waits again), and both enqueue and
+ // close() notify, so the worker can sleep until there is work. A 1 ms timeout
+@@ -51,7 +100,10 @@ void worker_main() {
+ 
+     if (item->work) {
+       ZoneScopedN("QueueItem work");
++      const auto started = std::chrono::steady_clock::now();
+       item->work();
++      g_queueMax = std::max(g_queueMax, g_queue.size());
++      record_item(item->type, std::chrono::steady_clock::now() - started);
+     }
+     complete_sync(item->sync);
+     g_pendingItems.fetch_sub(1, std::memory_order_acq_rel);
+@@ -144,6 +196,8 @@ FrameSlotPool::FrameSlotPool(size_t slotCount) : m_freeSlots(slotCount, true) {}
+ 
+ size_t FrameSlotPool::acquire() {
+   std::unique_lock lock{m_mutex};
++  const bool anyFree = std::find(m_freeSlots.begin(), m_freeSlots.end(), true) != m_freeSlots.end();
++  const auto waitStart = std::chrono::steady_clock::now();
+   m_cv.wait(lock, [&] {
+     for (const bool free : m_freeSlots) {
+       if (free) {
+@@ -152,6 +206,15 @@ size_t FrameSlotPool::acquire() {
+     }
+     return false;
+   });
++  if (!anyFree) {
++    const int64_t waited =
++        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - waitStart).count();
++    g_slotWaitNs.fetch_add(waited, std::memory_order_relaxed);
++    g_slotWaits.fetch_add(1, std::memory_order_relaxed);
++    int64_t max = g_slotWaitMaxNs.load(std::memory_order_relaxed);
++    while (waited > max && !g_slotWaitMaxNs.compare_exchange_weak(max, waited, std::memory_order_relaxed)) {
++    }
++  }
+   for (size_t i = 0; i < m_freeSlots.size(); ++i) {
+     if (m_freeSlots[i]) {
+       m_freeSlots[i] = false;
 --- /dev/null
 +++ b/lib/gfx/rgba_mips.hpp
 @@ -0,0 +1,169 @@
@@ -281,7 +401,35 @@
  // The game's own frame is not on show in the headset (aurora.cpp skips presenting it).
  std::atomic_bool g_screenHidden = false;
  // 8x once a headset uses the eyes' images (gx.cpp's samplers read it), or
-@@ -154,11 +160,15 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
+@@ -128,6 +134,27 @@ float g_sortKey = -1.f;
+ uint32_t g_sortObject = 0;
+ std::vector<DrawOrder> g_eyeOrder;
+ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
++// The world draws by kind (DrawKind), for "Stereo kinds" and
++// debug.partyboard.skip_draws: what each kind costs the GPU is what removing
++// it saves, on a frozen scene (debug.partyboard.freeze).
++enum DrawKind : uint32_t {
++  KindOpaque = 1u << 0,    // sortable: an object's opaque draw
++  KindBlend = 1u << 1,     // blended and not sortable (the game's translucent pass)
++  KindAdditive = 1u << 2,  // blended onto the target (dst factor ONE)
++  KindNoDepth = 1u << 3,   // no depth test: every fragment shaded
++  KindAlphaTest = 1u << 4, // alpha compare: fragments discarded in the shader
++  KindOutside = 1u << 5,   // outside any object (effects, scenery, shadows)
++  KindTev3 = 1u << 6,      // three TEV stages or more
++  KindFog = 1u << 7,       // fogged
++  KindIndirect = 1u << 8,  // indirect texturing
++};
++constexpr std::pair<const char*, uint32_t> kDrawKinds[] = {
++    {"opaque", KindOpaque}, {"blend", KindBlend}, {"additive", KindAdditive},   {"nodepth", KindNoDepth},
++    {"alphatest", KindAlphaTest}, {"outside", KindOutside}, {"tev3", KindTev3}, {"fog", KindFog},
++    {"indirect", KindIndirect},
++};
++uint64_t g_statKinds[std::size(kDrawKinds)]{};
++uint64_t g_statKindsTotal = 0, g_statSkipped = 0;
+ // Headset A/B switches, read again every 2 s so a capture can flip them
+ // without restarting the game. On the Toad board (Quest 3, build 118,
+ // 2026-09-28) the sort with the opaque blend off shaded 35% fewer fragments
+@@ -154,11 +181,22 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
  //                                        across the table, where 8x reads the
  //                                        most texels: an A/B tells what the
  //                                        textures cost before compressing them
@@ -294,16 +442,37 @@
    bool opaqueBlendOff = false;
    uint16_t anisotropy = 8;
 +  bool hiddenArea = true;
++  uint32_t skipKinds = 0; // debug.partyboard.skip_draws: DrawKind bits
++  // debug.partyboard.alpha_test opaque-off: the opaque draws of objects lose
++  // their alpha test (the game's GEQUAL 1, everywhere): no discard in their
++  // shader, so the GPU tests and writes depth before shading them. A
++  // measurement first: a cut-out texel (alpha 0) of such a draw then writes
++  // depth and may hide what is behind it.
++  bool alphaTestOff = false;
  };
  Switches g_switches;
  std::chrono::steady_clock::time_point g_switchesAt{};
-@@ -183,12 +193,17 @@ void refresh_switches() {
+@@ -183,12 +221,31 @@ void refresh_switches() {
    __system_property_get("debug.partyboard.anisotropy", value);
    const std::string_view anisotropy{value};
    read.anisotropy = anisotropy == "1" ? 1 : anisotropy == "2" ? 2 : anisotropy == "4" ? 4 : anisotropy == "16" ? 16 : 8;
 +  value[0] = '\0';
 +  __system_property_get("debug.partyboard.visibility_mask", value);
 +  read.hiddenArea = value[0] != '0';
++  value[0] = '\0';
++  __system_property_get("debug.partyboard.alpha_test", value);
++  read.alphaTestOff = std::string_view{value} == "opaque-off";
++  if (read.alphaTestOff != g_switches.alphaTestOff) {
++    Log.info("Stereo: alpha test {} on opaque draws (debug.partyboard.alpha_test)", read.alphaTestOff ? "off" : "on");
++  }
++  value[0] = '\0';
++  __system_property_get("debug.partyboard.skip_draws", value);
++  for (const auto& [name, bit] : kDrawKinds) {
++    if (std::strstr(value, name) != nullptr) read.skipKinds |= bit;
++  }
++  if (read.skipKinds != g_switches.skipKinds) {
++    Log.info("Stereo: skipping world draws of kinds '{}' (debug.partyboard.skip_draws, a measurement)", value);
++  }
    static bool logged = false;
    if (!logged || read.sortOpaque != g_switches.sortOpaque || read.crossingPerEye != g_switches.crossingPerEye ||
 -      read.opaqueBlendOff != g_switches.opaqueBlendOff || read.anisotropy != g_switches.anisotropy) {
@@ -318,7 +487,42 @@
    }
    g_switches = read;
    // New samplers from the next draw on (gx.cpp builds them per descriptor).
-@@ -506,6 +521,16 @@ void end_frame() noexcept {
+@@ -397,9 +454,34 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+                     config.blendFacDst == GX_BL_INVSRCALPHA)),
+   };
+   g_statSortable += order.sortable;
++  {
++    const bool blended = config.blendMode == GX_BM_BLEND || config.blendMode == GX_BM_SUBTRACT;
++    uint32_t kinds = 0;
++    kinds |= order.sortable ? KindOpaque : 0;
++    kinds |= blended && !order.sortable ? KindBlend : 0;
++    kinds |= config.blendMode == GX_BM_BLEND && config.blendFacDst == GX_BL_ONE ? KindAdditive : 0;
++    kinds |= !config.depthCompare ? KindNoDepth : 0;
++    kinds |= static_cast<bool>(config.shaderConfig.alphaCompare) ? KindAlphaTest : 0;
++    kinds |= !inObject ? KindOutside : 0;
++    kinds |= config.shaderConfig.tevStageCount >= 3 ? KindTev3 : 0;
++    kinds |= config.shaderConfig.fogType != GX_FOG_NONE ? KindFog : 0;
++    kinds |= config.shaderConfig.numIndStages > 0 ? KindIndirect : 0;
++    ++g_statKindsTotal;
++    for (size_t k = 0; k < std::size(kDrawKinds); ++k) {
++      g_statKinds[k] += (kinds & kDrawKinds[k].second) != 0;
++    }
++    if ((kinds & g_switches.skipKinds) != 0) {
++      ++g_statSkipped;
++      g_statSortable -= order.sortable;
++      return true; // a measurement: neither the eyes nor the hidden screen draw it
++    }
++  }
+   if (g_switches.opaqueBlendOff && order.sortable && spatialConfig.blendMode == GX_BM_BLEND) {
+     spatialConfig.blendMode = GX_BM_NONE;
+   }
++  if (g_switches.alphaTestOff && order.sortable) {
++    spatialConfig.shaderConfig.alphaCompare = gx::AlphaCompare{};
++  }
+   // An object that reaches both eyes, drawn once per eye when asked: no
+   // fragment test, so the GPU keeps rejecting its hidden fragments early.
+   const bool crossingPerEye = g_switches.crossingPerEye && inObject && !g_uncut;
+@@ -506,6 +588,16 @@ void end_frame() noexcept {
  
    const bool hasWorld = !g_eyeDraws[0].empty();
    const size_t worldDraws = g_eyeDraws[0].size();
@@ -335,7 +539,7 @@
    const uint32_t eyeStride = g_width / 2;
    PassDesc desc{
        .color = samples > 1 ? g_color.view : image.view,
-@@ -524,6 +549,7 @@ void end_frame() noexcept {
+@@ -524,6 +616,7 @@ void end_frame() noexcept {
        .instanced = &g_eyeInstanced,
        .order = &g_eyeOrder,
        .sortOpaque = g_switches.sortOpaque,
@@ -343,7 +547,152 @@
        .drawHud = g_frameDrawHud,
    };
    enqueue_pass(desc);
-@@ -827,6 +853,22 @@ extern "C" void AuroraStereoSetSortKey(float key) {
+@@ -573,6 +666,15 @@ void end_frame() noexcept {
+              recorded != 0 ? g_statSortable * 100 / recorded : 0, g_switches.sortOpaque ? " (sorted)" : "",
+              recorded != 0 ? g_statCrossingPerEye * 100 / recorded : 0);
+     g_statInstanced = g_statPerEye = g_statSortable = g_statCrossingPerEye = 0;
++    if (g_statKindsTotal != 0) {
++      std::string kinds;
++      for (size_t k = 0; k < std::size(kDrawKinds); ++k) {
++        kinds += fmt::format(" {}={}%", kDrawKinds[k].first, g_statKinds[k] * 100 / g_statKindsTotal);
++      }
++      Log.info("Stereo kinds:{} skipped={}%", kinds, g_statSkipped * 100 / g_statKindsTotal);
++    }
++    std::fill(std::begin(g_statKinds), std::end(g_statKinds), 0);
++    g_statKindsTotal = g_statSkipped = 0;
+     statsAt = now;
+     statFrames = statWorld = statHud = 0;
+     statWorldMax = 0;
+@@ -622,8 +724,128 @@ void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept
+ #endif
+ }
+ 
++#if defined(__ANDROID__)
++namespace {
++// A frame's GPU timestamps: queries 0-1 the eyes' pass, 2-3 the HUD's.
++struct PassTimer {
++  enum class State { Free, Encoding, Encoded, Mapping };
++  std::atomic<State> state{State::Free}; // the map callback may run on another thread
++  wgpu::QuerySet queries;
++  wgpu::Buffer resolve;  // QueryResolve, 512 bytes: the eyes' at 0, the HUD's at 256
++  wgpu::Buffer readback; // MapRead
++  bool eyes = false, hud = false;
++  wgpu::PassTimestampWrites eyesWrites, hudWrites;
++};
++std::array<PassTimer, 8> g_passTimers;
++int g_encodingTimer = -1;
++std::mutex g_gpuStatsMutex;
++double g_gpuEyesSum = 0, g_gpuEyesMax = 0, g_gpuHudSum = 0, g_gpuHudMax = 0;
++uint32_t g_gpuEyesCount = 0, g_gpuHudCount = 0, g_gpuTimerBusy = 0;
++std::chrono::steady_clock::time_point g_gpuStatsAt = std::chrono::steady_clock::now();
++
++void record_gpu_times(double eyesMs, double hudMs) {
++  std::lock_guard lock{g_gpuStatsMutex};
++  if (eyesMs > 0) {
++    g_gpuEyesSum += eyesMs;
++    g_gpuEyesMax = std::max(g_gpuEyesMax, eyesMs);
++    ++g_gpuEyesCount;
++  }
++  if (hudMs > 0) {
++    g_gpuHudSum += hudMs;
++    g_gpuHudMax = std::max(g_gpuHudMax, hudMs);
++    ++g_gpuHudCount;
++  }
++  const auto now = std::chrono::steady_clock::now();
++  if (now - g_gpuStatsAt < std::chrono::seconds(5)) return;
++  Log.info("Stereo GPU: eyes' pass {:.2f} ms avg / {:.2f} max ({} images), HUD pass {:.2f} ms avg / {:.2f} max ({}), "
++           "timers busy {}",
++           g_gpuEyesCount ? g_gpuEyesSum / g_gpuEyesCount : 0.0, g_gpuEyesMax, g_gpuEyesCount,
++           g_gpuHudCount ? g_gpuHudSum / g_gpuHudCount : 0.0, g_gpuHudMax, g_gpuHudCount, g_gpuTimerBusy);
++  g_gpuEyesSum = g_gpuEyesMax = g_gpuHudSum = g_gpuHudMax = 0;
++  g_gpuEyesCount = g_gpuHudCount = g_gpuTimerBusy = 0;
++  g_gpuStatsAt = now;
++}
++} // namespace
++#endif
++
++const wgpu::PassTimestampWrites* pass_timestamps(bool hud) noexcept {
++#if defined(__ANDROID__)
++  if (!webgpu::g_timestampsEnabled) return nullptr;
++  if (!hud) {
++    g_encodingTimer = -1;
++    for (size_t i = 0; i < g_passTimers.size(); ++i) {
++      if (g_passTimers[i].state.load() == PassTimer::State::Free) {
++        g_encodingTimer = static_cast<int>(i);
++        break;
++      }
++    }
++    if (g_encodingTimer < 0) {
++      std::lock_guard lock{g_gpuStatsMutex};
++      ++g_gpuTimerBusy;
++      return nullptr;
++    }
++    auto& timer = g_passTimers[g_encodingTimer];
++    if (!timer.queries) {
++      const wgpu::QuerySetDescriptor queryDesc{.label = "Stereo pass timestamps", .type = wgpu::QueryType::Timestamp, .count = 4};
++      timer.queries = webgpu::g_device.CreateQuerySet(&queryDesc);
++      const wgpu::BufferDescriptor resolveDesc{
++          .label = "Stereo timestamps resolve", .usage = wgpu::BufferUsage::QueryResolve | wgpu::BufferUsage::CopySrc, .size = 512};
++      timer.resolve = webgpu::g_device.CreateBuffer(&resolveDesc);
++      const wgpu::BufferDescriptor readbackDesc{
++          .label = "Stereo timestamps readback", .usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst, .size = 512};
++      timer.readback = webgpu::g_device.CreateBuffer(&readbackDesc);
++      timer.eyesWrites = {.querySet = timer.queries, .beginningOfPassWriteIndex = 0, .endOfPassWriteIndex = 1};
++      timer.hudWrites = {.querySet = timer.queries, .beginningOfPassWriteIndex = 2, .endOfPassWriteIndex = 3};
++    }
++    timer.state = PassTimer::State::Encoding;
++    timer.eyes = timer.hud = false;
++    return &timer.eyesWrites;
++  }
++  if (g_encodingTimer < 0) return nullptr;
++  return &g_passTimers[g_encodingTimer].hudWrites;
++#else
++  (void)hud;
++  return nullptr;
++#endif
++}
++
++void pass_timestamps_resolve(wgpu::CommandEncoder& cmd, bool hud) noexcept {
++#if defined(__ANDROID__)
++  if (g_encodingTimer < 0) return;
++  auto& timer = g_passTimers[g_encodingTimer];
++  cmd.ResolveQuerySet(timer.queries, hud ? 2 : 0, 2, timer.resolve, hud ? 256 : 0);
++  cmd.CopyBufferToBuffer(timer.resolve, hud ? 256 : 0, timer.readback, hud ? 256 : 0, 16);
++  (hud ? timer.hud : timer.eyes) = true;
++  timer.state = PassTimer::State::Encoded;
++#else
++  (void)cmd;
++  (void)hud;
++#endif
++}
++
+ void after_submit() noexcept {
+ #if defined(__ANDROID__)
++  // This frame's timestamps went to the GPU with it: read them once done.
++  for (auto& timer : g_passTimers) {
++    if (timer.state.load() != PassTimer::State::Encoded) continue;
++    timer.state = PassTimer::State::Mapping;
++    PassTimer* const self = &timer;
++    timer.readback.MapAsync(wgpu::MapMode::Read, 0, 512, wgpu::CallbackMode::AllowSpontaneous,
++                            [self](wgpu::MapAsyncStatus status, wgpu::StringView) {
++                              double eyesMs = 0, hudMs = 0;
++                              if (status == wgpu::MapAsyncStatus::Success) {
++                                const auto* data = static_cast<const uint64_t*>(self->readback.GetConstMappedRange(0, 512));
++                                if (data != nullptr) {
++                                  if (self->eyes && data[1] > data[0]) eyesMs = (data[1] - data[0]) / 1e6;
++                                  if (self->hud && data[33] > data[32]) hudMs = (data[33] - data[32]) / 1e6;
++                                }
++                                self->readback.Unmap();
++                              }
++                              record_gpu_times(eyesMs, hudMs);
++                              self->state = PassTimer::State::Free;
++                            });
++  }
++  g_encodingTimer = -1;
+   for (const auto& accessed : g_accessed) {
+     Image target;
+     {
+@@ -827,6 +1049,22 @@ extern "C" void AuroraStereoSetSortKey(float key) {
  #endif
  }
  
@@ -368,7 +717,19 @@
    if (aurora::gfx::stereo::g_uncut == uncut) {
 --- a/lib/gfx/stereo.hpp
 +++ b/lib/gfx/stereo.hpp
-@@ -86,6 +86,9 @@ struct PassDesc {
+@@ -58,6 +58,11 @@ void instanced_failed(const std::string& message) noexcept;
+ // On the render thread: the image is about to be drawn (render pass encode),
+ // and the frame using it was just submitted (aurora.cpp).
+ void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept;
++// Render thread: GPU timestamps around the eyes' pass (hud false) and the
++// HUD's (hud true) of a frame: the writes for its descriptor (nullptr: none),
++// then, once the pass ended, their resolve into a readback buffer.
++const wgpu::PassTimestampWrites* pass_timestamps(bool hud) noexcept;
++void pass_timestamps_resolve(wgpu::CommandEncoder& cmd, bool hud) noexcept;
+ void after_submit() noexcept;
+ 
+ // What common.cpp turns into a render pass: the eyes' (hud null), or the
+@@ -86,6 +91,9 @@ struct PassDesc {
    // sortOpaque sends the sortable runs front to back.
    const std::vector<DrawOrder>* order = nullptr;
    bool sortOpaque = false;
@@ -496,15 +857,16 @@
  
  namespace aurora::gx {
  void clear_copy_texture_cache() noexcept;
-@@ -61,6 +64,7 @@ bool g_bcTexturesSupported = false;
+@@ -61,6 +64,8 @@ bool g_bcTexturesSupported = false;
  bool g_astcTexturesSupported = false;
  bool g_textureComponentSwizzleSupported = false;
  bool g_clipDistancesSupported = false;
 +bool g_shaderF16Enabled = false;
++bool g_timestampsEnabled = false;
  static std::atomic_bool g_shuttingDown = false;
  
  namespace {
-@@ -839,6 +843,7 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -839,6 +844,7 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
      g_astcTexturesSupported = false;
      g_textureComponentSwizzleSupported = false;
      g_clipDistancesSupported = false;
@@ -512,10 +874,20 @@
      wgpu::SupportedFeatures supportedFeatures;
      g_adapter.GetFeatures(&supportedFeatures);
      for (size_t i = 0; i < supportedFeatures.featureCount; ++i) {
-@@ -866,6 +871,16 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -866,6 +872,26 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
          requiredFeatures.push_back(feature);
          g_clipDistancesSupported = true;
        }
++      // The GPU's own time for the eyes' and the HUD's passes ("Stereo GPU");
++      // `adb shell setprop debug.partyboard.gpu_timing 0` before starting: none.
++      if (feature == wgpu::FeatureName::TimestampQuery) {
++        char value[PROP_VALUE_MAX] = {};
++        __system_property_get("debug.partyboard.gpu_timing", value);
++        if (value[0] != '0') {
++          requiredFeatures.push_back(feature);
++          g_timestampsEnabled = true;
++        }
++      }
 +      // The TEV in half precision, for a headset A/B, before starting the
 +      // game: `adb shell setprop debug.partyboard.shader_f16 1` (off by default).
 +      if (feature == wgpu::FeatureName::ShaderF16) {
@@ -531,13 +903,15 @@
  #ifdef WEBGPU_DAWN
 --- a/lib/webgpu/gpu.hpp
 +++ b/lib/webgpu/gpu.hpp
-@@ -55,6 +55,9 @@ extern bool g_astcTexturesSupported;
+@@ -55,6 +55,11 @@ extern bool g_astcTexturesSupported;
  extern bool g_textureComponentSwizzleSupported;
  // Clip distances: a headset's two eyes drawn in one instanced draw (gfx/stereo.cpp).
  extern bool g_clipDistancesSupported;
 +// The GX shaders' TEV in half precision (gx/shader.cpp): the device has f16
 +// and a headset asked for it (debug.partyboard.shader_f16 1).
 +extern bool g_shaderF16Enabled;
++// GPU timestamps around the headset's eye and HUD passes (gfx/stereo.cpp).
++extern bool g_timestampsEnabled;
  
  bool initialize(AuroraBackend backend, bool allowCpu);
  void shutdown();

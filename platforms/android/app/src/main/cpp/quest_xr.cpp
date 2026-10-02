@@ -87,6 +87,11 @@ constexpr float kMaxScreenWidth = 4.0f;
 // be seen (2026-09-28).
 constexpr float kHudBehindSceneMeters = 0.10f; // from the scene's far edge
 constexpr float kHudLiftMeters = 0.22f;        // the interface's bottom edge, above the table
+// The board's scenery above the table (castles, trees), as a part of the
+// fitted scene's radius: the interface's bottom edge rises above the line of
+// sight over it, so the board never covers part of the interface.
+constexpr float kSceneryPerRadius = 0.35f;
+constexpr float kHudSightMarginMeters = 0.03f;
 constexpr float kHudWidthPerScene = 1.3f;
 constexpr float kMinHudWidth = 0.9f;
 constexpr float kMaxHudWidth = 1.6f;
@@ -222,6 +227,9 @@ struct App {
   // The eyes' height (STAGE) the flat screen is raised to at least: taken
   // while placing or calibrating, and once at startup (NaN until then).
   float screenEyeHeight = std::numeric_limits<float>::quiet_NaN();
+  // Where the eyes were then (stage space): the interface's screen is raised
+  // to be seen over the board from there (hud_pose).
+  XrVector3f screenEye{0.0f, std::numeric_limits<float>::quiet_NaN(), 0.0f};
   bool calibrating = false;
   bool calibrationConfirmed = false;
   bool calibrationConfirmArmed = false;
@@ -948,13 +956,36 @@ bool table_setup_needed(const App& app) {
 // anchor: +Z toward the player) with `modelScale` meters per game unit: its
 // center, upright and facing the player, and the interface's size (the bezel
 // goes around it, StereoView::hud_screen_layer). The fitted scene is
-// kSceneExtentUnits across (quest_scene_fit.hpp).
-XrPosef hud_pose(const XrPosef& table, float modelScale, XrExtent2Df& size) {
+// kSceneExtentUnits across (quest_scene_fit.hpp). With `eye` (stage space),
+// it stands high enough to be seen whole over the board's scenery from there:
+// at the back of the board, and never covering it or covered by it.
+XrPosef hud_pose(const XrPosef& table, float modelScale, XrExtent2Df& size, const XrVector3f* eye = nullptr) {
   const float sceneRadius = 0.5f * kSceneExtentUnits * modelScale;
   size.width = std::clamp(2.0f * sceneRadius * kHudWidthPerScene, kMinHudWidth, kMaxHudWidth);
   size.height = size.width * 0.75f; // the interface is 4:3
+  const float distance = sceneRadius + kHudBehindSceneMeters;
+  float lift = kHudLiftMeters;
+  if (eye != nullptr && std::isfinite(eye->y)) {
+    // The eye in the table's frame (+Z toward the player, Y up from the table).
+    const XrVector3f e = compose(inverse(table), XrPosef{{0.0f, 0.0f, 0.0f, 1.0f}, *eye}).position;
+    const float toEdge = e.z + sceneRadius; // horizontally, to the board's far edge
+    if (toEdge > 0.1f) {
+      // The line of sight grazing the scenery at the far edge, where the screen stands.
+      const float scenery = kSceneryPerRadius * sceneRadius;
+      const float sight = e.y + (scenery - e.y) * (e.z + distance) / toEdge;
+      lift = std::max(lift, sight + kHudSightMarginMeters);
+      // Never above the eyes: its center at most at eye level.
+      lift = std::min(lift, std::max(kHudLiftMeters, e.y - size.height * 0.5f));
+      static float logged = -1.0f;
+      if (std::fabs(lift - logged) > 0.02f) {
+        logged = lift;
+        LOGI("HUD screen: bottom %.2f m above the table, %.2f m behind the board (eyes %.2f m above it, %.2f m from "
+             "its far edge)", lift, kHudBehindSceneMeters, e.y, toEdge);
+      }
+    }
+  }
   XrPosef local = identity_pose();
-  local.position = {0.0f, kHudLiftMeters + size.height * 0.5f, -(sceneRadius + kHudBehindSceneMeters)};
+  local.position = {0.0f, lift + size.height * 0.5f, -distance};
   return compose(table, local);
 }
 
@@ -1348,6 +1379,9 @@ bool poll_events(App& app, JNIEnv* env) {
             LOGI("Room view started again with the session");
           }
         }
+      } else if (app.state == XR_SESSION_STATE_FOCUSED && app.modelAvailable) {
+        // The runtime may give the lenses' mask only to a running session.
+        app.stereo.load_hidden_area(app.extensions.visibilityMask);
       } else if (app.state == XR_SESSION_STATE_STOPPING) {
         xrEndSession(app.session);
         app.running = false;
@@ -1438,6 +1472,7 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   }
   if (haveHead && (!std::isfinite(app.screenEyeHeight) || app.placing)) {
     app.screenEyeHeight = head.position.y;
+    app.screenEye = head.position;
   }
   // Out of reach at startup: in front of the player instead, for this
   // session only. The saved place stays saved (it may be another room's
@@ -1638,13 +1673,15 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   app.stereo.set_screen_hidden(app.poseKnown && modelLayer != nullptr && !screenShown);
 
   // The images come from Aurora like the screen's, so they need the same flip.
-  // The interface's screen goes over the model: raised above the board, it
-  // must never be hidden by the board's far scenery. A minigame, floating
-  // there, shows its interface over it without the screen: no frame, no face.
+  // The interface's screen goes over the model, so it is always seen whole;
+  // it stands at the back of the board, raised over the board's scenery as
+  // seen from the player's place (hud_pose), so the two do not overlap and it
+  // reads as standing behind. A minigame, floating there, shows its
+  // interface over it without the screen: no frame, no face.
   if (modelLayer) {
     layers[layerCount++] = modelLayer;
     XrExtent2Df hudSize{};
-    const XrPosef hudPose = hud_pose(app.pose, app.table.modelScale, hudSize);
+    const XrPosef hudPose = hud_pose(app.pose, app.table.modelScale, hudSize, floating ? nullptr : &app.screenEye);
     if (const auto* screen = floating ? nullptr : app.stereo.hud_screen_layer(app.stage, hudPose, hudSize)) {
       layers[layerCount++] = screen;
     }

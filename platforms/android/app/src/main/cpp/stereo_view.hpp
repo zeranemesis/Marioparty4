@@ -129,7 +129,26 @@ private:
     int64_t startNs = 0;                        // its frame's paced start, 0 when not paced
     int64_t dueNs = 0;                          // the look it is for, 0: as soon as finished
     bool hud = false;                           // its interface image was drawn
+    int64_t leaseNs = 0, submitNs = 0;          // steady clock: lent to the game, sent to the GPU
   };
+  // Each image's way through the ring ("Stereo pipeline", every 2 s): the
+  // game recording it (lease -> submit), the GPU drawing it (submit -> its
+  // fence), waiting for its look (fence -> copy); and when the game finds no
+  // free image, where the images were (drawing, ready, copying).
+  struct Stage {
+    double sum = 0, max = 0;
+    uint32_t count = 0;
+    void add(int64_t ns) {
+      if (ns <= 0) return;
+      const double ms = ns / 1e6;
+      sum += ms;
+      max = std::max(max, ms);
+      ++count;
+    }
+    double avg() const { return count != 0 ? sum / count : 0; }
+  };
+  Stage mStageRecord, mStageGpu, mStageWait, mStageTotal;
+  uint32_t mFullDrawing = 0, mFullReady = 0, mFullCopying = 0;
 
   // Dynamic resolution, once a second (caller holds mMutex).
   void adapt_resolution();
@@ -139,7 +158,7 @@ private:
   bool allocate_images(uint32_t eyeWidth, uint32_t eyeHeight, uint32_t hudWidth = 0);
   void free_images();
   bool resize_ready();
-  void free_images(std::array<Slot, 3>& slots);
+  void free_images(std::vector<Slot>& slots);
 
 public:
   // The eyes' resolution, in % of the headset's recommended size.
@@ -177,7 +196,13 @@ private:
   int64_t mSwapchainFormat = 0;
 
   mutable std::mutex mMutex;
-  std::array<Slot, 3> mSlots;
+  // The ring of images the game draws into: 4, or debug.partyboard.ring
+  // (2 to 6) read at start. A deeper ring lets the GPU start an image while
+  // the last ones wait to be shown or copied. With 3, the Toad board drew 61
+  // new images/s asking for 120 (the ring full 117 times in 2 s, the GPU 82%
+  // busy); with 4, 80 (Quest 3, 2026-10-02).
+  std::vector<Slot> mSlots;
+  size_t mSlotCount = 4;
   uint32_t mGeneration = 0;
   uint64_t mNextTag = 1;
   uint32_t mLeaseCount = 0, mRingFullCount = 0, mPresentedCount = 0;
@@ -199,9 +224,11 @@ private:
   bool mShownIsBoard = false;
   float mHudWidth = 0.76f, mHudHeight = 0.57f;
   XrView mViews[2]{};
-  // The lenses' visible outline per eye (tangents at z = -1), waiting for the
-  // eyes' fields of view; then the hidden rectangles (hidden_area()).
+  // The lenses' visible outline per eye (tangents at z = -1), or else their
+  // hidden triangles (3 points each), waiting for the eyes' fields of view;
+  // then the hidden rectangles (hidden_area()).
   std::vector<XrVector2f> mVisibleOutline[2];
+  std::vector<XrVector2f> mHiddenTriangles[2];
   bool mHiddenPending = false;
   std::vector<float> mHiddenRects[2];
   uint32_t mHiddenVersion = 0;

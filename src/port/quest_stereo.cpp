@@ -34,6 +34,7 @@ extern "C" {
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 #if defined(__ANDROID__)
@@ -689,6 +690,49 @@ extern "C" void PartyBoard_StereoObjectBegin(Mtx modelView, const HuVecF *min, c
 // simulation's ticks without playing them, so the game holds one image and
 // every phase of a headset A/B (tools/quest_campaign.ps1) draws exactly the
 // same frame; the board's own motion no longer swamps a few percent.
+// Where each pass of the game's main loop spends its time (src/game/main.c's
+// marks), every 5 s: waiting for a render slot (aurora_begin_frame), the
+// simulation ticks, recording the draws (Hu3DExec, fonts), ending the GX
+// frame (HuSysDoneRender: the eyes' pass is built there), the interface and
+// Aurora's frame end, and the frame limiter's wait.
+extern "C" void PartyBoard_LoopMark(int mark)
+{
+#if defined(__ANDROID__)
+    static const char *const kNames[] = { "slotWait", "simulation", "draw", "doneRender", "uiEnd", "limiter" };
+    static std::chrono::steady_clock::time_point last {};
+    static int lastMark = -1;
+    static double sum[6] {}, max[6] {};
+    static uint32_t loops = 0;
+    static auto loggedAt = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (mark >= 1 && mark <= 6 && lastMark == mark - 1) {
+        const double ms = std::chrono::duration<double, std::milli>(now - last).count();
+        sum[mark - 1] += ms;
+        max[mark - 1] = std::max(max[mark - 1], ms);
+    }
+    last = now;
+    lastMark = mark;
+    if (mark != 6) {
+        return;
+    }
+    ++loops;
+    if (now - loggedAt < std::chrono::seconds(5)) {
+        return;
+    }
+    char text[512];
+    int length = std::snprintf(text, sizeof(text), "Game loop: %u loops, avg/max ms", loops);
+    for (int i = 0; i < 6 && length > 0 && length < static_cast<int>(sizeof(text)); ++i) {
+        length += std::snprintf(text + length, sizeof(text) - length, " %s=%.2f/%.2f", kNames[i], sum[i] / loops, max[i]);
+        sum[i] = max[i] = 0;
+    }
+    __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "%s", text);
+    loops = 0;
+    loggedAt = now;
+#else
+    (void)mark;
+#endif
+}
+
 extern "C" bool PartyBoard_DebugFreeze(void)
 {
 #if defined(__ANDROID__)

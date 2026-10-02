@@ -49,6 +49,9 @@ bool PartyBoard_RestartRequested = FALSE;
 bool PartyBoard_IsSimulationTick = TRUE;
 // src/port/quest_stereo.cpp: the game held on one image for headset measurements.
 bool PartyBoard_DebugFreeze(void);
+// src/port/quest_stereo.cpp: where each loop's time goes ("Game loop" in the
+// headset's log), marks 0 to 6 in loop order.
+void PartyBoard_LoopMark(int mark);
 int PartyBoard_SimulationTicksThisFrame = 1;
 
 bool disableFrameLimiter = FALSE;
@@ -235,10 +238,12 @@ void main(void)
 
         HuPerfBegin(2);
 #ifdef TARGET_PC
+        PartyBoard_LoopMark(0);
         if (!aurora_begin_frame()) {
             frame_pacer_reset();
             continue;
         }
+        PartyBoard_LoopMark(1);
         /* aurora_begin_frame can wait for a render slot when the selected FPS
          * exceeds GPU throughput. Refresh SDL after that wait; the scheduled
          * 60 Hz tick polls PAD from this fresh state immediately before the
@@ -336,6 +341,9 @@ void main(void)
         previousVCount = HuSysVWaitGet(0);
         HuSysVWaitSet((s16)simulatedTicks);
 #endif
+#ifdef TARGET_PC
+        PartyBoard_LoopMark(2);
+#endif
         HuPerfBegin(1);
         Hu3DExec();
         if (
@@ -365,7 +373,13 @@ void main(void)
         ) {
             msmMusFdoutEnd();
         }
+#ifdef TARGET_PC
+        PartyBoard_LoopMark(3);
+#endif
         HuSysDoneRender(retrace);
+#ifdef TARGET_PC
+        PartyBoard_LoopMark(4);
+#endif
         GXReadGPMetric(&met0, &met1);
         GXReadVCacheMetric(&vcheck, &vmiss, &vstall);
         GXReadPixMetric(&top_pixels_in, &top_pixels_out, &bot_pixels_in, &bot_pixels_out, &clr_pixels_in, &total_copy_clks);
@@ -422,10 +436,12 @@ void main(void)
         }
         ui_update();
         aurora_end_frame();
+        PartyBoard_LoopMark(5);
         PartyBoard_PerfFrameEnd();
         if (!disableFrameLimiter || PartyBoard_NetplayEnabled()) {
             frame_limiter();
         }
+        PartyBoard_LoopMark(6);
 #endif
     }
 

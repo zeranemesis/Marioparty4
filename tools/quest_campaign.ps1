@@ -27,6 +27,8 @@ param(
     [switch]$RestartPhases,
     [switch]$NoFreeze,
     [switch]$NoAlternate,
+    # Only these tested phases (names), each still after its reference.
+    [string[]]$Only,
     # The scene the restart phases wait for (89: the Toad board), and how long.
     [int]$Scene = 89,
     [int]$SceneWaitSeconds = 300,
@@ -48,7 +50,8 @@ $switches = @('debug.partyboard.sort_opaque', 'debug.partyboard.stereo_crossing'
               'debug.partyboard.gpu_level', 'debug.partyboard.eye_scale', 'debug.partyboard.tev_overflow',
               'debug.partyboard.xr_priority', 'debug.partyboard.stereo_msaa', 'debug.partyboard.opaque_blend',
               'debug.partyboard.hud_rate', 'debug.partyboard.xr_pacing', 'debug.partyboard.anisotropy',
-              'debug.partyboard.shader_f16', 'debug.partyboard.freeze', 'debug.partyboard.visibility_mask')
+              'debug.partyboard.shader_f16', 'debug.partyboard.freeze', 'debug.partyboard.visibility_mask',
+              'debug.partyboard.skip_draws', 'debug.partyboard.render_hz', 'debug.partyboard.alpha_test')
 $freeze = if ($NoFreeze) { '' } else { '1' }
 $live = @(
     @{ name = 'reference';     props = @{ 'debug.partyboard.eye_scale' = $eye } },
@@ -64,8 +67,25 @@ $live = @(
     @{ name = 'res-80';        props = @{ 'debug.partyboard.eye_scale' = '80' } },
     @{ name = 'res-110';       props = @{ 'debug.partyboard.eye_scale' = '110' } },
     @{ name = 'mask-off';      props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.visibility_mask' = '0' } },
+    # What each kind of world draw costs: the saving when it is not drawn
+    # (stereo.cpp's DrawKind; a measurement, the image is wrong meanwhile).
+    @{ name = 'blend-off';      props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.opaque_blend' = 'off' } },
+    @{ name = 'skip-opaque';    props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.skip_draws' = 'opaque' } },
+    @{ name = 'skip-blend';     props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.skip_draws' = 'blend' } },
+    @{ name = 'skip-additive';  props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.skip_draws' = 'additive' } },
+    @{ name = 'skip-nodepth';   props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.skip_draws' = 'nodepth' } },
+    @{ name = 'skip-alphatest'; props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.skip_draws' = 'alphatest' } },
+    @{ name = 'skip-outside';   props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.skip_draws' = 'outside' } },
+    @{ name = 'skip-tev3';      props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.skip_draws' = 'tev3' } },
+    @{ name = 'skip-fog';       props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.skip_draws' = 'fog' } },
+    @{ name = 'alpha-off';        props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.alpha_test' = 'opaque-off' } },
+    @{ name = 'alpha-off-aniso4'; props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.alpha_test' = 'opaque-off'; 'debug.partyboard.anisotropy' = '4' } },
+    @{ name = 'render-120';     props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.render_hz' = '0' } },
     @{ name = 'reference-end'; props = @{ 'debug.partyboard.eye_scale' = $eye } }
 )
+# powershell -File passes "a,b" as one string.
+if ($Only) { $Only = @($Only | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+if ($Only) { $live = @($live | Where-Object { $_.name -like 'reference*' -or $Only -contains $_.name }) }
 foreach ($phase in $live) { $phase.props['debug.partyboard.freeze'] = $freeze }
 if (-not $NoAlternate) {
     # ref-<name> before each tested phase: A B A C A D ... A.
@@ -225,6 +245,15 @@ foreach ($name in $marks) {
         motion_photon_ms = Average (& $number 'app/motion_to_photon_latency=([\d.]+)ms')
         predicted_ms     = Average (& $number 'VrApi\s*: FPS=.*?Prd=(\d+)ms')
         draws_eye        = & $median $summary.draws 'world_draws_avg'
+        # The probes of build 163: the GPU's own time for the eyes' pass, each
+        # image's stages through the ring, the render worker and the game loop.
+        eyes_gpu_ms      = Average (& $number "Stereo GPU: eyes' pass ([\d.]+) ms")
+        hud_gpu_ms       = Average (& $number 'HUD pass ([\d.]+) ms avg')
+        ring_gpu_ms      = Average (& $number 'Stereo pipeline: .*? gpu=([\d.]+)/')
+        ring_wait_ms     = Average (& $number 'Stereo pipeline: .*? wait=([\d.]+)/')
+        worker_busy_pct  = Average (& $number 'Render worker: .*? busy (\d+)%')
+        loop_draw_ms     = Average (& $number 'Game loop: .*? draw=([\d.]+)/')
+        loop_done_ms     = Average (& $number 'Game loop: .*? doneRender=([\d.]+)/')
     }
 }
 # Each tested phase against the reference just before it (ref-<name>), else
@@ -242,4 +271,5 @@ $rows | Export-Csv -Path (Join-Path $OutputDirectory 'campaign.csv') -NoTypeInfo
 $rows | Format-Table phase, images_s, stutters, off_cadence_pct, res_pct, frag_M_image, gpu_util_pct, gpu_MHz -AutoSize | Out-String
 $rows | Format-Table phase, tex_stall_pct, mem_stall_pct, read_GB_s, compositor_ms, motion_photon_ms, predicted_ms, draws_eye -AutoSize | Out-String
 $rows | Where-Object { $_.phase -notlike 'ref-*' } | Format-Table phase, delta_frag_pct, delta_gpu_pct, delta_m2p_pct -AutoSize | Out-String
+$rows | Format-Table phase, eyes_gpu_ms, hud_gpu_ms, ring_gpu_ms, ring_wait_ms, worker_busy_pct, loop_draw_ms, loop_done_ms -AutoSize | Out-String
 Write-Output "Output: $OutputDirectory"

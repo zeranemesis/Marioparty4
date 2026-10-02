@@ -258,6 +258,31 @@ Masque des lentilles : le casque donne le contour de ce que chaque lentille lais
 
 Scene figee : `adb shell setprop debug.partyboard.freeze 1` arrete la simulation (les ticks sont consommes, aucun n'est joue) sans arreter le rendu. Chaque phase dessine donc la meme image, et le journal ecrit `Simulation frozen`. `tools/quest_campaign.ps1` fige desormais le jeu pendant ses phases (`-NoFreeze` pour laisser jouer). Il intercale aussi une phase de reference `ref-<nom>` avant chaque phase testee (`-NoAlternate` pour ne pas le faire) et donne l'ecart de chaque phase a sa reference (`delta_frag_pct`, `delta_gpu_pct`, `delta_m2p_pct`), ce qui neutralise la derive de la chauffe et des frequences. Les phases en direct durent donc environ 16 minutes. Avant, les ecarts entre deux phases identiques allaient jusqu'a 40 %.
 
+### 9 ter. Mesures du 02/10 au soir : ou va le GPU (builds 160 a 164)
+
+Le masque des lentilles est sans effet sur le Quest 3 : le runtime rend un masque vide (`Hidden area, eye 0: outline 0 points (result 0), hidden mesh 0 triangles`), meme une fois la session FOCUSED.
+
+Le gel (`debug.partyboard.freeze 1`) fige aussi les vues des yeux (stereo_view.cpp) : sans cela, la tete qui bouge changeait la scene dessinee (80 a 611 dessins par oeil d'une phase a l'autre). Pendant le gel, le plateau suit la tete : c'est inconfortable, donc a garder court.
+
+120 Hz demande (`render_hz 0`), plateau de Toad, scene figee :
+
+| | images/s | anneau plein / 2 s | GPU | MHz | latence |
+|---|---|---|---|---|---|
+| anneau de 3, 95 % | 61 | 117 | 82 % | 611 | 66 ms |
+| anneau de 3, 75 % | 63 | 110 | 81 % | 610 | 66 ms |
+| anneau de 4, 95 % | 80 | 73 | 90 % | 640 | 65 ms |
+| anneau de 4, 75 % | 88 | 51 | 89 % | 640 | 64 ms |
+
+Avec 3 images, l'anneau limitait (images pretes ou en copie, GPU pas plein) : l'anneau passe a 4 par defaut (`debug.partyboard.ring`, 2 a 6, au demarrage). Avec 4, le GPU est le goulot.
+
+Sondes ajoutees (journal) : `Stereo GPU` (horodatages GPU de la passe des yeux et du HUD), `Stereo pipeline` (enregistrement, GPU, attente, total par image ; etat de l'anneau quand il est plein), `Render worker` (encodage, soumission, occupation, attentes du jeu), `Game loop` (attente, simulation, dessin, fin d'image, limiteur), `Stereo kinds` et `debug.partyboard.skip_draws` (cout par categorie de dessins), `debug.partyboard.alpha_test opaque-off`.
+
+Ce que coute une image (plateau entier, 430 dessins par oeil) : passe des yeux 8,7 ms a 640 MHz (10,8 ms vers 620 MHz en 60 Hz), HUD 0,8 ms, compositeur 1,1 a 2,6 ms par affichage. La trace par etape (`tools/quest_gpu_trace.ps1`) donne pour la passe des yeux : binning 2,2 ms (78 000 polygones), rendu 7,1 ms dans 63 bins de 384x256 (MSAA 4x et profondeur 32 bits : 32 octets par pixel en memoire de tuile), 20 millions de fragments pour 5,3 millions de pixels. Compteurs en direct : shaders occupes 49 %, 46 a 50 instructions ALU par fragment, textures occupees 47 %, attente texture 12-15 %, anisotrope 5 % des lectures.
+
+A/B courts (scene figee, ecart a la reference juste avant) : anisotrope 4x -1,5 % de passe des yeux ; test alpha retire des dessins opaques -3 a -7 % (le jeu met GEQUAL 1 partout) : ni l'un ni l'autre n'est le goulot.
+
+Conclusion : deux moities. Les bins (63 par image, chacun rejouant les dessins visibles) et le binning, sans shader ; et le cout du TEV emule (46 instructions par fragment). Prochaines etapes : profondeur 16 bits pour les yeux (bins plus grands), TEV en demi-precision et TEV genere plus court, plus de dessins pour les deux yeux a la fois.
+
 ### 10. Stabilite et contenu
 
 1. Retour au jeu apres une longue pause (le build 109 n'a ete teste que sur cinq retours courts), et reprise apres Space Setup : ligne `Layers:` et garde « table sous le sol ».
