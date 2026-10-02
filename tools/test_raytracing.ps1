@@ -85,7 +85,24 @@ param(
     # -Uncapped, which turns vsync off and asks for 240 FPS -- the ceiling the
     # frame pacer allows -- and puts both settings back once the game is gone.
     [switch]$FrameStats,
-    [switch]$Uncapped
+    [switch]$Uncapped,
+    # A temporal upscaler, forced through AURORA_UPSCALER whatever the game's
+    # settings say. "test" is the plumbing alone: a bilinear enlargement done on
+    # the ray tracing device, which tells a fault of the hand-over between the
+    # two devices from a fault of an SDK. Empty leaves the settings in charge.
+    [ValidateSet('', 'none', 'test', 'fsr3', 'xess', 'dlss')][string]$Upscaler = '',
+    # 0 native size (anti-aliasing only), 1 quality, 2 balanced, 3 performance,
+    # 4 ultra performance; -1 leaves the setting alone.
+    [int]$UpscaleQuality = -1,
+    # Consecutive frames of the upscaler's input and output written once the
+    # scene is up, and measured with measure_upscaler.py.
+    [int]$UpscaleDump = 0,
+    # -1 hands the SDK the opposite sub-pixel offset. On a still picture the
+    # right sign is the sharper one.
+    [int]$UpscaleJitterSign = 0,
+    # -1 hands the SDK the motion the other way round. On frames in motion the
+    # right direction is the one that keeps the picture sharp.
+    [int]$UpscaleMotionSign = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -283,6 +300,19 @@ function Invoke-Run {
     } else {
         Remove-Item Env:\AURORA_FRAME_STATS -ErrorAction SilentlyContinue
     }
+    # The upscaler's overrides. Each is removed when not asked for: the
+    # environment outlives a run, and a leftover would force the next one.
+    Remove-Item (Join-Path $binary 'upscale_in_*.bmp'), (Join-Path $binary 'upscale_out_*.bmp'),
+        (Join-Path $binary 'upscale_dump.txt'), (Join-Path $binary 'upscale_depth.raw'),
+        (Join-Path $binary 'upscale_motion.raw') -ErrorAction SilentlyContinue
+    foreach ($pair in @(@('AURORA_UPSCALER', $Upscaler),
+                        @('AURORA_UPSCALE_QUALITY', $(if ($UpscaleQuality -ge 0) { "$UpscaleQuality" } else { '' })),
+                        @('AURORA_UPSCALE_DUMP', $(if ($UpscaleDump -gt 0) { "$UpscaleDump" } else { '' })),
+                        @('AURORA_UPSCALE_JITTER_SIGN', $(if ($UpscaleJitterSign -lt 0) { '-1' } else { '' })),
+                        @('AURORA_UPSCALE_MOTION_SIGN', $(if ($UpscaleMotionSign -lt 0) { '-1' } else { '' })))) {
+        if ($pair[1]) { Set-Item -Path "Env:\$($pair[0])" -Value $pair[1] }
+        else { Remove-Item "Env:\$($pair[0])" -ErrorAction SilentlyContinue }
+    }
     $process = Start-Process -FilePath $exe -WorkingDirectory $binary -PassThru `
         -RedirectStandardOutput $logPath -RedirectStandardError "$logPath.err"
     Start-Sleep -Seconds $BootSeconds
@@ -390,12 +420,22 @@ function Invoke-Run {
 
     if ($reached) {
         Start-Sleep -Milliseconds ([int]($ArmDelaySeconds * 1000))
-        if ($AB -or $Sequence -gt 0) {
+        if ($AB -or $Sequence -gt 0 -or $UpscaleDump -gt 0) {
             # The game polls for this file and traces its A/B pair on the next
             # frame it sees it. A triangle threshold cannot pick the scene: the
             # title sequence alone crosses any threshold a board would.
             New-Item -ItemType File -Path (Join-Path $binary 'rt_ab_arm') -Force | Out-Null
             Start-Sleep -Seconds 3
+            # The upscaler's dump is armed by the same file and reads every
+            # frame back: wait for the last one rather than guess how long.
+            if ($UpscaleDump -gt 0) {
+                $lastDump = Join-Path $binary ('upscale_out_{0:d3}.bmp' -f ($UpscaleDump - 1))
+                $deadline = (Get-Date).AddSeconds(15 + $UpscaleDump)
+                while (-not (Test-Path $lastDump) -and (Get-Date) -lt $deadline -and -not $process.HasExited) {
+                    Start-Sleep -Milliseconds 500
+                }
+                Start-Sleep -Seconds 1
+            }
             # Each frame waits for its readback, twice over with a reference, and
             # how long that takes depends on the trace size and on the disk: an
             # estimate cut a 90-frame sequence at 80. Wait for the last file.
@@ -577,6 +617,39 @@ if ($Sequence -gt 0) {
         }
     } else {
         $failures += "sequence of $Sequence frames requested but $($written.Count) written after the scene was reached"
+    }
+}
+if ($Upscaler -and $Upscaler -ne 'none') {
+    Write-Host ''
+    foreach ($pattern in @('Temporal upscaler: ', '\d+x\d+ to \d+x\d+, quality', 'frames upscaled',
+                           'traced for the upscaler')) {
+        $hit = $lines | Select-String -Pattern $pattern | Select-Object -Last 1
+        if ($hit) { Write-Host ("  " + ($hit.ToString() -replace '^\[INFO \| aurora::\w+\] ', '')) }
+    }
+    # The host reports its first frame and then every 600th, so a short stay
+    # in the scene may hold no report of its own: the whole log is searched,
+    # and it is the dump (-UpscaleDump), written only for frames that went
+    # through the upscaler, that proves the scene's own frames did.
+    $upscaled = @($lines | Select-String -Pattern '(\d+) frames upscaled')
+    if ($upscaled.Count -eq 0) {
+        $failures += "upscaler $Upscaler asked for but no frame was reported upscaled"
+    }
+    $gaveUp = @($lines | Select-String -Pattern 'turned off for this session|cannot run here')
+    if ($gaveUp.Count -gt 0) {
+        $failures += "the upscaler did not run: $($gaveUp[-1].ToString() -replace '^\[\w+ \| aurora::\w+\] ', '')"
+    }
+}
+if ($UpscaleDump -gt 0) {
+    $dumped = @(Get-ChildItem (Join-Path $binary 'upscale_out_[0-9]*.bmp') -ErrorAction SilentlyContinue)
+    if ($dumped.Count -eq $UpscaleDump -and (Test-Path (Join-Path $binary 'upscale_dump.txt'))) {
+        $upscaleDir = Join-Path $output 'upscale'
+        New-Item -ItemType Directory -Path $upscaleDir -Force | Out-Null
+        Get-ChildItem (Join-Path $binary 'upscale_*') | Move-Item -Destination $upscaleDir -Force
+        Write-Host ''
+        & python (Join-Path $PSScriptRoot 'measure_upscaler.py') $upscaleDir
+        if ($LASTEXITCODE -ne 0) { $failures += 'the upscaler dump could not be measured' }
+    } else {
+        $failures += "$UpscaleDump upscaler frames requested but $($dumped.Count) written after the scene was reached"
     }
 }
 # Errors go to the game's error stream, a file of its own beside the log, and
