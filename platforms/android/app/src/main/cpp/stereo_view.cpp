@@ -375,9 +375,179 @@ void StereoView::destroy() {
     xrDestroySwapchain(mHudScreenSwapchain);
     mHudScreenSwapchain = XR_NULL_HANDLE;
   }
+  if (mDepthSwapchain != XR_NULL_HANDLE) {
+    xrDestroySwapchain(mDepthSwapchain);
+    mDepthSwapchain = XR_NULL_HANDLE;
+  }
+  if (mDepthProgram != 0) {
+    glDeleteProgram(mDepthProgram);
+    mDepthProgram = 0;
+  }
+  if (mDepthFbo != 0) {
+    glDeleteFramebuffers(1, &mDepthFbo);
+    mDepthFbo = 0;
+  }
+  mDepthShown = false;
   mHudShown = false;
   mShown = false;
   mPresentedTag = 0;
+}
+
+void StereoView::enable_depth_layer(XrInstance instance, XrSession session) {
+  uint32_t formatCount = 0;
+  xrEnumerateSwapchainFormats(session, 0, &formatCount, nullptr);
+  std::vector<int64_t> formats(formatCount);
+  xrEnumerateSwapchainFormats(session, formatCount, &formatCount, formats.data());
+  constexpr int64_t kDepth16 = 0x81A5, kDepth24 = 0x81A6; // GL_DEPTH_COMPONENT16/24
+  const int64_t format = std::ranges::find(formats, kDepth16) != formats.end()   ? kDepth16
+                         : std::ranges::find(formats, kDepth24) != formats.end() ? kDepth24
+                                                                                 : 0;
+  if (format == 0) {
+    LOGW("Depth layer: no depth swapchain format offered");
+    return;
+  }
+  XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+  info.usageFlags = XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+  info.format = format;
+  info.sampleCount = 1;
+  info.width = mEyeWidth * 2;
+  info.height = mEyeHeight;
+  info.faceCount = 1;
+  info.arraySize = 1;
+  info.mipCount = 1;
+  if (!check(instance, xrCreateSwapchain(session, &info, &mDepthSwapchain), "xrCreateSwapchain (depth)")) {
+    mDepthSwapchain = XR_NULL_HANDLE;
+    return;
+  }
+  uint32_t count = 0;
+  xrEnumerateSwapchainImages(mDepthSwapchain, 0, &count, nullptr);
+  mDepthImages.assign(count, {XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR});
+  xrEnumerateSwapchainImages(mDepthSwapchain, count, &count,
+                             reinterpret_cast<XrSwapchainImageBaseHeader*>(mDepthImages.data()));
+  // The plane's four corners, from a uniform, through each eye's projection;
+  // depth only.
+  const char* vertexSource = R"(#version 300 es
+uniform mat4 mvp;
+uniform vec3 corners[4];
+void main() { gl_Position = mvp * vec4(corners[gl_VertexID], 1.0); }
+)";
+  const char* fragmentSource = R"(#version 300 es
+precision mediump float;
+void main() {}
+)";
+  const auto compile = [](GLenum type, const char* source) {
+    const GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &source, nullptr);
+    glCompileShader(shader);
+    GLint ok = 0;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+      char log[512]{};
+      glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
+      LOGW("Depth layer: shader: %s", log);
+    }
+    return shader;
+  };
+  mDepthProgram = glCreateProgram();
+  const GLuint vs = compile(GL_VERTEX_SHADER, vertexSource), fs = compile(GL_FRAGMENT_SHADER, fragmentSource);
+  glAttachShader(mDepthProgram, vs);
+  glAttachShader(mDepthProgram, fs);
+  glLinkProgram(mDepthProgram);
+  glDeleteShader(vs);
+  glDeleteShader(fs);
+  GLint linked = 0;
+  glGetProgramiv(mDepthProgram, GL_LINK_STATUS, &linked);
+  mDepthMvpLocation = glGetUniformLocation(mDepthProgram, "mvp");
+  mDepthCornersLocation = glGetUniformLocation(mDepthProgram, "corners");
+  glGenFramebuffers(1, &mDepthFbo);
+  LOGI("Depth layer: %ux%u, format 0x%llx, %u images, program %s (debug.partyboard.depth_layer 1 to submit it)",
+       info.width, info.height, static_cast<unsigned long long>(format), count, linked ? "ready" : "failed");
+  if (!linked) {
+    xrDestroySwapchain(mDepthSwapchain);
+    mDepthSwapchain = XR_NULL_HANDLE;
+  }
+}
+
+void StereoView::set_depth_plane(const XrPosef& center, float halfExtent) {
+  std::lock_guard lock{mMutex};
+  mDepthPlane = center;
+  mDepthPlaneHalf = halfExtent;
+}
+
+// The plane's depth into the next depth image, for both eyes of `slot`, with
+// a GL projection (depth 0 at near, 1 at far): what mDepthInfos tell the
+// compositor. The caller holds no lock; the GL context is the XR thread's.
+bool StereoView::draw_depth(const Slot& slot) {
+  XrPosef plane;
+  float half;
+  {
+    std::lock_guard lock{mMutex};
+    plane = mDepthPlane;
+    half = mDepthPlaneHalf;
+  }
+  if (half <= 0.0f) return false;
+  uint32_t index = 0;
+  XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+  XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+  wait.timeout = XR_INFINITE_DURATION;
+  if (XR_FAILED(xrAcquireSwapchainImage(mDepthSwapchain, &acquire, &index))) return false;
+  if (XR_FAILED(xrWaitSwapchainImage(mDepthSwapchain, &wait))) {
+    XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    xrReleaseSwapchainImage(mDepthSwapchain, &release);
+    return false;
+  }
+  float corners[12];
+  const float signs[4][2] = {{-1, -1}, {1, -1}, {-1, 1}, {1, 1}}; // a triangle strip
+  for (int i = 0; i < 4; ++i) {
+    const XrVector3f p = add(plane.position, rotate(plane.orientation, {signs[i][0] * half, 0.0f, signs[i][1] * half}));
+    corners[i * 3] = p.x;
+    corners[i * 3 + 1] = p.y;
+    corners[i * 3 + 2] = p.z;
+  }
+  glBindFramebuffer(GL_FRAMEBUFFER, mDepthFbo);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, mDepthImages[index].image, 0);
+  const GLenum none = GL_NONE;
+  glDrawBuffers(1, &none);
+  glDisable(GL_SCISSOR_TEST);
+  glDepthMask(GL_TRUE);
+  glClearDepthf(1.0f);
+  glClear(GL_DEPTH_BUFFER_BIT);
+  glEnable(GL_DEPTH_TEST);
+  glDepthFunc(GL_LESS);
+  glDisable(GL_CULL_FACE);
+  glUseProgram(mDepthProgram);
+  glUniform3fv(mDepthCornersLocation, 4, corners);
+  for (uint32_t eye = 0; eye < 2; ++eye) {
+    const XrView& view = slot.views[eye];
+    // Stage -> eye (column-major), then the eye's GL projection.
+    const XrPosef toEye = inverse(view.pose);
+    const XrVector3f x = rotate(toEye.orientation, {1, 0, 0}), y = rotate(toEye.orientation, {0, 1, 0}),
+                     z = rotate(toEye.orientation, {0, 0, 1});
+    const float viewM[16] = {x.x, x.y, x.z, 0, y.x, y.y, y.z, 0, z.x, z.y, z.z, 0,
+                             toEye.position.x, toEye.position.y, toEye.position.z, 1};
+    const float l = std::tan(view.fov.angleLeft), r = std::tan(view.fov.angleRight);
+    const float d = std::tan(view.fov.angleDown), u = std::tan(view.fov.angleUp);
+    const float projM[16] = {2.0f / (r - l), 0, 0, 0,
+                             0, 2.0f / (u - d), 0, 0,
+                             (r + l) / (r - l), (u + d) / (u - d), -(kFar + kNear) / (kFar - kNear), -1,
+                             0, 0, -2.0f * kFar * kNear / (kFar - kNear), 0};
+    float mvp[16];
+    for (int c = 0; c < 4; ++c) {
+      for (int rr = 0; rr < 4; ++rr) {
+        mvp[c * 4 + rr] = projM[0 * 4 + rr] * viewM[c * 4 + 0] + projM[1 * 4 + rr] * viewM[c * 4 + 1] +
+                          projM[2 * 4 + rr] * viewM[c * 4 + 2] + projM[3 * 4 + rr] * viewM[c * 4 + 3];
+      }
+    }
+    glUniformMatrix4fv(mDepthMvpLocation, 1, GL_FALSE, mvp);
+    glViewport(static_cast<GLint>(eye * mEyeWidth), static_cast<GLint>((mEyeHeight - slot.renderHeight) / 2),
+               static_cast<GLsizei>(slot.renderWidth), static_cast<GLsizei>(slot.renderHeight));
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+  }
+  glDisable(GL_DEPTH_TEST);
+  glUseProgram(0);
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+  return XR_SUCCEEDED(xrReleaseSwapchainImage(mDepthSwapchain, &release));
 }
 
 void StereoView::load_hidden_area(bool available) {
@@ -1019,6 +1189,10 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
                          static_cast<GLsizei>(newest->renderWidth), static_cast<GLsizei>(newest->renderHeight), 1);
         }
       }
+      // The model's depth for the compositor (enable_depth_layer).
+      if (!keepBoard && mDepthWanted && mDepthSwapchain != XR_NULL_HANDLE) {
+        mDepthShown = draw_depth(*newest);
+      }
       if (hudReady) {
         mHudCopiedAt = hudNow;
         g_gl.copyImage(newest->hudTexture, GL_TEXTURE_2D, 0, 0, 0, 0,
@@ -1131,6 +1305,14 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
       char pacing[PROP_VALUE_MAX] = {};
       __system_property_get("debug.partyboard.xr_pacing", pacing);
       mPacing = std::strcmp(pacing, "0") != 0;
+      char depthLayer[PROP_VALUE_MAX] = {};
+      __system_property_get("debug.partyboard.depth_layer", depthLayer);
+      const bool depthWanted = depthLayer[0] == '1' && mDepthSwapchain != XR_NULL_HANDLE;
+      if (depthWanted != mDepthWanted) {
+        LOGI("Depth layer: %s (debug.partyboard.depth_layer)", depthWanted ? "submitted" : "off");
+        mDepthWanted = depthWanted;
+        if (!depthWanted) mDepthShown = false;
+      }
       char hudRate[PROP_VALUE_MAX] = {};
       __system_property_get("debug.partyboard.hud_rate", hudRate);
       const bool everyImage = std::strcmp(hudRate, "full") == 0;
@@ -1162,6 +1344,17 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
     const uint32_t shownHeight = mShownHeight != 0 ? mShownHeight : mEyeHeight;
     view.subImage.imageRect = {{static_cast<int32_t>(eye * mEyeWidth), static_cast<int32_t>((mEyeHeight - shownHeight) / 2)},
                                {static_cast<int32_t>(shownWidth), static_cast<int32_t>(shownHeight)}};
+    if (mDepthWanted && mDepthShown) {
+      auto& depth = mDepthInfos[eye];
+      depth = {XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR};
+      depth.subImage.swapchain = mDepthSwapchain;
+      depth.subImage.imageRect = view.subImage.imageRect;
+      depth.minDepth = 0.0f;
+      depth.maxDepth = 1.0f;
+      depth.nearZ = kNear;
+      depth.farZ = kFar;
+      view.next = &depth;
+    }
   }
   mLayer = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
   mLayer.next = next;

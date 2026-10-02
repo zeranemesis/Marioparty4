@@ -185,6 +185,7 @@ struct Extensions {
   bool scene = false;        // the room scan's tables
   bool sceneCapture = false; // opening Space Setup from the game
   bool visibilityMask = false; // the lenses' hidden pixels, skipped by the eyes' draws
+  bool layerDepth = false;     // the model's depth to the compositor (StereoView::enable_depth_layer)
 };
 
 struct App {
@@ -347,6 +348,7 @@ bool create_instance(App& app) {
   ext.imageLayout = optional(XR_FB_COMPOSITION_LAYER_IMAGE_LAYOUT_EXTENSION_NAME);
   ext.perfMetrics = optional(PerfMetrics::kExtension);
   ext.visibilityMask = optional(XR_KHR_VISIBILITY_MASK_EXTENSION_NAME);
+  ext.layerDepth = optional(XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME);
   ext.anchors = std::ranges::all_of(TableAnchor::kExtensions,
                                     [&](const char* name) { return has_extension(available, name); });
   if (ext.anchors) {
@@ -1576,6 +1578,9 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   app.stereo.set_quality_sample(g_perf.quality_sample());
   app.stereo.set_frame_time(time, frame.predictedDisplayPeriod);
   app.stereo.update(views, modelPose, modelScale, model, app.table.screenWidth, app.table.screenWidth * 0.75f);
+  // The table under the board, a little wider than the fitted scene, for the
+  // compositor's depth; a floating minigame faces the head: none.
+  app.stereo.set_depth_plane(modelPose, floating ? 0.0f : 0.55f * kSceneExtentUnits * modelScale);
   XrCompositionLayerImageLayoutFB modelFlip{XR_TYPE_COMPOSITION_LAYER_IMAGE_LAYOUT_FB};
   modelFlip.flags = XR_COMPOSITION_LAYER_IMAGE_LAYOUT_VERTICAL_FLIP_BIT_FB;
   XrCompositionLayerSettingsFB modelSettings{XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB};
@@ -1773,6 +1778,7 @@ bool set_up(App& app, JNIEnv* env) {
     LOGW("No model on the table: the game stays on its screen");
   } else {
     app.stereo.load_hidden_area(app.extensions.visibilityMask);
+    if (app.extensions.layerDepth) app.stereo.enable_depth_layer(app.instance, app.session);
   }
   g_followCamera.store(app.table.followCamera, std::memory_order_relaxed);
   app.stereo.set_quality_cap(quality_cap(app.table.resolution));

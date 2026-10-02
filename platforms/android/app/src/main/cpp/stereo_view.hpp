@@ -83,6 +83,16 @@ public:
   void submitted(uint32_t image, uint64_t tag, int syncFd, bool hasWorld = false);
   void set_screen_required(bool required);
   void set_board_mode(bool board);
+  // XR_KHR_composition_layer_depth, once the extension is enabled (after
+  // init): a depth swapchain beside the eyes' images. Each new image gets the
+  // depth of the plane the model stands on (set_depth_plane), drawn by this
+  // thread: the compositor can then correct the head's translation too, not
+  // only its rotation. Off unless `debug.partyboard.depth_layer 1` (read
+  // every 2 s), until seen on the headset.
+  void enable_depth_layer(XrInstance instance, XrSession session);
+  // XR thread, each frame: the plane's center (stage space, +Y its normal)
+  // and its half size in meters; 0 for none.
+  void set_depth_plane(const XrPosef& center, float halfExtent);
   bool screen_required() const;
   // A minigame is on show (the game's 3D world, not a board): quest_xr.cpp
   // stands it where the board's screen is.
@@ -181,6 +191,16 @@ private:
   XrCompositionLayerQuad mHudLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
   // The screen behind the interface: one static image, drawn once.
   XrSwapchain mHudScreenSwapchain = XR_NULL_HANDLE;
+  // The depth layer (enable_depth_layer).
+  bool draw_depth(const Slot& slot);
+  XrSwapchain mDepthSwapchain = XR_NULL_HANDLE;
+  std::vector<XrSwapchainImageOpenGLESKHR> mDepthImages;
+  GLuint mDepthFbo = 0, mDepthProgram = 0;
+  GLint mDepthMvpLocation = -1, mDepthCornersLocation = -1;
+  bool mDepthWanted = false, mDepthShown = false;
+  XrPosef mDepthPlane{{0, 0, 0, 1}, {0, 0, 0}};
+  float mDepthPlaneHalf = 0;
+  XrCompositionLayerDepthInfoKHR mDepthInfos[2]{};
   XrCompositionLayerQuad mHudScreenLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
   void create_hud_screen();
   std::vector<XrSwapchainImageOpenGLESKHR> mSwapchainImages;

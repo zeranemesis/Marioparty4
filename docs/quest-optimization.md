@@ -299,6 +299,13 @@ A verifier demain : pas de scintillement des cases et chemins (profondeur 16 bit
 
 Prochaine piste, la plus grosse : moins de dessins par tuile (objets qui touchent les deux yeux dessines une seule fois, `stereo_crossing 0` a mesurer proprement ; fusion des dessins consecutifs de meme materiau).
 
+### 9 quinquies. Technologies Meta : profondeur pour le compositeur (build 168), a essayer
+
+Le runtime propose `XR_KHR_composition_layer_depth` et `XR_FB_space_warp`. Premiere etape, sans toucher a Aurora : le fil XR dessine lui-meme, en GL, la profondeur du plan du plateau (la table sous la scene, 1,1 fois la scene ajustee) pour chaque oeil de chaque image neuve, dans une swapchain de profondeur, avec une projection GL classique (0 au plan proche de 10 cm, 1 au lointain de 100 m), et la joint a la couche des yeux (`XrCompositionLayerDepthInfoKHR`). Pour une maquette posee sur une table, la plupart des pixels sont a quelques centimetres de ce plan. Un mini-jeu flottant (tourne vers la tete) n'en a pas.
+
+Desactive par defaut : `adb shell setprop debug.partyboard.depth_layer 1` (relu toutes les 2 s). Le journal ecrit `Depth layer: ...x..., format ..., program ready` au demarrage et `Depth layer: submitted` quand il est envoye. A voir sur casque : si le plateau tient mieux en place quand la tete se deplace (60 images sur 120 Hz : `display_hz 120`), et que rien ne se deforme. Suite : Application SpaceWarp (vecteurs de mouvement nuls pour le plateau fixe, cette profondeur), puis le test de profondeur du compositeur pour le HUD (`XR_FB_composition_layer_depth_test`).
+
+Deux mesures ajoutees a la campagne : `filter-none` (filtre du compositeur coupe sur la couche des yeux) et `gpu-boost` (niveau GPU boost).
 ### 10. Stabilite et contenu
 
 1. Retour au jeu apres une longue pause (le build 109 n'a ete teste que sur cinq retours courts), et reprise apres Space Setup : ligne `Layers:` et garde « table sous le sol ».
