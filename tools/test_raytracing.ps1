@@ -507,12 +507,24 @@ $compositeLines = @($sceneLines | Select-String -Pattern 'Composition ran (\d+) 
 $frameLines = @($sceneLines | Select-String -Pattern 'end_frame calls (\d+),')
 $compositeMax = 0
 $compositeExtra = 0
+# The first report of the scene counts from the last one before it, which is
+# in the menus: without that one it was taken to cover 300 frames, and a first
+# report covering 600 failed a run that composited once per frame (an uncapped
+# run on the board, 592 compositions).
+$frameBefore = $null
+if ($from -gt 1) {
+    $frameBefore = $lines[0..($from - 2)] | Select-String -Pattern 'end_frame calls (\d+),' | Select-Object -Last 1
+}
 for ($i = 0; $i -lt $compositeLines.Count; $i++) {
     $line = $compositeLines[$i]
     $count = [int]$line.Matches[0].Groups[1].Value
     $covered = 300
-    if ($frameLines.Count -eq $compositeLines.Count -and $i -gt 0) {
-        $covered = [int]$frameLines[$i].Matches[0].Groups[1].Value - [int]$frameLines[$i - 1].Matches[0].Groups[1].Value
+    if ($frameLines.Count -eq $compositeLines.Count) {
+        if ($i -gt 0) {
+            $covered = [int]$frameLines[$i].Matches[0].Groups[1].Value - [int]$frameLines[$i - 1].Matches[0].Groups[1].Value
+        } elseif ($frameBefore) {
+            $covered = [int]$frameLines[0].Matches[0].Groups[1].Value - [int]$frameBefore.Matches[0].Groups[1].Value
+        }
         if ($covered -lt 300) { $covered = 300 }
     }
     $per300 = [int][math]::Round($count * 300.0 / $covered)
