@@ -3416,3 +3416,86 @@ frame en cause, quel draw couvrait l'écran.
   C'est une vraie désoccultation.
 - Une vue dont les draws n'ont pas tous les mêmes plans prend le plus proche des
   plans proches et le plus lointain des lointains.
+
+## Un décalage sous-pixel par frame, pour les upscalers temporels (2 octobre 2026)
+
+DLSS, XeSS et FSR 3 reconstruisent un détail plus fin que le pixel à partir de
+frames dessinées à une fraction de pixel les unes des autres. Il leur faut donc
+que l'image du jeu soit déplacée, à chaque frame, d'une quantité connue. C'est
+la dernière des trois choses qu'ils demandent, après le mouvement et la
+profondeur.
+
+### Ce qui est fait
+
+- `lib/rt/rt_jitter.{hpp,cpp}` tient une suite de Halton — base 2 en largeur,
+  base 3 en hauteur — et en donne un terme par frame, entre −0,5 et 0,5 pixel.
+  Sans suite demandée le décalage est nul et aucune projection n'est touchée.
+- Le décalage entre **dans la projection au moment où le jeu la charge**
+  (registres XF 0x1020 à 0x1026, `command_processor.cpp`) : GX place la
+  coordonnée horizontale à `p0·x + p1·z` sur `−z`, donc ajouter au NDC revient à
+  retrancher autant de `p1`, et de même pour `p3`. Le rasteriseur n'en sait pas
+  plus : il dessine à travers les nombres qu'on lui donne. C'est le seul endroit
+  de la chaîne de dessin qu'aucun autre patch de GitHub ne modifie.
+- La capture retrouve la projection du jeu à l'identique — par comparaison des
+  valeurs, pas en refaisant l'addition, qui ne rend pas les mêmes bits — et
+  garde le décalage à côté de la vue. Les clés qui reconnaissent une vue d'une
+  frame à l'autre ne bougent donc pas.
+- Le tracé suit : le rayon d'un pixel part de là où une image non décalée
+  montre ce que le jeu a dessiné à ce pixel. **Le mouvement écrit est sans
+  décalage aux deux bouts** — le décalage n'est pas un déplacement de la
+  surface, et un upscaler le reçoit à part.
+- La passe temporelle cherche son historique au pixel que donne le mouvement,
+  plus l'écart entre le décalage de la frame précédente et celui de celle-ci.
+
+`AURORA_JITTER=8` force une suite de huit termes, `AURORA_JITTER_FIXED="x,y"`
+tient un décalage fixe en pixels, `AURORA_RT_AB=jitterX=4` (ou `jitterY`) décale
+le tracé seul sur une frame, `AURORA_RT_JITTER_COMP` règle ce que la passe
+temporelle compense. Rien n'active encore le décalage en jeu : ce sera le rôle
+des upscalers.
+
+### Mesuré
+
+**Le sens et l'ampleur, sur une même frame.** Vue des primitives, le tracé
+décalé de 4 pixels contre le tracé sans décalage : l'image décalée en largeur
+coïncide avec l'autre lue 4 pixels plus à droite sur **100,00 %** des pixels
+(82,27 % sans la décaler, 70,54 % dans l'autre sens) ; en hauteur, lue 4 pixels
+plus bas, 100,00 % aussi. Un décalage positif déplace l'image vers la droite et
+vers le bas, exactement du nombre de pixels donné.
+
+**Le mouvement n'en est pas touché.** Ouverture de m401Dll, caméra et décor
+immobiles, 40 frames : la part des surfaces qui bougent de moins de 0,02 pixel
+est de 85,52 % sans décalage et de 85,90 % avec une suite de huit ; le mouvement
+médian est le pas de quantification de la vue dans les deux cas.
+
+**L'historique.** Même ouverture, 60 frames, part acceptée :
+
+| | acceptée | refusée, parmi les pixels jugés |
+|---|---|---|
+| sans décalage | 96,54 % | 0,51 % |
+| décalage, écart compensé | 96,47 % | 0,58 % |
+| décalage, écart non compensé | 96,46 % | 0,58 % |
+| décalage, écart compensé à l'envers | 96,46 % | 0,57 % |
+
+Le décalage coûte 0,07 point d'historique. **La compensation ne se voit pas
+dans cette mesure** : la passe lit l'historique au pixel le plus proche, et un
+écart d'une fraction de pixel retombe presque toujours sur le même. Elle reste,
+parce qu'elle est juste géométriquement ; elle comptera le jour où l'historique
+sera lu en interpolant.
+
+Test nul A/B, sans décalage : 0 pixel sur 1 228 800.
+
+### Ce qui n'est pas vérifié
+
+**Le côté rasteriseur n'a pas de mesure à lui.** Le tracé et le rasteriseur
+passent par les mêmes deux nombres, et le sens du tracé est mesuré ; que l'image
+dessinée bouge bien du même pas ne l'est pas — la capture d'écran prévue pour
+cela est tombée sur une autre fenêtre. Un sens inversé d'un côté se verrait tout
+de suite avec un upscaler branché : c'est là qu'il sera contrôlé.
+
+### Ce qui reste
+
+- Toute projection en perspective est décalée, y compris celles des vues que le
+  jeu rend dans une texture. Leur décalage est une fraction plus petite de leurs
+  propres pixels ; un effet qui réutilise l'image de la frame précédente
+  tremblerait d'autant.
+- L'interface n'est pas décalée, puisqu'elle est en projection orthographique.

@@ -1,5 +1,5 @@
 diff --git a/cmake/aurora_gx.cmake b/cmake/aurora_gx.cmake
-index e81b621..9e83421 100644
+index e81b621..7b4f8b4 100644
 --- a/cmake/aurora_gx.cmake
 +++ b/cmake/aurora_gx.cmake
 @@ -1,4 +1,6 @@
@@ -9,7 +9,7 @@ index e81b621..9e83421 100644
          lib/gfx/clear.cpp
          lib/gfx/common.cpp
          lib/gfx/depth_peek.cpp
-@@ -46,6 +48,90 @@ target_link_libraries(aurora_gx PUBLIC aurora::core dawn::webgpu_dawn xxhash)
+@@ -46,6 +48,92 @@ target_link_libraries(aurora_gx PUBLIC aurora::core dawn::webgpu_dawn xxhash)
  target_link_libraries(aurora_gx PRIVATE absl::btree absl::flat_hash_map sqlite3 TracyClient PNG::PNG)
  target_compile_definitions(aurora_gx PRIVATE WEBGPU_DAWN)
  
@@ -30,6 +30,8 @@ index e81b621..9e83421 100644
 +        lib/rt/rt_trace.hpp
 +        lib/rt/rt_interop.cpp
 +        lib/rt/rt_interop.hpp
++        lib/rt/rt_jitter.cpp
++        lib/rt/rt_jitter.hpp
 +    )
 +    target_link_libraries(aurora_gx PRIVATE d3d12 dxgi)
 +
@@ -1313,7 +1315,7 @@ index ac7c91c..025214c 100644
    TextureRef(wgpu::Texture texture, wgpu::TextureView sampleTextureView, wgpu::TextureView attachmentTextureView,
               wgpu::Extent3D size, wgpu::TextureFormat format, uint32_t mipCount, u32 gxFormat)
 diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
-index 9748556..9a6ed95 100644
+index 9748556..c24ff18 100644
 --- a/lib/gx/command_processor.cpp
 +++ b/lib/gx/command_processor.cpp
 @@ -8,6 +8,10 @@
@@ -1327,7 +1329,19 @@ index 9748556..9a6ed95 100644
  #include <absl/container/flat_hash_map.h>
  #include <tracy/Tracy.hpp>
  
-@@ -1560,6 +1564,14 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
+@@ -1431,6 +1435,11 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
+             proj.m0[2] = p1;
+             proj.m1[2] = p3;
+             proj.m3[2] = -1.0f;
++#ifdef _WIN32
++            // The sub-pixel offset a temporal upscaler asks for; nothing when
++            // none does. See rt_jitter.hpp.
++            rt::jitter::apply(proj.m0[2], proj.m1[2]);
++#endif
+           }
+           g_gxState.stateDirty = true;
+         }
+@@ -1560,6 +1569,14 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
  
    // Push raw vertex data to buffer. Merged draws must remain byte-contiguous with the previous range.
    gfx::Range vertRange = gfx::push_verts(data + pos, totalVtxBytes, canMerge ? 0 : 4);
@@ -2536,10 +2550,10 @@ index 0000000..9642110
 +} // namespace aurora::rt::accel
 diff --git a/lib/rt/rt_capture.cpp b/lib/rt/rt_capture.cpp
 new file mode 100644
-index 0000000..376d3eb
+index 0000000..e6f4b3c
 --- /dev/null
 +++ b/lib/rt/rt_capture.cpp
-@@ -0,0 +1,3297 @@
+@@ -0,0 +1,3340 @@
 +#include "rt_capture.hpp"
 +
 +#include "rt_accel.hpp"
@@ -2651,6 +2665,8 @@ index 0000000..376d3eb
 +// up where it was rather than where it is.
 +std::vector<accel::DrawGroup> g_prevGroups;
 +float g_prevProjParams[4] = {0.f, 0.f, 0.f, 0.f};
++// The sub-pixel offset the previous frame's traced view was drawn with.
++float g_prevJitterNdc[2] = {0.f, 0.f};
 +bool g_havePrevProj = false;
 +float g_viewDelta[12] = {1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f};
 +bool g_haveViewDelta = false;
@@ -2928,6 +2944,10 @@ index 0000000..376d3eb
 +  // could be told.
 +  float clipNear;
 +  float clipFar;
++  // What the rasterizer adds to the NDC of what it draws through this view:
++  // the frame's sub-pixel offset, zero without one. `params` are the game's
++  // own, with it taken back out.
++  float jitterNdc[2];
 +  uint64_t triangles;
 +};
 +std::vector<FrameProjection> g_projections;
@@ -3822,10 +3842,15 @@ index 0000000..376d3eb
 +
 +  size_t projIndex = SIZE_MAX;
 +  if (!ortho) {
++    // The projection as the game set it. What a draw goes through may carry
++    // the frame's sub-pixel offset; that is kept apart, beside the view.
++    float gameParams[2];
++    float jitterNdc[2];
++    jitter::unapply(proj.m0[2], proj.m1[2], gameParams, jitterNdc);
 +    g_projParams[0] = proj.m0[0];
-+    g_projParams[1] = proj.m0[2];
++    g_projParams[1] = gameParams[0];
 +    g_projParams[2] = proj.m1[1];
-+    g_projParams[3] = proj.m1[2];
++    g_projParams[3] = gameParams[1];
 +    g_haveProj = true;
 +
 +    // Which of the frame's projections this draw belongs to. Bounded because a
@@ -3844,6 +3869,7 @@ index 0000000..376d3eb
 +      FrameProjection entry{};
 +      std::memcpy(entry.params, g_projParams, sizeof(entry.params));
 +      std::memcpy(entry.viewport, viewport, sizeof(entry.viewport));
++      std::memcpy(entry.jitterNdc, jitterNdc, sizeof(entry.jitterNdc));
 +      g_projections.push_back(entry);
 +    }
 +    // The planes this draw is clipped by, from the projection's depth row:
@@ -4745,6 +4771,8 @@ index 0000000..376d3eb
 +}
 +
 +void begin_frame() noexcept {
++  // Ahead of everything the game sets this frame.
++  jitter::begin_frame();
 +  static bool read = false;
 +  if (!read) {
 +    read = true;
@@ -4816,7 +4844,8 @@ index 0000000..376d3eb
 +                                                 "aoRadius",  "bounce",        "denoisePhi",
 +                                                 "denoisePasses", "debugMode", "alphaTest",
 +                                                 "additive", "shadowStratify", "otherProjection",
-+                                                 "objectMotion", "rasterAlpha", "clipPlanes"};
++                                                 "objectMotion", "rasterAlpha", "clipPlanes",
++                                                 "jitterX", "jitterY"};
 +      bool known = false;
 +      if (const char* eq = std::strchr(env, '='); eq != nullptr) {
 +        const std::string name(env, eq);
@@ -4835,7 +4864,7 @@ index 0000000..376d3eb
 +        Log.warn("AURORA_RT_AB ignored: expected name=value, name one of aoSamples, shadowSamples, "
 +                 "lightRadius, aoRadius, bounce, denoisePhi, denoisePasses, debugMode, alphaTest, "
 +                 "additive, shadowStratify, otherProjection, objectMotion, rasterAlpha, "
-+                 "clipPlanes");
++                 "clipPlanes, jitterX, jitterY");
 +      }
 +    }
 +    // Frame numbers are a poor handle: the counter runs uncapped through boot,
@@ -5501,6 +5530,15 @@ index 0000000..376d3eb
 +                                                        : g_projParams,
 +              sizeof(g_prevProjParams));
 +  g_havePrevProj = true;
++  // Likewise the sub-pixel offset it was drawn with.
++  float previousJitterNdc[2];
++  std::memcpy(previousJitterNdc, g_prevJitterNdc, sizeof(previousJitterNdc));
++  g_prevJitterNdc[0] = 0.f;
++  g_prevJitterNdc[1] = 0.f;
++  if (g_tracedProjection < g_projections.size()) {
++    std::memcpy(g_prevJitterNdc, g_projections[g_tracedProjection].jitterNdc,
++                sizeof(g_prevJitterNdc));
++  }
 +
 +  // How much of the scene is actually in motion. Draws are keyed by their
 +  // position in the frame, which holds while the game issues them in a stable
@@ -5552,7 +5590,10 @@ index 0000000..376d3eb
 +  if (g_tracedProjection < g_projections.size()) {
 +    params.clipNear = g_projections[g_tracedProjection].clipNear;
 +    params.clipFar = g_projections[g_tracedProjection].clipFar;
++    std::memcpy(params.jitterNdc, g_projections[g_tracedProjection].jitterNdc,
++                sizeof(params.jitterNdc));
 +  }
++  std::memcpy(params.prevJitterNdc, previousJitterNdc, sizeof(params.prevJitterNdc));
 +  std::memcpy(params.prevProj, previousProjection, sizeof(params.prevProj));
 +  params.havePrevious = havePreviousProjection;
 +  params.reflectionRange = shadowRange; // the scene's own size bounds both
@@ -5621,6 +5662,12 @@ index 0000000..376d3eb
 +      probe.features =
 +          value != 0.0 ? (probe.features | trace::FeatureClipPlanes)
 +                       : (probe.features & ~static_cast<uint32_t>(trace::FeatureClipPlanes));
++    } else if (g_abName == "jitterX") {
++      // In pixels of the trace: what the offset does to the rays, measured
++      // without the rasterizer having to follow.
++      probe.jitterNdc[0] += 2.f * static_cast<float>(value) / static_cast<float>(probe.width);
++    } else if (g_abName == "jitterY") {
++      probe.jitterNdc[1] -= 2.f * static_cast<float>(value) / static_cast<float>(probe.height);
 +    }
 +    if (!trace::run(probe, "rt_ab_b.pfm")) {
 +      Log.error("A/B bench: the B trace failed");
@@ -5791,6 +5838,16 @@ index 0000000..376d3eb
 +             g_drawsTotal, g_drawsAlphaTested, g_drawsBlended, g_drawsReflective,
 +             g_drawsSingularMatrix, g_drawsAdditive,
 +             g_skipAdditive ? "left out of the rays" : "traced");
++    {
++      float jitterX = 0.f;
++      float jitterY = 0.f;
++      jitter::pixels(jitterX, jitterY);
++      Log.info("Sub-pixel offset of the perspective views: {}; this frame ({:.3f}, {:.3f}) pixels "
++               "of the render target",
++               jitter::phases() == 0u ? std::string("none")
++                                      : fmt::format("a sequence of {}", jitter::phases()),
++               jitterX, jitterY);
++    }
 +    Log.info("Primary ray {}: near plane {:.2f}, far plane {:.0f}",
 +             g_clipPlanes ? "clipped where the game's projection clips" : "not clipped",
 +             g_tracedProjection < g_projections.size() ? g_projections[g_tracedProjection].clipNear
@@ -5839,11 +5896,13 @@ index 0000000..376d3eb
 +} // namespace aurora::rt
 diff --git a/lib/rt/rt_capture.hpp b/lib/rt/rt_capture.hpp
 new file mode 100644
-index 0000000..c380e2a
+index 0000000..ef48199
 --- /dev/null
 +++ b/lib/rt/rt_capture.hpp
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,63 @@
 +#pragma once
++
++#include "rt_jitter.hpp"
 +
 +#include <dolphin/gx.h>
 +
@@ -6429,6 +6488,199 @@ index 0000000..f6dffd4
 +void shutdown() noexcept;
 +
 +} // namespace aurora::rt::interop
+diff --git a/lib/rt/rt_jitter.cpp b/lib/rt/rt_jitter.cpp
+new file mode 100644
+index 0000000..f6b124e
+--- /dev/null
++++ b/lib/rt/rt_jitter.cpp
+@@ -0,0 +1,141 @@
++#include "rt_jitter.hpp"
++
++#include "../logging.hpp"
++#include "../webgpu/gpu.hpp"
++
++#include <cstdio>
++#include <cstdlib>
++#include <string>
++
++namespace aurora::rt::jitter {
++static Module Log("aurora::rt");
++
++namespace {
++uint32_t g_phases = 0;
++bool g_phasesFromEnv = false;
++bool g_fixed = false;
++float g_fixedOffset[2] = {0.f, 0.f};
++uint32_t g_frame = 0;
++// This frame's offset, in pixels of the render target.
++float g_offset[2] = {0.f, 0.f};
++// The last perspective projection apply() saw: what the game set, what the
++// draws go through, and the offset between the two in NDC.
++float g_given[2] = {0.f, 0.f};
++float g_made[2] = {0.f, 0.f};
++float g_ndc[2] = {0.f, 0.f};
++bool g_haveMade = false;
++
++// Halton: the standard low-discrepancy sequence for this, base 2 across and
++// base 3 down, so that any run of consecutive frames covers the pixel evenly.
++float halton(uint32_t index, uint32_t base) noexcept {
++  float fraction = 1.f;
++  float result = 0.f;
++  while (index > 0u) {
++    fraction /= static_cast<float>(base);
++    result += fraction * static_cast<float>(index % base);
++    index /= base;
++  }
++  return result;
++}
++
++void read_environment() noexcept {
++  static bool read = false;
++  if (read) {
++    return;
++  }
++  read = true;
++  if (const char* env = std::getenv("AURORA_JITTER")) {
++    const int phases = std::atoi(env);
++    g_phases = phases <= 0 ? 0u : static_cast<uint32_t>(phases > 256 ? 256 : phases);
++    g_phasesFromEnv = true;
++    Log.info("Sub-pixel offset of the perspective views: {}",
++             g_phases == 0u ? std::string("off") : fmt::format("a sequence of {}", g_phases));
++  }
++  if (const char* env = std::getenv("AURORA_JITTER_FIXED")) {
++    float x = 0.f;
++    float y = 0.f;
++    if (std::sscanf(env, "%f,%f", &x, &y) == 2) {
++      g_fixed = true;
++      g_fixedOffset[0] = x;
++      g_fixedOffset[1] = y;
++      Log.info("Sub-pixel offset of the perspective views held at ({:.3f}, {:.3f}) pixels", x, y);
++    } else {
++      Log.warn("AURORA_JITTER_FIXED ignored: expected \"x,y\" in pixels");
++    }
++  }
++}
++} // namespace
++
++void begin_frame() noexcept {
++  read_environment();
++  ++g_frame;
++  if (g_fixed) {
++    g_offset[0] = g_fixedOffset[0];
++    g_offset[1] = g_fixedOffset[1];
++    return;
++  }
++  if (g_phases == 0u) {
++    g_offset[0] = 0.f;
++    g_offset[1] = 0.f;
++    return;
++  }
++  // From 1: the first Halton sample is the origin, which is no offset at all.
++  const uint32_t index = g_frame % g_phases + 1u;
++  g_offset[0] = halton(index, 2u) - 0.5f;
++  g_offset[1] = halton(index, 3u) - 0.5f;
++}
++
++void set_phases(uint32_t phases) noexcept {
++  read_environment();
++  if (!g_phasesFromEnv) {
++    g_phases = phases > 256u ? 256u : phases;
++  }
++}
++
++uint32_t phases() noexcept { return g_fixed ? 1u : g_phases; }
++
++void pixels(float& x, float& y) noexcept {
++  x = g_offset[0];
++  y = g_offset[1];
++}
++
++void apply(float& p1, float& p3) noexcept {
++  g_haveMade = false;
++  if (g_offset[0] == 0.f && g_offset[1] == 0.f) {
++    return;
++  }
++  const auto& target = webgpu::present_source();
++  if (target.size.width == 0 || target.size.height == 0) {
++    return;
++  }
++  // A pixel is 2 / width of NDC, and NDC runs upwards where pixels run down.
++  // GX puts the horizontal clip coordinate at p0*x + p1*z over -z, so adding
++  // to NDC is taking the same amount from p1, and likewise p3.
++  g_ndc[0] = 2.f * g_offset[0] / static_cast<float>(target.size.width);
++  g_ndc[1] = -2.f * g_offset[1] / static_cast<float>(target.size.height);
++  g_given[0] = p1;
++  g_given[1] = p3;
++  p1 -= g_ndc[0];
++  p3 -= g_ndc[1];
++  g_made[0] = p1;
++  g_made[1] = p3;
++  g_haveMade = true;
++}
++
++void unapply(float p1, float p3, float unjittered[2], float ndc[2]) noexcept {
++  // Matched on the exact values rather than undone by arithmetic: adding the
++  // offset back does not return the game's own bits.
++  if (g_haveMade && p1 == g_made[0] && p3 == g_made[1]) {
++    unjittered[0] = g_given[0];
++    unjittered[1] = g_given[1];
++    ndc[0] = g_ndc[0];
++    ndc[1] = g_ndc[1];
++    return;
++  }
++  unjittered[0] = p1;
++  unjittered[1] = p3;
++  ndc[0] = 0.f;
++  ndc[1] = 0.f;
++}
++
++} // namespace aurora::rt::jitter
+diff --git a/lib/rt/rt_jitter.hpp b/lib/rt/rt_jitter.hpp
+new file mode 100644
+index 0000000..9247377
+--- /dev/null
++++ b/lib/rt/rt_jitter.hpp
+@@ -0,0 +1,40 @@
++#pragma once
++
++#include <cstdint>
++
++namespace aurora::rt::jitter {
++
++// Sub-pixel offset of the perspective views, one per frame.
++//
++// A temporal upscaler rebuilds detail finer than a pixel from frames drawn a
++// fraction of a pixel apart, so it needs the game's picture moved by a known
++// amount every frame. The game knows nothing of it: the offset is put into
++// each perspective projection as it is loaded, the rasterizer and the rays
++// then go through the same numbers, and the motion handed to the upscaler has
++// it taken back out. With no sequence asked for, the offset is zero and every
++// projection is left exactly as the game set it.
++
++// Called once a frame, before the game sets its projections: moves on to the
++// next offset of the sequence.
++void begin_frame() noexcept;
++
++// How many offsets the sequence cycles through; 0 turns it off. AURORA_JITTER
++// overrides it, and AURORA_JITTER_FIXED="x,y" holds one offset still.
++void set_phases(uint32_t phases) noexcept;
++uint32_t phases() noexcept;
++
++// This frame's offset, in pixels of the render target: x to the right, y
++// downwards. A point the game would have drawn at s lands at s + offset.
++void pixels(float& x, float& y) noexcept;
++
++// Moves a perspective projection's p1 and p3 by this frame's offset, and
++// remembers what it was given and what it made of it.
++void apply(float& p1, float& p3) noexcept;
++
++// The other way round, for the capture: given the p1 and p3 a draw goes
++// through, what the game had set, and the offset in NDC that was added to what
++// the rasterizer draws. A projection apply() did not touch comes back as it is
++// with a zero offset.
++void unapply(float p1, float p3, float unjittered[2], float ndc[2]) noexcept;
++
++} // namespace aurora::rt::jitter
 diff --git a/lib/rt/rt_textures.cpp b/lib/rt/rt_textures.cpp
 new file mode 100644
 index 0000000..abdc778
@@ -6582,10 +6834,10 @@ index 0000000..b805129
 +} // namespace aurora::rt::textures
 diff --git a/lib/rt/rt_trace.cpp b/lib/rt/rt_trace.cpp
 new file mode 100644
-index 0000000..9686650
+index 0000000..1cf6339
 --- /dev/null
 +++ b/lib/rt/rt_trace.cpp
-@@ -0,0 +1,1275 @@
+@@ -0,0 +1,1296 @@
 +#include "rt_trace.hpp"
 +
 +#include "rt_accel.hpp"
@@ -6680,6 +6932,10 @@ index 0000000..9686650
 +// motion the trace writes, rather than at the same pixel.
 +// AURORA_RT_REPROJECT=0 goes back to the same pixel.
 +bool g_reproject = true;
++// How much of the change of sub-pixel offset the history lookup makes up for.
++// 1 is right; AURORA_RT_JITTER_COMP sets another value to measure what the
++// compensation is worth, 0 for none and -1 for the wrong way round.
++float g_jitterCompensation = 1.f;
 +// Whether the filter weighs signal agreement by the variance the temporal pass
 +// carries, or by its own 3x3 spread as before. AURORA_RT_VARIANCE=0 falls back.
 +bool g_varianceGuided = true;
@@ -6741,7 +6997,8 @@ index 0000000..9686650
 +  // Near and far planes of the projection, in front of the camera; 0 for none.
 +  float clipNear;
 +  float clipFar;
-+  float pad0[2];
++  // What the rasterizer adds to NDC this frame: the sub-pixel offset.
++  float jitterNdc[2];
 +};
 +// HLSL packs a cbuffer in float4 rows, so the size has to stay a multiple of 16.
 +static_assert(sizeof(Constants) == 128, "constants must stay 32 DWORDs");
@@ -6767,7 +7024,9 @@ index 0000000..9686650
 +  float clampSigma;
 +  uint32_t debugMode;
 +  uint32_t reproject;
-+  float pad0[2];
++  // The previous frame's sub-pixel offset less this frame's, in pixels: the
++  // motion says where the surface was, this says where the picture was.
++  float jitterDelta[2];
 +};
 +static_assert(sizeof(TemporalConstants) == 32, "temporal constants must stay 8 DWORDs");
 +
@@ -6804,6 +7063,11 @@ index 0000000..9686650
 +  if (const char* env = std::getenv("AURORA_RT_REPROJECT")) {
 +    g_reproject = env[0] != '0';
 +    Log.info("History looked up {}", g_reproject ? "where the pixel was" : "at the same pixel");
++  }
++  if (const char* env = std::getenv("AURORA_RT_JITTER_COMP")) {
++    g_jitterCompensation = static_cast<float>(std::atof(env));
++    Log.info("History lookup makes up for {:.2f} of the change of sub-pixel offset",
++             g_jitterCompensation);
 +  }
 +  if (const char* env = std::getenv("AURORA_RT_VARIANCE")) {
 +    g_varianceGuided = env[0] != '0';
@@ -7552,6 +7816,8 @@ index 0000000..9686650
 +  }
 +  constants.clipNear = params.clipNear;
 +  constants.clipFar = params.clipFar;
++  constants.jitterNdc[0] = params.jitterNdc[0];
++  constants.jitterNdc[1] = params.jitterNdc[1];
 +
 +  ID3D12DescriptorHeap* heaps[] = {g_uavHeap.Get()};
 +  g_cmdList->SetDescriptorHeaps(1, heaps);
@@ -7606,6 +7872,13 @@ index 0000000..9686650
 +                    (!params.singleFrame || params.debugMode == DebugHistory))
 +                       ? 1u
 +                       : 0u;
++    if (params.havePrevious) {
++      // NDC to pixels: half the size across, and downwards where NDC goes up.
++      tc.jitterDelta[0] = g_jitterCompensation * (params.prevJitterNdc[0] - params.jitterNdc[0]) *
++                          0.5f * static_cast<float>(width);
++      tc.jitterDelta[1] = g_jitterCompensation * -(params.prevJitterNdc[1] - params.jitterNdc[1]) *
++                          0.5f * static_cast<float>(height);
++    }
 +
 +    const uint32_t temporalStride =
 +        device()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -7863,10 +8136,10 @@ index 0000000..9686650
 +} // namespace aurora::rt::trace
 diff --git a/lib/rt/rt_trace.hpp b/lib/rt/rt_trace.hpp
 new file mode 100644
-index 0000000..082829f
+index 0000000..d9765fd
 --- /dev/null
 +++ b/lib/rt/rt_trace.hpp
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,175 @@
 +#pragma once
 +
 +#include <cstdint>
@@ -7989,6 +8262,12 @@ index 0000000..082829f
 +  // ray unclipped.
 +  float clipNear = 0.f;
 +  float clipFar = 0.f;
++  // What the rasterizer adds to the NDC of everything it draws through the
++  // traced view, this frame and the previous one: the sub-pixel offset a
++  // temporal upscaler asks for. The rays follow it, and the motion they write
++  // has it taken back out. Zero without one.
++  float jitterNdc[2] = {0.f, 0.f};
++  float prevJitterNdc[2] = {0.f, 0.f};
 +  // Per-trace denoiser overrides; negative keeps the global setting.
 +  float luminancePhi = -1.f;
 +  int32_t denoisePasses = -1;
@@ -8038,10 +8317,10 @@ index 0000000..082829f
 +} // namespace aurora::rt::trace
 diff --git a/lib/rt/shaders/rt_ao.hlsl b/lib/rt/shaders/rt_ao.hlsl
 new file mode 100644
-index 0000000..e7d09b6
+index 0000000..9e09b5c
 --- /dev/null
 +++ b/lib/rt/shaders/rt_ao.hlsl
-@@ -0,0 +1,946 @@
+@@ -0,0 +1,957 @@
 +// Ray traced ambient occlusion for PartyBoard.
 +//
 +// Primary visibility is traced rather than rasterised: with inline RayQuery the
@@ -8183,7 +8462,9 @@ index 0000000..e7d09b6
 +  // gProj as it was in the previous frame; all zero when there was none.
 +  float4 gProjPrev;
 +  // x and y: the near and far planes of the game's projection, as distances in
-+  // front of the camera; 0 when unknown.
++  // front of the camera; 0 when unknown. z and w: what the rasterizer adds to
++  // the NDC of everything it draws this frame, the sub-pixel offset a temporal
++  // upscaler asks for; zero without one.
 +  float4 gClip;
 +};
 +
@@ -8454,8 +8735,11 @@ index 0000000..e7d09b6
 +  }
 +
 +  // Pixel centre -> NDC -> view ray. Y is flipped: texture rows run downwards.
++  // The rasterizer drew everything gClip.zw further along in NDC, so what
++  // this pixel shows is what an unmoved picture has that much earlier: the
++  // ray goes there, and stays on what the game drew at this pixel.
 +  const float2 uv = (float2(tid.xy) + 0.5f) / float2(gDims);
-+  const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
++  const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f) - gClip.zw;
 +
 +  // Under a 2D overlay there is nothing here to shade: white leaves the frame
 +  // exactly as the game drew it and no reflection is blended in. The test comes
@@ -8651,9 +8935,15 @@ index 0000000..e7d09b6
 +                                      (there.y / -there.z) * gProjPrev.z - gProjPrev.w);
 +        const float2 pixelPrev =
 +            float2(ndcPrev.x * 0.5f + 0.5f, 0.5f - ndcPrev.y * 0.5f) * float2(gDims);
++        // Both ends without the sub-pixel offset: where the point was in an
++        // unmoved picture of the previous frame, less where it is in an
++        // unmoved picture of this one. The offset is not the surface moving,
++        // and an upscaler is told of it apart.
++        const float2 offset = float2(gClip.z, -gClip.w) * 0.5f * float2(gDims);
 +        // Clamped: the buffer holds half floats, and a point that was far off
 +        // screen must stay a number the temporal pass can turn away.
-+        const float2 moved = clamp(pixelPrev - (float2(tid.xy) + 0.5f), -32000.0f, 32000.0f);
++        const float2 moved =
++            clamp(pixelPrev - (float2(tid.xy) + 0.5f - offset), -32000.0f, 32000.0f);
 +        motion = float4(moved, length(there), followed ? 2.0f : 1.0f);
 +      }
 +    }
@@ -9160,10 +9450,10 @@ index 0000000..fad188a
 +}
 diff --git a/lib/rt/shaders/rt_temporal.hlsl b/lib/rt/shaders/rt_temporal.hlsl
 new file mode 100644
-index 0000000..d6888fc
+index 0000000..9025ac2
 --- /dev/null
 +++ b/lib/rt/shaders/rt_temporal.hlsl
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,188 @@
 +// Temporal accumulation for the ray traced terms, between the trace -- which
 +// writes this frame's raw estimate -- and the a-trous filter.
 +//
@@ -9209,7 +9499,10 @@ index 0000000..d6888fc
 +  uint gDebugMode;
 +  // Whether to look the history up where this pixel was in the previous frame.
 +  uint gReproject;
-+  float2 gPad0;
++  // The previous frame's sub-pixel offset less this frame's, in pixels. The
++  // motion says where the surface was in an unmoved picture; the history is a
++  // picture that was moved, and by another amount than this one.
++  float2 gJitterDelta;
 +};
 +
 +// Where this pixel's surface was in the previous frame, as the trace worked it
@@ -9227,7 +9520,7 @@ index 0000000..d6888fc
 +  if (motion.w <= 0.0f) {
 +    return false;
 +  }
-+  const int2 pixelPrevious = int2(floor(float2(pixel) + 0.5f + motion.xy));
++  const int2 pixelPrevious = int2(floor(float2(pixel) + 0.5f + motion.xy + gJitterDelta));
 +  if (any(pixelPrevious < int2(0, 0)) || any(pixelPrevious >= int2(gDims))) {
 +    return false;
 +  }
