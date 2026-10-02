@@ -567,8 +567,19 @@ if ($Sequence -gt 0) {
         $failures += "sequence of $Sequence frames requested but $($written.Count) written after the scene was reached"
     }
 }
-$errors = ($sceneLines | Select-String -Pattern 'aurora::rt.*ERROR|device removed|DEVICE_HUNG').Count
-if ($errors -gt 0) { $failures += "$errors ray tracing errors" }
+# Errors go to the game's error stream, a file of its own beside the log, and
+# are written "[ERROR | module]": the pattern this used to look for, in the log
+# alone, could match neither. Nothing was missed in the meantime -- no run kept
+# in work/ has such a line -- but nothing would have been caught either. The
+# error stream has no scene markers, so the whole run is held to it.
+$errorStream = @()
+if (Test-Path "$logPath.err") { $errorStream = @(Get-Content "$logPath.err") }
+$errors = @($errorStream | Select-String -Pattern '^\[(ERROR|FATAL) \| aurora::(rt|upscale)\]').Count
+$errors += @($sceneLines + $errorStream | Select-String -Pattern 'device removed|DEVICE_HUNG|DEVICE_REMOVED').Count
+if ($errors -gt 0) {
+    $first = @($errorStream | Select-String -Pattern '^\[(ERROR|FATAL) \| aurora::(rt|upscale)\]' | Select-Object -First 1)
+    $failures += "$errors ray tracing errors" + $(if ($first.Count -gt 0) { " (first: $($first[0]))" } else { '' })
+}
 if ($nonFinite -gt 0) { $failures += "$nonFinite reports with non-finite scene bounds" }
 if ($absurd -gt 0) { $failures += "$absurd reports with scene bounds past 1e6" }
 if ($compositeExtra -gt 0) { $failures += "$compositeExtra passes eligible for a second composition" }
