@@ -3720,3 +3720,38 @@ erreur de ray tracing ni de l'upscaler.
   `AURORA_UPSCALE_DUMP`, `AURORA_UPSCALE_JITTER_SIGN`,
   `AURORA_UPSCALE_MOTION_SIGN` et `AURORA_UPSCALE_DEBUG`, qui rend les SDK
   bavards.
+
+## Le registre des vignettes de textures n'est plus vidé au premier tracé (3 octobre 2026)
+
+Trouvé par l'agent qui relisait le tracé pour les upscalers, confirmé dans les
+journaux : la fonction qui envoie la grille de couverture 2D au GPU contenait
+trois lignes égarées — `g_thumbnailBuffer.Reset()`, `g_thumbnailCapacity = 0`,
+`textures::shutdown()` — copiées là depuis l'arrêt du périphérique, sans doute
+par un patch dont l'ancre se trouvait aux deux endroits (commit acd908d5, le
+lot des reflets). Elles s'exécutaient à la création du tampon de la grille,
+c'est-à-dire au premier tracé.
+
+**Ce que ça faisait.** Toutes les textures enregistrées avant le premier tracé
+perdaient leur vignette, qui sert au test alpha des découpes et à la couleur des
+reflets. Celles enregistrées ensuite recevaient de nouveau les numéros 1, 2, …,
+que les premières gardaient : celles-là lisaient la vignette d'une autre
+texture, et les autres plus aucune. Le premier tracé tombe sur l'écran titre,
+qui charge ses textures avant ; les plateaux et les mini-games chargent les
+leurs après, et n'étaient touchés que par ce qui restait chargé depuis le
+titre.
+
+**Mesuré**, au premier rapport puis au dernier de chaque scène, nombre de
+vignettes enregistrées, même parcours jusqu'à w01Dll :
+
+| scène | avant | après |
+|---|---|---|
+| titre (bootDll) | 0 → 2 | 143 → 145 |
+| sélection du mode | 18 → 349 | 161 → 537 |
+| w01Dll | 968 → 1 146 | 1 112 → 1 343 |
+
+Les 143 textures du titre restent maintenant enregistrées. Test nul A/B sur
+w01Dll : 0 pixel sur 1 228 800.
+
+Ce qui n'est pas mesuré : l'effet sur l'image. Ce défaut tient à un état, pas à
+un réglage, donc le banc A/B, qui trace une frame deux fois avec le même
+registre, ne peut pas le montrer.

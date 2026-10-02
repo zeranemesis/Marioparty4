@@ -7592,10 +7592,10 @@ index 0000000..b805129
 +} // namespace aurora::rt::textures
 diff --git a/lib/rt/rt_trace.cpp b/lib/rt/rt_trace.cpp
 new file mode 100644
-index 0000000..8e4462f
+index 0000000..d8d2d66
 --- /dev/null
 +++ b/lib/rt/rt_trace.cpp
-@@ -0,0 +1,1547 @@
+@@ -0,0 +1,1544 @@
 +#include "rt_trace.hpp"
 +
 +#include "rt_accel.hpp"
@@ -8411,9 +8411,6 @@ index 0000000..8e4462f
 +    desc.SampleDesc.Count = 1;
 +    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 +    g_maskBuffer.Reset();
-+  g_thumbnailBuffer.Reset();
-+  g_thumbnailCapacity = 0;
-+  textures::shutdown();
 +    if (FAILED(device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
 +                                                 D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
 +                                                 IID_PPV_ARGS(&g_maskBuffer)))) {
