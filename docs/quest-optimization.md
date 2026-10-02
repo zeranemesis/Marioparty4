@@ -293,6 +293,7 @@ Actifs par defaut depuis le build 166, chacun avec son interrupteur :
 - TEV en demi-precision pour les yeux, si le GPU a `shader-f16` (`debug.partyboard.eye_f16 0`) ;
 - affichage a 90 Hz, chaque image neuve (`debug.partyboard.display_hz 120` pour revenir a 120 Hz et 60 images neuves) ;
 - anneau de 4 images (`debug.partyboard.ring 3`).
+- build 167 : un objet qui touche les deux yeux est un seul dessin instancie (`debug.partyboard.stereo_crossing 1` pour le dessiner une fois par oeil). Par oeil, il y avait 11 % de fragments en moins (build 117), mais deux fois ses dessins dans chaque tuile ; le 02/10, en un seul dessin : fragments +9 %, GPU -11 %. Tous les dessins ont deja un `discard` (test alpha GEQUAL 1 du jeu).
 
 A verifier demain : pas de scintillement des cases et chemins (profondeur 16 bits), couleurs et degrades (demi-precision), 90 images/s tenues sans saccade (`Stereo perf` worldNew, `Game perf` stutters, `Stereo GPU`), et la fluidite ressentie. La premiere partie compile les nouveaux pipelines : quelques secondes d'objets manquants a la premiere vue du plateau.
 

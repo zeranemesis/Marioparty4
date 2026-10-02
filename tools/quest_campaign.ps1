@@ -86,6 +86,7 @@ $live = @(
     @{ name = 'f32';              props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.eye_f16' = '0' } },
     @{ name = 'msaa1';            props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.eye_msaa' = '1' } },
     @{ name = 'full-precision';   props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.eye_depth' = '32'; 'debug.partyboard.eye_f16' = '0' } },
+    @{ name = 'crossing-on';      props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.stereo_crossing' = '1' } },
     @{ name = 'all-cheap';        props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.alpha_test' = 'opaque-off'; 'debug.partyboard.anisotropy' = '4' } },
     @{ name = 'render-120';     props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.render_hz' = '0' } },
     @{ name = 'reference-end'; props = @{ 'debug.partyboard.eye_scale' = $eye } }
