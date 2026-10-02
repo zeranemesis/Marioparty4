@@ -445,7 +445,7 @@
  // The game's own frame is not on show in the headset (aurora.cpp skips presenting it).
  std::atomic_bool g_screenHidden = false;
  // 8x once a headset uses the eyes' images (gx.cpp's samplers read it), or
-@@ -128,6 +134,27 @@ float g_sortKey = -1.f;
+@@ -128,6 +134,39 @@ float g_sortKey = -1.f;
  uint32_t g_sortObject = 0;
  std::vector<DrawOrder> g_eyeOrder;
  uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
@@ -470,10 +470,22 @@
 +};
 +uint64_t g_statKinds[std::size(kDrawKinds)]{};
 +uint64_t g_statKindsTotal = 0, g_statSkipped = 0;
++// World draws with the same pipeline and textures as the world draw just
++// before ("Stereo kinds" samePipeTex): those a merge across redundant GX
++// state could join (only their uniforms differ, or nothing at all).
++uint64_t g_statSameAsPrevious = 0;
++PipelineRef g_previousPipeline = UINTPTR_MAX;
++BindGroupRef g_previousTextures = 0;
++void note_previous(const gx::DrawData& draw) {
++  g_statSameAsPrevious +=
++      draw.pipeline == g_previousPipeline && draw.bindGroups.textureBindGroup == g_previousTextures ? 1 : 0;
++  g_previousPipeline = draw.pipeline;
++  g_previousTextures = draw.bindGroups.textureBindGroup;
++}
  // Headset A/B switches, read again every 2 s so a capture can flip them
  // without restarting the game. On the Toad board (Quest 3, build 118,
  // 2026-09-28) the sort with the opaque blend off shaded 35% fewer fragments
-@@ -136,13 +163,17 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
+@@ -136,13 +175,17 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
  // default.
  //   debug.partyboard.sort_opaque 0       opaque draws of objects in the game's
  //                                        order (default: front to back)
@@ -497,7 +509,7 @@
  //   debug.partyboard.opaque_blend off    the game's opaque objects drawn without
  //                                        their alpha blend (edges of translucent
  //                                        textures turn hard). Build 119 found no
-@@ -154,13 +185,40 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
+@@ -154,13 +197,40 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
  //                                        across the table, where 8x reads the
  //                                        most texels: an A/B tells what the
  //                                        textures cost before compressing them
@@ -539,7 +551,7 @@
  std::chrono::steady_clock::time_point g_switchesAt{};
  
  void refresh_switches() {
-@@ -175,7 +233,7 @@ void refresh_switches() {
+@@ -175,7 +245,7 @@ void refresh_switches() {
    read.sortOpaque = value[0] != '0';
    value[0] = '\0';
    __system_property_get("debug.partyboard.stereo_crossing", value);
@@ -548,7 +560,7 @@
    value[0] = '\0';
    __system_property_get("debug.partyboard.opaque_blend", value);
    read.opaqueBlendOff = std::string_view{value} == "off";
-@@ -183,12 +241,44 @@ void refresh_switches() {
+@@ -183,12 +253,44 @@ void refresh_switches() {
    __system_property_get("debug.partyboard.anisotropy", value);
    const std::string_view anisotropy{value};
    read.anisotropy = anisotropy == "1" ? 1 : anisotropy == "2" ? 2 : anisotropy == "4" ? 4 : anisotropy == "16" ? 16 : 8;
@@ -596,7 +608,7 @@
    }
    g_switches = read;
    // New samplers from the next draw on (gx.cpp builds them per descriptor).
-@@ -360,6 +450,10 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -360,6 +462,10 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
    }
    auto spatialConfig = config;
    spatialConfig.msaaSamples = stereo_samples();
@@ -607,7 +619,7 @@
    if (spatialConfig.colorUpdate) {
      spatialConfig.alphaUpdate = true; // transparent MR targets need coverage
    }
-@@ -397,9 +491,34 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -397,9 +503,34 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
                      config.blendFacDst == GX_BL_INVSRCALPHA)),
    };
    g_statSortable += order.sortable;
@@ -642,7 +654,23 @@
    // An object that reaches both eyes, drawn once per eye when asked: no
    // fragment test, so the GPU keeps rejecting its hidden fragments early.
    const bool crossingPerEye = g_switches.crossingPerEye && inObject && !g_uncut;
-@@ -491,21 +610,39 @@ void end_frame() noexcept {
+@@ -422,6 +553,7 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+     }
+     if (ready) {
+       draw.pipeline = instancedRef;
++      note_previous(draw);
+       draw.uniformRange =
+           gx::build_uniform_stereo_instanced(info, vtxStart, ranges, g_clip[0], g_clip[1], g_eyeX, g_eyeClip);
+       g_eyeDraws[0].push_back(draw);
+@@ -437,6 +569,7 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+   g_eyeInstanced.push_back(0);
+   g_eyeOrder.push_back(order);
+   draw.pipeline = pipeline_ref(spatialConfig);
++  note_previous(draw);
+   // One uniform build for both eyes: only the projection differs.
+   const auto uniforms = gx::build_uniform_stereo(info, vtxStart, ranges, g_clip[0], g_clip[1]);
+   for (size_t eye = 0; eye < 2; ++eye) {
+@@ -491,21 +624,39 @@ void end_frame() noexcept {
    // Same sample count and formats as the game's frame, so its pipelines draw here too.
    const auto& config = webgpu::g_graphicsConfig;
    const uint32_t samples = stereo_samples();
@@ -688,7 +716,7 @@
    const uint32_t eyeStride = g_width / 2;
    PassDesc desc{
        .color = samples > 1 ? g_color.view : image.view,
-@@ -524,6 +661,7 @@ void end_frame() noexcept {
+@@ -524,6 +675,7 @@ void end_frame() noexcept {
        .instanced = &g_eyeInstanced,
        .order = &g_eyeOrder,
        .sortOpaque = g_switches.sortOpaque,
@@ -696,7 +724,7 @@
        .drawHud = g_frameDrawHud,
    };
    enqueue_pass(desc);
-@@ -573,6 +711,15 @@ void end_frame() noexcept {
+@@ -573,6 +725,16 @@ void end_frame() noexcept {
               recorded != 0 ? g_statSortable * 100 / recorded : 0, g_switches.sortOpaque ? " (sorted)" : "",
               recorded != 0 ? g_statCrossingPerEye * 100 / recorded : 0);
      g_statInstanced = g_statPerEye = g_statSortable = g_statCrossingPerEye = 0;
@@ -705,14 +733,15 @@
 +      for (size_t k = 0; k < std::size(kDrawKinds); ++k) {
 +        kinds += fmt::format(" {}={}%", kDrawKinds[k].first, g_statKinds[k] * 100 / g_statKindsTotal);
 +      }
-+      Log.info("Stereo kinds:{} skipped={}%", kinds, g_statSkipped * 100 / g_statKindsTotal);
++      Log.info("Stereo kinds:{} skipped={}% samePipeTex={}%", kinds, g_statSkipped * 100 / g_statKindsTotal,
++               g_statSameAsPrevious * 100 / g_statKindsTotal);
 +    }
 +    std::fill(std::begin(g_statKinds), std::end(g_statKinds), 0);
-+    g_statKindsTotal = g_statSkipped = 0;
++    g_statKindsTotal = g_statSkipped = g_statSameAsPrevious = 0;
      statsAt = now;
      statFrames = statWorld = statHud = 0;
      statWorldMax = 0;
-@@ -622,8 +769,128 @@ void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept
+@@ -622,8 +784,128 @@ void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept
  #endif
  }
  
@@ -841,7 +870,7 @@
    for (const auto& accessed : g_accessed) {
      Image target;
      {
-@@ -827,6 +1094,22 @@ extern "C" void AuroraStereoSetSortKey(float key) {
+@@ -827,6 +1109,22 @@ extern "C" void AuroraStereoSetSortKey(float key) {
  #endif
  }
  
