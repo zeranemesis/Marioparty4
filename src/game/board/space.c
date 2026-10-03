@@ -881,6 +881,13 @@ static void DrawSpaces(HU3DMODEL *model, Mtx matrix)
         space_curr = &spaceData[0][0];
         space_hilite = NULL;
         GXSetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
+#ifdef TARGET_PC
+        // One view matrix for every space, their corners placed on the board
+        // below: nothing changes between two spaces, so Aurora joins them into
+        // one draw. With a matrix per space, each was a draw of its own, and on
+        // a headset every draw is replayed in each of the eyes' 63 bins.
+        GXLoadPosMtxImm(lookat, GX_PNMTX0);
+#endif
         for (i = 0; i < spaceCnt[0]; i++, space_curr++) {
             if (space_curr->type == 0) {
                 continue;
@@ -926,6 +933,22 @@ static void DrawSpaces(HU3DMODEL *model, Mtx matrix)
             MTXConcat(rot_x, rot_y, rot_y);
             MTXConcat(rot_y, rot_z, rot_z);
             MTXConcat(final, rot_z, final);
+#ifdef TARGET_PC
+            {
+                static const Vec corners[4] = { { -100, -100, 0 }, { 100, -100, 0 }, { 100, 100, 0 }, { -100, 100, 0 } };
+                const float uvs[4][2] = { { uv_x, uv_y }, { uv_x + uv_size, uv_y },
+                    { uv_x + uv_size, uv_y + uv_size + (1.5f / 256.0f) }, { uv_x, uv_y + uv_size + (1.5f / 256.0f) } };
+                s32 corner;
+                Vec world;
+                GXBegin(GX_QUADS, GX_VTXFMT0, 4);
+                for (corner = 0; corner < 4; corner++) {
+                    MTXMultVec(final, &corners[corner], &world);
+                    GXPosition3f32(world.x, world.y, world.z);
+                    GXTexCoord2f32(uvs[corner][0], uvs[corner][1]);
+                }
+                GXEnd();
+            }
+#else
             MTXConcat(lookat, final, final);
             GXLoadPosMtxImm(final, GX_PNMTX0);
             GXBegin(GX_QUADS, GX_VTXFMT0, 4);
@@ -938,6 +961,7 @@ static void DrawSpaces(HU3DMODEL *model, Mtx matrix)
             GXPosition3f32(-100, 100, 0);
             GXTexCoord2f32(uv_x, uv_y + uv_size + (1.5f / 256.0f));
             GXEnd();
+#endif
             spaceDrawCnt++;
         }
         if (space_hilite) {
