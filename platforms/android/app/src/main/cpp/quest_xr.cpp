@@ -92,6 +92,7 @@ constexpr float kHudLiftMeters = 0.22f;        // the interface's bottom edge, a
 // sight over it, so the board never covers part of the interface.
 constexpr float kSceneryPerRadius = 0.35f;
 constexpr float kHudSightMarginMeters = 0.03f;
+constexpr float kHudAboveEyesMeters = 0.05f; // the interface's center, over the eyes' height
 constexpr float kHudWidthPerScene = 1.3f;
 constexpr float kMinHudWidth = 0.9f;
 constexpr float kMaxHudWidth = 1.6f;
@@ -982,8 +983,10 @@ XrPosef hud_pose(const XrPosef& table, float modelScale, XrExtent2Df& size, cons
       const float scenery = kSceneryPerRadius * sceneRadius;
       const float sight = e.y + (scenery - e.y) * (e.z + distance) / toEdge;
       lift = std::max(lift, sight + kHudSightMarginMeters);
-      // Never above the eyes: its center at most at eye level.
-      lift = std::min(lift, std::max(kHudLiftMeters, e.y - size.height * 0.5f));
+      // Its center at least at eye level (a little above), looked at straight
+      // ahead: with the eyes 0.27 m above the table, the screen stood at its
+      // lowest, 0.22 m up, too low to read (2026-10-03).
+      lift = std::max(lift, e.y + kHudAboveEyesMeters - size.height * 0.5f);
       static float logged = -1.0f;
       if (std::fabs(lift - logged) > 0.02f) {
         logged = lift;
@@ -1693,7 +1696,17 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
     layers[layerCount++] = modelLayer;
     XrExtent2Df hudSize{};
     const XrPosef hudPose = hud_pose(app.pose, app.table.modelScale, hudSize, floating ? nullptr : &app.screenEye);
-    if (const auto* screen = floating ? nullptr : app.stereo.hud_screen_layer(app.stage, hudPose, hudSize)) {
+    // The dark screen behind the interface: only with `debug.partyboard.hud_screen
+    // 1`; the interface floats on the room by default (asked for 2026-10-03).
+    static bool hudScreen = false;
+    static auto hudScreenAt = std::chrono::steady_clock::time_point{};
+    if (const auto now = std::chrono::steady_clock::now(); now - hudScreenAt >= std::chrono::seconds(2)) {
+      hudScreenAt = now;
+      char value[PROP_VALUE_MAX] = {};
+      __system_property_get("debug.partyboard.hud_screen", value);
+      hudScreen = value[0] == '1';
+    }
+    if (const auto* screen = floating || !hudScreen ? nullptr : app.stereo.hud_screen_layer(app.stage, hudPose, hudSize)) {
       layers[layerCount++] = screen;
     }
     if (const auto* hud =

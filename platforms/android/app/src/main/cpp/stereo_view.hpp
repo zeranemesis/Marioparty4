@@ -294,7 +294,11 @@ private:
   // 3, 4 or more), this stats window.
   FramePacer mPacer;
   XrDuration mPeriodNs = 0;
-  bool mPacing = true;             // debug.partyboard.xr_pacing=0 turns it off
+  // Off by default (debug.partyboard.xr_pacing 1 turns it on): holding
+  // finished images for their look kept 10 ms on each image's way, 23.6 ms
+  // from lease to copy against 14.7 without it, with 90 images/s and no
+  // stutter either way (Toad board, 90 Hz, 2026-10-03).
+  bool mPacing = false;
   bool mStartGiven = false;        // a start the next lease belongs to
   int64_t mGivenStartNs = 0, mGivenDueNs = 0;
   uint32_t mFramesSinceNew = 0;

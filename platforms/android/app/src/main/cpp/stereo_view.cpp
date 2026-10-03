@@ -1436,10 +1436,14 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
       // A/B switch, read every 2 s: `adb shell setprop debug.partyboard.xr_pacing 0`.
       char pacing[PROP_VALUE_MAX] = {};
       __system_property_get("debug.partyboard.xr_pacing", pacing);
-      mPacing = std::strcmp(pacing, "0") != 0;
+      mPacing = std::strcmp(pacing, "1") == 0;
       char depthLayer[PROP_VALUE_MAX] = {};
       __system_property_get("debug.partyboard.depth_layer", depthLayer);
-      const bool depthWanted = depthLayer[0] == '1' && mDepthSwapchain != XR_NULL_HANDLE;
+      // On by default (debug.partyboard.depth_layer 0 turns it off): with it
+      // the compositor corrects the head's translation, and the board held
+      // better (2026-10-03); its reprojection took the compositor from 2 to 4
+      // ms a displayed frame.
+      const bool depthWanted = depthLayer[0] != '0' && mDepthSwapchain != XR_NULL_HANDLE;
       if (depthWanted != mDepthWanted) {
         LOGI("Depth layer: %s (debug.partyboard.depth_layer)", depthWanted ? "submitted" : "off");
         mDepthWanted = depthWanted;
