@@ -1042,6 +1042,7 @@ void StereoView::adapt_resolution() {
   mLastSlow = slow;
   const float measuredScale = mQuality.update(mQualitySample, wanted, mAdaptRingFull, slow);
   mRenderScale = std::min(1.0f, measuredScale / mMaxScale);
+  if (mBoardMode && mShownHasWorld) mBoardQuality = measuredScale;
   // debug.partyboard.eye_scale <percent of recommended, 50 to 125>: a fixed
   // resolution instead of the adaptive one, read every second, so an A/B
   // capture (tools/quest_campaign.ps1) compares the same pixels.
@@ -1127,6 +1128,11 @@ void StereoView::set_screen_required(bool required) {
 
 void StereoView::set_board_mode(bool board) {
   std::lock_guard lock{mMutex};
+  if (board && !mBoardMode && mQuality.scale() > mBoardQuality) {
+    mQuality.start_at(mBoardQuality);
+    mRenderScale = std::min(1.0f, mQuality.scale() / mMaxScale);
+    LOGI("Stereo: a board again, resolution back to %.0f%% of recommended", mBoardQuality * 100.0f);
+  }
   mBoardMode = board;
 }
 

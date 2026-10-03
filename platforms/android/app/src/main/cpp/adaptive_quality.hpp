@@ -27,6 +27,13 @@ public:
     mTrial = {};
   }
   float scale() const { return mScale; }
+  // Start again from `scale` (a scene known to need it), no trial pending.
+  void start_at(float scale) {
+    mScale = std::clamp(scale, 0.65f, mCap);
+    mTrial = {};
+    mCalm = 0;
+    mHold = 0;
+  }
   float cap() const { return mCap; }
   Decision last_decision() const { return mDecision; }
   bool holding() const { return mHold != 0; }

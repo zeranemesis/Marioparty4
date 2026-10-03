@@ -274,6 +274,10 @@ private:
   // Dynamic resolution: the drawn part of the eyes' images, 0.5 to 1 of
   // their size, lowered when the GPU falls behind 120 Hz, raised back slowly.
   float mRenderScale = 0.8f; // of 125% of the recommended size: 100% of it, then up as the GPU allows
+  // The resolution a board last held (of the recommended size): a board is
+  // entered again at it rather than at what the light menus rose to, which
+  // took several seconds of hitches to come down 5% at a time (2026-10-03).
+  float mBoardQuality = 0.9f;
   float mMaxScale = 1.0f;    // the images' size, relative to the recommended one
   AdaptiveQuality mQuality;
   QualitySample mQualitySample;
