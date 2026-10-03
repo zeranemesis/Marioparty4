@@ -53,7 +53,8 @@ $switches = @('debug.partyboard.sort_opaque', 'debug.partyboard.stereo_crossing'
               'debug.partyboard.shader_f16', 'debug.partyboard.freeze', 'debug.partyboard.visibility_mask',
               'debug.partyboard.skip_draws', 'debug.partyboard.render_hz', 'debug.partyboard.alpha_test',
               'debug.partyboard.eye_depth', 'debug.partyboard.eye_f16', 'debug.partyboard.eye_msaa',
-              'debug.partyboard.display_hz', 'debug.partyboard.space_warp', 'debug.partyboard.hud_msaa')
+              'debug.partyboard.display_hz', 'debug.partyboard.space_warp', 'debug.partyboard.hud_msaa',
+              'debug.partyboard.batch_draws', 'debug.partyboard.cull_objects')
 $freeze = if ($NoFreeze) { '' } else { '1' }
 $live = @(
     @{ name = 'reference';     props = @{ 'debug.partyboard.eye_scale' = $eye } },
@@ -93,6 +94,9 @@ $live = @(
     # No MSAA, more pixels instead: four times fewer bytes a pixel in tile
     # memory (fewer bins), the compositor's filter smoothing the larger image.
     @{ name = 'msaa1-res110';     props = @{ 'debug.partyboard.eye_scale' = '110'; 'debug.partyboard.eye_msaa' = '1' } },
+    # Batched draws (build 182) and the eyes' culling of a board's pieces (181), off.
+    @{ name = 'batch-off';        props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.batch_draws' = '0' } },
+    @{ name = 'cull-off';         props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.cull_objects' = '0' } },
     @{ name = 'filter-none';      props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.layer_filter' = 'none' } },
     @{ name = 'gpu-boost';        props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.gpu_level' = 'boost' } },
     @{ name = 'crossing-on';      props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.stereo_crossing' = '1' } },

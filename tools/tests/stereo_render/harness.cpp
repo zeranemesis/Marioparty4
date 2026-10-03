@@ -224,6 +224,23 @@ int main(int argc, char** argv) {
         write(dir + "/" + name + half, build_shader_source(config));
         ++written;
       }
+      // Several draws in one (ShaderConfig::batched), for the instanced
+      // variants the eyes' pass joins.
+      if (stereo == StereoDiscard || stereo == StereoUncut) {
+        for (const u8 half : {u8{0}, u8{1}}) {
+          config.halfPrecision = half;
+          config.batched = 1;
+          std::string file = std::string{suffix};
+          file.replace(file.rfind(".wgsl"), 5, half ? "-batched-f16.wgsl" : "-batched.wgsl");
+          const auto source = build_shader_source(config);
+          if (source.find("batch_slot") == std::string::npos) {
+            std::printf("%s%s: not batched (no free location)\n", name, file.c_str());
+          }
+          write(dir + "/" + name + file, source);
+          ++written;
+          config.batched = 0;
+        }
+      }
     }
   };
 

@@ -49,7 +49,66 @@
  #include <deque>
  #include <mutex>
  #include <optional>
-@@ -1214,6 +1215,44 @@ void stereo::enqueue_pass(const PassDesc& desc) noexcept {
+@@ -140,6 +141,8 @@ static PipelineRef g_currentPipeline;
+ wgpu::BindGroupLayout g_staticBindGroupLayout;
+ wgpu::BindGroup g_staticBindGroup;
+ wgpu::BindGroupLayout g_uniformBindGroupLayout;
++wgpu::BindGroupLayout g_batchBindGroupLayout;
++wgpu::BindGroup g_batchBindGroup;
+ wgpu::BindGroup g_uniformBindGroup;
+ 
+ // for imgui debug
+@@ -960,6 +963,40 @@ void initialize() {
+     };
+     g_uniformBindGroup = g_device.CreateBindGroup(&bindGroupDescriptor);
+   }
++  {
++    constexpr std::array layoutEntries{
++        // Batched draws' uniform blocks (dynamic offset into the storage buffer)
++        wgpu::BindGroupLayoutEntry{
++            .binding = 0,
++            .visibility = wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Fragment,
++            .buffer =
++                wgpu::BufferBindingLayout{
++                    .type = wgpu::BufferBindingType::ReadOnlyStorage,
++                    .hasDynamicOffset = true,
++                },
++        },
++    };
++    const wgpu::BindGroupLayoutDescriptor layoutDesc{
++        .label = "Batch bind group layout",
++        .entryCount = layoutEntries.size(),
++        .entries = layoutEntries.data(),
++    };
++    g_batchBindGroupLayout = g_device.CreateBindGroupLayout(&layoutDesc);
++    const std::array entries{
++        wgpu::BindGroupEntry{
++            .binding = 0,
++            .buffer = g_storageBuffer,
++            .size = MaxBatchBytes,
++        },
++    };
++    const wgpu::BindGroupDescriptor bindGroupDescriptor{
++        .label = "Batch bind group",
++        .layout = g_batchBindGroupLayout,
++        .entryCount = entries.size(),
++        .entries = entries.data(),
++    };
++    g_batchBindGroup = g_device.CreateBindGroup(&bindGroupDescriptor);
++  }
+ 
+   gx::initialize();
+ #ifdef AURORA_ENABLE_RMLUI
+@@ -1006,6 +1043,8 @@ void shutdown() {
+   g_staticBindGroupLayout = {};
+   g_uniformBindGroup = {};
+   g_uniformBindGroupLayout = {};
++  g_batchBindGroupLayout = {};
++  g_batchBindGroup = {};
+   g_inOffscreen = false;
+   g_frameIndex = UINT32_MAX;
+   g_frameSlots.reset();
+@@ -1214,6 +1253,44 @@ void stereo::enqueue_pass(const PassDesc& desc) noexcept {
    const auto instanced = [&](size_t i) {
      return desc.instanced != nullptr && i < desc.instanced->size() && (*desc.instanced)[i] != 0;
    };
@@ -94,7 +153,79 @@
    std::vector<uint32_t> sequence;
    if (desc.order != nullptr && desc.order->size() == leftDraws.size()) {
      sequence = stereo::draw_sequence(*desc.order, desc.sortOpaque);
-@@ -1460,16 +1499,23 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+@@ -1221,9 +1298,71 @@ void stereo::enqueue_pass(const PassDesc& desc) noexcept {
+     sequence.resize(leftDraws.size());
+     std::iota(sequence.begin(), sequence.end(), 0u);
+   }
++  // A run of instanced draws with the same batched pipeline, textures and
++  // blend constant becomes one draw (ShaderConfig::batched): their uniform
++  // blocks one after another in the storage buffer, their indices made 32
++  // bits with the block's slot in the top 10. On the headset's tiled GPU each
++  // draw is replayed in every bin; a quarter of the board's draws repeat the
++  // pipeline and textures of the one before (Stereo kinds samePipeTex).
++  const auto batched_of = [&](size_t i) -> PipelineRef {
++    return desc.batched != nullptr && i < desc.batched->size() ? (*desc.batched)[i] : 0;
++  };
++  const auto push_batch = [&](size_t from, size_t to) {
++    const auto& first = leftDraws[sequence[from]];
++    const uint32_t blockSize = first.uniformRange.size;
++    const uint32_t stride = AURORA_ALIGN(blockSize, 16);
++    const size_t count = to - from;
++    std::vector<uint8_t> blocks(count * stride, 0);
++    std::vector<uint32_t> indices;
++    for (size_t k = 0; k < count; ++k) {
++      const auto& d = leftDraws[sequence[from + k]];
++      std::memcpy(blocks.data() + k * stride, frame.uniforms.data() + d.uniformRange.offset, blockSize);
++      const uint32_t slot = static_cast<uint32_t>(k) << 22;
++      if (d.indexCount != 0) {
++        const auto* src = reinterpret_cast<const uint16_t*>(frame.indices.data() + d.idxRange.offset);
++        for (uint32_t i = 0; i < d.indexCount; ++i) indices.push_back(slot | src[i]);
++      } else {
++        for (uint32_t i = 0; i < d.vtxCount; ++i) indices.push_back(slot | i);
++      }
++    }
++    const Range uniforms = push_storage(blocks.data(), blocks.size());
++    if (uniforms.offset + MaxBatchBytes > StorageBufferSize) {
++      return false; // the binding's window would leave the buffer: each on its own
++    }
++    gx::DrawData draw = first;
++    draw.pipeline = batched_of(sequence[from]);
++    draw.uniformRange = uniforms;
++    draw.idxRange = push_indices(reinterpret_cast<const uint8_t*>(indices.data()), indices.size() * sizeof(uint32_t), 4);
++    draw.indexCount = static_cast<uint32_t>(indices.size());
++    draw.vtxCount = 0;
++    draw.instanceCount = 2;
++    draw.batched = true;
++    push_gx(draw);
++    stereo::note_batch(static_cast<uint32_t>(count));
++    return true;
++  };
+   for (size_t p = 0; p < sequence.size();) {
+     if (instanced(sequence[p])) {
+       set_view(2);
++      // The run that can be joined with this draw.
++      size_t end = p + 1;
++      if (const PipelineRef variant = batched_of(sequence[p]); variant != 0) {
++        const auto& first = leftDraws[sequence[p]];
++        const uint32_t stride = AURORA_ALIGN(first.uniformRange.size, 16);
++        while (end < sequence.size() && instanced(sequence[end]) && batched_of(sequence[end]) == variant &&
++               (end - p + 1) * stride <= MaxBatchBytes && end - p < 1023) {
++          const auto& next = leftDraws[sequence[end]];
++          if (next.bindGroups.textureBindGroup != first.bindGroups.textureBindGroup || next.dstAlpha != first.dstAlpha ||
++              next.uniformRange.size != first.uniformRange.size || next.instanceCount != 1) {
++            break;
++          }
++          ++end;
++        }
++      }
++      if (end - p >= 2 && push_batch(p, end)) {
++        p = end;
++        continue;
++      }
+       auto draw = leftDraws[sequence[p++]];
+       draw.instanceCount = 2;
+       push_gx(draw);
+@@ -1460,16 +1599,23 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
      stereo::begin_access(passInfo.stereoImage, passInfo.stereoTag, passInfo.stereoHasWorld, passInfo.stereoHud);
    }
    const auto label = fmt::format("Render pass {}", passIndex);
@@ -118,7 +249,7 @@
  
    if (passInfo.captureDepthSnapshot) {
      depth_peek::encode_frame_snapshot(cmd, passInfo.copySourceDepthView, passInfo.targetSize, passInfo.msaaSamples);
-@@ -1539,6 +1585,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
+@@ -1539,6 +1685,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
    // Bind static bind group for the whole pass
    pass.SetBindGroup(0, g_staticBindGroup);
    pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
@@ -126,7 +257,7 @@
  
    for (const auto& cmd : passInfo.commands) {
  #ifdef AURORA_GFX_DEBUG_GROUPS
-@@ -1580,6 +1627,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
+@@ -1580,6 +1727,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
        switch (draw.type) {
        case ShaderType::Clear:
          clear::render(draw.clear, pass, passInfo.targetSize);
@@ -134,7 +265,7 @@
          break;
        case ShaderType::GX:
          gx::render(draw.gx, pass);
-@@ -1587,6 +1635,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
+@@ -1587,6 +1735,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
  #ifdef AURORA_ENABLE_RMLUI
        case ShaderType::Rml:
          rmlui::render(draw.rml, pass);
@@ -142,6 +273,20 @@
          break;
  #endif
        }
+--- a/lib/gfx/common.hpp
++++ b/lib/gfx/common.hpp
+@@ -185,6 +185,11 @@ extern wgpu::Buffer g_vertexBuffer;
+ extern wgpu::Buffer g_uniformBuffer;
+ extern wgpu::Buffer g_indexBuffer;
+ extern wgpu::Buffer g_storageBuffer;
++// Batched GX draws (ShaderConfig::batched): their uniform blocks, an array
++// in the storage buffer at a dynamic offset, at most MaxBatchBytes.
++inline constexpr uint32_t MaxBatchBytes = 65536;
++extern wgpu::BindGroupLayout g_batchBindGroupLayout;
++extern wgpu::BindGroup g_batchBindGroup;
+ extern wgpu::BindGroupLayout g_staticBindGroupLayout;
+ extern wgpu::BindGroup g_staticBindGroup;
+ extern wgpu::BindGroupLayout g_uniformBindGroupLayout;
 --- a/lib/gfx/pipeline_cache.cpp
 +++ b/lib/gfx/pipeline_cache.cpp
 @@ -956,7 +956,7 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
@@ -423,7 +568,15 @@
 +} // namespace aurora::gfx
 --- a/lib/gfx/stereo.cpp
 +++ b/lib/gfx/stereo.cpp
-@@ -53,7 +53,7 @@ uint32_t g_eyeHeight = 0, g_hudWidth = 0, g_hudHeight = 0;
+@@ -13,6 +13,7 @@
+ #include <atomic>
+ #include <chrono>
+ #include <mutex>
++#include <unordered_map>
+ #include <unordered_set>
+ 
+ #if defined(__ANDROID__)
+@@ -53,7 +54,7 @@ uint32_t g_eyeHeight = 0, g_hudWidth = 0, g_hudHeight = 0;
  // the game: `adb shell setprop debug.partyboard.stereo_msaa 1` (no MSAA).
  // WebGPU only has 1 and 4 samples: any other value keeps 4 (2x aborted the
  // game on its first eye frame, 2026-09-28).
@@ -432,7 +585,7 @@
    static const uint32_t samples = [] {
      char value[PROP_VALUE_MAX] = {};
      __system_property_get("debug.partyboard.stereo_msaa", value);
-@@ -105,6 +105,12 @@ bool g_loggedGeometry = false;
+@@ -105,6 +106,12 @@ bool g_loggedGeometry = false;
  uint32_t g_frameEyeWidth = 0, g_frameEyeHeight = 0;
  // Whether this frame draws the HUD image (AuroraStereoSetHud).
  bool g_frameDrawHud = true;
@@ -445,7 +598,7 @@
  // The game's own frame is not on show in the headset (aurora.cpp skips presenting it).
  std::atomic_bool g_screenHidden = false;
  // 8x once a headset uses the eyes' images (gx.cpp's samplers read it), or
-@@ -128,6 +134,39 @@ float g_sortKey = -1.f;
+@@ -128,6 +135,48 @@ float g_sortKey = -1.f;
  uint32_t g_sortObject = 0;
  std::vector<DrawOrder> g_eyeOrder;
  uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
@@ -476,16 +629,25 @@
 +uint64_t g_statSameAsPrevious = 0;
 +PipelineRef g_previousPipeline = UINTPTR_MAX;
 +BindGroupRef g_previousTextures = 0;
-+void note_previous(const gx::DrawData& draw) {
-+  g_statSameAsPrevious +=
-+      draw.pipeline == g_previousPipeline && draw.bindGroups.textureBindGroup == g_previousTextures ? 1 : 0;
++bool note_previous(const gx::DrawData& draw) {
++  const bool same = draw.pipeline == g_previousPipeline && draw.bindGroups.textureBindGroup == g_previousTextures;
++  g_statSameAsPrevious += same ? 1 : 0;
 +  g_previousPipeline = draw.pipeline;
 +  g_previousTextures = draw.bindGroups.textureBindGroup;
++  return same;
 +}
++// Batched draws (debug.partyboard.batch_draws 0: none): per instanced
++// pipeline, its batched variant, asked for the first time a draw repeats
++// that pipeline and those textures (0: its shader cannot be batched), and
++// those already built. Per world draw, the variant to join it with.
++std::unordered_map<PipelineRef, PipelineRef> g_batchedVariant;
++std::unordered_set<PipelineRef> g_readyBatched;
++std::vector<PipelineRef> g_eyeBatched;
++uint64_t g_statBatchJoined = 0, g_statBatchDraws = 0;
  // Headset A/B switches, read again every 2 s so a capture can flip them
  // without restarting the game. On the Toad board (Quest 3, build 118,
  // 2026-09-28) the sort with the opaque blend off shaded 35% fewer fragments
-@@ -136,13 +175,17 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
+@@ -136,13 +185,17 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
  // default.
  //   debug.partyboard.sort_opaque 0       opaque draws of objects in the game's
  //                                        order (default: front to back)
@@ -509,7 +671,7 @@
  //   debug.partyboard.opaque_blend off    the game's opaque objects drawn without
  //                                        their alpha blend (edges of translucent
  //                                        textures turn hard). Build 119 found no
-@@ -154,13 +197,46 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
+@@ -154,13 +207,47 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
  //                                        across the table, where 8x reads the
  //                                        most texels: an A/B tells what the
  //                                        textures cost before compressing them
@@ -530,6 +692,7 @@
 +  // measurement first: a cut-out texel (alpha 0) of such a draw then writes
 +  // depth and may hide what is behind it.
 +  bool alphaTestOff = false;
++  bool batchDraws = true; // debug.partyboard.batch_draws 0: each draw on its own
 +  // Live A/Bs of what the trace showed (docs/quest-optimization.md): the
 +  // eyes' pass in 63 bins (4x MSAA, 32-bit depth: 32 bytes a pixel in tile
 +  // memory) and 46-50 ALU instructions a fragment.
@@ -557,7 +720,7 @@
  std::chrono::steady_clock::time_point g_switchesAt{};
  
  void refresh_switches() {
-@@ -175,7 +251,7 @@ void refresh_switches() {
+@@ -175,7 +262,7 @@ void refresh_switches() {
    read.sortOpaque = value[0] != '0';
    value[0] = '\0';
    __system_property_get("debug.partyboard.stereo_crossing", value);
@@ -566,7 +729,7 @@
    value[0] = '\0';
    __system_property_get("debug.partyboard.opaque_blend", value);
    read.opaqueBlendOff = std::string_view{value} == "off";
-@@ -183,12 +259,47 @@ void refresh_switches() {
+@@ -183,12 +270,54 @@ void refresh_switches() {
    __system_property_get("debug.partyboard.anisotropy", value);
    const std::string_view anisotropy{value};
    read.anisotropy = anisotropy == "1" ? 1 : anisotropy == "2" ? 2 : anisotropy == "4" ? 4 : anisotropy == "16" ? 16 : 8;
@@ -588,6 +751,13 @@
 +  if (read.depth16 != g_switches.depth16 || read.f16 != g_switches.f16 || read.msaa != g_switches.msaa) {
 +    Log.info("Stereo: eyes' depth {} bits, TEV {}, MSAA {}x (eye_depth, eye_f16, eye_msaa)", read.depth16 ? 16 : 32,
 +             read.f16 ? "half precision" : "full precision", read.msaa != 0 ? read.msaa : startup_samples());
++  }
++  value[0] = '\0';
++  __system_property_get("debug.partyboard.batch_draws", value);
++  read.batchDraws = value[0] != '0';
++  if (read.batchDraws != g_switches.batchDraws) {
++    Log.info("Stereo: draws of the same pipeline and textures {} (debug.partyboard.batch_draws)",
++             read.batchDraws ? "joined" : "each on its own");
 +  }
 +  value[0] = '\0';
 +  __system_property_get("debug.partyboard.alpha_test", value);
@@ -617,7 +787,7 @@
    }
    g_switches = read;
    // New samplers from the next draw on (gx.cpp builds them per descriptor).
-@@ -359,7 +470,11 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -359,7 +488,11 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
      return false;
    }
    auto spatialConfig = config;
@@ -630,7 +800,7 @@
    if (spatialConfig.colorUpdate) {
      spatialConfig.alphaUpdate = true; // transparent MR targets need coverage
    }
-@@ -397,9 +512,34 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -397,9 +530,34 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
                      config.blendFacDst == GX_BL_INVSRCALPHA)),
    };
    g_statSortable += order.sortable;
@@ -665,23 +835,57 @@
    // An object that reaches both eyes, drawn once per eye when asked: no
    // fragment test, so the GPU keeps rejecting its hidden fragments early.
    const bool crossingPerEye = g_switches.crossingPerEye && inObject && !g_uncut;
-@@ -422,6 +562,7 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -422,11 +580,30 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
      }
      if (ready) {
        draw.pipeline = instancedRef;
-+      note_previous(draw);
++      PipelineRef batchedRef = 0;
++      if (note_previous(draw) || g_batchedVariant.contains(instancedRef)) {
++        auto [it, inserted] = g_batchedVariant.try_emplace(instancedRef, 0);
++        if (inserted && gx::batched_shader_fits(instancedConfig.shaderConfig)) {
++          auto batchedConfig = instancedConfig;
++          batchedConfig.shaderConfig.batched = 1;
++          it->second = pipeline_ref(batchedConfig);
++        }
++        batchedRef = it->second;
++        if (batchedRef != 0 && !g_readyBatched.contains(batchedRef)) {
++          wgpu::RenderPipeline batchedPipeline;
++          if (get_pipeline(batchedRef, batchedPipeline) && batchedPipeline) {
++            g_readyBatched.insert(batchedRef);
++          } else {
++            batchedRef = 0; // not built yet: on its own meanwhile
++          }
++        }
++      }
        draw.uniformRange =
            gx::build_uniform_stereo_instanced(info, vtxStart, ranges, g_clip[0], g_clip[1], g_eyeX, g_eyeClip);
        g_eyeDraws[0].push_back(draw);
-@@ -437,6 +578,7 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+       g_eyeDraws[1].push_back(draw);
+       g_eyeInstanced.push_back(1);
++      g_eyeBatched.push_back(batchedRef);
+       g_eyeOrder.push_back(order);
+       ++g_statInstanced;
+       g_worldMergeable = true;
+@@ -435,8 +612,10 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+   }
+   ++g_statPerEye;
    g_eyeInstanced.push_back(0);
++  g_eyeBatched.push_back(0);
    g_eyeOrder.push_back(order);
    draw.pipeline = pipeline_ref(spatialConfig);
 +  note_previous(draw);
    // One uniform build for both eyes: only the projection differs.
    const auto uniforms = gx::build_uniform_stereo(info, vtxStart, ranges, g_clip[0], g_clip[1]);
    for (size_t eye = 0; eye < 2; ++eye) {
-@@ -491,21 +633,40 @@ void end_frame() noexcept {
+@@ -482,6 +661,7 @@ void end_frame() noexcept {
+       g_eyeDraws[1].clear();
+       g_eyeInstanced.clear();
+   g_eyeOrder.clear();
++  g_eyeBatched.clear();
+       g_hudDraws.clear();
+       return;
+     }
+@@ -491,21 +671,40 @@ void end_frame() noexcept {
    // Same sample count and formats as the game's frame, so its pipelines draw here too.
    const auto& config = webgpu::g_graphicsConfig;
    const uint32_t samples = stereo_samples();
@@ -729,15 +933,16 @@
    const uint32_t eyeStride = g_width / 2;
    PassDesc desc{
        .color = samples > 1 ? g_color.view : image.view,
-@@ -524,6 +685,7 @@ void end_frame() noexcept {
+@@ -524,6 +723,8 @@ void end_frame() noexcept {
        .instanced = &g_eyeInstanced,
        .order = &g_eyeOrder,
        .sortOpaque = g_switches.sortOpaque,
 +      .hidden = {&g_frameHidden[0], &g_frameHidden[1]},
++      .batched = g_switches.batchDraws && g_eyeBatched.size() == worldDraws ? &g_eyeBatched : nullptr,
        .drawHud = g_frameDrawHud,
    };
    enqueue_pass(desc);
-@@ -534,11 +696,11 @@ void end_frame() noexcept {
+@@ -534,11 +735,11 @@ void end_frame() noexcept {
    static const std::vector<gx::DrawData> noDraws;
    const PassDesc hud{
        .label = "Stereo HUD",
@@ -752,7 +957,7 @@
        .hudTop = 0,
        .hudWidth = g_hudWidth,
        .hudHeight = g_hudHeight,
-@@ -573,6 +735,16 @@ void end_frame() noexcept {
+@@ -573,6 +774,18 @@ void end_frame() noexcept {
               recorded != 0 ? g_statSortable * 100 / recorded : 0, g_switches.sortOpaque ? " (sorted)" : "",
               recorded != 0 ? g_statCrossingPerEye * 100 / recorded : 0);
      g_statInstanced = g_statPerEye = g_statSortable = g_statCrossingPerEye = 0;
@@ -761,15 +966,25 @@
 +      for (size_t k = 0; k < std::size(kDrawKinds); ++k) {
 +        kinds += fmt::format(" {}={}%", kDrawKinds[k].first, g_statKinds[k] * 100 / g_statKindsTotal);
 +      }
-+      Log.info("Stereo kinds:{} skipped={}% samePipeTex={}%", kinds, g_statSkipped * 100 / g_statKindsTotal,
-+               g_statSameAsPrevious * 100 / g_statKindsTotal);
++      Log.info("Stereo kinds:{} skipped={}% samePipeTex={}% batched: {} draws into {} ({} variants, {} built)", kinds,
++               g_statSkipped * 100 / g_statKindsTotal, g_statSameAsPrevious * 100 / g_statKindsTotal,
++               g_statBatchJoined, g_statBatchDraws, g_batchedVariant.size(), g_readyBatched.size());
++      g_statBatchJoined = g_statBatchDraws = 0;
 +    }
 +    std::fill(std::begin(g_statKinds), std::end(g_statKinds), 0);
 +    g_statKindsTotal = g_statSkipped = g_statSameAsPrevious = 0;
      statsAt = now;
      statFrames = statWorld = statHud = 0;
      statWorldMax = 0;
-@@ -622,8 +794,128 @@ void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept
+@@ -581,6 +794,7 @@ void end_frame() noexcept {
+   g_eyeDraws[1].clear();
+   g_eyeInstanced.clear();
+   g_eyeOrder.clear();
++  g_eyeBatched.clear();
+   g_hudDraws.clear();
+   g_image = -1;
+ #endif
+@@ -622,8 +836,128 @@ void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept
  #endif
  }
  
@@ -898,10 +1113,21 @@
    for (const auto& accessed : g_accessed) {
      Image target;
      {
-@@ -827,6 +1119,22 @@ extern "C" void AuroraStereoSetSortKey(float key) {
+@@ -827,6 +1161,33 @@ extern "C" void AuroraStereoSetSortKey(float key) {
  #endif
  }
  
++namespace aurora::gfx::stereo {
++void note_batch(uint32_t count) noexcept {
++#if defined(__ANDROID__)
++  g_statBatchJoined += count;
++  ++g_statBatchDraws;
++#else
++  (void)count;
++#endif
++}
++} // namespace aurora::gfx::stereo
++
 +extern "C" void AuroraStereoSetHiddenArea(uint32_t eye, const float* rects, uint32_t count) {
 +#if defined(__ANDROID__)
 +  using namespace aurora::gfx::stereo;
@@ -935,16 +1161,24 @@
  void after_submit() noexcept;
  
  // What common.cpp turns into a render pass: the eyes' (hud null), or the
-@@ -86,6 +91,9 @@ struct PassDesc {
+@@ -86,8 +91,17 @@ struct PassDesc {
    // sortOpaque sends the sortable runs front to back.
    const std::vector<DrawOrder>* order = nullptr;
    bool sortOpaque = false;
++  // Per world draw: its pipeline's batched variant when it is built (0: none),
++  // for runs of instanced draws with the same pipeline and textures, joined
++  // into one draw (common.cpp). nullptr: none joined.
++  const std::vector<PipelineRef>* batched = nullptr;
 +  // Eyes' pass: per eye, the rectangles the lenses never show ({x0, y0, x1,
 +  // y1}, 0..1 of the eye's rectangle), filled with the nearest depth first.
 +  const std::vector<float>* hidden[2]{};
    const std::vector<gx::DrawData>* hud = nullptr;
  };
  void enqueue_pass(const PassDesc& desc) noexcept; // common.cpp
++// common.cpp joined `count` world draws into one (for "Stereo draws").
++void note_batch(uint32_t count) noexcept;
+ 
+ } // namespace aurora::gfx::stereo
 --- a/lib/gfx/texture.cpp
 +++ b/lib/gfx/texture.cpp
 @@ -4,6 +4,7 @@
@@ -1053,7 +1287,15 @@
  TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept;
 --- a/lib/gx/gx.cpp
 +++ b/lib/gx/gx.cpp
-@@ -668,7 +668,7 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
+@@ -42,6 +42,7 @@ static absl::flat_hash_map<u32, std::pair<wgpu::BindGroupLayout, wgpu::BindGroup
+ static wgpu::BindGroupLayout sTextureBindGroupLayout;
+ static wgpu::BindGroupLayout sSamplerBindGroupLayout;
+ static wgpu::PipelineLayout sPipelineLayout;
++static wgpu::PipelineLayout sBatchedPipelineLayout; // ShaderConfig::batched
+ wgpu::BindGroup g_emptyTextureBindGroup;
+ 
+ namespace {
+@@ -668,7 +669,7 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
    const float depthBias = (UseReversedZ ? -1.0f : 1.0f) * std::bit_cast<float>(config.polygonOffsetBits);
    const float depthBiasSlopeScale = (UseReversedZ ? -1.0f : 1.0f) * std::bit_cast<float>(config.polygonOffsetScaleBits);
    const wgpu::DepthStencilState depthStencil{
@@ -1062,9 +1304,38 @@
        .depthWriteEnabled = config.depthCompare && config.depthUpdate,
        .depthCompare = config.depthCompare ? to_compare_function(config.depthFunc) : wgpu::CompareFunction::Always,
        .depthBias = round_away_from_zero<int32_t>(depthBias),
+@@ -690,7 +691,7 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
+   };
+   const wgpu::RenderPipelineDescriptor descriptor{
+       .label = label,
+-      .layout = sPipelineLayout,
++      .layout = config.shaderConfig.batched ? sBatchedPipelineLayout : sPipelineLayout,
+       .vertex =
+           {
+               .module = shader,
+@@ -1027,6 +1028,19 @@ void initialize() noexcept {
+     };
+     sPipelineLayout = g_device.CreatePipelineLayout(&desc);
+   }
++  {
++    const std::array layouts{
++        gfx::g_staticBindGroupLayout,
++        gfx::g_batchBindGroupLayout,
++        sTextureBindGroupLayout,
++    };
++    const wgpu::PipelineLayoutDescriptor desc{
++        .label = "GX Batched Pipeline Layout",
++        .bindGroupLayoutCount = layouts.size(),
++        .bindGroupLayouts = layouts.data(),
++    };
++    sBatchedPipelineLayout = g_device.CreatePipelineLayout(&desc);
++  }
+ }
+ 
+ void shutdown() noexcept {
 --- a/lib/gx/gx.hpp
 +++ b/lib/gx/gx.hpp
-@@ -478,7 +478,10 @@ struct ShaderConfig {
+@@ -478,7 +478,14 @@ struct ShaderConfig {
    // The TEV in half precision (shader.cpp, webgpu::g_shaderF16Enabled): from
    // pad2's spare bits, 0 elsewhere, so other pipelines keep their hash.
    u8 halfPrecision : 1 = 0;
@@ -1072,13 +1343,27 @@
 +  // A 16-bit depth target (a headset's eyes, gfx/stereo.cpp's eye_depth): from
 +  // pad2's spare bits too, 0 elsewhere.
 +  u8 depth16 : 1 = 0;
-+  u8 pad2 : 6 = 0;
++  // Several draws in one (gfx/common.cpp's eyes' pass): each draw's uniform
++  // block in a storage array, its index in the top bits of the vertex index
++  // (shader.cpp's make_batched). Also from pad2's spare bits, 0 elsewhere.
++  u8 batched : 1 = 0;
++  u8 pad2 : 5 = 0;
    std::array<AttrConfig, MaxVtxAttr> attrs;
    std::array<TevSwap, MaxTevSwap> tevSwapTable;
    std::array<TevStage, MaxTevStages> tevStages;
+@@ -525,6 +532,9 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
+                                     wgpu::ShaderModule shader, const char* label) noexcept;
+ std::string build_shader_source(const ShaderConfig& config) noexcept;
+ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept;
++// Whether the batched variant of this shader can be built (a free
++// inter-stage location for the draw's slot).
++bool batched_shader_fits(const ShaderConfig& config) noexcept;
+ GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept;
+ 
+ u8 comp_type_size(GXAttr attr, GXCompType type) noexcept;
 --- a/lib/gx/pipeline.cpp
 +++ b/lib/gx/pipeline.cpp
-@@ -46,6 +46,22 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -46,25 +46,52 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    return build_pipeline(config, {}, shader, "GX Pipeline");
  }
  
@@ -1090,6 +1375,7 @@
 +// constant are bound only when they differ from the draw before.
 +struct Bound {
 +  bool indexBuffer = false;
++  bool index32 = false; // the bound index buffer's format: 32 bits for a batched draw
 +  WGPUBindGroup textures = nullptr;
 +  uint32_t dstAlpha = UINT32_MAX;
 +};
@@ -1101,9 +1387,11 @@
  void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
    if (!gfx::bind_pipeline(data.pipeline, pass)) {
      return;
-@@ -54,17 +70,25 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
+   }
+ 
    const std::array offsets{data.uniformRange.offset};
-   pass.SetBindGroup(1, gfx::g_uniformBindGroup, offsets.size(), offsets.data());
+-  pass.SetBindGroup(1, gfx::g_uniformBindGroup, offsets.size(), offsets.data());
++  pass.SetBindGroup(1, data.batched ? gfx::g_batchBindGroup : gfx::g_uniformBindGroup, offsets.size(), offsets.data());
    if (data.bindGroups.textureBindGroup) {
 -    pass.SetBindGroup(2, gfx::find_bind_group(data.bindGroups.textureBindGroup));
 +    const auto& textures = gfx::find_bind_group(data.bindGroups.textureBindGroup);
@@ -1123,17 +1411,30 @@
      pass.Draw(data.vtxCount, data.instanceCount);
    } else {
 -    pass.DrawIndexed(data.indexCount, data.instanceCount);
-+    if (!g_bound.indexBuffer) {
-+      pass.SetIndexBuffer(gfx::g_indexBuffer, wgpu::IndexFormat::Uint16);
++    if (!g_bound.indexBuffer || g_bound.index32 != data.batched) {
++      pass.SetIndexBuffer(gfx::g_indexBuffer, data.batched ? wgpu::IndexFormat::Uint32 : wgpu::IndexFormat::Uint16);
 +      g_bound.indexBuffer = true;
++      g_bound.index32 = data.batched;
 +    }
-+    pass.DrawIndexed(data.indexCount, data.instanceCount, data.idxRange.offset / sizeof(uint16_t));
++    pass.DrawIndexed(data.indexCount, data.instanceCount,
++                     data.idxRange.offset / (data.batched ? sizeof(uint32_t) : sizeof(uint16_t)));
    }
  }
  } // namespace aurora::gx
 --- a/lib/gx/pipeline.hpp
 +++ b/lib/gx/pipeline.hpp
-@@ -36,6 +36,9 @@ static_assert(std::has_unique_object_representations_v<PipelineConfig>);
+@@ -14,6 +14,10 @@ struct DrawData {
+   uint32_t instanceCount;
+   GXBindGroups bindGroups;
+   uint32_t dstAlpha;
++  // Several draws in one (ShaderConfig::batched pipeline): uniformRange is
++  // the blocks' array in the storage buffer, idxRange 32-bit indices whose
++  // top 10 bits pick the block.
++  bool batched = false;
+ };
+ 
+ constexpr uint32_t GXPipelineConfigVersion = 14;
+@@ -36,6 +40,9 @@ static_assert(std::has_unique_object_representations_v<PipelineConfig>);
  
  wgpu::RenderPipeline create_pipeline([[maybe_unused]] const PipelineConfig& config);
  void render(const DrawData& data, const wgpu::RenderPassEncoder& pass);
@@ -1143,6 +1444,87 @@
  
  void queue_surface(const u8* dlStart, uint32_t dlSize, bool bigEndian) noexcept;
  } // namespace aurora::gx
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -963,6 +963,55 @@ static void add_stereo_discard(std::string& source) noexcept {
+   source.insert(body + 1, "\n    if (in.stereo_side < 0.0) { discard; }");
+ }
+ 
++// The batched variant (ShaderConfig::batched): the uniform block becomes an
++// element of a storage array, chosen by the draw's slot, which the vertex
++// index carries in its top 10 bits (the low 22 the vertex) and the vertex
++// stage hands the fragment stage. Every "ubuf." of the generated source,
++// helpers included, reads the slot's block through a private variable. No
++// free inter-stage location: left as is (batched_shader_fits says so).
++static void make_batched(std::string& source) noexcept {
++  const auto replace_first = [&](std::string_view from, std::string_view to) {
++    const auto at = source.find(from);
++    if (at == std::string::npos) return false;
++    source.replace(at, from.size(), to);
++    return true;
++  };
++  // A free location for the slot in VertexOutput (16 inter-stage variables).
++  const auto begin = source.find("struct VertexOutput {");
++  const auto end = begin == std::string::npos ? begin : source.find("};", begin);
++  if (end == std::string::npos) return;
++  int location = 0;
++  for (size_t at = source.find("@location(", begin); at != std::string::npos && at < end;
++       at = source.find("@location(", at + 1)) {
++    location = std::max(location, std::atoi(source.c_str() + at + 10) + 1);
++  }
++  if (location > 15) return;
++  std::string replaced;
++  replaced.reserve(source.size() + 256);
++  for (size_t at = 0;;) {
++    const auto hit = source.find("ubuf.", at);
++    replaced.append(source, at, hit == std::string::npos ? std::string::npos : hit - at);
++    if (hit == std::string::npos) break;
++    replaced.append("ubufs[g_batch_slot].");
++    at = hit + 5;
++  }
++  source = std::move(replaced);
++  if (!replace_first("var<uniform> ubuf: Uniform;",
++                     "var<storage, read> ubufs: array<Uniform>;\nvar<private> g_batch_slot: u32;") ||
++      !replace_first("@builtin(position) pos: vec4f,",
++                     fmt::format("@builtin(position) pos: vec4f,\n    @location({}) @interpolate(flat) batch_slot: u32,",
++                                 location)) ||
++      !replace_first("@builtin(vertex_index) vidx: u32", "@builtin(vertex_index) batch_vidx: u32") ||
++      !replace_first("var out: VertexOutput;", "var out: VertexOutput;\n    g_batch_slot = batch_vidx >> 22u;\n"
++                                               "    let vidx = batch_vidx & 0x3FFFFFu;\n    out.batch_slot = g_batch_slot;")) {
++    return;
++  }
++  const auto fragment = source.find("fn fs_main(in: VertexOutput)");
++  const auto brace = fragment == std::string::npos ? fragment : source.find('{', fragment);
++  if (brace != std::string::npos) {
++    source.insert(brace + 1, "\n    g_batch_slot = in.batch_slot;");
++  }
++}
+ std::string build_shader_source(const ShaderConfig& config) noexcept {
+   ZoneScoped;
+   const auto hash = xxh3_hash(config);
+@@ -2198,6 +2247,9 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
+   } else if (config.stereo == StereoDiscard) {
+     add_stereo_discard(shaderSource);
+   }
++  if (config.batched) {
++    make_batched(shaderSource);
++  }
+   if (config.halfPrecision) {
+     shaderSource.insert(0, "enable f16;\n");
+   }
+@@ -2208,6 +2260,12 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
+   return shaderSource;
+ }
+ 
++bool batched_shader_fits(const ShaderConfig& config) noexcept {
++  ShaderConfig batched = config;
++  batched.batched = 1;
++  return build_shader_source(batched).find("batch_slot") != std::string::npos;
++}
++
+ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
+   ZoneScoped;
+   const auto shaderSource = build_shader_source(config);
 --- a/lib/webgpu/gpu.cpp
 +++ b/lib/webgpu/gpu.cpp
 @@ -22,6 +22,9 @@
