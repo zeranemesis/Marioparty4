@@ -958,6 +958,19 @@ bool StereoView::game_frame(StereoFrame& out) {
 
 void StereoView::set_frame_time(XrTime time, XrDuration period) {
   std::lock_guard lock{mMutex};
+  // The XR thread's own period, from one frame's display time to the next:
+  // with Application SpaceWarp the runtime wakes it every other display frame
+  // (60 times a second at 120 Hz), and the pacer, set to the display's period,
+  // gave the game's images the wrong looks: 50 new images for 60 frames
+  // (2026-10-03).
+  static XrTime lastTime = 0;
+  if (mSpaceWarpWanted && period > 0 && lastTime > 0 && time > lastTime) {
+    const XrDuration step = time - lastTime;
+    if (step > period / 2 && step < period * 4) {
+      period = static_cast<XrDuration>(std::llround(static_cast<double>(step) / period)) * period;
+    }
+  }
+  lastTime = time;
   mFrameTime = time;
   if (period > 0) mPeriodNs = period;
 }
@@ -965,7 +978,7 @@ void StereoView::set_frame_time(XrTime time, XrDuration period) {
 int64_t StereoView::next_frame_start(int64_t nowNs, float targetHz) {
   std::lock_guard lock{mMutex};
   mStartGiven = false;
-  if (!mPacing || !mEnabled || mScreenRequired) return 0;
+  if (!(mPacing || mAlign) || !mEnabled || mScreenRequired) return 0;
   const int64_t start = mPacer.next_start(nowNs, targetHz, &mGivenDueNs);
   mStartGiven = start != 0;
   mGivenStartNs = start;
@@ -1153,7 +1166,7 @@ StereoView::Slot* StereoView::newest_completed(int64_t lookNs) {
   Slot* newest = nullptr;
   for (auto& slot : mSlots) {
     if (slot.state != State::Ready || slot.tag <= mPresentedTag) continue;
-    if (!mPacer.is_due(slot.dueNs, lookNs)) continue; // finished early: its look comes
+    if (mPacing && !mPacer.is_due(slot.dueNs, lookNs)) continue; // finished early: its look comes
     pollfd finished{slot.fence, POLLIN, 0};
     const bool complete = slot.fence < 0 ||
         (poll(&finished, 1, 0) > 0 && (finished.revents & POLLIN));
@@ -1436,14 +1449,21 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
       // A/B switch, read every 2 s: `adb shell setprop debug.partyboard.xr_pacing 0`.
       char pacing[PROP_VALUE_MAX] = {};
       __system_property_get("debug.partyboard.xr_pacing", pacing);
-      mPacing = std::strcmp(pacing, "1") == 0;
+      // On by default (debug.partyboard.xr_pacing 0 turns it off): at 72 Hz,
+      // holding each finished image for its look gave them all the same age,
+      // 13.9 ms, and 38 ms from motion to photon, the most comfortable; off,
+      // their ages went from 14 to 28 ms (2026-10-03). At 90 Hz it cost 10 ms.
+      mPacing = std::strcmp(pacing, "0") != 0;
+      char align[PROP_VALUE_MAX] = {};
+      __system_property_get("debug.partyboard.xr_align", align);
+      mAlign = std::strcmp(align, "0") != 0;
       char depthLayer[PROP_VALUE_MAX] = {};
       __system_property_get("debug.partyboard.depth_layer", depthLayer);
-      // On by default (debug.partyboard.depth_layer 0 turns it off): with it
-      // the compositor corrects the head's translation, and the board held
-      // better (2026-10-03); its reprojection took the compositor from 2 to 4
-      // ms a displayed frame.
-      const bool depthWanted = depthLayer[0] != '0' && mDepthSwapchain != XR_NULL_HANDLE;
+      // Off by default (debug.partyboard.depth_layer 1 turns it on): the board
+      // shook as much with it as without (2026-10-03, the head's translation is
+      // what moves it: covering the tracking cameras stilled it), and its
+      // reprojection took the compositor from 2 to 4 ms a displayed frame.
+      const bool depthWanted = depthLayer[0] == '1' && mDepthSwapchain != XR_NULL_HANDLE;
       if (depthWanted != mDepthWanted) {
         LOGI("Depth layer: %s (debug.partyboard.depth_layer)", depthWanted ? "submitted" : "off");
         mDepthWanted = depthWanted;

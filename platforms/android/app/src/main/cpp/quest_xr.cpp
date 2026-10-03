@@ -696,12 +696,12 @@ void set_passthrough(App& app, bool on) {
 }
 
 // The display rate to ask for, among those the headset offers: the one
-// closest to 90 Hz, or `adb shell setprop debug.partyboard.display_hz 120`
-// (72, 80, 90, 120: the offered rate closest to it). At 120 Hz the board got
-// 60 new images/s (each shown twice: not smooth when the head moves), 80 at
-// most when asked for all 120; at 90 every image is a new one, which the GPU
-// holds with the eyes' half-precision TEV and 16-bit depth (8.7 ms for the
-// eyes' pass at 640 MHz before them, about 7.6 after; 2026-10-02). The game then renders at that rate below
+// closest to 72 Hz, or `adb shell setprop debug.partyboard.display_hz 90`
+// (72, 80, 90, 120: the offered rate closest to it; read again every 2 s).
+// At 120 Hz the board got 60 new images/s, each shown twice; at 90, 75 to 83
+// new images for 90, each 11 to 45 ms old, and the board shook; at 72, with
+// images held for their look and the GPU boosted, 72 for 72, all 13.9 ms old,
+// 38 ms from motion to photon (2026-10-03). The game then renders at that rate below
 // 110 Hz, every displayed image a new one, and at half of it from 110 Hz up
 // (src/port/imgui.cpp). At 120 Hz each image is shown twice, and the
 // compositor, which corrects the head's rotation but not its translation,
@@ -713,7 +713,7 @@ float preferred_refresh_rate(const std::vector<float>& rates) {
   }
   char value[PROP_VALUE_MAX] = {};
   __system_property_get("debug.partyboard.display_hz", value);
-  const float wanted = value[0] != '\0' ? static_cast<float>(std::atof(value)) : 90.0f;
+  const float wanted = value[0] != '\0' ? static_cast<float>(std::atof(value)) : 72.0f;
   float chosen = *std::max_element(rates.begin(), rates.end());
   if (wanted > 0.0f) {
     chosen = *std::min_element(rates.begin(), rates.end(), [wanted](float a, float b) {
@@ -794,7 +794,11 @@ void request_performance(const App& app, bool sessionStart = false) {
     // and the VrApi GPU level in the log.
     char value[PROP_VALUE_MAX] = {};
     __system_property_get("debug.partyboard.gpu_level", value);
-    const bool boost = std::strcmp(value, "boost") == 0;
+    // Boost by default (`debug.partyboard.gpu_level sustained` for sustained
+    // high): at 72 Hz with images held for their look the GPU idles between
+    // images, and the runtime kept it at 456 MHz: 11 ms an image, 58 to 69 new
+    // images for 72; boosted, 545 MHz and 72 for 72 (2026-10-03).
+    const bool boost = std::strcmp(value, "sustained") != 0;
     const XrPerfSettingsLevelEXT gpuLevel =
         boost ? XR_PERF_SETTINGS_LEVEL_BOOST_EXT : XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT;
     check(app.instance, set(app.session, XR_PERF_SETTINGS_DOMAIN_CPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT),
@@ -1539,6 +1543,21 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
     apply_rumble(app, rumbleSerial);
   }
   g_activeRefreshRate.store(current_refresh_rate(app), std::memory_order_relaxed);
+  // debug.partyboard.display_hz, read again every 2 s: an A/B of the display
+  // rate in one session (preferred_refresh_rate logs each change).
+  {
+    static auto ratesAt = std::chrono::steady_clock::now();
+    static float lastPreferred = 0.0f;
+    if (const auto now = std::chrono::steady_clock::now(); now - ratesAt >= std::chrono::seconds(2)) {
+      ratesAt = now;
+      std::lock_guard lock{g_ratesMutex};
+      const float preferred = preferred_refresh_rate(g_refreshRates);
+      if (preferred > 0.0f && preferred != lastPreferred) {
+        if (lastPreferred > 0.0f) g_requestedRefreshRate.store(preferred);
+        lastPreferred = preferred;
+      }
+    }
+  }
   const float requested = g_requestedRefreshRate.exchange(0.0f);
   if (requested > 0.0f && app.requestRefreshRate != nullptr) {
     check(app.instance, app.requestRefreshRate(app.session, requested), "xrRequestDisplayRefreshRateFB");

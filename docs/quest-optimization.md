@@ -323,6 +323,62 @@ Deux mesures ajoutees a la campagne : `filter-none` (filtre du compositeur coupe
 - AppSW, la reprojection de la translation par profondeur et vecteurs de mouvement (piste E, conception plus haut), si le 72 Hz ne suffit pas.
 - Une reconstruction temporelle, seulement avec des vecteurs de mouvement et un historique coherents (GX n'en fournit pas). Pas d'upscaling IA promis sans implementation ni mesure de cout.
 
+## Plan d'optimisation du 03/10 : goulots mesures et ordre des travaux
+
+### Carte des goulots (plateau de Toad, Quest 3, sondes du build 163 et suivants)
+
+| Poste | Mesure | Verdict |
+|---|---|---|
+| Passe des yeux (GPU) | 8,2 a 8,7 ms a 640 MHz, pleine resolution, 420 dessins par oeil | **Goulot principal** |
+| dont binning (sommets) | ~23 % : 78 000 polygones, sommets ombres deux fois | important |
+| dont rendu dans 63 bins | ~75 % : chaque bin rejoue les dessins visibles ; shaders occupes 49 %, 46-50 instructions ALU par fragment | **le coeur** |
+| Passe du HUD (GPU) | 0,8 a 1,2 ms, une image sur deux (MSAA 4x, 1600x1200) | cree une alternance de cout d'une image a l'autre |
+| Compositeur | 1,1 a 2,6 ms par affichage (4 ms avec la profondeur a 90 Hz) | 13 a 30 % du GPU a 90-120 Hz |
+| Pointes GPU | max 16-18 ms par image | a-coups a 90 Hz |
+| CPU du jeu | enregistrement 4-5 ms, fil de rendu 26 % occupe, simulation < 0,2 ms | pas un frein |
+| Chaine d'images | 4 images : plus pleine a 72/90 Hz | regle |
+| Latence / cadence | 90 Hz : 75-83 images neuves, age 11-45 ms ; 72 Hz + retenue : 72/72, age 13,9 ms, mouvement->image 38 ms | 72 Hz regle la cadence |
+| Instabilite du plateau | disparait quand le suivi de position est perdu (capteurs caches) | **translation de la tete non corrigee** : il faut SpaceWarp |
+
+Leviers deja mesures sans grand effet : resolution (-44 % de pixels -> -9 %), anisotrope 4x (-1,5 %), test alpha coupe (-3 a -7 %), masque des lentilles (aucun sur Quest 3), profondeur seule pour le compositeur (pas de difference ressentie).
+
+### Phase 1 : confort (la nausee), en cours
+
+1. **SpaceWarp cale** (build 175) : 120 Hz affiches, 60 images calculees, la translation de la tete corrigee par le compositeur. Critere : 60 images neuves sur 60, age constant, plateau stable en se deplacant. Sinon, repli : 72 Hz avec retenue (`display_hz 72`, `xr_pacing 1`).
+2. **Choisir le mode par defaut** selon le ressenti, et le noter ici.
+
+### Phase 2 : lisser le cout de chaque image (pointes, alternance)
+
+3. **HUD sans MSAA** (une interface plate, du texte) ou a 2x, et peut-etre a chaque image : la passe du HUD passerait d'environ 1 ms a environ 0,3 ms, sans l'alternance qui fait deborder une image sur deux a 90 Hz. Gain : -5 a -10 % les images avec HUD.
+4. **Pipelines compiles d'avance** pour les variantes demi-precision et profondeur 16 bits (le cache disque les garde deja apres la premiere partie) : plus d'objets absents ni de pointes a la premiere vue d'un plateau.
+5. **Sonde des pointes** : les images de plus de 12 ms avec leur contenu (dessins, HUD, compilation) pour en trouver la cause.
+
+### Phase 3 : moins de travail par bin (le goulot GPU)
+
+6. **Fusion des dessins** : lire `samePipeTex` (part des dessins au meme pipeline et aux memes textures que le precedent). Si elle depasse 20 %, fusionner a travers les etats GX redondants (meme pipeline, memes textures, uniformes identiques -> un seul dessin). Gain attendu proportionnel.
+7. **Culling par oeil** : un objet dont les bornes sortent d'un oeil n'y est pas dessine (les objets du jeu ont des bornes : `ObjDraw`).
+8. **Liaisons dedupliquees** (fait, build 170) : a mesurer.
+
+### Phase 4 : moins de travail par fragment
+
+9. **TEV genere plus court** : sans l'emulation des debordements quand ils sont impossibles, constantes precalculees, etages fusionnes. Objectif : de 46 a moins de 30 instructions par fragment. Gain : -10 a -15 %.
+10. Demi-precision et profondeur 16 bits (faits, -8 et -5 %).
+
+### Phase 5 : compositeur
+
+11. **Filtre de la couche des yeux** : mesurer `layer_filter none` (phase `filter-none`). Gain possible : -0,3 a -1 ms par affichage.
+12. Profondeur pour le compositeur : la garder seulement avec SpaceWarp (elle coutait +2 ms par affichage a 90 Hz sans effet ressenti).
+
+### Phase 6 : architecture (plusieurs jours), pour 120 images calculees
+
+13. **Rendu Vulkan direct dans les swapchains OpenXR** (plus de copie GL), qui ouvre le **multiview** (les deux yeux en une passe : moins de rejeu par bin) et le **rendu foveal** (densite de fragments).
+14. **Boucle du jeu cadencee par le fil XR** (pour SpaceWarp et la latence minimale).
+
+Objectif chiffre pour 120 images calculees : environ 7 ms de GPU par image, compositeur compris, contre ~9 a 10 aujourd'hui : les phases 2 a 5 visent -30 %, la phase 6 le reste.
+
+### Methode de mesure
+
+Chaque etape : la campagne (`tools/quest_campaign.ps1 -Only ...`, scene et vues figees, reference avant chaque phase) et les sondes du journal (`Stereo GPU`, `Stereo pipeline`, `Stereo kinds`, `Render worker`, `Game loop`, `holds=`). Puis le ressenti au casque, qui decide.
 ## Sources Meta du plan
 
 - [OVR Metrics Tool](https://developers.meta.com/horizon/documentation/native/android/ts-ovrmetricstool/)

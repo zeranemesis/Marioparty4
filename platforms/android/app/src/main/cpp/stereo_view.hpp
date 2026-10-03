@@ -298,7 +298,14 @@ private:
   // finished images for their look kept 10 ms on each image's way, 23.6 ms
   // from lease to copy against 14.7 without it, with 90 images/s and no
   // stutter either way (Toad board, 90 Hz, 2026-10-03).
-  bool mPacing = false;
+  bool mPacing = true; // debug.partyboard.xr_pacing 0 turns it off (see the switch)
+  // The game's frames start on the display's grid (next_frame_start), so one
+  // new image is ready for each look; on by default (debug.partyboard.xr_align
+  // 0 turns it off). Without it, the game's own 90 Hz clock beat against the
+  // display's: in 2 s, about 18 images shown twice and as many dropped, each
+  // shown image 10 to 48 ms old, and the board shook when the head moved
+  // (2026-10-03). Unlike xr_pacing, finished images are not held.
+  bool mAlign = true;
   bool mStartGiven = false;        // a start the next lease belongs to
   int64_t mGivenStartNs = 0, mGivenDueNs = 0;
   uint32_t mFramesSinceNew = 0;
