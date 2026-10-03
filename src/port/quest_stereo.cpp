@@ -762,6 +762,37 @@ extern "C" void PartyBoard_StereoObjectEnd(void)
     AuroraStereoSetSortKey(-1.0f);
 }
 
+extern "C" BOOL PartyBoard_StereoObjectVisible(float x, float y, float z, float radius)
+{
+    if (!sActive || !sCameraViewSet || !sFloorSettled) return TRUE;
+#if defined(__ANDROID__)
+    static bool enabled = true;
+    static uint32_t tested = 0, culled = 0;
+    static auto checkedAt = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (now - checkedAt >= std::chrono::seconds(5)) {
+        if (tested != 0) {
+            __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest",
+                "Object culling: %u of %u pieces outside both eyes in 5 s (%u%%)%s", culled, tested,
+                culled * 100 / tested, enabled ? "" : ", off (debug.partyboard.cull_objects 0)");
+        }
+        tested = culled = 0;
+        checkedAt = now;
+        char value[PROP_VALUE_MAX] = {};
+        __system_property_get("debug.partyboard.cull_objects", value);
+        enabled = value[0] != '0';
+    }
+    const float center[3]{x, y, z};
+    const bool visible = partyboard::quest::sphere_visible(sEyeClip, center, radius);
+    ++tested;
+    culled += visible ? 0 : 1;
+    return visible || !enabled ? TRUE : FALSE;
+#else
+    const float center[3]{x, y, z};
+    return partyboard::quest::sphere_visible(sEyeClip, center, radius) ? TRUE : FALSE;
+#endif
+}
+
 extern "C" BOOL PartyBoard_StereoSphereVisible(float x, float y, float z, float radius)
 {
     if (!sActive || !sCameraViewSet) return TRUE;

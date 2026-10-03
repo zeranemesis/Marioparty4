@@ -213,6 +213,29 @@ static BOOL ObjStereoBackdrop(HSFOBJECT *objPtr, Mtx mtx) {
     return PartyBoard_StereoBackdrop(center[0][3], center[1][3], center[2][3],
         largest * sqrtf(centerX * centerX + centerY * centerY + centerZ * centerZ));
 }
+
+// Meta Quest: whether the object can be seen by either eye, for models the
+// game never culls (most of a board): their pieces outside the eyes' view
+// were drawn anyway, their vertices shaded and their triangles binned before
+// the GPU threw them away. Same bounding sphere as ObjCullCheck, half as large
+// again for the animated meshes whose vertices leave their rest bounds.
+static BOOL ObjStereoVisible(HSFOBJECT *objPtr, Mtx mtx) {
+    HuVecF *min = &objPtr->mesh.mesh.min;
+    HuVecF *max = &objPtr->mesh.mesh.max;
+    Vec *scale = &scaleBuf[MTXIdx - 1];
+    float largest = scale->x;
+    float centerX = (max->x - min->x) * 0.5f;
+    float centerY = (max->y - min->y) * 0.5f;
+    float centerZ = (max->z - min->z) * 0.5f;
+    Mtx center;
+
+    if (scale->y > largest) largest = scale->y;
+    if (scale->z > largest) largest = scale->z;
+    MTXTrans(center, centerX + min->x, centerY + min->y, centerZ + min->z);
+    MTXConcat(mtx, center, center);
+    return PartyBoard_StereoObjectVisible(center[0][3], center[1][3], center[2][3],
+        1.5f * largest * sqrtf(centerX * centerX + centerY * centerY + centerZ * centerZ));
+}
 #endif
 
 static void objCall(HU3DMODEL *modelP, HSFOBJECT *objPtr) {
@@ -350,7 +373,7 @@ static void objMesh(HU3DMODEL *modelP, HSFOBJECT *objPtr) {
             }
 #ifdef TARGET_PC
             else if (PartyBoard_StereoActive()) {
-                dispF = !ObjStereoBackdrop(objPtr, drawObj->matrix);
+                dispF = !ObjStereoBackdrop(objPtr, drawObj->matrix) && ObjStereoVisible(objPtr, drawObj->matrix);
             }
 #endif
             else {
