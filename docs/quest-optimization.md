@@ -386,6 +386,22 @@ Chaque etape : la campagne (`tools/quest_campaign.ps1 -Only ...`, scene et vues 
 - **Sonde des changements d'etat entre deux dessins** (essayee puis retiree, elle copiait l'etat a chaque dessin) : 0 % d'etats identiques ; matrices 73 %, tableaux de sommets 74 %, textures 65 %, canaux de couleur 29-39 %, etages TEV 26 %, eclairage 11 %. Les ~360 dessins par oeil sont de vrais morceaux differents : les fusionner demande un regroupement multi-dessins (donnees par dessin dans un stockage lu par le shader), au mieux -27 % de dessins (samePipeTex).
 - **Cases du plateau qui scintillent et tremblent quand le personnage avance**, en profondeur 16 comme en 32 bits : piste, le tri des objets de l'avant vers l'arriere, qui change l'ordre des cases (dessinees apres le sol, a la meme profondeur) quand la camera du jeu bouge. A verifier avec `debug.partyboard.sort_opaque 0`.
 - Charge actuelle a 72 Hz, plateau entier : passe des yeux 9,5-10 ms a 640 MHz (360 dessins par oeil), 59-61 images neuves sur 72, resolution dynamique 90 %.
+### Bilan du 03/10 apres-midi (builds 180 a 187)
+
+Mesure ou essaye sur le plateau de Toad :
+
+- **Cases du plateau qui tremblaient** quand un joueur avancait : `DrawSpaces` (board/space.c) recalculait sa vue avec la camera du plateau du dernier tick de simulation, alors que la scene est dessinee avec la camera interpolee. Corrige (build 183), valide au casque. Les cases sont aussi ecartees selon les yeux, et toutes dessinees en un seul dessin (build 184).
+- **Regroupement des dessins** (build 182, `batch_draws`) : ~83 dessins par image joints en ~30 ; passe des yeux 10,4-11,2 ms sans, 10,9-11,2 avec : neutre. Garde.
+- **Objets hors des yeux** (build 181, `cull_objects`) : sans effet sur ce plateau, ses modeles passent deja par le test de visibilite du jeu, qui utilise les yeux.
+- **SpaceWarp** (builds 180, 175) : 51 a 53 images neuves sur 60, prediction 92 ms : abandonne, il faudrait le jeu cadence par la boucle XR et une passe plus legere.
+- **MSAA 1x** : -15 % de passe des yeux a vue egale (9,8 -> 8,4 ms), mais nettement plus laid : 4x garde.
+- **Filtre du compositeur coupe** (build 186, par defaut) : compositeur de 2,2 a 1,7 ms par affichage ; le plateau semble bouger moins (l'accentuation faisait grouiller les bords). Un peu moins net, accepte.
+- **Images des yeux reduites plus vite** (build 186) : elles restaient a leur taille maximale (4208x2200) pour 70 a 95 % dessines ; reduites apres 8 s a plus de 15 % inutilises.
+- **Resolution a l'entree d'un plateau** (build 185) : celle que le plateau tenait la derniere fois (90 % la premiere), et non celle des menus.
+- **Emulation du debordement 8 bits du TEV** (build 187) : sur les 764 shaders des yeux regeneres depuis le cache de pipelines du casque, 1 337 enveloppements, dont la plupart d'operandes deja bornes a [0, 1] : 141 restent. Exact (0 pixel different).
+- **Rendu Vulkan direct, multiview, rendu foveal** : impossible sans forker Dawn (il n'expose ni son peripherique Vulkan ni la creation sur un peripherique fourni, et WebGPU n'a ni multiview ni densite de fragments) : ecarte.
+
+Reglages par defaut a la fin : 72 Hz, images retenues pour leur affichage, GPU en boost, MSAA 4x, TEV en demi-precision, profondeur 16 bits, filtre du compositeur coupe, HUD sans MSAA ni ecran sombre, anneau de 4 images. A mesurer au prochain essai : la passe des yeux avec le TEV allege (build 187), plateau entier dans le champ.
 ## Sources Meta du plan
 
 - [OVR Metrics Tool](https://developers.meta.com/horizon/documentation/native/android/ts-ovrmetricstool/)
