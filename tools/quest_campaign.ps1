@@ -52,7 +52,8 @@ $switches = @('debug.partyboard.sort_opaque', 'debug.partyboard.stereo_crossing'
               'debug.partyboard.hud_rate', 'debug.partyboard.xr_pacing', 'debug.partyboard.anisotropy',
               'debug.partyboard.shader_f16', 'debug.partyboard.freeze', 'debug.partyboard.visibility_mask',
               'debug.partyboard.skip_draws', 'debug.partyboard.render_hz', 'debug.partyboard.alpha_test',
-              'debug.partyboard.eye_depth', 'debug.partyboard.eye_f16', 'debug.partyboard.eye_msaa')
+              'debug.partyboard.eye_depth', 'debug.partyboard.eye_f16', 'debug.partyboard.eye_msaa',
+              'debug.partyboard.display_hz', 'debug.partyboard.space_warp', 'debug.partyboard.hud_msaa')
 $freeze = if ($NoFreeze) { '' } else { '1' }
 $live = @(
     @{ name = 'reference';     props = @{ 'debug.partyboard.eye_scale' = $eye } },
@@ -86,6 +87,12 @@ $live = @(
     @{ name = 'f32';              props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.eye_f16' = '0' } },
     @{ name = 'msaa1';            props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.eye_msaa' = '1' } },
     @{ name = 'full-precision';   props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.eye_depth' = '32'; 'debug.partyboard.eye_f16' = '0' } },
+    # Display modes (display_hz and space_warp are read live since build 174/169).
+    @{ name = 'hz90';             props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.display_hz' = '90' } },
+    @{ name = 'appsw120';         props = @{ 'debug.partyboard.eye_scale' = '85'; 'debug.partyboard.display_hz' = '120'; 'debug.partyboard.space_warp' = '1' } },
+    # No MSAA, more pixels instead: four times fewer bytes a pixel in tile
+    # memory (fewer bins), the compositor's filter smoothing the larger image.
+    @{ name = 'msaa1-res110';     props = @{ 'debug.partyboard.eye_scale' = '110'; 'debug.partyboard.eye_msaa' = '1' } },
     @{ name = 'filter-none';      props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.layer_filter' = 'none' } },
     @{ name = 'gpu-boost';        props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.gpu_level' = 'boost' } },
     @{ name = 'crossing-on';      props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.stereo_crossing' = '1' } },
