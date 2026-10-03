@@ -1049,6 +1049,17 @@ void StereoView::adapt_resolution() {
   __system_property_get("debug.partyboard.eye_scale", pinned);
   if (const float percent = std::strtof(pinned, nullptr); percent >= 50.0f && percent <= 125.0f) {
     mRenderScale = std::min(1.0f, percent / 100.0f / mMaxScale);
+  } else if (mSpaceWarpWanted) {
+    // Application SpaceWarp: the compositor's own work grows, and an image
+    // that misses its look is shown for two of the XR thread's frames, 33 ms
+    // at 120 Hz. The adaptive control kept 100% there and the eyes' pass took
+    // 13.5 ms: 43 to 52 new images for 60 (2026-10-03). At most
+    // debug.partyboard.space_warp_res percent of recommended (85 by default).
+    char cap[PROP_VALUE_MAX] = {};
+    __system_property_get("debug.partyboard.space_warp_res", cap);
+    float percent = std::strtof(cap, nullptr);
+    if (percent < 50.0f || percent > 125.0f) percent = 85.0f;
+    mRenderScale = std::min(mRenderScale, percent / 100.0f / mMaxScale);
   }
   mAdaptLeases = mAdaptRingFull = 0;
   // New images only when they must grow, or have been far too large for a
