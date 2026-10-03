@@ -1313,7 +1313,23 @@
        .vertex =
            {
                .module = shader,
-@@ -1027,6 +1028,19 @@ void initialize() noexcept {
+@@ -871,6 +872,15 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
+     config.shaderConfig.lineMode = 0;
+   }
+   config.shaderConfig.halfPrecision = webgpu::g_shaderF16Enabled ? 1 : 0;
++  {
++    bool inRange = true;
++    for (const auto& reg : g_gxState.colorRegs) {
++      for (const float v : {reg.x(), reg.y(), reg.z(), reg.w()}) {
++        inRange = inRange && v >= 0.f && v <= 1.f;
++      }
++    }
++    config.shaderConfig.tevRegsInRange = inRange ? 1 : 0;
++  }
+   config.shaderConfig.tevSwapTable = g_gxState.tevSwapTable;
+   for (u8 i = 0; i < g_gxState.numTevStages; ++i) {
+     config.shaderConfig.tevStages[i] = g_gxState.tevStages[i];
+@@ -1027,6 +1037,19 @@ void initialize() noexcept {
      };
      sPipelineLayout = g_device.CreatePipelineLayout(&desc);
    }
@@ -1335,7 +1351,7 @@
  void shutdown() noexcept {
 --- a/lib/gx/gx.hpp
 +++ b/lib/gx/gx.hpp
-@@ -478,7 +478,14 @@ struct ShaderConfig {
+@@ -478,7 +478,18 @@ struct ShaderConfig {
    // The TEV in half precision (shader.cpp, webgpu::g_shaderF16Enabled): from
    // pad2's spare bits, 0 elsewhere, so other pipelines keep their hash.
    u8 halfPrecision : 1 = 0;
@@ -1347,11 +1363,15 @@
 +  // block in a storage array, its index in the top bits of the vertex index
 +  // (shader.cpp's make_batched). Also from pad2's spare bits, 0 elsewhere.
 +  u8 batched : 1 = 0;
-+  u8 pad2 : 5 = 0;
++  // The game's TEV registers all hold values in [0, 1] (GXSetTevColor's
++  // 8-bit colors; GXSetTevColorS10 can go past): the stages need no 8-bit
++  // wrap of what they load from them (shader.cpp's TevInRange).
++  u8 tevRegsInRange : 1 = 0;
++  u8 pad2 : 4 = 0;
    std::array<AttrConfig, MaxVtxAttr> attrs;
    std::array<TevSwap, MaxTevSwap> tevSwapTable;
    std::array<TevStage, MaxTevStages> tevStages;
-@@ -525,6 +532,9 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
+@@ -525,6 +536,9 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
                                      wgpu::ShaderModule shader, const char* label) noexcept;
  std::string build_shader_source(const ShaderConfig& config) noexcept;
  wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept;
@@ -1446,7 +1466,58 @@
  } // namespace aurora::gx
 --- a/lib/gx/shader.cpp
 +++ b/lib/gx/shader.cpp
-@@ -963,6 +963,55 @@ static void add_stereo_discard(std::string& source) noexcept {
+@@ -454,12 +454,34 @@ static bool tev_may_overflow(std::string_view operand) {
+   return tev_overflow_all() || tev_register_operand(operand);
+ }
+ 
++// What the stages before this one left in the registers (prev, tevreg0-2):
++// for each, whether its color and its alpha are surely in [0, 1], where the
++// 8-bit wrap is the identity: written by a stage that clamps, or never loaded
++// from the game's registers (zero). Of the headset's 764 eye shaders on the
++// Toad board, 475 wrapped operands the stage before had just clamped
++// (2026-10-03).
++struct TevInRange {
++  std::array<bool, 4> rgb{true, true, true, true};
++  std::array<bool, 4> alpha{true, true, true, true};
++};
++
++static bool tev_operand_in_range(std::string_view operand, const TevInRange* known) {
++  if (known == nullptr || tev_overflow_all()) return false;
++  int reg = -1;
++  if (operand.find("tevreg0") != std::string_view::npos) reg = 1;
++  else if (operand.find("tevreg1") != std::string_view::npos) reg = 2;
++  else if (operand.find("tevreg2") != std::string_view::npos) reg = 3;
++  else if (operand.find("prev") != std::string_view::npos) reg = 0;
++  if (reg < 0) return false;
++  return operand.find(".a") != std::string_view::npos ? known->alpha[reg] : known->rgb[reg];
++}
++
+ // `half`: the operands are f16 (half_operand); the wrap is done in f32.
+ static std::string tev_color_op(GXTevOp op, std::string_view bias, std::string_view scale, bool clamp,
+                                 std::string_view a, std::string_view b, std::string_view c, std::string_view d,
+-                                bool half = false) {
+-  const auto overflow = [half](std::string_view reg) {
+-    if (!tev_may_overflow(reg)) return std::string{reg};
++                                bool half = false, const TevInRange* known = nullptr) {
++  const auto overflow = [half, known](std::string_view reg) {
++    if (!tev_may_overflow(reg) || tev_operand_in_range(reg, known)) return std::string{reg};
+     return half ? fmt::format("vec3h(tev_overflow_vec3f(vec3f({})))", reg) : fmt::format("tev_overflow_vec3f({})", reg);
+   };
+   std::string expr = tev_op(op, bias, scale, overflow(a), overflow(b), overflow(c), d,
+@@ -471,9 +493,9 @@ static std::string tev_color_op(GXTevOp op, std::string_view bias, std::string_v
+ 
+ static std::string tev_alpha_op(GXTevOp op, std::string_view bias, std::string_view scale, bool clamp,
+                                 std::string_view a, std::string_view b, std::string_view c, std::string_view d,
+-                                bool half = false) {
+-  const auto overflow = [half](std::string_view reg) {
+-    if (!tev_may_overflow(reg)) return std::string{reg};
++                                bool half = false, const TevInRange* known = nullptr) {
++  const auto overflow = [half, known](std::string_view reg) {
++    if (!tev_may_overflow(reg) || tev_operand_in_range(reg, known)) return std::string{reg};
+     return half ? fmt::format("f16(tev_overflow_f32(f32({})))", reg) : fmt::format("tev_overflow_f32({})", reg);
+   };
+   std::string expr =
+@@ -963,6 +985,55 @@ static void add_stereo_discard(std::string& source) noexcept {
    source.insert(body + 1, "\n    if (in.stereo_side < 0.0) { discard; }");
  }
  
@@ -1502,7 +1573,45 @@
  std::string build_shader_source(const ShaderConfig& config) noexcept {
    ZoneScoped;
    const auto hash = xxh3_hash(config);
-@@ -2198,6 +2247,9 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
+@@ -1222,6 +1293,14 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+     std::string operand = alpha_arg_reg(arg, idx, config, stage);
+     return half ? half_operand(std::move(operand), true) : operand;
+   };
++  // Registers loaded from the game's may hold anything, unless the draw found
++  // them all in [0, 1] (ShaderConfig::tevRegsInRange).
++  TevInRange inRange;
++  for (int i = 0; i < 4 && i < static_cast<int>(info.loadsTevReg.size()); ++i) {
++    if (info.loadsTevReg.test(i) && !config.tevRegsInRange) {
++      inRange.rgb[i] = inRange.alpha[i] = false;
++    }
++  }
+   for (u32 idx = 0; idx < config.tevStageCount; ++idx) {
+     const auto& stage = config.tevStages[idx];
+     {
+@@ -1229,7 +1308,7 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+       std::string op = tev_color_op(
+           stage.colorOp.op, tev_bias(stage.colorOp.bias), tev_scale(stage.colorOp.scale), stage.colorOp.clamp,
+           color_operand(stage.colorPass.a, idx, stage), color_operand(stage.colorPass.b, idx, stage),
+-          color_operand(stage.colorPass.c, idx, stage), color_operand(stage.colorPass.d, idx, stage), half);
++          color_operand(stage.colorPass.c, idx, stage), color_operand(stage.colorPass.d, idx, stage), half, &inRange);
+       fragmentFn += fmt::format("\n    // TEV stage {2}\n    {0} = {3}({1}, {0}.a);", outReg, op, idx, vec4);
+     }
+     {
+@@ -1237,9 +1316,12 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+       std::string op = tev_alpha_op(
+           stage.alphaOp.op, tev_bias(stage.alphaOp.bias), tev_scale(stage.alphaOp.scale), stage.alphaOp.clamp,
+           alpha_operand(stage.alphaPass.a, idx, stage), alpha_operand(stage.alphaPass.b, idx, stage),
+-          alpha_operand(stage.alphaPass.c, idx, stage), alpha_operand(stage.alphaPass.d, idx, stage), half);
++          alpha_operand(stage.alphaPass.c, idx, stage), alpha_operand(stage.alphaPass.d, idx, stage), half, &inRange);
+       fragmentFn += fmt::format("\n    {0}.a = {1};", outReg, op);
+     }
++    // GX's stage reads its operands before writing: what it leaves, for the next.
++    inRange.rgb[stage.colorOp.outReg] = stage.colorOp.clamp;
++    inRange.alpha[stage.alphaOp.outReg] = stage.alphaOp.clamp;
+   }
+ 
+   {
+@@ -2198,6 +2280,9 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
    } else if (config.stereo == StereoDiscard) {
      add_stereo_discard(shaderSource);
    }
@@ -1512,7 +1621,7 @@
    if (config.halfPrecision) {
      shaderSource.insert(0, "enable f16;\n");
    }
-@@ -2208,6 +2260,12 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
+@@ -2208,6 +2293,12 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
    return shaderSource;
  }
  

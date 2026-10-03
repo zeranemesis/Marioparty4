@@ -202,10 +202,39 @@ static int render_scene(const std::string& dir) {
   return 0;
 }
 
+// The game's own shaders: each pipeline config of a headset's pipeline cache
+// (exported by tools/dump_quest_shaders.ps1, one .bin per row) as WGSL.
+static int write_cached_configs(const std::string& in, const std::string& out) {
+  const std::string list = in + "/list.txt";
+  std::ifstream names(list);
+  std::string name;
+  int written = 0, skipped = 0;
+  while (std::getline(names, name)) {
+    if (!name.empty() && name.back() == '\r') name.pop_back();
+    std::ifstream file(in + "/" + name, std::ios::binary);
+    std::vector<char> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    if (bytes.size() != sizeof(PipelineConfig)) {
+      ++skipped;
+      continue;
+    }
+    PipelineConfig config;
+    std::memcpy(&config, bytes.data(), sizeof(config));
+    if (std::getenv("HARNESS_REGS_IN_RANGE") != nullptr) config.shaderConfig.tevRegsInRange = 1;
+    write(out + "/" + name.substr(0, name.size() - 4) + ".wgsl", build_shader_source(config.shaderConfig));
+    ++written;
+  }
+  std::printf("%d cached configs written, %d skipped (sizeof PipelineConfig %zu)\n", written, skipped,
+              sizeof(PipelineConfig));
+  return written != 0 ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
   const std::string dir = argc > 1 ? argv[1] : ".";
   if (argc > 2 && std::string{argv[2]} == "scene") {
     return render_scene(dir);
+  }
+  if (argc > 3 && std::string{argv[2]} == "configs") {
+    return write_cached_configs(argv[3], dir);
   }
   int written = 0;
   const auto emit = [&](const char* name, ShaderConfig config) {
