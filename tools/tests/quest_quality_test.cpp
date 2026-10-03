@@ -293,11 +293,11 @@ int main() {
   for (unsigned i = 0; i < 2 * quest::ImageSizePolicy::kShrinkSeconds; ++i) {
     assert(!images.update(1600, 1680, 1680, 1760, false)); // 91% drawn: kept
   }
-  assert(!images.update(1512, 1584, 1680, 1760, true)); // 81% drawn
-  for (unsigned i = 1; i < quest::ImageSizePolicy::kShrinkSeconds; ++i) {
+  assert(!images.update(1512, 1584, 1680, 1760, true)); // 81% drawn: its first second counts
+  for (unsigned i = 1; i < quest::ImageSizePolicy::kShrinkSeconds - 1; ++i) {
     assert(!images.update(1512, 1584, 1680, 1760, false));
   }
-  assert(images.update(1512, 1584, 1680, 1760, false)); // held: shrink
+  assert(images.update(1512, 1584, 1680, 1760, false)); // undrawn kShrinkSeconds: shrink
   assert(!images.update(1512, 1584, 1512, 1584, false));
   assert(!images.update(1344, 1408, 1512, 1584, true)); // lowered again
   for (unsigned i = 1; i < quest::ImageSizePolicy::kShrinkSeconds - 1; ++i) {

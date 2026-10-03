@@ -1624,7 +1624,12 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
     layerFilterAt = now;
     char value[PROP_VALUE_MAX] = {};
     __system_property_get("debug.partyboard.layer_filter", value);
-    const int chosen = std::strcmp(value, "none") == 0 ? 0 : std::strcmp(value, "normal") == 0 ? 1 : 2;
+    // None by default (`normal` for light sharpening, `resolution` for the
+    // sharpening chosen by the eyes' resolution): sharpening made the board's
+    // edges crawl as the head moved, the board seemed to move with it, and it
+    // took 0.5 ms of the compositor's 2.2 a displayed frame (72 Hz,
+    // 2026-10-03). The image is a little softer.
+    const int chosen = std::strcmp(value, "normal") == 0 ? 1 : std::strcmp(value, "resolution") == 0 ? 2 : 0;
     if (chosen != layerFilter) {
       LOGI("Eyes' layer filter: %s (debug.partyboard.layer_filter=%s)",
            chosen == 0 ? "none" : chosen == 1 ? "normal sharpening" : "by resolution",

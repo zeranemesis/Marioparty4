@@ -156,12 +156,15 @@ private:
 // its render targets again. A smaller size is drawn in a part of the images
 // at once (Aurora draws each eye at the left of its half, centered
 // vertically), so a lowering the controller undoes costs no new images. The
-// images shrink to it once it has held kShrinkSeconds and leaves more than
-// 15% of them undrawn: the GPU clears and writes out whole images. A larger
-// size needs new images at once.
+// images shrink once more than 15% of them has stayed undrawn for
+// kShrinkSeconds, whatever small steps the drawn size took meanwhile: the
+// GPU clears, resolves and writes out whole images (4x multisampled), and
+// with the controller stepping every few seconds, a 20 s steady size was
+// seldom reached: the images stayed at 4208x2200 while 70 to 95% of them
+// was drawn (2026-10-03). A larger size needs new images at once.
 class ImageSizePolicy {
 public:
-  static constexpr unsigned kShrinkSeconds = 20;
+  static constexpr unsigned kShrinkSeconds = 8;
 
   // Once a second. `changed`: the drawn size changed since the last call.
   bool update(uint32_t drawWidth, uint32_t drawHeight, uint32_t imageWidth, uint32_t imageHeight, bool changed) {
@@ -171,7 +174,8 @@ public:
     }
     const uint64_t drawn = static_cast<uint64_t>(drawWidth) * drawHeight;
     const uint64_t image = static_cast<uint64_t>(imageWidth) * imageHeight;
-    if (changed || drawn * 100 >= image * 85) {
+    (void)changed;
+    if (drawn * 100 >= image * 85) {
       mSmallerSeconds = 0;
       return false;
     }
