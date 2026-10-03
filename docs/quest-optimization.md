@@ -379,6 +379,13 @@ Objectif chiffre pour 120 images calculees : environ 7 ms de GPU par image, comp
 ### Methode de mesure
 
 Chaque etape : la campagne (`tools/quest_campaign.ps1 -Only ...`, scene et vues figees, reference avant chaque phase) et les sondes du journal (`Stereo GPU`, `Stereo pipeline`, `Stereo kinds`, `Render worker`, `Game loop`, `holds=`). Puis le ressenti au casque, qui decide.
+### Mesures du 03/10 en fin de matinee (builds 176 a 179)
+
+- **HUD sans MSAA** (build 177, `debug.partyboard.hud_msaa 4` pour revenir) : la passe du HUD reste a 0,7-0,8 ms (55 dessins) ; le cout etait les dessins, pas le MSAA.
+- **Fusion des dessins a etat GX reecrit mais identique** (essayee puis retiree) : 1 054 dessins sur 152 739 (0,7 %).
+- **Sonde des changements d'etat entre deux dessins** (essayee puis retiree, elle copiait l'etat a chaque dessin) : 0 % d'etats identiques ; matrices 73 %, tableaux de sommets 74 %, textures 65 %, canaux de couleur 29-39 %, etages TEV 26 %, eclairage 11 %. Les ~360 dessins par oeil sont de vrais morceaux differents : les fusionner demande un regroupement multi-dessins (donnees par dessin dans un stockage lu par le shader), au mieux -27 % de dessins (samePipeTex).
+- **Cases du plateau qui scintillent et tremblent quand le personnage avance**, en profondeur 16 comme en 32 bits : piste, le tri des objets de l'avant vers l'arriere, qui change l'ordre des cases (dessinees apres le sol, a la meme profondeur) quand la camera du jeu bouge. A verifier avec `debug.partyboard.sort_opaque 0`.
+- Charge actuelle a 72 Hz, plateau entier : passe des yeux 9,5-10 ms a 640 MHz (360 dessins par oeil), 59-61 images neuves sur 72, resolution dynamique 90 %.
 ## Sources Meta du plan
 
 - [OVR Metrics Tool](https://developers.meta.com/horizon/documentation/native/android/ts-ovrmetricstool/)
