@@ -14,6 +14,7 @@
 #include "game/objsub.h"
 #include "game/sprite.h"
 #include "port/widescreen.h"
+#include "port/quest_stereo.h"
 #ifdef TARGET_PC
 #include "port/crash_report.h"
 #endif
@@ -850,7 +851,17 @@ static void DrawSpaces(HU3DMODEL *model, Mtx matrix)
     BoardCameraTargetGet(&target);
     MTXPerspective(proj, camera->fov, PARTYBOARD_WIDESCREEN_ASPECT(camera->aspect), camera->nnear, camera->ffar);
     GXSetProjection(proj, GX_PERSPECTIVE);
+#ifdef TARGET_PC
+    // The camera the rest of the scene is drawn with this frame (hsfman.c's
+    // Hu3DCameraSet: interpolated between simulation ticks above 60 Hz), not
+    // the board camera of the last tick: drawn with that one, the spaces slid
+    // against the ground whenever the camera moved, and on a Meta Quest, whose
+    // eyes undo the scene's camera, they shook while a player walked
+    // (2026-10-03).
+    MTXCopy(Hu3DCameraMtx, lookat);
+#else
     MTXLookAt(lookat, &pos, &camera->up, &target);
+#endif
     GXSetViewport(camera->viewport_x, camera->viewport_y, camera->viewport_w, camera->viewport_h, camera->viewport_near, camera->viewport_far);
     GXSetScissor(camera->viewport_x, camera->viewport_y, camera->viewport_w, camera->viewport_h);
     {
@@ -874,6 +885,18 @@ static void DrawSpaces(HU3DMODEL *model, Mtx matrix)
             if (space_curr->type == 0) {
                 continue;
             }
+#ifdef TARGET_PC
+            // On a headset, what the eyes can see: the board camera's cone
+            // made spaces at its edge come and go as it turned.
+            if (PartyBoard_StereoActive()) {
+                Vec view;
+                MTXMultVec(lookat, &space_curr->pos, &view);
+                if (!PartyBoard_StereoSphereVisible(view.x, view.y, view.z, 200.0f) || (space_curr->flag & spaceAttr[0])) {
+                    continue;
+                }
+            }
+            else
+#endif
             if (!BoardCameraCullCheck(&space_curr->pos, 200.0f) || (space_curr->flag & spaceAttr[0])) {
                 continue;
             }
