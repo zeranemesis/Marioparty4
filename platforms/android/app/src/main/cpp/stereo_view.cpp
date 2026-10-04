@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <thread>
 
 namespace quest {
 
@@ -1230,6 +1231,230 @@ StereoView::Slot* StereoView::newest_completed(int64_t displayNs) {
   return newest;
 }
 
+// Copies a finished image into the headset's images and hands them over:
+// from layer() at its look, or early (early_copy()) as soon as it finished,
+// for the display frame after. displayTime: the frame it is first shown
+// in; holdExtra: display frames the one before stays on show beyond those
+// layer() counted.
+void StereoView::present(Slot* newest, int fence, int64_t doneNs, int64_t finishedNs, bool shownLate,
+                         CopyTimer* copyTimer, XrTime displayTime, uint32_t holdExtra) {
+  const auto copyStart = std::chrono::steady_clock::now();
+  GLsync copyFence = nullptr;
+  bool accepted = false;
+  // The GPU waits for Aurora's drawing; no CPU stall here.
+  if (fence >= 0) {
+    const EGLint attributes[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, fence, EGL_NONE};
+    EGLSyncKHR sync = g_gl.createSync(mDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, attributes);
+    if (sync != EGL_NO_SYNC_KHR) {
+      g_gl.waitSync(mDisplay, sync, 0);
+      g_gl.destroySync(mDisplay, sync);
+    } else {
+      close(fence);
+    }
+  }
+  uint32_t index = 0;
+  XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+  XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+  wait.timeout = XR_INFINITE_DURATION;
+  const bool keepBoard = mShown && newest->board && !newest->hasWorld && mShownHasWorld && mShownIsBoard;
+  const auto acquireImage = [&](XrSwapchain swapchain, uint32_t& image, size_t destination) {
+    const auto start = std::chrono::steady_clock::now();
+    const bool acquired = XR_SUCCEEDED(xrAcquireSwapchainImage(swapchain, &acquire, &image));
+    const auto waitStart = std::chrono::steady_clock::now();
+    const bool ready = acquired && XR_SUCCEEDED(xrWaitSwapchainImage(swapchain, &wait));
+    const auto end = std::chrono::steady_clock::now();
+    mDestinationAcquireMaxMs[destination] = std::max(mDestinationAcquireMaxMs[destination],
+        std::chrono::duration<double, std::milli>(waitStart - start).count());
+    if (acquired) {
+      mDestinationWaitMaxMs[destination] = std::max(mDestinationWaitMaxMs[destination],
+          std::chrono::duration<double, std::milli>(end - waitStart).count());
+    }
+    mAcquireMaxMs = std::max(mAcquireMaxMs,
+        std::chrono::duration<double, std::milli>(end - start).count());
+    return ready;
+  };
+  if (keepBoard || acquireImage(mSwapchain, index, 0)) {
+    uint32_t hudIndex = 0;
+    const auto hudNow = std::chrono::steady_clock::now();
+    // Only from an image that drew it; at every image's rate, 30 Hz at most.
+    const bool copyHud = newest->hud && (!mHudShown || !mHudEveryImage ||
+                                         hudNow - mHudCopiedAt >= std::chrono::milliseconds(33));
+    const bool hudReady = copyHud && acquireImage(mHudSwapchain, hudIndex, 1);
+    // Acquire both destinations before queuing copies, then flush once.
+    if (copyTimer) g_gl.queryCounter(copyTimer->queries[0], GL_TIMESTAMP_EXT);
+
+    if (!keepBoard) {
+      // Only the drawn part of each eye's half (dynamic resolution): at the
+      // left, centered vertically (Aurora's common.cpp draws it there, a
+      // half being the image's width / 2). The images are replaced only
+      // when every slot is free, so this slot has the current images' size.
+      const auto y = static_cast<GLint>((mEyeHeight - newest->renderHeight) / 2);
+      const auto srcY = static_cast<GLint>((mImageEyeHeight - newest->renderHeight) / 2);
+      const uint32_t srcStride = mImageEyeWidth;
+      for (uint32_t eye = 0; eye < 2; ++eye) {
+        g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, static_cast<GLint>(eye * srcStride), srcY, 0,
+                       mSwapchainImages[index].image, GL_TEXTURE_2D, 0, static_cast<GLint>(eye * mEyeWidth), y, 0,
+                       static_cast<GLsizei>(newest->renderWidth), static_cast<GLsizei>(newest->renderHeight), 1);
+      }
+    }
+    // The model's depth for the compositor (enable_depth_layer).
+    if (!keepBoard && mDepthWanted && mDepthSwapchain != XR_NULL_HANDLE) {
+      mDepthShown = draw_depth(*newest);
+    }
+    if (!keepBoard && mSpaceWarpWanted && mMotionSwapchain != XR_NULL_HANDLE) {
+      mSpaceWarpShown = draw_space_warp(*newest);
+    }
+    if (hudReady) {
+      mHudCopiedAt = hudNow;
+      g_gl.copyImage(newest->hudTexture, GL_TEXTURE_2D, 0, 0, 0, 0,
+                    mHudImages[hudIndex].image, GL_TEXTURE_2D, 0, 0, 0, 0,
+                    static_cast<GLsizei>(mHudPixelsWidth), static_cast<GLsizei>(mHudPixelsHeight), 1);
+
+    }
+    // Keep the source lease until this GPU copy completes. The compositor
+    // synchronizes the released destination; the game must not reuse its source.
+    if (copyTimer) {
+      g_gl.queryCounter(copyTimer->queries[1], GL_TIMESTAMP_EXT);
+      copyTimer->pending = true;
+    }
+    copyFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    // When the GPU finishes the copy ("Copy GPU" probe): it waits behind
+    // the game's own drawing unless the driver lets it go first.
+    EGLSyncKHR copyDone = EGL_NO_SYNC_KHR;
+    if (g_gl.dupNativeFence != nullptr && newest->copyDoneFd < 0) {
+      const EGLint none[] = {EGL_NONE};
+      copyDone = g_gl.createSync(mDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, none);
+    }
+    if (copyFence != nullptr) {
+      glFlush();
+      if (copyDone != EGL_NO_SYNC_KHR) {
+        newest->copyDoneFd = g_gl.dupNativeFence(mDisplay, copyDone);
+        newest->copyFlushNs = steady_ns();
+      }
+    } else {
+      LOGW("Stereo: copy fence unavailable, using synchronous fallback");
+      glFinish();
+    }
+    if (copyDone != EGL_NO_SYNC_KHR) g_gl.destroySync(mDisplay, copyDone);
+    XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    if (hudReady) {
+      mHudShown = XR_SUCCEEDED(xrReleaseSwapchainImage(mHudSwapchain, &release));
+      if (mHudShown) ++mNewHudCount;
+    }
+    accepted = keepBoard || XR_SUCCEEDED(xrReleaseSwapchainImage(mSwapchain, &release));
+    if (accepted && !keepBoard) {
+      ++mNewWorldCount;
+      mShownViews[0] = newest->views[0];
+      mShownViews[1] = newest->views[1];
+      mShownHasWorld = newest->hasWorld;
+      mShownIsBoard = newest->board;
+      mShownWidth = newest->renderWidth;
+      mShownHeight = newest->renderHeight;
+      if (mHoldCounted) ++mHolds[std::min<uint32_t>(std::max<uint32_t>(mFramesSinceNew + holdExtra, 1), 4) - 1];
+      mHoldCounted = true;
+      mFramesSinceNew = 0;
+    }
+    // How long images take from the game's lease to the display.
+    if (newest->leaseTime > 0 && displayTime > newest->leaseTime) {
+      const double sample = static_cast<double>(displayTime - newest->leaseTime);
+      mLatencyNs = mLatencyNs == 0.0 ? sample : mLatencyNs * 0.9 + sample * 0.1;
+      mLatencyMinMs = mLatencyMinMs == 0.0 ? sample / 1e6 : std::min(mLatencyMinMs, sample / 1e6);
+      mLatencyMaxMs = std::max(mLatencyMaxMs, sample / 1e6);
+    }
+    if (accepted) {
+      mShown = true;
+      mPresentedTag = newest->tag;
+    }
+    static bool loggedFirstImage = false;
+    if (!loggedFirstImage) {
+      LOGI("Stereo: first eye image copied to OpenXR (tag %llu)", static_cast<unsigned long long>(newest->tag));
+      loggedFirstImage = true;
+    }
+  }
+  std::lock_guard lock{mMutex};
+  if (finishedNs > newest->startNs) mPacer.finished(finishedNs - newest->startNs);
+  if (shownLate) note_miss(doneNs, newest->dueNs);
+  {
+    const int64_t copyNs = steady_ns();
+    if (newest->submitNs > newest->leaseNs && newest->leaseNs != 0) mStageRecord.add(newest->submitNs - newest->leaseNs);
+    if (doneNs > newest->submitNs && newest->submitNs != 0) {
+      mStageGpu.add(doneNs - newest->submitNs);
+      mStageWait.add(copyNs - doneNs);
+    }
+    if (newest->leaseNs != 0) mStageTotal.add(copyNs - newest->leaseNs);
+  }
+  mCopyMaxMs = std::max(mCopyMaxMs,
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - copyStart).count());
+  if (copyFence != nullptr) {
+    newest->copyFence = copyFence;
+    newest->state = State::Copying;
+  } else {
+    release_slot(*newest);
+  }
+  if (accepted) ++mPresentedCount;
+}
+void StereoView::early_copy() {
+  if (mSwapchain == XR_NULL_HANDLE) return;
+  int64_t displayNs = 0, deadlineNs = 0;
+  {
+    std::lock_guard lock{mMutex};
+    if (!mEarlyCopy || !mPacing || !mEnabled || mScreenRequired || !mShown || mResizePending || mPeriodNs <= 0 ||
+        mLastLookNs == 0 || mFrameTime == 0) {
+      return;
+    }
+    displayNs = mFrameTime + mPeriodNs;
+    // Back before the next look: it comes about a period after the last one
+    // (2 ms either way on the board), and xrWaitFrame must not be late.
+    deadlineNs = mLastLookNs + mPeriodNs - 3'000'000;
+  }
+  Slot* due = nullptr;
+  uint64_t tag = 0;
+  for (;;) {
+    int fd = -1;
+    bool recording = false;
+    {
+      std::lock_guard lock{mMutex};
+      due = nullptr;
+      for (auto& slot : mSlots) {
+        if (slot.dueNs != 0 && slot.tag > mPresentedTag && (slot.state == State::Drawing || slot.state == State::Ready) &&
+            std::llabs(slot.dueNs - displayNs) < mPeriodNs / 2) {
+          due = &slot;
+        }
+      }
+      if (due == nullptr) return;
+      recording = due->state == State::Drawing;
+      fd = due->fence;
+      tag = due->tag;
+    }
+    const int64_t now = steady_ns();
+    if (now >= deadlineNs) return;
+    if (recording) {
+      // Not sent to the GPU yet (the render worker submits it): look again soon.
+      std::this_thread::sleep_for(std::chrono::nanoseconds(std::min<int64_t>(1'000'000, deadlineNs - now)));
+      continue;
+    }
+    if (fd >= 0) {
+      // Only this thread closes a ready image's fence (release_slot, layer()).
+      pollfd finished{fd, POLLIN, 0};
+      const int timeoutMs = static_cast<int>((deadlineNs - now + 999'999) / 1'000'000);
+      if (poll(&finished, 1, timeoutMs) <= 0 || !(finished.revents & POLLIN) || steady_ns() > deadlineNs) return;
+    }
+    break;
+  }
+  int fence = -1;
+  {
+    std::lock_guard lock{mMutex};
+    if (due->state != State::Ready || due->tag != tag) return;
+    fence = due->fence;
+    due->fence = -1;
+    mEarlyDisplayNs = displayNs;
+  }
+  const int64_t doneNs = fence_signal_time_ns(fence);
+  present(due, fence, doneNs, due->startNs != 0 ? doneNs : 0, false, nullptr, displayNs, 1);
+  std::lock_guard lock{mMutex};
+  mSkipFrameCount = true;
+}
+
 const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void* next) {
   if (mSwapchain == XR_NULL_HANDLE) {
     return nullptr;
@@ -1272,7 +1497,10 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
       mHoldCounted = false; // the layer was away: no hold to count
     }
     mLastLayerAt = lookAt;
-    ++mFramesSinceNew;
+    mLastLookNs = lookNs;
+    // An early copy is first shown in this frame: it already counted it.
+    if (!mSkipFrameCount) ++mFramesSinceNew;
+    mSkipFrameCount = false;
     for (auto& slot : mSlots) {
       if (slot.state == State::Copying && slot.copyFence != nullptr) {
         const GLenum status = glClientWaitSync(slot.copyFence, 0, 0);
@@ -1298,7 +1526,9 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
           due = &slot;
         }
       }
-      if (due == nullptr) {
+      if (mEarlyDisplayNs != 0 && std::llabs(mEarlyDisplayNs - mFrameTime) < mPeriodNs / 2) {
+        ++mDueEarly; // copied and handed over after the last frame
+      } else if (due == nullptr) {
         ++mDueNone;
       } else if (due->state == State::Drawing) {
         ++mDueDrawing;
@@ -1367,160 +1597,7 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
   }
 
   if (newest != nullptr) {
-    const auto copyStart = std::chrono::steady_clock::now();
-    GLsync copyFence = nullptr;
-    bool accepted = false;
-    // The GPU waits for Aurora's drawing; no CPU stall here.
-    if (fence >= 0) {
-      const EGLint attributes[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, fence, EGL_NONE};
-      EGLSyncKHR sync = g_gl.createSync(mDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, attributes);
-      if (sync != EGL_NO_SYNC_KHR) {
-        g_gl.waitSync(mDisplay, sync, 0);
-        g_gl.destroySync(mDisplay, sync);
-      } else {
-        close(fence);
-      }
-    }
-    uint32_t index = 0;
-    XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-    XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-    wait.timeout = XR_INFINITE_DURATION;
-    const bool keepBoard = mShown && newest->board && !newest->hasWorld && mShownHasWorld && mShownIsBoard;
-    const auto acquireImage = [&](XrSwapchain swapchain, uint32_t& image, size_t destination) {
-      const auto start = std::chrono::steady_clock::now();
-      const bool acquired = XR_SUCCEEDED(xrAcquireSwapchainImage(swapchain, &acquire, &image));
-      const auto waitStart = std::chrono::steady_clock::now();
-      const bool ready = acquired && XR_SUCCEEDED(xrWaitSwapchainImage(swapchain, &wait));
-      const auto end = std::chrono::steady_clock::now();
-      mDestinationAcquireMaxMs[destination] = std::max(mDestinationAcquireMaxMs[destination],
-          std::chrono::duration<double, std::milli>(waitStart - start).count());
-      if (acquired) {
-        mDestinationWaitMaxMs[destination] = std::max(mDestinationWaitMaxMs[destination],
-            std::chrono::duration<double, std::milli>(end - waitStart).count());
-      }
-      mAcquireMaxMs = std::max(mAcquireMaxMs,
-          std::chrono::duration<double, std::milli>(end - start).count());
-      return ready;
-    };
-    if (keepBoard || acquireImage(mSwapchain, index, 0)) {
-      uint32_t hudIndex = 0;
-      const auto hudNow = std::chrono::steady_clock::now();
-      // Only from an image that drew it; at every image's rate, 30 Hz at most.
-      const bool copyHud = newest->hud && (!mHudShown || !mHudEveryImage ||
-                                           hudNow - mHudCopiedAt >= std::chrono::milliseconds(33));
-      const bool hudReady = copyHud && acquireImage(mHudSwapchain, hudIndex, 1);
-      // Acquire both destinations before queuing copies, then flush once.
-      if (copyTimer) g_gl.queryCounter(copyTimer->queries[0], GL_TIMESTAMP_EXT);
-
-      if (!keepBoard) {
-        // Only the drawn part of each eye's half (dynamic resolution): at the
-        // left, centered vertically (Aurora's common.cpp draws it there, a
-        // half being the image's width / 2). The images are replaced only
-        // when every slot is free, so this slot has the current images' size.
-        const auto y = static_cast<GLint>((mEyeHeight - newest->renderHeight) / 2);
-        const auto srcY = static_cast<GLint>((mImageEyeHeight - newest->renderHeight) / 2);
-        const uint32_t srcStride = mImageEyeWidth;
-        for (uint32_t eye = 0; eye < 2; ++eye) {
-          g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, static_cast<GLint>(eye * srcStride), srcY, 0,
-                         mSwapchainImages[index].image, GL_TEXTURE_2D, 0, static_cast<GLint>(eye * mEyeWidth), y, 0,
-                         static_cast<GLsizei>(newest->renderWidth), static_cast<GLsizei>(newest->renderHeight), 1);
-        }
-      }
-      // The model's depth for the compositor (enable_depth_layer).
-      if (!keepBoard && mDepthWanted && mDepthSwapchain != XR_NULL_HANDLE) {
-        mDepthShown = draw_depth(*newest);
-      }
-      if (!keepBoard && mSpaceWarpWanted && mMotionSwapchain != XR_NULL_HANDLE) {
-        mSpaceWarpShown = draw_space_warp(*newest);
-      }
-      if (hudReady) {
-        mHudCopiedAt = hudNow;
-        g_gl.copyImage(newest->hudTexture, GL_TEXTURE_2D, 0, 0, 0, 0,
-                      mHudImages[hudIndex].image, GL_TEXTURE_2D, 0, 0, 0, 0,
-                      static_cast<GLsizei>(mHudPixelsWidth), static_cast<GLsizei>(mHudPixelsHeight), 1);
-
-      }
-      // Keep the source lease until this GPU copy completes. The compositor
-      // synchronizes the released destination; the game must not reuse its source.
-      if (copyTimer) {
-        g_gl.queryCounter(copyTimer->queries[1], GL_TIMESTAMP_EXT);
-        copyTimer->pending = true;
-      }
-      copyFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-      // When the GPU finishes the copy ("Copy GPU" probe): it waits behind
-      // the game's own drawing unless the driver lets it go first.
-      EGLSyncKHR copyDone = EGL_NO_SYNC_KHR;
-      if (g_gl.dupNativeFence != nullptr && newest->copyDoneFd < 0) {
-        const EGLint none[] = {EGL_NONE};
-        copyDone = g_gl.createSync(mDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, none);
-      }
-      if (copyFence != nullptr) {
-        glFlush();
-        if (copyDone != EGL_NO_SYNC_KHR) {
-          newest->copyDoneFd = g_gl.dupNativeFence(mDisplay, copyDone);
-          newest->copyFlushNs = steady_ns();
-        }
-      } else {
-        LOGW("Stereo: copy fence unavailable, using synchronous fallback");
-        glFinish();
-      }
-      if (copyDone != EGL_NO_SYNC_KHR) g_gl.destroySync(mDisplay, copyDone);
-      XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-      if (hudReady) {
-        mHudShown = XR_SUCCEEDED(xrReleaseSwapchainImage(mHudSwapchain, &release));
-        if (mHudShown) ++mNewHudCount;
-      }
-      accepted = keepBoard || XR_SUCCEEDED(xrReleaseSwapchainImage(mSwapchain, &release));
-      if (accepted && !keepBoard) {
-        ++mNewWorldCount;
-        mShownViews[0] = newest->views[0];
-        mShownViews[1] = newest->views[1];
-        mShownHasWorld = newest->hasWorld;
-        mShownIsBoard = newest->board;
-        mShownWidth = newest->renderWidth;
-        mShownHeight = newest->renderHeight;
-        if (mHoldCounted) ++mHolds[std::min<uint32_t>(mFramesSinceNew, 4) - 1];
-        mHoldCounted = true;
-        mFramesSinceNew = 0;
-      }
-      // How long images take from the game's lease to the display.
-      if (newest->leaseTime > 0 && mFrameTime > newest->leaseTime) {
-        const double sample = static_cast<double>(mFrameTime - newest->leaseTime);
-        mLatencyNs = mLatencyNs == 0.0 ? sample : mLatencyNs * 0.9 + sample * 0.1;
-        mLatencyMinMs = mLatencyMinMs == 0.0 ? sample / 1e6 : std::min(mLatencyMinMs, sample / 1e6);
-        mLatencyMaxMs = std::max(mLatencyMaxMs, sample / 1e6);
-      }
-      if (accepted) {
-        mShown = true;
-        mPresentedTag = newest->tag;
-      }
-      static bool loggedFirstImage = false;
-      if (!loggedFirstImage) {
-        LOGI("Stereo: first eye image copied to OpenXR (tag %llu)", static_cast<unsigned long long>(newest->tag));
-        loggedFirstImage = true;
-      }
-    }
-    std::lock_guard lock{mMutex};
-    if (finishedNs > newest->startNs) mPacer.finished(finishedNs - newest->startNs);
-    if (shownLate) note_miss(doneNs, newest->dueNs);
-    {
-      const int64_t copyNs = steady_ns();
-      if (newest->submitNs > newest->leaseNs && newest->leaseNs != 0) mStageRecord.add(newest->submitNs - newest->leaseNs);
-      if (doneNs > newest->submitNs && newest->submitNs != 0) {
-        mStageGpu.add(doneNs - newest->submitNs);
-        mStageWait.add(copyNs - doneNs);
-      }
-      if (newest->leaseNs != 0) mStageTotal.add(copyNs - newest->leaseNs);
-    }
-    mCopyMaxMs = std::max(mCopyMaxMs,
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - copyStart).count());
-    if (copyFence != nullptr) {
-      newest->copyFence = copyFence;
-      newest->state = State::Copying;
-    } else {
-      release_slot(*newest);
-    }
-    if (accepted) ++mPresentedCount;
+    present(newest, fence, doneNs, finishedNs, shownLate, copyTimer, mFrameTime, 0);
   }
 
   {
@@ -1551,10 +1628,17 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
            mMissDoneEarly, mMissEarlyMaxNs / 1e6, mMissDoneLate,
            mMissDoneLate ? mMissLateSumNs / 1e6 / mMissDoneLate : 0.0, mMissLateMaxNs / 1e6, mJitterMinNs / 1e6,
            mJitterMaxNs / 1e6, mPacer.lead_ns() / 1e6);
-      LOGI("Pacing looks: due image none %u, recording %u, GPU unfinished %u, finished %u; images due 0/1/2+ "
-           "display frames after the one before: %u/%u/%u",
-           mDueNone, mDueDrawing, mDueUnfinished, mDueFinished, mDueSteps[0], mDueSteps[1], mDueSteps[2]);
-      mDueNone = mDueDrawing = mDueUnfinished = mDueFinished = 0;
+      LOGI("Pacing looks: due image copied early %u, none %u, recording %u, GPU unfinished %u, finished %u; images "
+           "due 0/1/2+ display frames after the one before: %u/%u/%u",
+           mDueEarly, mDueNone, mDueDrawing, mDueUnfinished, mDueFinished, mDueSteps[0], mDueSteps[1], mDueSteps[2]);
+      mDueEarly = mDueNone = mDueDrawing = mDueUnfinished = mDueFinished = 0;
+      mEarlyCopies = 0;
+      char earlyCopy[PROP_VALUE_MAX] = {};
+      __system_property_get("debug.partyboard.early_copy", earlyCopy);
+      if (const bool early = earlyCopy[0] != '0'; early != mEarlyCopy) {
+        LOGI("Stereo: early copies %s (debug.partyboard.early_copy)", early ? "on" : "off");
+        mEarlyCopy = early;
+      }
       mDueSteps[0] = mDueSteps[1] = mDueSteps[2] = 0;
       mMissDoneEarly = mMissDoneLate = 0;
       mMissLateSumNs = mMissLateMaxNs = mMissEarlyMaxNs = mJitterMinNs = mJitterMaxNs = 0;

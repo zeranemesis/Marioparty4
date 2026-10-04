@@ -52,6 +52,14 @@ public:
   // XR thread: the newest image the game drew, copied into the swapchain; the
   // layer showing it (or the previous one), nullptr before the first.
   const XrCompositionLayerBaseHeader* layer(XrSpace space, const void* next);
+  // XR thread, after xrEndFrame: waits, until shortly before the next look,
+  // for the image due in the next display frame to finish, then copies it
+  // and hands it over at once. At its look the copy waited behind the
+  // game's next eyes' pass, 5 to 6 ms on average and up to 14, and the
+  // headset, seeing its frames finish that late, prepared them 46 ms ahead
+  // instead of 18 (Toad board, 2026-10-04): its head poses were predicted
+  // that much further. Here the GPU is idle between the game's frames.
+  void early_copy();
   // The game's interface (scores, messages) as a quad at `pose` in `space`:
   // quest_xr.cpp stands it at the back of the model. nullptr while hidden.
   const XrCompositionLayerBaseHeader* hud_layer(XrSpace space, const XrPosef& pose, XrExtent2Df size,
@@ -254,6 +262,14 @@ private:
   std::array<double, 2> mDestinationWaitMaxMs{};
   struct CopyTimer { GLuint queries[2]{}; bool pending = false; };
   std::array<CopyTimer, 4> mCopyTimers;
+  void present(Slot* newest, int fence, int64_t doneNs, int64_t finishedNs, bool shownLate, CopyTimer* copyTimer,
+               XrTime displayTime, uint32_t holdExtra);
+  // Early copies (early_copy()): on by default, debug.partyboard.early_copy 0
+  // turns them off (read every 2 s). The last look, the display frame the
+  // last early copy was for, and how many were made since the last perf line.
+  bool mEarlyCopy = true, mSkipFrameCount = false;
+  int64_t mLastLookNs = 0, mEarlyDisplayNs = 0;
+  uint32_t mEarlyCopies = 0, mDueEarly = 0;
   bool mGpuTiming = false;
   double mCopyGpuMaxMs = -1;
   uint32_t mCopyGpuSamples = 0;

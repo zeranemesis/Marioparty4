@@ -1790,6 +1790,9 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   check(app.instance, xrEndFrame(app.session, &end), "xrEndFrame");
   g_perf.frame(frame, std::chrono::steady_clock::now() - frameStart, app.stereo.resolution_percent(),
                app.stereo.render_info());
+  // The next frame's image, copied as soon as the game finishes it, while
+  // the GPU is idle (StereoView::early_copy).
+  if (modelLayer != nullptr && frame.shouldRender) app.stereo.early_copy();
 }
 
 bool set_up(App& app, JNIEnv* env) {
