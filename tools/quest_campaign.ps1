@@ -54,7 +54,8 @@ $switches = @('debug.partyboard.sort_opaque', 'debug.partyboard.stereo_crossing'
               'debug.partyboard.skip_draws', 'debug.partyboard.render_hz', 'debug.partyboard.alpha_test',
               'debug.partyboard.eye_depth', 'debug.partyboard.eye_f16', 'debug.partyboard.eye_msaa',
               'debug.partyboard.display_hz', 'debug.partyboard.space_warp', 'debug.partyboard.hud_msaa',
-              'debug.partyboard.batch_draws', 'debug.partyboard.cull_objects')
+              'debug.partyboard.batch_draws', 'debug.partyboard.cull_objects', 'debug.partyboard.foveation',
+              'debug.partyboard.astc', 'debug.partyboard.late_latch', 'debug.partyboard.early_copy')
 $freeze = if ($NoFreeze) { '' } else { '1' }
 $live = @(
     @{ name = 'reference';     props = @{ 'debug.partyboard.eye_scale' = $eye } },
@@ -106,6 +107,10 @@ $live = @(
     # the interface every other image (one in 3 at 72 Hz by default).
     @{ name = 'sort-depth';       props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.sort_opaque' = 'depth' } },
     @{ name = 'hud-half';         props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.hud_rate' = 'half' } },
+    # The eyes' fragment density map (a Dawn built by tools/build_dawn_android_fdm.ps1): levels 1 to 3.
+    @{ name = 'fov-1';            props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.foveation' = '1' } },
+    @{ name = 'fov-2';            props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.foveation' = '2' } },
+    @{ name = 'fov-3';            props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.foveation' = '3' } },
     @{ name = 'render-120';     props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.render_hz' = '0' } },
     @{ name = 'reference-end'; props = @{ 'debug.partyboard.eye_scale' = $eye } }
 )
