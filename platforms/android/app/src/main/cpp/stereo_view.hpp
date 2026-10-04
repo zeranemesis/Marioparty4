@@ -296,7 +296,10 @@ private:
   // The resolution a board last held (of the recommended size): a board is
   // entered again at it rather than at what the light menus rose to, which
   // took several seconds of hitches to come down 5% at a time (2026-10-03).
-  float mBoardQuality = 0.9f;
+  // 100% at first: with early copies the Toad board kept 72 new images of 72
+  // at 100% (one missed in 26 s, eyes' pass 9.4 to 9.9 ms; build 195,
+  // 2026-10-04); its pixels cost little.
+  float mBoardQuality = 1.0f;
   float mMaxScale = 1.0f;    // the images' size, relative to the recommended one
   AdaptiveQuality mQuality;
   QualitySample mQualitySample;
