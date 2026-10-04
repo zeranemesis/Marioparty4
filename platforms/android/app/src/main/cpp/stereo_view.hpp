@@ -38,6 +38,7 @@ struct StereoFrame {
   uint32_t eyeWidth, eyeHeight; // drawn part of each eye's half (dynamic resolution)
   uint32_t generation;          // of the images the lease is in
   uint32_t drawHud;             // 1: draw the interface into its image this frame
+  uint32_t foveation;           // the eyes' foveation level (0: none), StereoView::adapt_resolution
 };
 
 class StereoView {
@@ -70,6 +71,9 @@ public:
   // with was taken up to a period before the game started it, and the game's
   // draws took 4 to 5 ms more (2026-10-04). debug.partyboard.late_latch 0: off.
   bool late_latch(uint64_t tag, float correction[2][16]);
+  // Whether the game's renderer has a fragment density map (Aurora's
+  // AuroraStereoFoveationSupported, told by the game's bridge once).
+  void set_foveation_available(bool available);
   // The game's interface (scores, messages) as a quad at `pose` in `space`:
   // quest_xr.cpp stands it at the back of the model. nullptr while hidden.
   const XrCompositionLayerBaseHeader* hud_layer(XrSpace space, const XrPosef& pose, XrExtent2Df size,
@@ -282,6 +286,12 @@ private:
   // views are frozen for a measurement, and since the last perf line, the
   // frames corrected and how far the left eye had moved meanwhile.
   bool mLateLatch = true, mViewsFrozen = false;
+  // Foveation chosen with the resolution (adapt_resolution(), with
+  // debug.partyboard.foveation auto): a lowering takes a foveation level
+  // first, up to kMaxAutoFoveation, and a raising gives one back first.
+  static constexpr uint32_t kMaxAutoFoveation = 2;
+  bool mFoveationAvailable = false, mFoveationAuto = false;
+  uint32_t mFoveation = 0;
   XrSpace mLocateSpace = XR_NULL_HANDLE;
   uint32_t mLateApplied = 0;
   double mLateMovedSumMm = 0, mLateMovedMaxMm = 0;

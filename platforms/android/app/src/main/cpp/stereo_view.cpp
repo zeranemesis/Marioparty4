@@ -971,6 +971,7 @@ bool StereoView::game_frame(StereoFrame& out) {
   free->hud = mHudSinceLease + 1 >= hudEvery;
   mHudSinceLease = free->hud ? 0 : mHudSinceLease + 1;
   out.drawHud = free->hud ? 1 : 0;
+  out.foveation = mFoveationAuto && mFoveationAvailable ? mFoveation : 0;
   out.generation = mGeneration;
   free->state = State::Drawing;
   free->leaseNs = steady_ns();
@@ -991,6 +992,12 @@ bool StereoView::game_frame(StereoFrame& out) {
   out.eyeWidth = free->renderWidth;
   out.eyeHeight = free->renderHeight;
   return true;
+}
+
+void StereoView::set_foveation_available(bool available) {
+  std::lock_guard lock{mMutex};
+  if (available != mFoveationAvailable) LOGI("Stereo: fragment density map %s", available ? "available" : "unavailable");
+  mFoveationAvailable = available;
 }
 
 void StereoView::set_locate_space(XrSpace space) {
@@ -1191,8 +1198,26 @@ void StereoView::adapt_resolution() {
   if (mShownHasWorld && !mSettleWorld) mSettleUntil = now + std::chrono::seconds(3);
   mSettleWorld = mShownHasWorld;
   const bool settling = now < mSettleUntil;
-  const float measuredScale = settling ? mQuality.scale()
-                                       : mQuality.update(mQualitySample, wanted, mAdaptRingFull, slow, mAdaptMissed);
+  const float scaleBefore = mQuality.scale();
+  float measuredScale = settling ? mQuality.scale()
+                                 : mQuality.update(mQualitySample, wanted, mAdaptRingFull, slow, mAdaptMissed);
+  // Foveation before pixels: the lenses blur the eyes' edges anyway, where it
+  // takes its pixels, while a lower resolution blurs the whole board.
+  if (!settling && mFoveationAuto && mFoveationAvailable) {
+    const auto decision = mQuality.last_decision();
+    if (decision == AdaptiveQuality::Decision::Lowered && mFoveation < kMaxAutoFoveation) {
+      mQuality.start_at(scaleBefore);
+      measuredScale = scaleBefore;
+      ++mFoveation;
+      LOGI("Stereo: foveation level %u instead of a lower resolution", mFoveation);
+    } else if ((decision == AdaptiveQuality::Decision::Raised || decision == AdaptiveQuality::Decision::CalmAtCap) &&
+               mFoveation > 0) {
+      mQuality.start_at(scaleBefore);
+      measuredScale = scaleBefore;
+      --mFoveation;
+      LOGI("Stereo: foveation level %u before a higher resolution", mFoveation);
+    }
+  }
   mAdaptMissed = 0;
   mRenderScale = std::min(1.0f, measuredScale / mMaxScale);
   if (mBoardMode && mShownHasWorld) mBoardQuality = measuredScale;
@@ -1770,6 +1795,13 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
            mLateApplied ? mLateMovedSumMm / mLateApplied : 0.0, mLateMovedMaxMm);
       mLateApplied = 0;
       mLateMovedSumMm = mLateMovedMaxMm = 0;
+      char foveation[PROP_VALUE_MAX] = {};
+      __system_property_get("debug.partyboard.foveation", foveation);
+      if (const bool automatic = std::strcmp(foveation, "auto") == 0; automatic != mFoveationAuto) {
+        LOGI("Stereo: automatic foveation %s (debug.partyboard.foveation)", automatic ? "on" : "off");
+        mFoveationAuto = automatic;
+        if (!automatic) mFoveation = 0;
+      }
       char lateLatch[PROP_VALUE_MAX] = {};
       __system_property_get("debug.partyboard.late_latch", lateLatch);
       if (const bool late = lateLatch[0] != '0'; late != mLateLatch) {
@@ -2017,6 +2049,10 @@ __attribute__((visibility("default"))) void PartyBoardQuest_StereoCancelled(uint
   if (quest::g_stereoView != nullptr) {
     quest::g_stereoView->cancelled(image, tag);
   }
+}
+
+__attribute__((visibility("default"))) void PartyBoardQuest_StereoFoveationAvailable(bool available) {
+  if (quest::g_stereoView != nullptr) quest::g_stereoView->set_foveation_available(available);
 }
 
 __attribute__((visibility("default"))) bool PartyBoardQuest_StereoLateLatch(uint64_t tag, float correction[2][16]) {

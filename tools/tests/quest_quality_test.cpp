@@ -326,6 +326,15 @@ int main() {
     assert(board.scale() >= 0.9f - 1e-6f);
     board.set_floor(0.65f); // a minigame: lowering allowed again
     assert(board.scale() >= 0.9f - 1e-6f);
+    // Calm at the ceiling: no raise, but the controller says so (a foveation
+    // level may be given back instead, stereo_view.cpp).
+    quest::AdaptiveQuality ceiling;
+    ceiling.set_cap(1.0f);
+    for (unsigned i = 1300; i < 1304; ++i) { idle.sequence = i; ceiling.update(idle, 72, 0, 0, 0); }
+    assert(ceiling.last_decision() == D2::Kept);
+    idle.sequence = 1304;
+    ceiling.update(idle, 72, 0, 0, 0);
+    assert(ceiling.scale() == 1.0f && ceiling.last_decision() == D2::CalmAtCap);
   }
 
   // Instanced stereo without the cut: only a sphere wholly inside both eyes'

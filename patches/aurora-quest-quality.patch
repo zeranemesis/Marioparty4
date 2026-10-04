@@ -87,7 +87,7 @@
    FetchContent_Declare(xxhash
 --- a/include/aurora/stereo.h
 +++ b/include/aurora/stereo.h
-@@ -59,6 +59,18 @@ void AuroraStereoSetUncut(bool uncut);
+@@ -59,6 +59,23 @@ void AuroraStereoSetUncut(bool uncut);
  // eyes (any unit, the same for every object); < 0: outside any object. Opaque
  // draws of objects can then go to the GPU front to back (debug.partyboard.sort_opaque).
  void AuroraStereoSetSortKey(float key);
@@ -102,6 +102,11 @@
 +// true, it filled each eye's row-major correction: every projection clip[e]
 +// of the frame becomes correction[e] * clip[e] (the head's newer pose).
 +typedef bool (*AuroraStereoLateLatch)(uint64_t frameTag, float correction[2][16]);
++// Whether the eyes' pass can take a fragment density map (a Dawn built with
++// the party board's patch). Before AuroraStereoBegin: this frame's foveation
++// level, 0 (none) to 3, unless debug.partyboard.foveation fixes one.
++bool AuroraStereoFoveationSupported(void);
++void AuroraStereoSetFoveation(uint32_t level);
 +void AuroraStereoSetLateLatch(AuroraStereoLateLatch latch);
  
  #ifdef __cplusplus
@@ -1059,7 +1064,7 @@
  // The game's own frame is not on show in the headset (aurora.cpp skips presenting it).
  std::atomic_bool g_screenHidden = false;
  // 8x once a headset uses the eyes' images (gx.cpp's samplers read it), or
-@@ -127,7 +139,59 @@ uint64_t g_statInstanced = 0, g_statPerEye = 0;
+@@ -127,7 +139,60 @@ uint64_t g_statInstanced = 0, g_statPerEye = 0;
  float g_sortKey = -1.f;
  uint32_t g_sortObject = 0;
  std::vector<DrawOrder> g_eyeOrder;
@@ -1068,6 +1073,7 @@
 +// is built, every one is multiplied by a correction for the head's newer pose.
 +std::vector<std::pair<uint32_t, uint8_t>> g_clipSites;
 +AuroraStereoLateLatch g_lateLatch = nullptr;
++uint32_t g_frameFoveation = 0; // AuroraStereoSetFoveation
 +uint64_t g_statLateFrames = 0, g_statLateApplied = 0;
  uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
 +// The world draws by kind (DrawKind), for "Stereo kinds" and
@@ -1119,7 +1125,7 @@
  // Headset A/B switches, read again every 2 s so a capture can flip them
  // without restarting the game. On the Toad board (Quest 3, build 118,
  // 2026-09-28) the sort with the opaque blend off shaded 35% fewer fragments
-@@ -135,14 +199,23 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
+@@ -135,14 +200,23 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
  // instead of 68), with no difference the player could see: both are on by
  // default.
  //   debug.partyboard.sort_opaque 0       opaque draws of objects in the game's
@@ -1150,7 +1156,7 @@
  //   debug.partyboard.opaque_blend off    the game's opaque objects drawn without
  //                                        their alpha blend (edges of translucent
  //                                        textures turn hard). Build 119 found no
-@@ -154,15 +227,108 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
+@@ -154,15 +228,109 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
  //                                        across the table, where 8x reads the
  //                                        most texels: an A/B tells what the
  //                                        textures cost before compressing them
@@ -1189,9 +1195,10 @@
 +  bool hudMsaa4 = false;
 +  // debug.partyboard.foveation 0-3: the eyes' fragment density map (a
 +  // patched Dawn only, webgpu::g_foveationSupported): 0, full density
-+  // everywhere (the default until measured on the headset); 1 to 3, less
-+  // and less density away from each eye's center.
-+  int foveation = 0;
++  // everywhere; 1 to 3, less and less density away from each eye's center.
++  // Unset (or `auto`, the headset's controller then choosing): the level
++  // each frame brings (AuroraStereoSetFoveation), 0 unless automatic.
++  int foveation = -1;
  };
  Switches g_switches;
 +
@@ -1217,7 +1224,7 @@
 +  const uint32_t stride = g_width / 2;
 +  const uint32_t eyeWidth = g_frameEyeWidth != 0 ? std::min(g_frameEyeWidth, stride) : stride;
 +  const uint32_t eyeHeight = g_frameEyeHeight != 0 ? std::min(g_frameEyeHeight, g_eyeHeight) : g_eyeHeight;
-+  const int level = g_switches.foveation;
++  const int level = g_switches.foveation >= 0 ? g_switches.foveation : static_cast<int>(std::min(g_frameFoveation, 3u));
 +  if (level == writtenLevel && g_width == writtenWidth && g_height == writtenHeight &&
 +      (level == 0 || (eyeWidth == writtenEyeWidth && eyeHeight == writtenEyeHeight))) {
 +    return;
@@ -1260,14 +1267,14 @@
  void refresh_switches() {
    const auto now = std::chrono::steady_clock::now();
    if (g_switchesAt != std::chrono::steady_clock::time_point{} && now - g_switchesAt < std::chrono::seconds(2)) {
-@@ -173,9 +339,13 @@ void refresh_switches() {
+@@ -173,9 +341,13 @@ void refresh_switches() {
    Switches read;
    __system_property_get("debug.partyboard.sort_opaque", value);
    read.sortOpaque = value[0] != '0';
 +  read.sortByState = read.sortOpaque && std::strcmp(value, "depth") != 0 && std::strcmp(value, "1") != 0;
 +  value[0] = '\0';
 +  __system_property_get("debug.partyboard.foveation", value);
-+  read.foveation = value[0] >= '1' && value[0] <= '3' ? value[0] - '0' : 0;
++  read.foveation = value[0] >= '0' && value[0] <= '3' && value[1] == '\0' ? value[0] - '0' : -1;
    value[0] = '\0';
    __system_property_get("debug.partyboard.stereo_crossing", value);
 -  read.crossingPerEye = value[0] != '0';
@@ -1275,7 +1282,7 @@
    value[0] = '\0';
    __system_property_get("debug.partyboard.opaque_blend", value);
    read.opaqueBlendOff = std::string_view{value} == "off";
-@@ -183,12 +353,55 @@ void refresh_switches() {
+@@ -183,12 +355,55 @@ void refresh_switches() {
    __system_property_get("debug.partyboard.anisotropy", value);
    const std::string_view anisotropy{value};
    read.anisotropy = anisotropy == "1" ? 1 : anisotropy == "2" ? 2 : anisotropy == "4" ? 4 : anisotropy == "16" ? 16 : 8;
@@ -1335,7 +1342,7 @@
    }
    g_switches = read;
    // New samplers from the next draw on (gx.cpp builds them per descriptor).
-@@ -359,7 +572,11 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -359,7 +574,11 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
      return false;
    }
    auto spatialConfig = config;
@@ -1348,7 +1355,7 @@
    if (spatialConfig.colorUpdate) {
      spatialConfig.alphaUpdate = true; // transparent MR targets need coverage
    }
-@@ -384,7 +601,7 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -384,7 +603,7 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
    // use instances, one draw per eye.
    // An opaque draw of an object may go to the GPU in front-to-back order.
    const bool inObject = g_sortKey >= 0.f;
@@ -1357,7 +1364,7 @@
        .key = g_sortKey,
        .object = g_sortObject,
        // The game draws its opaque objects with the usual alpha blend on
-@@ -397,9 +614,34 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -397,9 +616,34 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
                      config.blendFacDst == GX_BL_INVSRCALPHA)),
    };
    g_statSortable += order.sortable;
@@ -1392,7 +1399,7 @@
    // An object that reaches both eyes, drawn once per eye when asked: no
    // fragment test, so the GPU keeps rejecting its hidden fragments early.
    const bool crossingPerEye = g_switches.crossingPerEye && inObject && !g_uncut;
-@@ -422,11 +664,34 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -422,11 +666,34 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
      }
      if (ready) {
        draw.pipeline = instancedRef;
@@ -1429,7 +1436,7 @@
        g_eyeOrder.push_back(order);
        ++g_statInstanced;
        g_worldMergeable = true;
-@@ -435,12 +700,17 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -435,12 +702,17 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
    }
    ++g_statPerEye;
    g_eyeInstanced.push_back(0);
@@ -1449,7 +1456,7 @@
      g_eyeDraws[eye].push_back(draw);
    }
    g_worldMergeable = world;
-@@ -482,6 +752,8 @@ void end_frame() noexcept {
+@@ -482,6 +754,8 @@ void end_frame() noexcept {
        g_eyeDraws[1].clear();
        g_eyeInstanced.clear();
    g_eyeOrder.clear();
@@ -1458,7 +1465,7 @@
        g_hudDraws.clear();
        return;
      }
-@@ -491,21 +763,43 @@ void end_frame() noexcept {
+@@ -491,21 +765,43 @@ void end_frame() noexcept {
    // Same sample count and formats as the game's frame, so its pipelines draw here too.
    const auto& config = webgpu::g_graphicsConfig;
    const uint32_t samples = stereo_samples();
@@ -1509,7 +1516,7 @@
    const uint32_t eyeStride = g_width / 2;
    PassDesc desc{
        .color = samples > 1 ? g_color.view : image.view,
-@@ -524,8 +818,33 @@ void end_frame() noexcept {
+@@ -524,8 +820,33 @@ void end_frame() noexcept {
        .instanced = &g_eyeInstanced,
        .order = &g_eyeOrder,
        .sortOpaque = g_switches.sortOpaque,
@@ -1543,7 +1550,7 @@
    enqueue_pass(desc);
    // The interface, in its own image, when this frame draws it (its image's
    // contents are not kept: a frame that draws it draws all of it): its pass
-@@ -534,11 +853,11 @@ void end_frame() noexcept {
+@@ -534,11 +855,11 @@ void end_frame() noexcept {
    static const std::vector<gx::DrawData> noDraws;
    const PassDesc hud{
        .label = "Stereo HUD",
@@ -1558,7 +1565,7 @@
        .hudTop = 0,
        .hudWidth = g_hudWidth,
        .hudHeight = g_hudHeight,
-@@ -573,6 +892,22 @@ void end_frame() noexcept {
+@@ -573,6 +894,22 @@ void end_frame() noexcept {
               recorded != 0 ? g_statSortable * 100 / recorded : 0, g_switches.sortOpaque ? " (sorted)" : "",
               recorded != 0 ? g_statCrossingPerEye * 100 / recorded : 0);
      g_statInstanced = g_statPerEye = g_statSortable = g_statCrossingPerEye = 0;
@@ -1581,7 +1588,7 @@
      statsAt = now;
      statFrames = statWorld = statHud = 0;
      statWorldMax = 0;
-@@ -581,6 +916,8 @@ void end_frame() noexcept {
+@@ -581,6 +918,8 @@ void end_frame() noexcept {
    g_eyeDraws[1].clear();
    g_eyeInstanced.clear();
    g_eyeOrder.clear();
@@ -1590,7 +1597,7 @@
    g_hudDraws.clear();
    g_image = -1;
  #endif
-@@ -622,8 +959,128 @@ void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept
+@@ -622,8 +961,128 @@ void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept
  #endif
  }
  
@@ -1719,7 +1726,7 @@
    for (const auto& accessed : g_accessed) {
      Image target;
      {
-@@ -827,6 +1284,41 @@ extern "C" void AuroraStereoSetSortKey(float key) {
+@@ -827,6 +1286,57 @@ extern "C" void AuroraStereoSetSortKey(float key) {
  #endif
  }
  
@@ -1733,6 +1740,22 @@
 +#endif
 +}
 +} // namespace aurora::gfx::stereo
++
++extern "C" bool AuroraStereoFoveationSupported(void) {
++#if defined(__ANDROID__)
++  return aurora::webgpu::g_foveationSupported;
++#else
++  return false;
++#endif
++}
++
++extern "C" void AuroraStereoSetFoveation(uint32_t level) {
++#if defined(__ANDROID__)
++  aurora::gfx::stereo::g_frameFoveation = level;
++#else
++  (void)level;
++#endif
++}
 +
 +extern "C" void AuroraStereoSetLateLatch(AuroraStereoLateLatch latch) {
 +#if defined(__ANDROID__)

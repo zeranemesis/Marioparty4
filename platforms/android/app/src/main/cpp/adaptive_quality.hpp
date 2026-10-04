@@ -15,7 +15,9 @@ struct QualitySample {
 class AdaptiveQuality {
 public:
   // What the last update did, for the log (stereo_view.cpp).
-  enum class Decision { Kept, Lowered, Raised, Restored };
+  // CalmAtCap: calm long enough to raise, but at the ceiling already (a
+  // foveation level may be given back instead, stereo_view.cpp).
+  enum class Decision { Kept, Lowered, Raised, Restored, CalmAtCap };
   // A lowering that did not bring more images is undone, and pixels are not
   // lowered again for this many fresh windows (one a second).
   static constexpr unsigned kHoldWindows = 30;
@@ -155,7 +157,7 @@ public:
         const float before = mScale;
         mScale = std::min(mCap, mScale + 0.05f);
         mCalm = 0;
-        if (mScale != before) mDecision = Decision::Raised;
+        mDecision = mScale != before ? Decision::Raised : Decision::CalmAtCap;
       }
     } else {
       mCalm = 0;

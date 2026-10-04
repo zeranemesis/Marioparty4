@@ -178,6 +178,7 @@ struct Extensions {
   bool refreshRate = false;
   bool passthrough = false;
   bool layerSettings = false;
+  bool autoLayerFilter = false; // XR_META_automatic_layer_filter
   bool colorScale = false;
   bool performance = false;
   bool imageLayout = false;
@@ -345,6 +346,7 @@ bool create_instance(App& app) {
   ext.refreshRate = optional(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
   ext.passthrough = optional(XR_FB_PASSTHROUGH_EXTENSION_NAME);
   ext.layerSettings = optional(XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME);
+  ext.autoLayerFilter = ext.layerSettings && optional(XR_META_AUTOMATIC_LAYER_FILTER_EXTENSION_NAME);
   ext.colorScale = optional(XR_KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME);
   ext.performance = optional(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
   ext.imageLayout = optional(XR_FB_COMPOSITION_LAYER_IMAGE_LAYOUT_EXTENSION_NAME);
@@ -1630,16 +1632,21 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
     // edges crawl as the head moved, the board seemed to move with it, and it
     // took 0.5 ms of the compositor's 2.2 a displayed frame (72 Hz,
     // 2026-10-03). The image is a little softer.
-    const int chosen = std::strcmp(value, "normal") == 0 ? 1 : std::strcmp(value, "resolution") == 0 ? 2 : 0;
+    // `auto`: Meta's automatic filter (XR_META_automatic_layer_filter), the
+    // compositor choosing sharpening or supersampling from the image itself.
+    const int chosen = std::strcmp(value, "normal") == 0 ? 1 : std::strcmp(value, "resolution") == 0 ? 2
+        : std::strcmp(value, "auto") == 0 && app.extensions.autoLayerFilter ? 3 : 0;
     if (chosen != layerFilter) {
       LOGI("Eyes' layer filter: %s (debug.partyboard.layer_filter=%s)",
-           chosen == 0 ? "none" : chosen == 1 ? "normal sharpening" : "by resolution",
+           chosen == 0 ? "none" : chosen == 1 ? "normal sharpening" : chosen == 2 ? "by resolution" : "automatic (Meta)",
            value[0] != '\0' ? value : "unset");
     }
     layerFilter = chosen;
   }
   if (layerFilter == 1) {
     modelSettings.layerFlags = XR_COMPOSITION_LAYER_SETTINGS_NORMAL_SHARPENING_BIT_FB;
+  } else if (layerFilter == 3) {
+    modelSettings.layerFlags = XR_COMPOSITION_LAYER_SETTINGS_AUTO_LAYER_FILTER_BIT_META;
   }
   const void* modelChain = app.extensions.layerSettings && layerFilter != 0 ? static_cast<const void*>(&modelSettings)
                                                                              : modelSettings.next;

@@ -56,6 +56,7 @@ struct QuestStereoFrame {
     uint32_t eyeWidth, eyeHeight; // drawn part of each eye's half (dynamic resolution)
     uint32_t generation;          // of the images the lease is in
     uint32_t drawHud;             // 1: draw the interface into its image this frame
+    uint32_t foveation;           // the eyes' foveation level (0: none)
 };
 
 using FrameFn = bool (*)(QuestStereoFrame *frame);
@@ -72,6 +73,7 @@ using ScreenHiddenFn = bool (*)();
 using TableSetupHoldFn = bool (*)();
 using FollowCameraFn = bool (*)();
 using HiddenAreaFn = uint32_t (*)(uint32_t eye, float *rects, uint32_t capacity, uint32_t *version);
+using FoveationAvailableFn = void (*)(bool available);
 
 struct Quest {
     bool looked = false;
@@ -88,6 +90,7 @@ struct Quest {
     TableSetupHoldFn tableSetupHold = nullptr; // optional
     FollowCameraFn followCamera = nullptr;     // optional: following by default
     HiddenAreaFn hiddenArea = nullptr;         // optional: every pixel drawn
+    FoveationAvailableFn foveationAvailable = nullptr; // optional: no automatic foveation
     uint32_t registeredGeneration = 0;
     uint32_t hiddenVersion = 0;
 };
@@ -204,6 +207,8 @@ bool find_quest()
             sQuest.tableSetupHold = reinterpret_cast<TableSetupHoldFn>(dlsym(lib, "PartyBoardQuest_TableSetupHold"));
             sQuest.followCamera = reinterpret_cast<FollowCameraFn>(dlsym(lib, "PartyBoardQuest_StereoFollowCamera"));
             sQuest.hiddenArea = reinterpret_cast<HiddenAreaFn>(dlsym(lib, "PartyBoardQuest_StereoHiddenArea"));
+            sQuest.foveationAvailable =
+                reinterpret_cast<FoveationAvailableFn>(dlsym(lib, "PartyBoardQuest_StereoFoveationAvailable"));
             // The head's pose again once a frame is recorded (optional: an
             // older library has none). Aurora calls it on this thread.
             AuroraStereoSetLateLatch(
@@ -528,6 +533,14 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
     std::memcpy(sEyeClip, clip, sizeof(sEyeClip));
     AuroraStereoSetEyeSize(sFrame.eyeWidth, sFrame.eyeHeight);
     AuroraStereoSetHud(sFrame.drawHud != 0);
+    // Whether the renderer can foveate, told once it has its device; the
+    // level the headset chose for this frame (StereoView::adapt_resolution).
+    static bool sFoveationTold = false;
+    if (!sFoveationTold && sQuest.foveationAvailable != nullptr) {
+        sQuest.foveationAvailable(AuroraStereoFoveationSupported());
+        sFoveationTold = true;
+    }
+    AuroraStereoSetFoveation(sFrame.foveation);
     AuroraStereoBegin(sFrame.image, clip, sFrame.tag);
     sCameraViewSet = true;
 }
