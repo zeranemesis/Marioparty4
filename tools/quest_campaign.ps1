@@ -67,6 +67,7 @@ $live = @(
     @{ name = 'filter-normal'; props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.layer_filter' = 'normal' } },
     @{ name = 'aniso-4';       props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.anisotropy' = '4' } },
     @{ name = 'aniso-1';       props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.anisotropy' = '1' } },
+    @{ name = 'res-65';        props = @{ 'debug.partyboard.eye_scale' = '65' } },
     @{ name = 'res-80';        props = @{ 'debug.partyboard.eye_scale' = '80' } },
     @{ name = 'res-110';       props = @{ 'debug.partyboard.eye_scale' = '110' } },
     @{ name = 'mask-off';      props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.visibility_mask' = '0' } },
