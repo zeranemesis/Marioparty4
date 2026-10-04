@@ -148,6 +148,8 @@ private:
     int64_t dueNs = 0;                          // the look it is for, 0: as soon as finished
     bool hud = false;                           // its interface image was drawn
     int64_t leaseNs = 0, submitNs = 0;          // steady clock: lent to the game, sent to the GPU
+    int copyDoneFd = -1;                        // the copy's native fence, for its GPU finish time
+    int64_t copyFlushNs = 0;                    // steady clock: the copy sent to the GPU
   };
   // Each image's way through the ring ("Stereo pipeline", every 2 s): the
   // game recording it (lease -> submit), the GPU drawing it (submit -> its
@@ -166,6 +168,7 @@ private:
     double avg() const { return count != 0 ? sum / count : 0; }
   };
   Stage mStageRecord, mStageGpu, mStageWait, mStageTotal;
+  Stage mStageCopy; // the copy into the headset's images: sent -> finished on the GPU
   uint32_t mFullDrawing = 0, mFullReady = 0, mFullCopying = 0;
 
   // Dynamic resolution, once a second (caller holds mMutex).
@@ -295,6 +298,13 @@ private:
   // came early, or the fence was seen late) or after it, by how much; and
   // the looks' distance from the grid they are paced on.
   uint32_t mMissDoneEarly = 0, mMissDoneLate = 0;
+  // At each look, the image due for its display frame: none, still being
+  // recorded (not submitted), submitted but its GPU work unfinished, or
+  // finished; and how many finished images were due one display frame
+  // later than the one before them was (0 or 2 or more: a pacing gap).
+  uint32_t mDueNone = 0, mDueDrawing = 0, mDueUnfinished = 0, mDueFinished = 0;
+  uint32_t mDueSteps[3]{};
+  int64_t mLastDueNs = 0;
   int64_t mMissLateSumNs = 0, mMissLateMaxNs = 0, mMissEarlyMaxNs = 0;
   int64_t mJitterMinNs = 0, mJitterMaxNs = 0;
   void note_miss(int64_t doneNs, int64_t dueNs);

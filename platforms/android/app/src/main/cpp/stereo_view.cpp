@@ -47,8 +47,11 @@ struct Gl {
   CopyImageSubData copyImage = nullptr;
   PFNGLGETQUERYOBJECTUI64VEXTPROC queryResult64 = nullptr;
   PFNGLQUERYCOUNTEREXTPROC queryCounter = nullptr;
+  PFNEGLDUPNATIVEFENCEFDANDROIDPROC dupNativeFence = nullptr; // optional: the copies' probe
 
   bool load() {
+    dupNativeFence =
+        reinterpret_cast<PFNEGLDUPNATIVEFENCEFDANDROIDPROC>(eglGetProcAddress("eglDupNativeFenceFDANDROID"));
     getNativeClientBuffer =
         reinterpret_cast<PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC>(eglGetProcAddress("eglGetNativeClientBufferANDROID"));
     createImage = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImageKHR"));
@@ -355,6 +358,11 @@ void StereoView::release_slot(Slot& slot) {
     close(slot.fence);
     slot.fence = -1;
   }
+  if (slot.copyDoneFd >= 0) {
+    close(slot.copyDoneFd);
+    slot.copyDoneFd = -1;
+  }
+  slot.copyFlushNs = 0;
   slot.state = State::Free;
 }
 
@@ -941,6 +949,11 @@ bool StereoView::game_frame(StereoFrame& out) {
   // The paced start this frame began at (next_frame_start()), for the pacer.
   free->startNs = mStartGiven ? mGivenStartNs : 0;
   free->dueNs = mStartGiven ? mGivenDueNs : 0;
+  if (free->dueNs != 0 && mLastDueNs != 0 && mPeriodNs > 0) {
+    const int64_t steps = (free->dueNs - mLastDueNs + mPeriodNs / 2) / mPeriodNs;
+    ++mDueSteps[std::clamp<int64_t>(steps, 0, 2)];
+  }
+  if (free->dueNs != 0) mLastDueNs = free->dueNs;
   mStartGiven = false;
   // The interface, every other image: it is copied at 30 Hz, and its pass
   // (1600x1200 at 4x MSAA) was a fifth of the pixels the GPU cleared and wrote.
@@ -1142,6 +1155,11 @@ void StereoView::set_screen_required(bool required) {
 
 void StereoView::set_board_mode(bool board) {
   std::lock_guard lock{mMutex};
+  // A board: never under 90% (AdaptiveQuality::set_floor).
+  if (board != mBoardMode) {
+    mQuality.set_floor(board ? 0.9f : 0.65f);
+    mRenderScale = std::min(1.0f, mQuality.scale() / mMaxScale);
+  }
   if (board && !mBoardMode && mQuality.scale() > mBoardQuality) {
     mQuality.start_at(mBoardQuality);
     mRenderScale = std::min(1.0f, mQuality.scale() / mMaxScale);
@@ -1255,6 +1273,10 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
         if (status == GL_ALREADY_SIGNALED || status == GL_CONDITION_SATISFIED) {
           glDeleteSync(slot.copyFence);
           slot.copyFence = nullptr;
+          if (const int64_t copiedNs = fence_signal_time_ns(slot.copyDoneFd);
+              copiedNs > slot.copyFlushNs && slot.copyFlushNs != 0) {
+            mStageCopy.add(copiedNs - slot.copyFlushNs);
+          }
           release_slot(slot);
         }
       }
@@ -1262,6 +1284,24 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
     }
     // Do not queue a GPU wait on unfinished game work into the XR copy stream.
     // Resubmit the previous layer until at least one source is complete.
+    if (mPacing && mPeriodNs > 0 && mShown) {
+      const Slot* due = nullptr;
+      for (const auto& slot : mSlots) {
+        if (slot.dueNs != 0 && (slot.state == State::Drawing || slot.state == State::Ready) &&
+            std::llabs(slot.dueNs - mFrameTime) < mPeriodNs / 2) {
+          due = &slot;
+        }
+      }
+      if (due == nullptr) {
+        ++mDueNone;
+      } else if (due->state == State::Drawing) {
+        ++mDueDrawing;
+      } else {
+        pollfd finished{due->fence, POLLIN, 0};
+        const bool complete = due->fence < 0 || (poll(&finished, 1, 0) > 0 && (finished.revents & POLLIN));
+        ++(complete ? mDueFinished : mDueUnfinished);
+      }
+    }
     newest = newest_completed(mFrameTime);
     // Older finished images will never be shown now.
     for (auto& slot : mSlots) {
@@ -1401,12 +1441,24 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
         copyTimer->pending = true;
       }
       copyFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+      // When the GPU finishes the copy ("Copy GPU" probe): it waits behind
+      // the game's own drawing unless the driver lets it go first.
+      EGLSyncKHR copyDone = EGL_NO_SYNC_KHR;
+      if (g_gl.dupNativeFence != nullptr && newest->copyDoneFd < 0) {
+        const EGLint none[] = {EGL_NONE};
+        copyDone = g_gl.createSync(mDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, none);
+      }
       if (copyFence != nullptr) {
         glFlush();
+        if (copyDone != EGL_NO_SYNC_KHR) {
+          newest->copyDoneFd = g_gl.dupNativeFence(mDisplay, copyDone);
+          newest->copyFlushNs = steady_ns();
+        }
       } else {
         LOGW("Stereo: copy fence unavailable, using synchronous fallback");
         glFinish();
       }
+      if (copyDone != EGL_NO_SYNC_KHR) g_gl.destroySync(mDisplay, copyDone);
       XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
       if (hudReady) {
         mHudShown = XR_SUCCEEDED(xrReleaseSwapchainImage(mHudSwapchain, &release));
@@ -1493,6 +1545,11 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
            mMissDoneEarly, mMissEarlyMaxNs / 1e6, mMissDoneLate,
            mMissDoneLate ? mMissLateSumNs / 1e6 / mMissDoneLate : 0.0, mMissLateMaxNs / 1e6, mJitterMinNs / 1e6,
            mJitterMaxNs / 1e6, mPacer.lead_ns() / 1e6);
+      LOGI("Pacing looks: due image none %u, recording %u, GPU unfinished %u, finished %u; images due 0/1/2+ "
+           "display frames after the one before: %u/%u/%u",
+           mDueNone, mDueDrawing, mDueUnfinished, mDueFinished, mDueSteps[0], mDueSteps[1], mDueSteps[2]);
+      mDueNone = mDueDrawing = mDueUnfinished = mDueFinished = 0;
+      mDueSteps[0] = mDueSteps[1] = mDueSteps[2] = 0;
       mMissDoneEarly = mMissDoneLate = 0;
       mMissLateSumNs = mMissLateMaxNs = mMissEarlyMaxNs = mJitterMinNs = mJitterMaxNs = 0;
       mMissedLate = mMissedDropped = 0;
@@ -1501,7 +1558,9 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
            mStageTotal.count, mStageRecord.avg(), mStageRecord.max, mStageGpu.avg(), mStageGpu.max, mStageWait.avg(),
            mStageWait.max, mStageTotal.avg(), mStageTotal.max, mSlots.size(), mRingFullCount, mFullDrawing, mFullReady,
            mFullCopying);
-      mStageRecord = mStageGpu = mStageWait = mStageTotal = Stage{};
+      LOGI("Copy GPU: %u copies, sent to finished %.2f ms avg, %.2f max; looks %.1f ms before their display",
+           mStageCopy.count, mStageCopy.avg(), mStageCopy.max, mPacer.lead_ns() / 1e6);
+      mStageRecord = mStageGpu = mStageWait = mStageTotal = mStageCopy = Stage{};
       mFullDrawing = mFullReady = mFullCopying = 0;
       mHolds.fill(0);
       mLatencyMinMs = mLatencyMaxMs = 0;

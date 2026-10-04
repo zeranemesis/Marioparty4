@@ -33,9 +33,17 @@ public:
     mTrial = {};
   }
   float scale() const { return mScale; }
+  // The lowest scale a lowering may reach (0.65 by default, readable). On a
+  // board the eyes' pass took 8.7 ms at 65% as at 90%, the images made
+  // smaller too (2026-10-04, build 191): its time is in the draws and their
+  // vertices, not the pixels, and lowering only blurred the board.
+  void set_floor(float floor) {
+    mFloor = std::clamp(floor, 0.65f, mCap);
+    mScale = std::max(mScale, mFloor);
+  }
   // Start again from `scale` (a scene known to need it), no trial pending.
   void start_at(float scale) {
-    mScale = std::clamp(scale, 0.65f, mCap);
+    mScale = std::clamp(scale, mFloor, mCap);
     mTrial = {};
     mCalm = 0;
     mHold = 0;
@@ -126,13 +134,13 @@ public:
         return mScale;
       }
     }
-    if (pressure && mHold == 0 && mScale > 0.65f) {
+    if (pressure && mHold == 0 && mScale > mFloor) {
       const float before = previousDelivered != 0 ? (delivered + previousDelivered) / 2.0f
                                                   : static_cast<float>(delivered);
       const float slowBefore = hadWindow ? (slow + previousSlow) / 2.0f : static_cast<float>(slow);
       const float missedBefore = hadWindow ? (missed + previousMissed) / 2.0f : static_cast<float>(missed);
       mTrial = {true, mScale, before, 0, 0, slowBefore, 0, missedBefore, 0};
-      mScale = std::max(0.65f, mScale - 0.05f);
+      mScale = std::max(mFloor, mScale - 0.05f);
       mCalm = 0;
       mRaiseHold = kRaiseHoldWindows;
       mDecision = Decision::Lowered;
@@ -167,7 +175,7 @@ private:
     float missedBefore = 0;      // missed display frames, average of the two windows before
     unsigned missedAfter = 0;    // missed display frames, sum of the two judged windows
   };
-  float mScale = 1.0f, mCap = 1.25f;
+  float mScale = 1.0f, mCap = 1.25f, mFloor = 0.65f;
   uint64_t mSequence = 0;
   unsigned mCalm = 0;
   unsigned mHold = 0;

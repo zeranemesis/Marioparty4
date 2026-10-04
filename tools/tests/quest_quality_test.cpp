@@ -311,6 +311,14 @@ int main() {
     between.start_at(0.9f);
     for (unsigned i = 1100; i < 1110; ++i) { idle.sequence = i; between.update(idle, 72, 0, 0, 2); }
     assert(between.scale() == 0.9f);
+    // A board's floor: pressure never takes it under 90%.
+    quest::AdaptiveQuality board;
+    board.set_cap(1.0f);
+    board.set_floor(0.9f);
+    for (unsigned i = 1200; i < 1260; ++i) { idle.sequence = i; board.update(idle, 72, 0, 0, 12); }
+    assert(board.scale() >= 0.9f - 1e-6f);
+    board.set_floor(0.65f); // a minigame: lowering allowed again
+    assert(board.scale() >= 0.9f - 1e-6f);
   }
 
   // Instanced stereo without the cut: only a sphere wholly inside both eyes'
