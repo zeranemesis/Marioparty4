@@ -96,6 +96,13 @@ static void test_draw_order() {
   const std::vector<uint32_t> expected{2, 0, 1, 3, 5, 4, 6, 8, 7};
   assert(sorted == expected); // runs sorted, object 1's draws together and in order, barriers fixed
   assert(draw_sequence({}, true).empty());
+  // By state: the same pipeline and textures together, front to back among
+  // them; barriers still fixed.
+  const std::vector<DrawOrder> states{
+      {5.f, 1, true, 7}, {4.f, 2, true, 3}, {1.f, 3, true, 7}, {2.f, 4, true, 3}, {-1.f, 0, false, 7}, {0.5f, 5, true, 7},
+  };
+  const std::vector<uint32_t> grouped{3, 1, 2, 0, 4, 5};
+  assert(draw_sequence(states, true, true) == grouped);
 }
 
 int main() {

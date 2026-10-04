@@ -108,7 +108,7 @@
    g_inOffscreen = false;
    g_frameIndex = UINT32_MAX;
    g_frameSlots.reset();
-@@ -1214,6 +1253,44 @@ void stereo::enqueue_pass(const PassDesc& desc) noexcept {
+@@ -1214,16 +1253,116 @@ void stereo::enqueue_pass(const PassDesc& desc) noexcept {
    const auto instanced = [&](size_t i) {
      return desc.instanced != nullptr && i < desc.instanced->size() && (*desc.instanced)[i] != 0;
    };
@@ -152,8 +152,9 @@
 +  }
    std::vector<uint32_t> sequence;
    if (desc.order != nullptr && desc.order->size() == leftDraws.size()) {
-     sequence = stereo::draw_sequence(*desc.order, desc.sortOpaque);
-@@ -1221,9 +1298,71 @@ void stereo::enqueue_pass(const PassDesc& desc) noexcept {
+-    sequence = stereo::draw_sequence(*desc.order, desc.sortOpaque);
++    sequence = stereo::draw_sequence(*desc.order, desc.sortOpaque, desc.sortByState);
+   } else {
      sequence.resize(leftDraws.size());
      std::iota(sequence.begin(), sequence.end(), 0u);
    }
@@ -598,7 +599,7 @@
  // The game's own frame is not on show in the headset (aurora.cpp skips presenting it).
  std::atomic_bool g_screenHidden = false;
  // 8x once a headset uses the eyes' images (gx.cpp's samplers read it), or
-@@ -128,6 +135,48 @@ float g_sortKey = -1.f;
+@@ -128,6 +135,52 @@ float g_sortKey = -1.f;
  uint32_t g_sortObject = 0;
  std::vector<DrawOrder> g_eyeOrder;
  uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
@@ -629,6 +630,10 @@
 +uint64_t g_statSameAsPrevious = 0;
 +PipelineRef g_previousPipeline = UINTPTR_MAX;
 +BindGroupRef g_previousTextures = 0;
++// The sort by state's key: a pipeline and its textures.
++uint64_t state_key(PipelineRef pipeline, BindGroupRef textures) {
++  return static_cast<uint64_t>(pipeline) * 0x9E3779B97F4A7C15ull ^ static_cast<uint64_t>(textures);
++}
 +bool note_previous(const gx::DrawData& draw) {
 +  const bool same = draw.pipeline == g_previousPipeline && draw.bindGroups.textureBindGroup == g_previousTextures;
 +  g_statSameAsPrevious += same ? 1 : 0;
@@ -647,7 +652,7 @@
  // Headset A/B switches, read again every 2 s so a capture can flip them
  // without restarting the game. On the Toad board (Quest 3, build 118,
  // 2026-09-28) the sort with the opaque blend off shaded 35% fewer fragments
-@@ -136,13 +185,17 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
+@@ -136,13 +189,17 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
  // default.
  //   debug.partyboard.sort_opaque 0       opaque draws of objects in the game's
  //                                        order (default: front to back)
@@ -671,7 +676,7 @@
  //   debug.partyboard.opaque_blend off    the game's opaque objects drawn without
  //                                        their alpha blend (edges of translucent
  //                                        textures turn hard). Build 119 found no
-@@ -154,13 +207,47 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
+@@ -154,13 +211,48 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
  //                                        across the table, where 8x reads the
  //                                        most texels: an A/B tells what the
  //                                        textures cost before compressing them
@@ -681,6 +686,7 @@
  struct Switches {
    bool sortOpaque = true;
 -  bool crossingPerEye = true;
++  bool sortByState = false; // debug.partyboard.sort_opaque state (stereo_order.hpp)
 +  bool crossingPerEye = false;
    bool opaqueBlendOff = false;
    uint16_t anisotropy = 8;
@@ -720,8 +726,11 @@
  std::chrono::steady_clock::time_point g_switchesAt{};
  
  void refresh_switches() {
-@@ -175,7 +262,7 @@ void refresh_switches() {
+@@ -173,9 +265,10 @@ void refresh_switches() {
+   Switches read;
+   __system_property_get("debug.partyboard.sort_opaque", value);
    read.sortOpaque = value[0] != '0';
++  read.sortByState = std::strcmp(value, "state") == 0;
    value[0] = '\0';
    __system_property_get("debug.partyboard.stereo_crossing", value);
 -  read.crossingPerEye = value[0] != '0';
@@ -729,7 +738,7 @@
    value[0] = '\0';
    __system_property_get("debug.partyboard.opaque_blend", value);
    read.opaqueBlendOff = std::string_view{value} == "off";
-@@ -183,12 +270,54 @@ void refresh_switches() {
+@@ -183,12 +276,55 @@ void refresh_switches() {
    __system_property_get("debug.partyboard.anisotropy", value);
    const std::string_view anisotropy{value};
    read.anisotropy = anisotropy == "1" ? 1 : anisotropy == "2" ? 2 : anisotropy == "4" ? 4 : anisotropy == "16" ? 16 : 8;
@@ -774,20 +783,22 @@
 +    Log.info("Stereo: skipping world draws of kinds '{}' (debug.partyboard.skip_draws, a measurement)", value);
 +  }
    static bool logged = false;
-   if (!logged || read.sortOpaque != g_switches.sortOpaque || read.crossingPerEye != g_switches.crossingPerEye ||
+-  if (!logged || read.sortOpaque != g_switches.sortOpaque || read.crossingPerEye != g_switches.crossingPerEye ||
 -      read.opaqueBlendOff != g_switches.opaqueBlendOff || read.anisotropy != g_switches.anisotropy) {
++  if (!logged || read.sortOpaque != g_switches.sortOpaque || read.sortByState != g_switches.sortByState ||
++      read.crossingPerEye != g_switches.crossingPerEye ||
 +      read.opaqueBlendOff != g_switches.opaqueBlendOff || read.anisotropy != g_switches.anisotropy ||
 +      read.hiddenArea != g_switches.hiddenArea) {
      logged = true;
 -    Log.info("Stereo switches: sort_opaque={} stereo_crossing={} opaque_blend={} anisotropy={}x", read.sortOpaque ? 1 : 0,
 -             read.crossingPerEye ? 1 : 0, read.opaqueBlendOff ? "off" : "on", read.anisotropy);
 +    Log.info("Stereo switches: sort_opaque={} stereo_crossing={} opaque_blend={} anisotropy={}x visibility_mask={}",
-+             read.sortOpaque ? 1 : 0, read.crossingPerEye ? 1 : 0, read.opaqueBlendOff ? "off" : "on", read.anisotropy,
++             read.sortByState ? "state" : read.sortOpaque ? "1" : "0", read.crossingPerEye ? 1 : 0, read.opaqueBlendOff ? "off" : "on", read.anisotropy,
 +             read.hiddenArea ? 1 : 0);
    }
    g_switches = read;
    // New samplers from the next draw on (gx.cpp builds them per descriptor).
-@@ -359,7 +488,11 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -359,7 +495,11 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
      return false;
    }
    auto spatialConfig = config;
@@ -800,7 +811,16 @@
    if (spatialConfig.colorUpdate) {
      spatialConfig.alphaUpdate = true; // transparent MR targets need coverage
    }
-@@ -397,9 +530,34 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -384,7 +524,7 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+   // use instances, one draw per eye.
+   // An opaque draw of an object may go to the GPU in front-to-back order.
+   const bool inObject = g_sortKey >= 0.f;
+-  const DrawOrder order{
++  DrawOrder order{
+       .key = g_sortKey,
+       .object = g_sortObject,
+       // The game draws its opaque objects with the usual alpha blend on
+@@ -397,9 +537,34 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
                      config.blendFacDst == GX_BL_INVSRCALPHA)),
    };
    g_statSortable += order.sortable;
@@ -835,7 +855,7 @@
    // An object that reaches both eyes, drawn once per eye when asked: no
    // fragment test, so the GPU keeps rejecting its hidden fragments early.
    const bool crossingPerEye = g_switches.crossingPerEye && inObject && !g_uncut;
-@@ -422,11 +580,30 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -422,11 +587,31 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
      }
      if (ready) {
        draw.pipeline = instancedRef;
@@ -863,21 +883,24 @@
        g_eyeDraws[1].push_back(draw);
        g_eyeInstanced.push_back(1);
 +      g_eyeBatched.push_back(batchedRef);
++      order.state = state_key(batchedRef != 0 ? batchedRef : instancedRef, draw.bindGroups.textureBindGroup);
        g_eyeOrder.push_back(order);
        ++g_statInstanced;
        g_worldMergeable = true;
-@@ -435,8 +612,10 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -435,8 +620,11 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
    }
    ++g_statPerEye;
    g_eyeInstanced.push_back(0);
+-  g_eyeOrder.push_back(order);
 +  g_eyeBatched.push_back(0);
-   g_eyeOrder.push_back(order);
    draw.pipeline = pipeline_ref(spatialConfig);
++  order.state = state_key(draw.pipeline, draw.bindGroups.textureBindGroup);
++  g_eyeOrder.push_back(order);
 +  note_previous(draw);
    // One uniform build for both eyes: only the projection differs.
    const auto uniforms = gx::build_uniform_stereo(info, vtxStart, ranges, g_clip[0], g_clip[1]);
    for (size_t eye = 0; eye < 2; ++eye) {
-@@ -482,6 +661,7 @@ void end_frame() noexcept {
+@@ -482,6 +670,7 @@ void end_frame() noexcept {
        g_eyeDraws[1].clear();
        g_eyeInstanced.clear();
    g_eyeOrder.clear();
@@ -885,7 +908,7 @@
        g_hudDraws.clear();
        return;
      }
-@@ -491,21 +671,40 @@ void end_frame() noexcept {
+@@ -491,21 +680,40 @@ void end_frame() noexcept {
    // Same sample count and formats as the game's frame, so its pipelines draw here too.
    const auto& config = webgpu::g_graphicsConfig;
    const uint32_t samples = stereo_samples();
@@ -933,16 +956,17 @@
    const uint32_t eyeStride = g_width / 2;
    PassDesc desc{
        .color = samples > 1 ? g_color.view : image.view,
-@@ -524,6 +723,8 @@ void end_frame() noexcept {
+@@ -524,6 +732,9 @@ void end_frame() noexcept {
        .instanced = &g_eyeInstanced,
        .order = &g_eyeOrder,
        .sortOpaque = g_switches.sortOpaque,
++      .sortByState = g_switches.sortByState,
 +      .hidden = {&g_frameHidden[0], &g_frameHidden[1]},
 +      .batched = g_switches.batchDraws && g_eyeBatched.size() == worldDraws ? &g_eyeBatched : nullptr,
        .drawHud = g_frameDrawHud,
    };
    enqueue_pass(desc);
-@@ -534,11 +735,11 @@ void end_frame() noexcept {
+@@ -534,11 +745,11 @@ void end_frame() noexcept {
    static const std::vector<gx::DrawData> noDraws;
    const PassDesc hud{
        .label = "Stereo HUD",
@@ -957,7 +981,7 @@
        .hudTop = 0,
        .hudWidth = g_hudWidth,
        .hudHeight = g_hudHeight,
-@@ -573,6 +774,18 @@ void end_frame() noexcept {
+@@ -573,6 +784,18 @@ void end_frame() noexcept {
               recorded != 0 ? g_statSortable * 100 / recorded : 0, g_switches.sortOpaque ? " (sorted)" : "",
               recorded != 0 ? g_statCrossingPerEye * 100 / recorded : 0);
      g_statInstanced = g_statPerEye = g_statSortable = g_statCrossingPerEye = 0;
@@ -976,7 +1000,7 @@
      statsAt = now;
      statFrames = statWorld = statHud = 0;
      statWorldMax = 0;
-@@ -581,6 +794,7 @@ void end_frame() noexcept {
+@@ -581,6 +804,7 @@ void end_frame() noexcept {
    g_eyeDraws[1].clear();
    g_eyeInstanced.clear();
    g_eyeOrder.clear();
@@ -984,7 +1008,7 @@
    g_hudDraws.clear();
    g_image = -1;
  #endif
-@@ -622,8 +836,128 @@ void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept
+@@ -622,8 +846,128 @@ void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept
  #endif
  }
  
@@ -1113,7 +1137,7 @@
    for (const auto& accessed : g_accessed) {
      Image target;
      {
-@@ -827,6 +1161,33 @@ extern "C" void AuroraStereoSetSortKey(float key) {
+@@ -827,6 +1171,33 @@ extern "C" void AuroraStereoSetSortKey(float key) {
  #endif
  }
  
@@ -1161,10 +1185,11 @@
  void after_submit() noexcept;
  
  // What common.cpp turns into a render pass: the eyes' (hud null), or the
-@@ -86,8 +91,17 @@ struct PassDesc {
+@@ -86,8 +91,18 @@ struct PassDesc {
    // sortOpaque sends the sortable runs front to back.
    const std::vector<DrawOrder>* order = nullptr;
    bool sortOpaque = false;
++  bool sortByState = false; // pipeline and textures first (stereo_order.hpp)
 +  // Per world draw: its pipeline's batched variant when it is built (0: none),
 +  // for runs of instanced draws with the same pipeline and textures, joined
 +  // into one draw (common.cpp). nullptr: none joined.
@@ -1179,6 +1204,44 @@
 +void note_batch(uint32_t count) noexcept;
  
  } // namespace aurora::gfx::stereo
+--- a/lib/gfx/stereo_order.hpp
++++ b/lib/gfx/stereo_order.hpp
+@@ -11,6 +11,13 @@
+ // the run: blended draws, draws outside an object (particles, sprites), and
+ // the game's own back-to-front pass. Within a run, draws go by the distance of
+ // their object from the eyes, and an object's draws stay together, in order.
++//
++// By state instead (debug.partyboard.sort_opaque state): within a run, draws
++// with the same pipeline and textures go together, front to back among them.
++// The eyes' pass took as long at 65% of the pixels as at 90% (2026-10-04):
++// its time is in the draws, each replayed in every bin it touches, and 80% of
++// them changed pipeline or textures from the one before; grouped, they also
++// batch (gfx/common.cpp). An object's draws may then be split.
+ 
+ #include <algorithm>
+ #include <cstdint>
+@@ -23,10 +30,12 @@ struct DrawOrder {
+   float key = -1.f;     // the object's distance from the eyes; < 0: not in an object
+   uint32_t object = 0;  // which object, in the order the game drew them
+   bool sortable = false;
++  uint64_t state = 0;   // its pipeline and textures, for the sort by state
+ };
+ 
+ // The draws' indices in the order to draw them.
+-inline std::vector<uint32_t> draw_sequence(const std::vector<DrawOrder>& order, bool sortOpaque) {
++inline std::vector<uint32_t> draw_sequence(const std::vector<DrawOrder>& order, bool sortOpaque,
++                                           bool byState = false) {
+   std::vector<uint32_t> sequence(order.size());
+   std::iota(sequence.begin(), sequence.end(), 0u);
+   if (!sortOpaque) {
+@@ -44,6 +53,7 @@ inline std::vector<uint32_t> draw_sequence(const std::vector<DrawOrder>& order,
+     std::stable_sort(sequence.begin() + start, sequence.begin() + end, [&](uint32_t a, uint32_t b) {
+       const auto& x = order[a];
+       const auto& y = order[b];
++      if (byState && x.state != y.state) return x.state < y.state;
+       return x.key < y.key || (x.key == y.key && x.object < y.object);
+     });
+     start = end;
 --- a/lib/gfx/texture.cpp
 +++ b/lib/gfx/texture.cpp
 @@ -4,6 +4,7 @@

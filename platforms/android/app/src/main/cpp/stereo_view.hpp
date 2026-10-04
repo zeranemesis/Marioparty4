@@ -344,7 +344,8 @@ private:
   // the rate it is copied at: `adb shell setprop debug.partyboard.hud_rate
   // full` draws it in every image (read every 2 s).
   bool mHudEveryImage = false;
-  bool mHudLastLease = false; // the previous lease drew it
+  bool mHudHalf = false, mHudRateLogged = false;
+  uint32_t mHudSinceLease = 0; // leases since the last one that drew it
 
   // The last image shown, resubmitted until the game draws the next one.
   uint64_t mPresentedTag = 0;

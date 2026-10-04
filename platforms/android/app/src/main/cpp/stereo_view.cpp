@@ -955,10 +955,16 @@ bool StereoView::game_frame(StereoFrame& out) {
   }
   if (free->dueNs != 0) mLastDueNs = free->dueNs;
   mStartGiven = false;
-  // The interface, every other image: it is copied at 30 Hz, and its pass
-  // (1600x1200 at 4x MSAA) was a fifth of the pixels the GPU cleared and wrote.
-  free->hud = mHudEveryImage || !mHudLastLease;
-  mHudLastLease = free->hud;
+  // The interface, about 26 times a second: one image in 3 at 72 Hz. Every
+  // other image, it was drawn at 36 Hz for a copy at 30 Hz at most, and its
+  // pass (0.8 ms, up to 2.5) made every other image heavier, on a GPU
+  // nearly full (2026-10-04). debug.partyboard.hud_rate: `full` in every
+  // image, `half` every other one.
+  const int64_t displayHz = mPeriodNs > 0 ? 1'000'000'000 / mPeriodNs : 60;
+  const uint32_t hudEvery = mHudEveryImage ? 1u : mHudHalf ? 2u
+                                                  : static_cast<uint32_t>(std::max<int64_t>(2, (displayHz + 13) / 26));
+  free->hud = mHudSinceLease + 1 >= hudEvery;
+  mHudSinceLease = free->hud ? 0 : mHudSinceLease + 1;
   out.drawHud = free->hud ? 1 : 0;
   out.generation = mGeneration;
   free->state = State::Drawing;
@@ -1598,10 +1604,14 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
       char hudRate[PROP_VALUE_MAX] = {};
       __system_property_get("debug.partyboard.hud_rate", hudRate);
       const bool everyImage = std::strcmp(hudRate, "full") == 0;
-      if (everyImage != mHudEveryImage) {
-        LOGI("Stereo: interface drawn %s (debug.partyboard.hud_rate=%s)", everyImage ? "in every image" : "every other image",
+      const bool half = std::strcmp(hudRate, "half") == 0;
+      if (everyImage != mHudEveryImage || half != mHudHalf || !mHudRateLogged) {
+        LOGI("Stereo: interface drawn %s (debug.partyboard.hud_rate=%s)",
+             everyImage ? "in every image" : half ? "every other image" : "about 26 times a second",
              hudRate[0] != '\0' ? hudRate : "unset");
         mHudEveryImage = everyImage;
+        mHudHalf = half;
+        mHudRateLogged = true;
       }
       mWorldRate = static_cast<float>(mNewWorldCount / elapsed);
       mStatsAt = now;
