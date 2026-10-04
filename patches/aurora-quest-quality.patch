@@ -1,3 +1,74 @@
+--- a/cmake/aurora_gx.cmake
++++ b/cmake/aurora_gx.cmake
+@@ -5,6 +5,7 @@ add_library(aurora_gx STATIC
+         lib/gfx/pipeline_cache.cpp
+         lib/gfx/render_worker.cpp
+         lib/gfx/stereo.cpp
++        lib/gfx/astc_cache.cpp
+         lib/gfx/dds_io.cpp
+         lib/gfx/tex_copy_conv.cpp
+         lib/gfx/tex_palette_conv.cpp
+@@ -46,6 +47,10 @@ set_target_properties(aurora_gx PROPERTIES FOLDER "aurora")
+ target_link_libraries(aurora_gx PUBLIC aurora::core dawn::webgpu_dawn xxhash)
+ target_link_libraries(aurora_gx PRIVATE absl::btree absl::flat_hash_map sqlite3 TracyClient PNG::PNG)
+ target_compile_definitions(aurora_gx PRIVATE WEBGPU_DAWN)
++if (TARGET aurora_astcenc)
++    target_link_libraries(aurora_gx PRIVATE aurora_astcenc)
++    target_compile_definitions(aurora_gx PRIVATE AURORA_ASTC_ENCODE=1)
++endif ()
+ 
+ if (AURORA_ENABLE_RMLUI)
+     target_sources(aurora_gx PRIVATE
+--- a/extern/CMakeLists.txt
++++ b/extern/CMakeLists.txt
+@@ -49,6 +49,47 @@ endif ()
+ 
+ include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/AuroraSDL3Provider.cmake)
+ 
++# ARM's ASTC encoder (Apache-2.0), for a VR headset's world textures
++# (lib/gfx/astc_cache.cpp): its library sources only, not its own build.
++if (ANDROID AND NOT TARGET aurora_astcenc)
++  message(STATUS "aurora: Fetching astc-encoder")
++  FetchContent_Declare(astcenc
++    URL https://github.com/ARM-software/astc-encoder/archive/refs/tags/5.3.0.tar.gz
++    URL_HASH SHA256=6bd248f460b90576f90a5499c0f6b8d785b3af3837bcab82607d9a3b5bba77e2
++    SOURCE_SUBDIR no-cmake-build
++    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
++    EXCLUDE_FROM_ALL
++  )
++  FetchContent_MakeAvailable(astcenc)
++  set(_aurora_astc ${astcenc_SOURCE_DIR}/Source)
++  add_library(aurora_astcenc STATIC
++    ${_aurora_astc}/astcenc_averages_and_directions.cpp
++    ${_aurora_astc}/astcenc_block_sizes.cpp
++    ${_aurora_astc}/astcenc_color_quantize.cpp
++    ${_aurora_astc}/astcenc_color_unquantize.cpp
++    ${_aurora_astc}/astcenc_compress_symbolic.cpp
++    ${_aurora_astc}/astcenc_compute_variance.cpp
++    ${_aurora_astc}/astcenc_decompress_symbolic.cpp
++    ${_aurora_astc}/astcenc_diagnostic_trace.cpp
++    ${_aurora_astc}/astcenc_entry.cpp
++    ${_aurora_astc}/astcenc_find_best_partitioning.cpp
++    ${_aurora_astc}/astcenc_ideal_endpoints_and_weights.cpp
++    ${_aurora_astc}/astcenc_image.cpp
++    ${_aurora_astc}/astcenc_integer_sequence.cpp
++    ${_aurora_astc}/astcenc_mathlib.cpp
++    ${_aurora_astc}/astcenc_mathlib_softfloat.cpp
++    ${_aurora_astc}/astcenc_partition_tables.cpp
++    ${_aurora_astc}/astcenc_percentile_tables.cpp
++    ${_aurora_astc}/astcenc_pick_best_endpoint_format.cpp
++    ${_aurora_astc}/astcenc_quantization.cpp
++    ${_aurora_astc}/astcenc_symbolic_physical.cpp
++    ${_aurora_astc}/astcenc_weight_align.cpp
++    ${_aurora_astc}/astcenc_weight_quant_xfer_tables.cpp
++  )
++  target_include_directories(aurora_astcenc PUBLIC ${_aurora_astc})
++  set_target_properties(aurora_astcenc PROPERTIES FOLDER "aurora/extern" POSITION_INDEPENDENT_CODE ON)
++endif ()
++
+ if (NOT TARGET xxhash)
+   message(STATUS "aurora: Fetching xxhash")
+   FetchContent_Declare(xxhash
 --- a/include/aurora/stereo.h
 +++ b/include/aurora/stereo.h
 @@ -59,6 +59,18 @@ void AuroraStereoSetUncut(bool uncut);
@@ -19,6 +90,330 @@
  
  #ifdef __cplusplus
  }
+--- /dev/null
++++ b/lib/gfx/astc_cache.cpp
+@@ -0,0 +1,276 @@
++#include "astc_cache.hpp"
++
++#include "common.hpp"
++
++#include "../fs_helper.hpp"
++#include "../internal.hpp"
++#include "../webgpu/gpu.hpp"
++
++#include <algorithm>
++#include <condition_variable>
++#include <cstring>
++#include <deque>
++#include <filesystem>
++#include <fstream>
++#include <memory>
++#include <mutex>
++#include <thread>
++
++#include <fmt/format.h>
++#include <webgpu/webgpu_cpp.h>
++#include <xxhash.h>
++
++#if defined(__ANDROID__)
++#include <sys/resource.h>
++#include <sys/system_properties.h>
++#include <unistd.h>
++#endif
++#if AURORA_ASTC_ENCODE
++#include <astcenc.h>
++#endif
++
++namespace aurora::gfx::astc {
++namespace {
++Module Log("aurora::gfx::astc");
++
++constexpr uint32_t kMagic = 0x34545341; // "AST4"
++constexpr size_t kMaxQueued = 256;
++
++uint32_t level_size(uint32_t size, uint32_t level) { return std::max(size >> level, 1u); }
++
++size_t rgba_level_bytes(uint32_t width, uint32_t height, uint32_t level) {
++  return size_t(level_size(width, level)) * level_size(height, level) * 4;
++}
++
++size_t astc_level_bytes(uint32_t width, uint32_t height, uint32_t level) {
++  return size_t((level_size(width, level) + 3) / 4) * ((level_size(height, level) + 3) / 4) * 16;
++}
++
++size_t astc_chain_bytes(uint32_t width, uint32_t height, uint32_t levels) {
++  size_t total = 0;
++  for (uint32_t level = 0; level < levels; ++level) total += astc_level_bytes(width, height, level);
++  return total;
++}
++
++uint64_t chain_hash(const uint8_t* rgba, size_t bytes, uint32_t width, uint32_t height, uint32_t levels) {
++  const uint64_t seed = (uint64_t(width) << 40) ^ (uint64_t(height) << 16) ^ levels;
++  return XXH3_64bits_withSeed(rgba, bytes, seed);
++}
++
++std::filesystem::path cache_file(uint64_t hash) {
++  return std::filesystem::path{g_config.cachePath} / "astc4x4" / fmt::format("{:016x}.astc", hash);
++}
++
++struct Job {
++  std::weak_ptr<TextureRef> ref;
++  std::vector<uint8_t> rgba;
++  uint32_t width = 0, height = 0, levels = 0;
++  uint64_t hash = 0;
++};
++struct Done {
++  std::weak_ptr<TextureRef> ref;
++  std::vector<uint8_t> blocks;
++  uint32_t levels = 0;
++};
++
++// Never destroyed: the process may exit while it encodes.
++struct Worker {
++  std::mutex mutex;
++  std::condition_variable wake;
++  std::deque<Job> jobs;
++  std::deque<Done> done;
++  bool started = false;
++};
++Worker& worker() {
++  static auto* instance = new Worker;
++  return *instance;
++}
++
++#if AURORA_ASTC_ENCODE
++// One chain, level by level, on this thread (ARM's encoder at its medium
++// preset: 4x4 blocks at that effort look the same as the RGBA8 they replace).
++bool encode_chain(astcenc_context* context, const Job& job, std::vector<uint8_t>& out) {
++  out.assign(astc_chain_bytes(job.width, job.height, job.levels), 0);
++  size_t in = 0, offset = 0;
++  const astcenc_swizzle swizzle{ASTCENC_SWZ_R, ASTCENC_SWZ_G, ASTCENC_SWZ_B, ASTCENC_SWZ_A};
++  for (uint32_t level = 0; level < job.levels; ++level) {
++    void* slices[1] = {const_cast<uint8_t*>(job.rgba.data() + in)};
++    astcenc_image image{
++        .dim_x = level_size(job.width, level),
++        .dim_y = level_size(job.height, level),
++        .dim_z = 1,
++        .data_type = ASTCENC_TYPE_U8,
++        .data = slices,
++    };
++    const size_t bytes = astc_level_bytes(job.width, job.height, level);
++    if (astcenc_compress_image(context, &image, &swizzle, out.data() + offset, bytes, 0) != ASTCENC_SUCCESS) {
++      return false;
++    }
++    astcenc_compress_reset(context);
++    in += rgba_level_bytes(job.width, job.height, level);
++    offset += bytes;
++  }
++  return true;
++}
++
++void store(uint64_t hash, uint32_t width, uint32_t height, uint32_t levels, const std::vector<uint8_t>& blocks) {
++  std::error_code error;
++  const auto path = cache_file(hash);
++  std::filesystem::create_directories(path.parent_path(), error);
++  const auto partial = path.string() + ".part";
++  {
++    std::ofstream file(partial, std::ios::binary | std::ios::trunc);
++    const uint32_t header[4] = {kMagic, width, height, levels};
++    file.write(reinterpret_cast<const char*>(header), sizeof(header));
++    file.write(reinterpret_cast<const char*>(blocks.data()), static_cast<std::streamsize>(blocks.size()));
++    if (!file) return;
++  }
++  std::filesystem::rename(partial, path, error); // whole files only
++}
++
++void run(Worker& self) {
++#if defined(__ANDROID__)
++  setpriority(PRIO_PROCESS, static_cast<id_t>(gettid()), 10); // behind the game, the GPU's feeding and the XR thread
++#endif
++  astcenc_config config{};
++  astcenc_context* context = nullptr;
++  if (astcenc_config_init(ASTCENC_PRF_LDR, 4, 4, 1, ASTCENC_PRE_MEDIUM, 0, &config) != ASTCENC_SUCCESS ||
++      astcenc_context_alloc(&config, 1, &context) != ASTCENC_SUCCESS) {
++    Log.error("ASTC encoder unavailable");
++    return;
++  }
++  uint64_t encoded = 0;
++  for (;;) {
++    Job job;
++    {
++      std::unique_lock lock{self.mutex};
++      self.wake.wait(lock, [&] { return !self.jobs.empty(); });
++      job = std::move(self.jobs.front());
++      self.jobs.pop_front();
++    }
++    std::vector<uint8_t> blocks;
++    if (!encode_chain(context, job, blocks)) {
++      Log.warn("ASTC: encoding a {}x{} texture failed; it stays RGBA8", job.width, job.height);
++      continue;
++    }
++    store(job.hash, job.width, job.height, job.levels, blocks);
++    if (++encoded % 50 == 0) Log.info("ASTC: {} world textures encoded and cached", encoded);
++    std::lock_guard lock{self.mutex};
++    self.done.push_back({std::move(job.ref), std::move(blocks), job.levels});
++  }
++}
++#endif
++} // namespace
++
++bool enabled() noexcept {
++#if AURORA_ASTC_ENCODE
++  static const bool on = [] {
++    bool wanted = true;
++#if defined(__ANDROID__)
++    char value[PROP_VALUE_MAX] = {};
++    __system_property_get("debug.partyboard.astc", value);
++    wanted = value[0] != '0';
++#endif
++    const bool usable = webgpu::g_astcTexturesSupported && g_config.cachePath != nullptr && g_config.cachePath[0] != '\0';
++    Log.info("ASTC world textures: {}", !wanted ? "off (debug.partyboard.astc)" : usable ? "on" : "unavailable");
++    return wanted && usable;
++  }();
++  return on;
++#else
++  return false;
++#endif
++}
++
++std::vector<uint8_t> cached(const uint8_t* rgba, size_t bytes, uint32_t width, uint32_t height,
++                            uint32_t levels) noexcept {
++  if (!enabled()) return {};
++  std::ifstream file(cache_file(chain_hash(rgba, bytes, width, height, levels)), std::ios::binary);
++  if (!file) return {};
++  uint32_t header[4] = {};
++  file.read(reinterpret_cast<char*>(header), sizeof(header));
++  if (!file || header[0] != kMagic || header[1] != width || header[2] != height || header[3] != levels) return {};
++  std::vector<uint8_t> blocks(astc_chain_bytes(width, height, levels));
++  file.read(reinterpret_cast<char*>(blocks.data()), static_cast<std::streamsize>(blocks.size()));
++  if (!file) return {};
++  return blocks;
++}
++
++void encode_later(const TextureHandle& ref, const uint8_t* rgba, size_t bytes, uint32_t width, uint32_t height,
++                  uint32_t levels) noexcept {
++#if AURORA_ASTC_ENCODE
++  if (!enabled() || !ref) return;
++  auto& self = worker();
++  std::lock_guard lock{self.mutex};
++  if (self.jobs.size() >= kMaxQueued) return;
++  if (!self.started) {
++    self.started = true;
++    std::thread([&self] { run(self); }).detach();
++  }
++  self.jobs.push_back({ref, std::vector<uint8_t>(rgba, rgba + bytes), width, height, levels,
++                       chain_hash(rgba, bytes, width, height, levels)});
++  self.wake.notify_one();
++#else
++  (void)ref, (void)rgba, (void)bytes, (void)width, (void)height, (void)levels;
++#endif
++}
++
++void apply_ready() noexcept {
++  if (!enabled()) return;
++  std::deque<Done> ready;
++  {
++    auto& self = worker();
++    std::lock_guard lock{self.mutex};
++    ready.swap(self.done);
++  }
++  for (auto& item : ready) {
++    if (const auto ref = item.ref.lock()) upload(*ref, item.blocks, item.levels, "ASTC world texture");
++  }
++}
++
++void upload(TextureRef& ref, const std::vector<uint8_t>& blocks, uint32_t levels, const char* label) noexcept {
++  const uint32_t width = ref.size.width, height = ref.size.height;
++  if (blocks.size() != astc_chain_bytes(width, height, levels)) return;
++  constexpr auto format = wgpu::TextureFormat::ASTC4x4Unorm;
++  const wgpu::TextureDescriptor descriptor{
++      .label = label,
++      .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
++      .dimension = wgpu::TextureDimension::e2D,
++      .size = {width, height, 1},
++      .format = format,
++      .mipLevelCount = levels,
++      .sampleCount = 1,
++  };
++  auto texture = webgpu::g_device.CreateTexture(&descriptor);
++  size_t offset = 0;
++  for (uint32_t level = 0; level < levels; ++level) {
++    const uint32_t blocksWide = (level_size(width, level) + 3) / 4;
++    const uint32_t blocksHigh = (level_size(height, level) + 3) / 4;
++    const uint32_t bytesPerRow = blocksWide * 16;
++    const size_t bytes = size_t(bytesPerRow) * blocksHigh;
++    const wgpu::Extent3D physical{blocksWide * 4, blocksHigh * 4, 1};
++    wgpu::TexelCopyTextureInfo destination{.texture = texture, .mipLevel = level};
++    if constexpr (UseTextureBuffer) {
++      queue_texture_upload_data(blocks.data() + offset, bytes, bytesPerRow, blocksHigh, std::move(destination),
++                                physical);
++    } else {
++      const wgpu::TexelCopyBufferLayout layout{.bytesPerRow = bytesPerRow, .rowsPerImage = blocksHigh};
++      webgpu::g_queue.WriteTexture(&destination, blocks.data() + offset, bytes, &layout, &physical);
++    }
++    offset += bytes;
++  }
++  const wgpu::TextureViewDescriptor viewDescriptor{
++      .label = label,
++      .format = format,
++      .dimension = wgpu::TextureViewDimension::e2D,
++      .mipLevelCount = levels,
++  };
++  auto view = texture.CreateView(&viewDescriptor);
++  // Draws recorded from now on bind the new view (gx.cpp's bind groups are
++  // keyed by it); those already recorded keep the old texture alive.
++  ref.texture = std::move(texture);
++  ref.sampleTextureView = std::move(view);
++  ref.format = format;
++  ref.mipCount = levels;
++}
++
++} // namespace aurora::gfx::astc
+--- /dev/null
++++ b/lib/gfx/astc_cache.hpp
+@@ -0,0 +1,42 @@
++#pragma once
++
++#include "texture.hpp"
++
++#include <cstdint>
++#include <vector>
++
++// A VR headset's world textures in ASTC 4x4 (8 bits a texel) rather than
++// RGBA8 (32): a quarter of the bytes for the eyes' pass to fetch from memory,
++// which stalled 16% of its time on system memory (Quest 3, the Toad board,
++// 2026-10-04). Only the textures that get a generated mip chain for the eyes
++// (texture.cpp's worldMips path: the 3D world, never the interface).
++//
++// The encoding (ARM's astc-encoder, thorough enough to look the same) takes
++// too long for a frame: a texture seen for the first time is drawn from its
++// RGBA8 copy while a background thread encodes it, then swapped for the
++// ASTC one at the start of a later frame (apply_ready()). Each encoding is
++// kept in the cache directory (astc4x4/), so a texture seen before starts in
++// ASTC at once. debug.partyboard.astc 0, read at start: off.
++namespace aurora::gfx::astc {
++
++// Whether world textures go to ASTC (device feature, switch, an encoder).
++bool enabled() noexcept;
++
++// The chain's ASTC blocks, all levels one after another, when the cache has
++// them; empty otherwise (the caller then uploads RGBA8 and calls encode_later).
++std::vector<uint8_t> cached(const uint8_t* rgba, size_t bytes, uint32_t width, uint32_t height,
++                            uint32_t levels) noexcept;
++
++// Encodes the chain in the background; `ref` then gets the ASTC texture
++// (apply_ready()) unless it is gone by then.
++void encode_later(const TextureHandle& ref, const uint8_t* rgba, size_t bytes, uint32_t width, uint32_t height,
++                  uint32_t levels) noexcept;
++
++// Game thread, once a frame before recording: textures whose encoding ended
++// get their ASTC texture.
++void apply_ready() noexcept;
++
++// An ASTC 4x4 texture holding `blocks` (all levels), for `ref`'s size.
++void upload(TextureRef& ref, const std::vector<uint8_t>& blocks, uint32_t levels, const char* label) noexcept;
++
++} // namespace aurora::gfx::astc
 --- a/lib/gfx/clear.cpp
 +++ b/lib/gfx/clear.cpp
 @@ -119,7 +119,11 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass, const wgp
@@ -47,7 +442,12 @@
  constexpr uint32_t ClearPipelineConfigVersion = 2;
 --- a/lib/gfx/common.cpp
 +++ b/lib/gfx/common.cpp
-@@ -20,6 +20,7 @@
+@@ -16,10 +16,12 @@
+ #include "tex_palette_conv.hpp"
+ #include "texture_replacement.hpp"
+ #include "texture.hpp"
++#include "astc_cache.hpp"
+ #include "../window.hpp"
  
  #include <atomic>
  #include <chrono>
@@ -55,7 +455,7 @@
  #include <deque>
  #include <mutex>
  #include <optional>
-@@ -140,6 +141,8 @@ static PipelineRef g_currentPipeline;
+@@ -140,6 +142,8 @@ static PipelineRef g_currentPipeline;
  wgpu::BindGroupLayout g_staticBindGroupLayout;
  wgpu::BindGroup g_staticBindGroup;
  wgpu::BindGroupLayout g_uniformBindGroupLayout;
@@ -64,7 +464,7 @@
  wgpu::BindGroup g_uniformBindGroup;
  
  // for imgui debug
-@@ -960,6 +963,40 @@ void initialize() {
+@@ -960,6 +964,40 @@ void initialize() {
      };
      g_uniformBindGroup = g_device.CreateBindGroup(&bindGroupDescriptor);
    }
@@ -105,7 +505,7 @@
  
    gx::initialize();
  #ifdef AURORA_ENABLE_RMLUI
-@@ -1006,6 +1043,8 @@ void shutdown() {
+@@ -1006,6 +1044,8 @@ void shutdown() {
    g_staticBindGroupLayout = {};
    g_uniformBindGroup = {};
    g_uniformBindGroupLayout = {};
@@ -114,7 +514,15 @@
    g_inOffscreen = false;
    g_frameIndex = UINT32_MAX;
    g_frameSlots.reset();
-@@ -1214,16 +1253,116 @@ void stereo::enqueue_pass(const PassDesc& desc) noexcept {
+@@ -1116,6 +1156,7 @@ bool begin_frame() {
+   push_command(CommandType::SetViewport, Command::Data{.setViewport = g_cachedViewport});
+   push_command(CommandType::SetScissor, Command::Data{.setScissor = g_cachedScissor});
+   begin_pipeline_frame();
++  astc::apply_ready(); // world textures encoded meanwhile (astc_cache.hpp)
+   render_worker::enqueue_begin_frame(frame.frameId, [frameSlot] {
+     const auto encoderDescriptor = wgpu::CommandEncoderDescriptor{
+         .label = "Redraw encoder",
+@@ -1214,16 +1255,116 @@ void stereo::enqueue_pass(const PassDesc& desc) noexcept {
    const auto instanced = [&](size_t i) {
      return desc.instanced != nullptr && i < desc.instanced->size() && (*desc.instanced)[i] != 0;
    };
@@ -232,7 +640,7 @@
        auto draw = leftDraws[sequence[p++]];
        draw.instanceCount = 2;
        push_gx(draw);
-@@ -1460,16 +1599,23 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+@@ -1460,16 +1601,23 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
      stereo::begin_access(passInfo.stereoImage, passInfo.stereoTag, passInfo.stereoHasWorld, passInfo.stereoHud);
    }
    const auto label = fmt::format("Render pass {}", passIndex);
@@ -256,7 +664,7 @@
  
    if (passInfo.captureDepthSnapshot) {
      depth_peek::encode_frame_snapshot(cmd, passInfo.copySourceDepthView, passInfo.targetSize, passInfo.msaaSamples);
-@@ -1539,6 +1685,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
+@@ -1539,6 +1687,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
    // Bind static bind group for the whole pass
    pass.SetBindGroup(0, g_staticBindGroup);
    pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
@@ -264,7 +672,7 @@
  
    for (const auto& cmd : passInfo.commands) {
  #ifdef AURORA_GFX_DEBUG_GROUPS
-@@ -1580,6 +1727,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
+@@ -1580,6 +1729,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
        switch (draw.type) {
        case ShaderType::Clear:
          clear::render(draw.clear, pass, passInfo.targetSize);
@@ -272,7 +680,7 @@
          break;
        case ShaderType::GX:
          gx::render(draw.gx, pass);
-@@ -1587,6 +1735,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
+@@ -1587,6 +1737,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
  #ifdef AURORA_ENABLE_RMLUI
        case ShaderType::Rml:
          rmlui::render(draw.rml, pass);
@@ -280,7 +688,7 @@
          break;
  #endif
        }
-@@ -1692,6 +1841,7 @@ std::pair<ByteBuffer, Range> map_uniform(size_t length) {
+@@ -1692,6 +1843,7 @@ std::pair<ByteBuffer, Range> map_uniform(size_t length) {
    const auto range = map(current_frame_packet().uniforms, length, g_cachedLimits.minUniformBufferOffsetAlignment);
    return {ByteBuffer{current_frame_packet().uniforms.data() + range.offset, range.size}, range};
  }
@@ -1332,15 +1740,16 @@
      start = end;
 --- a/lib/gfx/texture.cpp
 +++ b/lib/gfx/texture.cpp
-@@ -4,6 +4,7 @@
+@@ -4,6 +4,8 @@
  #include "../webgpu/gpu.hpp"
  #include "aurora/aurora.h"
  #include "texture.hpp"
 +#include "rgba_mips.hpp"
++#include "astc_cache.hpp"
  #include "texture_convert.hpp"
  #include "../gx/gx_fmt.hpp"
  
-@@ -54,26 +55,38 @@ bool setup_swizzle(wgpu::TextureComponentSwizzleDescriptor& swizzle, u32 format)
+@@ -54,24 +56,47 @@ bool setup_swizzle(wgpu::TextureComponentSwizzleDescriptor& swizzle, u32 format)
  } // namespace
  
  TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 format, ArrayRef<uint8_t> data,
@@ -1362,13 +1771,12 @@
 +      converted = convert_tlut(format, width, data);
      } else {
 -      converted = convert_texture(ref.gxFormat, ref.size.width, ref.size.height, ref.mipCount, data);
--    }
++      converted = convert_texture(format, width, height, mips, data);
+     }
 -    if (!converted.data.empty()) {
 -      data = converted.data;
 -      ref.hasArbitraryMips = converted.hasArbitraryMips;
-+      converted = convert_texture(format, width, height, mips, data);
-     }
-   }
++  }
 +  if (!converted.data.empty()) data = converted.data;
 +  RgbaMipChain generated;
 +  // Colour formats, CMPR included: decoded to RGBA8 on the headset (no BC
@@ -1389,10 +1797,29 @@
 +  ref.hasArbitraryMips = converted.hasArbitraryMips;
 +  ref.worldMipsPrepared = worldMips;
 +  ref.generatedWorldMips = generated.levels > 1;
++  // A headset's world texture: ASTC from the cache at once, else RGBA8 now
++  // and ASTC once encoded in the background (astc_cache.hpp).
++  // (A compressed texture's size must be a whole number of 4x4 blocks.)
++  const bool astcWorld = generated.levels > 1 && width % 4 == 0 && height % 4 == 0 && astc::enabled();
++  if (astcWorld) {
++    const auto blocks = astc::cached(generated.bytes.data(), generated.bytes.size(), width, height, mips);
++    if (!blocks.empty()) {
++      astc::upload(ref, blocks, mips, label);
++      return handle;
+     }
+   }
  
-   uint32_t offset = 0;
-   for (uint32_t mip = 0; mip < mips; ++mip) {
-@@ -218,13 +231,22 @@ void write_texture(TextureRef& ref, ArrayRef<uint8_t> data) noexcept {
+@@ -109,6 +134,9 @@ TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mi
+   if (data.size() != UINT32_MAX && offset < data.size()) {
+     Log.warn("new_static_texture_2d[{}]: texture used {} bytes, but given {} bytes", label, offset, data.size());
+   }
++  if (astcWorld) {
++    astc::encode_later(handle, generated.bytes.data(), generated.bytes.size(), width, height, mips);
++  }
+   return handle;
+ }
+ 
+@@ -218,13 +246,22 @@ void write_texture(TextureRef& ref, ArrayRef<uint8_t> data) noexcept {
  
    ConvertedTexture converted;
    if (ref.gxFormat != InvalidTextureFormat) {
