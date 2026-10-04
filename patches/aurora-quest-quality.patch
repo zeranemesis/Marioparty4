@@ -1617,7 +1617,7 @@
  } // namespace aurora::gx
 --- a/lib/gx/shader.cpp
 +++ b/lib/gx/shader.cpp
-@@ -454,12 +454,34 @@ static bool tev_may_overflow(std::string_view operand) {
+@@ -454,12 +454,73 @@ static bool tev_may_overflow(std::string_view operand) {
    return tev_overflow_all() || tev_register_operand(operand);
  }
  
@@ -1643,6 +1643,45 @@
 +  return operand.find(".a") != std::string_view::npos ? known->alpha[reg] : known->rgb[reg];
 +}
 +
++// Whether a stage's result is surely in [0, 1] without its clamp: a plain
++// lerp of operands in [0, 1] (add, nothing added, no bias, scale 1). The
++// 8-bit sources (textures, rasterized and konst colors, constants) are; a
++// register is when TevInRange says so.
++static bool tev_color_arg_in_range(GXTevColorArg arg, const TevInRange& known) {
++  switch (arg) {
++  case GX_CC_CPREV: return known.rgb[0];
++  case GX_CC_APREV: return known.alpha[0];
++  case GX_CC_C0: return known.rgb[1];
++  case GX_CC_A0: return known.alpha[1];
++  case GX_CC_C1: return known.rgb[2];
++  case GX_CC_A1: return known.alpha[2];
++  case GX_CC_C2: return known.rgb[3];
++  case GX_CC_A2: return known.alpha[3];
++  default: return true;
++  }
++}
++static bool tev_alpha_arg_in_range(GXTevAlphaArg arg, const TevInRange& known) {
++  switch (arg) {
++  case GX_CA_APREV: return known.alpha[0];
++  case GX_CA_A0: return known.alpha[1];
++  case GX_CA_A1: return known.alpha[2];
++  case GX_CA_A2: return known.alpha[3];
++  default: return true;
++  }
++}
++static bool tev_color_stage_in_range(const TevStage& stage, const TevInRange& known) {
++  return !tev_overflow_all() && stage.colorOp.op == GX_TEV_ADD && stage.colorOp.bias == GX_TB_ZERO &&
++         stage.colorOp.scale == GX_CS_SCALE_1 && stage.colorPass.d == GX_CC_ZERO &&
++         tev_color_arg_in_range(stage.colorPass.a, known) && tev_color_arg_in_range(stage.colorPass.b, known) &&
++         tev_color_arg_in_range(stage.colorPass.c, known);
++}
++static bool tev_alpha_stage_in_range(const TevStage& stage, const TevInRange& known) {
++  return !tev_overflow_all() && stage.alphaOp.op == GX_TEV_ADD && stage.alphaOp.bias == GX_TB_ZERO &&
++         stage.alphaOp.scale == GX_CS_SCALE_1 && stage.alphaPass.d == GX_CA_ZERO &&
++         tev_alpha_arg_in_range(stage.alphaPass.a, known) && tev_alpha_arg_in_range(stage.alphaPass.b, known) &&
++         tev_alpha_arg_in_range(stage.alphaPass.c, known);
++}
++
  // `half`: the operands are f16 (half_operand); the wrap is done in f32.
  static std::string tev_color_op(GXTevOp op, std::string_view bias, std::string_view scale, bool clamp,
                                  std::string_view a, std::string_view b, std::string_view c, std::string_view d,
@@ -1655,7 +1694,7 @@
      return half ? fmt::format("vec3h(tev_overflow_vec3f(vec3f({})))", reg) : fmt::format("tev_overflow_vec3f({})", reg);
    };
    std::string expr = tev_op(op, bias, scale, overflow(a), overflow(b), overflow(c), d,
-@@ -471,9 +493,9 @@ static std::string tev_color_op(GXTevOp op, std::string_view bias, std::string_v
+@@ -471,9 +532,9 @@ static std::string tev_color_op(GXTevOp op, std::string_view bias, std::string_v
  
  static std::string tev_alpha_op(GXTevOp op, std::string_view bias, std::string_view scale, bool clamp,
                                  std::string_view a, std::string_view b, std::string_view c, std::string_view d,
@@ -1668,7 +1707,7 @@
      return half ? fmt::format("f16(tev_overflow_f32(f32({})))", reg) : fmt::format("tev_overflow_f32({})", reg);
    };
    std::string expr =
-@@ -963,6 +985,55 @@ static void add_stereo_discard(std::string& source) noexcept {
+@@ -963,6 +1024,55 @@ static void add_stereo_discard(std::string& source) noexcept {
    source.insert(body + 1, "\n    if (in.stereo_side < 0.0) { discard; }");
  }
  
@@ -1724,7 +1763,7 @@
  std::string build_shader_source(const ShaderConfig& config) noexcept {
    ZoneScoped;
    const auto hash = xxh3_hash(config);
-@@ -1222,6 +1293,14 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+@@ -1222,6 +1332,14 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
      std::string operand = alpha_arg_reg(arg, idx, config, stage);
      return half ? half_operand(std::move(operand), true) : operand;
    };
@@ -1739,7 +1778,7 @@
    for (u32 idx = 0; idx < config.tevStageCount; ++idx) {
      const auto& stage = config.tevStages[idx];
      {
-@@ -1229,7 +1308,7 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+@@ -1229,7 +1347,7 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
        std::string op = tev_color_op(
            stage.colorOp.op, tev_bias(stage.colorOp.bias), tev_scale(stage.colorOp.scale), stage.colorOp.clamp,
            color_operand(stage.colorPass.a, idx, stage), color_operand(stage.colorPass.b, idx, stage),
@@ -1748,7 +1787,7 @@
        fragmentFn += fmt::format("\n    // TEV stage {2}\n    {0} = {3}({1}, {0}.a);", outReg, op, idx, vec4);
      }
      {
-@@ -1237,9 +1316,12 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+@@ -1237,10 +1355,20 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
        std::string op = tev_alpha_op(
            stage.alphaOp.op, tev_bias(stage.alphaOp.bias), tev_scale(stage.alphaOp.scale), stage.alphaOp.clamp,
            alpha_operand(stage.alphaPass.a, idx, stage), alpha_operand(stage.alphaPass.b, idx, stage),
@@ -1757,12 +1796,54 @@
        fragmentFn += fmt::format("\n    {0}.a = {1};", outReg, op);
      }
 +    // GX's stage reads its operands before writing: what it leaves, for the next.
-+    inRange.rgb[stage.colorOp.outReg] = stage.colorOp.clamp;
-+    inRange.alpha[stage.alphaOp.outReg] = stage.alphaOp.clamp;
++    const bool colorInRange = stage.colorOp.clamp || tev_color_stage_in_range(stage, inRange);
++    const bool alphaInRange = stage.alphaOp.clamp || tev_alpha_stage_in_range(stage, inRange);
++    inRange.rgb[stage.colorOp.outReg] = colorInRange;
++    inRange.alpha[stage.alphaOp.outReg] = alphaInRange;
    }
++  // The final color and alpha are the last stage's (copied to prev below,
++  // whatever register it wrote): whether each is surely in [0, 1].
++  const auto& finalStage = config.tevStages[config.tevStageCount - 1];
++  const bool finalColorInRange = inRange.rgb[finalStage.colorOp.outReg];
++  const bool finalAlphaInRange = inRange.alpha[finalStage.alphaOp.outReg];
  
    {
-@@ -2198,6 +2280,9 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
+     const auto& lastStage = config.tevStages[config.tevStageCount - 1];
+@@ -1777,23 +1905,17 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+         "var tex{0}_samp: sampler;",
+         i, i * 2, i * 2 + 1);
+   }
+-  // prev's final 8 bits. When the last stages writing it clamp their color and
+-  // alpha, prev is in [0, 1] already (fog mixes it with a color in [0, 1]),
+-  // where the wrap changes nothing.
+-  bool prevClamped = true;
+-  for (int i = static_cast<int>(config.tevStageCount) - 1, color = 0, alpha = 0; i >= 0 && (!color || !alpha); --i) {
+-    const auto& stage = config.tevStages[i];
+-    if (!color && stage.colorOp.outReg == GX_TEVPREV) {
+-      color = 1;
+-      prevClamped = prevClamped && stage.colorOp.clamp;
+-    }
+-    if (!alpha && stage.alphaOp.outReg == GX_TEVPREV) {
+-      alpha = 1;
+-      prevClamped = prevClamped && stage.alphaOp.clamp;
+-    }
+-  }
+-  if (!prevClamped || tev_overflow_all()) {
++  // prev's final 8 bits, for the color and the alpha that may leave [0, 1]:
++  // where the last stage clamped them or mixed values in [0, 1] (fog then
++  // mixes with a color in [0, 1]), the wrap changes nothing. The whole of prev
++  // was wrapped in 138 of the Toad board's 1083 eye shaders, mostly for an
++  // alpha alone (2026-10-04).
++  if (tev_overflow_all() || (!finalColorInRange && !finalAlphaInRange)) {
+     fragmentFn += "\n    prev = tev_overflow_vec4f(prev);";
++  } else if (!finalColorInRange) {
++    fragmentFn += "\n    prev = vec4f(tev_overflow_vec3f(prev.rgb), prev.a);";
++  } else if (!finalAlphaInRange) {
++    fragmentFn += "\n    prev.a = tev_overflow_f32(prev.a);";
+   }
+   if (config.alphaCompare) {
+     const auto comp0 = alpha_compare(config.alphaCompare.comp0, config.alphaCompare.ref0);
+@@ -2198,6 +2320,9 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
    } else if (config.stereo == StereoDiscard) {
      add_stereo_discard(shaderSource);
    }
@@ -1772,7 +1853,7 @@
    if (config.halfPrecision) {
      shaderSource.insert(0, "enable f16;\n");
    }
-@@ -2208,6 +2293,12 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
+@@ -2208,6 +2333,12 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
    return shaderSource;
  }
  
