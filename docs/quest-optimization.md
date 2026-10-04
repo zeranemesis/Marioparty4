@@ -402,6 +402,29 @@ Mesure ou essaye sur le plateau de Toad :
 - **Rendu Vulkan direct, multiview, rendu foveal** : impossible sans forker Dawn (il n'expose ni son peripherique Vulkan ni la creation sur un peripherique fourni, et WebGPU n'a ni multiview ni densite de fragments) : ecarte.
 
 Reglages par defaut a la fin : 72 Hz, images retenues pour leur affichage, GPU en boost, MSAA 4x, TEV en demi-precision, profondeur 16 bits, filtre du compositeur coupe, HUD sans MSAA ni ecran sombre, anneau de 4 images. A mesurer au prochain essai : la passe des yeux avec le TEV allege (build 187), plateau entier dans le champ.
+## Bilan du 04/10 (builds 188 a 201)
+
+### Regularite et latence : la copie anticipee
+
+- Sonde des regards (`Pacing looks`) : 31 % des images attendues etaient encore au GPU au passage du casque. Sonde de la copie (`Copy GPU`) : la copie vers les images OpenXR attendait 5 a 6 ms (max 14) derriere la passe des yeux de l'image suivante ; le casque, voyant ses images finir si tard, preparait l'affichage 46 ms a l'avance au lieu de 18 (Prd VrApi 78-80 ms). Preuve : sans le decor (`skip_draws`), copie 0,46 ms, avance 18 ms, 72/72.
+- Build 194 : apres `xrEndFrame`, le fil XR attend l'image due a l'affichage suivant, la copie pendant que le GPU est libre et la rend aussitot (`StereoView::early_copy`). Resultat : 61 -> 72 images neuves sur 72, ~15 -> ~0 images ratees par seconde, avance 46 -> 21 ms, Prd 80 -> 51 ms, delai constant 27,8 ms.
+- Build 195 : le pacer grossit son plan des que 2 images sur 8 depassent (scene plus lourde), et vise la fin de la copie anticipee (2 ms avant le regard) : ~100 % des images copiees en avance.
+- Builds 190-191 : le pacer suit les heures d'affichage OpenXR (exactes) et non l'heure des regards (+-7 ms) ; les images ratees sont comptees et donnees au controleur de resolution (`missedLate`, `missedDropped`).
+- Build 199 : late latch, la pose des yeux relue une fois l'image enregistree, chaque projection corrigee (`AuroraStereoSetLateLatch`). Correction mesuree 0,1-0,5 mm en moyenne, jusqu'a 6 mm ; le Prd du systeme ne la voit pas.
+
+### Le GPU suit la charge
+
+- La frequence du GPU suit la charge (611 MHz a 100 %, 469 MHz a 65 %) : le temps de la passe des yeux reste ~10 ms quoi qu'on retire. Le vrai cout se lit en occupation x frequence (campagne a image figee).
+- Image figee, plateau Toad, 100 % : 65 % de resolution -42 % de travail ; objets opaques 73 % du travail ; transparents 19 % ; TEV a 3 etages et plus 17 % ; test alpha coupe 0 % ; tri d'avant en arriere +7 % de travail ; **tri par pipeline et textures -10 %** (defaut depuis le build 200, rien de visible).
+- Resolution du plateau : 100 % par defaut (build 196), plancher 90 % sur un plateau (baisser ne faisait que flouter), pas de decision pendant les 3 s qui suivent l'arrivee d'une scene (build 197).
+- 90 Hz : vue legere 90/90 et 39 ms mouvement->photon, plateau entier sature (68-85 images, GPU 92-96 %) ; 90 Hz a 80 % tient 90/90 (GPU 85-88 %, 41-45 ms). 72 Hz a 100 % reste le defaut.
+
+### Pistes du soir (build 201, non mesure)
+
+- Shaders : le debordement 8 bits final n'est plus applique qu'aux composantes qui peuvent sortir de [0, 1] (un lerp de valeurs dans [0, 1] y reste) : sur les 1083 shaders des yeux du cache du jour, 138 enveloppaient tout `prev`, 0 maintenant (105 une composante, 33 rien).
+- Textures du decor en ASTC 4x4 (8 bits par texel au lieu de 32), encodees en arriere-plan par astc-encoder (ARM, Apache-2.0) et gardees en cache (`astc4x4/`), `debug.partyboard.astc 0` pour couper.
+- Foveation fixe : demande un Dawn modifie (`VK_EXT_fragment_density_map`, carte de densite attachee a la passe des yeux) ; Dawn se compile depuis ses sources pour Android (`C:\mp4w\dawn-src`).
+
 ## Sources Meta du plan
 
 - [OVR Metrics Tool](https://developers.meta.com/horizon/documentation/native/android/ts-ovrmetricstool/)
