@@ -1040,7 +1040,8 @@ void StereoView::adapt_resolution() {
   }
   mRequestIntervals.clear();
   mLastSlow = slow;
-  const float measuredScale = mQuality.update(mQualitySample, wanted, mAdaptRingFull, slow);
+  const float measuredScale = mQuality.update(mQualitySample, wanted, mAdaptRingFull, slow, mAdaptMissed);
+  mAdaptMissed = 0;
   mRenderScale = std::min(1.0f, measuredScale / mMaxScale);
   if (mBoardMode && mShownHasWorld) mBoardQuality = measuredScale;
   // debug.partyboard.eye_scale <percent of recommended, 50 to 125>: a fixed
@@ -1254,6 +1255,14 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
         // make its image reusable while Aurora's GPU can still write to it.
         pollfd finished{slot.fence, POLLIN, 0};
         if (slot.fence < 0 || (poll(&finished, 1, 0) > 0 && (finished.revents & POLLIN))) {
+          // Never shown: it missed its display frame. The pacer learned only
+          // from the images shown, so the slowest ones, those replaced, never
+          // counted and its 98% was nearer 85% (2026-10-04).
+          if (const int64_t doneNs = fence_signal_time_ns(slot.fence); slot.startNs != 0 && doneNs > slot.startNs) {
+            mPacer.finished(doneNs - slot.startNs);
+          }
+          ++mAdaptMissed;
+          ++mMissedDropped;
           release_slot(slot);
         }
       }
@@ -1261,6 +1270,11 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
     if (newest != nullptr) {
       fence = newest->fence;
       newest->fence = -1;
+      // Shown, but a display frame or more after the one it was paced for.
+      if (mPacing && newest->dueNs != 0 && lookNs > newest->dueNs + mPeriodNs / 2) {
+        ++mAdaptMissed;
+        ++mMissedLate;
+      }
     }
   }
   // When the GPU finished it, before EGL takes the fence.
@@ -1447,13 +1461,15 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
       LOGI("Stereo perf: source=%.1fHz presented=%.1fHz ringFull=%u copyMax=%.2fms slots=%u/%u/%u world=%d "
            "res=%.0f%% latency=%.1fms screenHidden=%d acquireCpuMax=%.2fms worldNew=%.1fHz hudNew=%.1fHz copyGpuMax=%.3fms gpuSamples=%u eye=%ux%u "
            "worldAcquireMax=%.3fms worldWaitMax=%.3fms hudAcquireMax=%.3fms hudWaitMax=%.3fms "
-           "holds=%u/%u/%u/%u latencyMin=%.1fms latencyMax=%.1fms paced=%d paceWork=%.1fms paceLooks=%lld pacePhase=%.1fms",
+           "holds=%u/%u/%u/%u latencyMin=%.1fms latencyMax=%.1fms paced=%d paceWork=%.1fms paceLooks=%lld pacePhase=%.1fms "
+           "missedLate=%u missedDropped=%u",
           mLeaseCount / elapsed, mPresentedCount / elapsed, mRingFullCount, mCopyMaxMs,
           drawing, ready, copying, mShownHasWorld, mRenderScale * mMaxScale * 100.0f, mLatencyNs / 1e6, mScreenHidden, mAcquireMaxMs, mNewWorldCount / elapsed, mNewHudCount / elapsed, mCopyGpuMaxMs, mCopyGpuSamples,
           mShownWidth, mShownHeight, mDestinationAcquireMaxMs[0], mDestinationWaitMaxMs[0],
           mDestinationAcquireMaxMs[1], mDestinationWaitMaxMs[1], mHolds[0], mHolds[1], mHolds[2], mHolds[3],
           mLatencyMinMs, mLatencyMaxMs, mPacing, mPacer.work_ns() / 1e6, static_cast<long long>(mPacer.looks()),
-          mPacer.phase_ns() / 1e6);
+          mPacer.phase_ns() / 1e6, mMissedLate, mMissedDropped);
+      mMissedLate = mMissedDropped = 0;
       LOGI("Stereo pipeline: images=%u record=%.1f/%.1fms gpu=%.1f/%.1fms wait=%.1f/%.1fms total=%.1f/%.1fms "
            "(avg/max) ring=%zu full=%u (at full, images drawing/ready/copying: %u/%u/%u)",
            mStageTotal.count, mStageRecord.avg(), mStageRecord.max, mStageGpu.avg(), mStageGpu.max, mStageWait.avg(),

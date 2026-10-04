@@ -19,6 +19,12 @@ public:
   // A lowering that did not bring more images is undone, and pixels are not
   // lowered again for this many fresh windows (one a second).
   static constexpr unsigned kHoldWindows = 30;
+  // After a lowering, pixels are not raised again for this many fresh
+  // windows. Five calm seconds were enough before: on the Toad board the
+  // eyes went 90, 95, 100, 95, 90% within a minute (2026-10-04), each raise
+  // making new images (the ring drains, a hitch) and bringing back the late
+  // images the lowering had removed.
+  static constexpr unsigned kRaiseHoldWindows = 20;
 
   void set_cap(float cap) {
     mCap = std::clamp(cap, 0.65f, 1.25f);
@@ -33,6 +39,7 @@ public:
     mTrial = {};
     mCalm = 0;
     mHold = 0;
+    mRaiseHold = 0;
   }
   float cap() const { return mCap; }
   Decision last_decision() const { return mDecision; }
@@ -40,8 +47,14 @@ public:
 
   // `requests`: images the game asked for in the window; `busy`: those
   // refused because every eye image was in use; `slow`: the game's images
-  // that came late, a visible hitch of the board (stereo_view.cpp).
-  float update(const QualitySample& sample, unsigned requests, unsigned busy, unsigned slow = 0) {
+  // that came late, a visible hitch of the board (stereo_view.cpp);
+  // `missed`: finished images that missed the display frame they were paced
+  // for, shown a frame late or replaced by the next one. The game's requests
+  // stay regular then (they are paced), so `slow` cannot see them: on the
+  // Toad board 11 of 72 images a second missed while the eyes stayed at 90%
+  // (2026-10-04).
+  float update(const QualitySample& sample, unsigned requests, unsigned busy, unsigned slow = 0,
+               unsigned missed = 0) {
     mDecision = Decision::Kept;
     if (sample.sequence == 0 || sample.sequence == mSequence) return mScale;
     mSequence = sample.sequence;
@@ -51,10 +64,13 @@ public:
     }
     const unsigned delivered = requests - std::min(busy, requests);
     const unsigned previousSlow = mLastSlow;
+    const unsigned previousMissed = mLastMissed;
     const bool hadWindow = mHadWindow;
     mLastSlow = slow;
+    mLastMissed = missed;
     mHadWindow = true;
     if (mHold != 0) --mHold;
+    if (mRaiseHold != 0) --mRaiseHold;
     const float budget = 1000.0f / sample.refreshHz;
     const bool gpuKnown = std::isfinite(sample.gpuMs) && sample.gpuMs >= 0;
     const bool cpuKnown = std::isfinite(sample.cpuMs) && sample.cpuMs >= 0;
@@ -71,7 +87,10 @@ public:
     // delivered, so this is the pressure that matters: at 100% the board
     // hitched twice a second, at 80% not at all (Quest 3, 2026-09-28).
     const bool hitching = slow * 50ull > requests;
-    const bool pressure = hitching || (gpuKnown ? (gpu >= 0.9f * budget ||
+    // More than 5% of the images missing their display frame: the pacer
+    // plans for 2% (frame_pacing.hpp), the rest is the GPU's queue.
+    const bool missing = missed * 20ull > requests;
+    const bool pressure = hitching || missing || (gpuKnown ? (gpu >= 0.9f * budget ||
         (sample.latePercent > 1 && gpu >= 0.85f * budget) || (stalled && !cpuBound)) : (congested && !cpuBound));
     // Fewer pixels only help a frame limited by its pixels. The headset's
     // counters cannot tell (they miss the game's Vulkan work): on the Toad
@@ -90,11 +109,14 @@ public:
       if (mTrial.windows < 2) return mScale;
       mTrial.deliveredAfter += delivered;
       mTrial.slowAfter += slow;
+      mTrial.missedAfter += missed;
       if (mTrial.windows < 3) return mScale;
       const float after = static_cast<float>(mTrial.deliveredAfter) / 2.0f;
-      // More images, or (at a capped rate) half the hitches or fewer.
+      // More images, or (at a capped rate) half the hitches or missed
+      // display frames, or fewer.
       const bool helped = after >= 1.08f * mTrial.deliveredBefore + 1.0f ||
-          (mTrial.slowBefore >= 1.0f && mTrial.slowAfter / 2.0f <= 0.5f * mTrial.slowBefore);
+          (mTrial.slowBefore >= 1.0f && mTrial.slowAfter / 2.0f <= 0.5f * mTrial.slowBefore) ||
+          (mTrial.missedBefore >= 2.0f && mTrial.missedAfter / 2.0f <= 0.5f * mTrial.missedBefore);
       mTrial.active = false;
       if (pressure && !helped) {
         mScale = mTrial.scaleBefore;
@@ -108,13 +130,17 @@ public:
       const float before = previousDelivered != 0 ? (delivered + previousDelivered) / 2.0f
                                                   : static_cast<float>(delivered);
       const float slowBefore = hadWindow ? (slow + previousSlow) / 2.0f : static_cast<float>(slow);
-      mTrial = {true, mScale, before, 0, 0, slowBefore, 0};
+      const float missedBefore = hadWindow ? (missed + previousMissed) / 2.0f : static_cast<float>(missed);
+      mTrial = {true, mScale, before, 0, 0, slowBefore, 0, missedBefore, 0};
       mScale = std::max(0.65f, mScale - 0.05f);
       mCalm = 0;
+      mRaiseHold = kRaiseHoldWindows;
       mDecision = Decision::Lowered;
     } else if (pressure) {
       mCalm = 0;
-    } else if (!cpuBound && busy == 0 && slow == 0 && sample.latePercent < 1 &&
+    } else if (mRaiseHold != 0) {
+      mCalm = 0;
+    } else if (!cpuBound && busy == 0 && slow == 0 && missed * 50ull <= requests && sample.latePercent < 1 &&
                (!gpuKnown || gpu < 0.85f * budget) &&
                (!cpuKnown || sample.cpuMs < 0.85f * budget)) {
       if (++mCalm >= 5) {
@@ -138,13 +164,17 @@ private:
     unsigned deliveredAfter = 0; // sum of the two judged windows
     float slowBefore = 0;        // hitches, average of the two windows before
     unsigned slowAfter = 0;      // hitches, sum of the two judged windows
+    float missedBefore = 0;      // missed display frames, average of the two windows before
+    unsigned missedAfter = 0;    // missed display frames, sum of the two judged windows
   };
   float mScale = 1.0f, mCap = 1.25f;
   uint64_t mSequence = 0;
   unsigned mCalm = 0;
   unsigned mHold = 0;
+  unsigned mRaiseHold = 0;
   unsigned mLastDelivered = 0;
   unsigned mLastSlow = 0;
+  unsigned mLastMissed = 0;
   bool mHadWindow = false;
   Trial mTrial;
   Decision mDecision = Decision::Kept;

@@ -255,8 +255,11 @@ int main() {
     assert(hitch.update(calm, 60, 0, 0) == 0.95f);
     calm.sequence = 503;
     assert(hitch.update(calm, 60, 0, 0) == 0.95f && hitch.last_decision() != D2::Restored); // hitches gone: kept
-    for (unsigned i = 504; i < 508; ++i) { calm.sequence = i; hitch.update(calm, 60, 0, 0); }
-    assert(hitch.scale() == 1.0f); // five calm windows: back up
+    for (unsigned i = 504; i < 524; ++i) { calm.sequence = i; hitch.update(calm, 60, 0, 0); }
+    assert(hitch.scale() == 0.95f); // no raise while kRaiseHoldWindows last
+    calm.sequence = 524;
+    hitch.update(calm, 60, 0, 0);
+    assert(hitch.scale() == 1.0f); // then five calm windows: back up
     // Hitches the pixels do not cause: the lowering is undone.
     quest::AdaptiveQuality cpuHitch;
     cpuHitch.set_cap(1.0f);
@@ -270,6 +273,39 @@ int main() {
     edge.set_cap(1.0f);
     for (unsigned i = 700; i < 710; ++i) { calm.sequence = i; edge.update(calm, 60, 0, 1); }
     assert(edge.scale() == 1.0f && edge.last_decision() == D2::Kept);
+
+    // Paced images missing their display frame (72 Hz): the requests stay
+    // regular, so only the missed count shows the pressure.
+    quest::AdaptiveQuality late;
+    late.set_cap(1.0f);
+    quest::QualitySample idle{800, 72, 2, 2, 1, 0};
+    assert(late.update(idle, 72, 0, 0, 11) == 0.95f && late.last_decision() == D2::Lowered); // 15% missed
+    idle.sequence = 801;
+    late.update(idle, 72, 0, 0, 9); // the resize window, skipped
+    idle.sequence = 802;
+    late.update(idle, 72, 0, 0, 3);
+    idle.sequence = 803;
+    assert(late.update(idle, 72, 0, 0, 2) == 0.95f && late.last_decision() != D2::Restored); // 11 -> 2.5: kept
+    // Missed frames the pixels do not cause: undone.
+    quest::AdaptiveQuality queue;
+    queue.set_cap(1.0f);
+    idle.sequence = 900;
+    assert(queue.update(idle, 72, 0, 0, 10) == 0.95f);
+    for (unsigned i = 901; i < 903; ++i) { idle.sequence = i; queue.update(idle, 72, 0, 0, 10); }
+    idle.sequence = 903;
+    assert(queue.update(idle, 72, 0, 0, 9) == 1.0f && queue.last_decision() == D2::Restored);
+    // One missed a second (the pacer's planned 2%): neither lowered nor kept from rising.
+    quest::AdaptiveQuality planned;
+    planned.set_cap(1.0f);
+    planned.start_at(0.9f);
+    for (unsigned i = 1000; i < 1005; ++i) { idle.sequence = i; planned.update(idle, 72, 0, 0, 1); }
+    assert(planned.scale() == 0.95f && planned.last_decision() == D2::Raised);
+    // Two missed a second: no lowering, no raising.
+    quest::AdaptiveQuality between;
+    between.set_cap(1.0f);
+    between.start_at(0.9f);
+    for (unsigned i = 1100; i < 1110; ++i) { idle.sequence = i; between.update(idle, 72, 0, 0, 2); }
+    assert(between.scale() == 0.9f);
   }
 
   // Instanced stereo without the cut: only a sphere wholly inside both eyes'

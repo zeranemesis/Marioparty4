@@ -287,6 +287,10 @@ private:
   std::chrono::steady_clock::time_point mLastRequestAt{};
   std::vector<float> mRequestIntervals;
   uint32_t mLastSlow = 0;
+  // Finished images that missed their paced display frame (shown late, or
+  // replaced unseen by a newer one): this second's, for the controller, and
+  // since the last perf line, for the log.
+  uint32_t mAdaptMissed = 0, mMissedLate = 0, mMissedDropped = 0;
   std::chrono::steady_clock::time_point mAdaptAt = std::chrono::steady_clock::now();
   // Pose prediction: this XR frame's display time, and the measured delay
   // between taking an image and showing it (moving average, nanoseconds).
