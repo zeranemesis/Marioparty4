@@ -1,0 +1,639 @@
+diff --git a/include/dawn/native/VulkanBackend.h b/include/dawn/native/VulkanBackend.h
+index 355c4b8..01373b6 100644
+--- a/include/dawn/native/VulkanBackend.h
++++ b/include/dawn/native/VulkanBackend.h
+@@ -41,6 +41,31 @@ DAWN_NATIVE_EXPORT VkInstance GetInstance(WGPUDevice device);
+ 
+ DAWN_NATIVE_EXPORT PFN_vkVoidFunction GetInstanceProcAddr(WGPUDevice device, const char* pName);
+ 
++// Fragment density map (party board patch). Before any pipeline is created:
++// every render pass, and every pipeline's compatible render pass, whose depth
++// attachment has `depthFormat` and whose sample count is `sampleCount` gets a
++// device-wide fragment density map (VK_EXT_fragment_density_map), full
++// density until written. `maxWidth` x `maxHeight`: the largest such render
++// pass, in pixels. False when the device cannot (extension, non-subsampled
++// attachments, or dynamic rendering).
++DAWN_NATIVE_EXPORT bool EnableFragmentDensityMap(WGPUDevice device,
++                                                 WGPUTextureFormat depthFormat,
++                                                 uint32_t sampleCount,
++                                                 uint32_t maxWidth,
++                                                 uint32_t maxHeight);
++// The pixels each map texel covers, and the map's size in texels (0: none).
++DAWN_NATIVE_EXPORT void GetFragmentDensityMapLayout(WGPUDevice device,
++                                                    uint32_t* texelWidth,
++                                                    uint32_t* texelHeight,
++                                                    uint32_t* mapWidth,
++                                                    uint32_t* mapHeight);
++// The map's top-left `width` x `height` texels, R8G8 (horizontal, vertical
++// density, 255 = full), for the render passes recorded from now on.
++DAWN_NATIVE_EXPORT bool WriteFragmentDensityMap(WGPUDevice device,
++                                                const uint8_t* rg8,
++                                                uint32_t width,
++                                                uint32_t height);
++
+ enum class NeedsDedicatedAllocation {
+     Yes,
+     No,
+diff --git a/src/dawn/native/vulkan/CommandBufferVk.cpp b/src/dawn/native/vulkan/CommandBufferVk.cpp
+index 382b359..79b2aca 100644
+--- a/src/dawn/native/vulkan/CommandBufferVk.cpp
++++ b/src/dawn/native/vulkan/CommandBufferVk.cpp
+@@ -904,6 +904,7 @@ MaybeError RecordBeginRenderPass(CommandRecordingContext* recordingContext,
+     // Query a VkRenderPass from the cache
+     VkRenderPass renderPassVK = VK_NULL_HANDLE;
+     uint32_t renderPassId = 0;
++    bool fragmentDensityMap = false;
+     {
+         RenderPassCacheQuery query;
+ 
+@@ -932,6 +933,7 @@ MaybeError RecordBeginRenderPass(CommandRecordingContext* recordingContext,
+         DAWN_TRY_ASSIGN(renderPassInfo, device->GetRenderPassCache()->GetRenderPass(query));
+         renderPassVK = renderPassInfo.renderPass;
+         renderPassId = renderPassInfo.uniqueId;
++        fragmentDensityMap = renderPassInfo.fragmentDensityMap;
+     }
+ 
+     // Query a framebuffer from the cache and gather the clear values for the attachments at the
+@@ -975,6 +977,11 @@ MaybeError RecordBeginRenderPass(CommandRecordingContext* recordingContext,
+             }
+         }
+ 
++        if (fragmentDensityMap) {
++            framebufferQuery.AddRawAttachment(device->GetFragmentDensityMapView(),
++                                              device->GetFragmentDensityMapId());
++        }
++
+         DAWN_TRY_ASSIGN(
+             framebuffer,
+             device->GetFramebufferCache()->GetOrCreate(
+diff --git a/src/dawn/native/vulkan/DeviceVk.cpp b/src/dawn/native/vulkan/DeviceVk.cpp
+index 3b2a436..4a46211 100644
+--- a/src/dawn/native/vulkan/DeviceVk.cpp
++++ b/src/dawn/native/vulkan/DeviceVk.cpp
+@@ -26,6 +26,7 @@
+ // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ 
+ #include "src/dawn/native/vulkan/DeviceVk.h"
++#include "src/dawn/native/vulkan/ResourceHeapVk.h"
+ 
+ #include <algorithm>
+ #include <utility>
+@@ -547,6 +548,13 @@ ResultOrError<VulkanDeviceKnobs> Device::CreateDevice(VkPhysicalDevice vkPhysica
+         featuresChain.Add(&usedKnobs.rasterizationOrderAttachmentAccessFeatures);
+     }
+ 
++    if (mDeviceInfo.HasExt(DeviceExt::FragmentDensityMap) &&
++        mDeviceInfo.fragmentDensityMapFeatures.fragmentDensityMap == VK_TRUE) {
++        usedKnobs.fragmentDensityMapFeatures = mDeviceInfo.fragmentDensityMapFeatures;
++        usedKnobs.fragmentDensityMapFeatures.fragmentDensityMapDynamic = VK_FALSE;
++        featuresChain.Add(&usedKnobs.fragmentDensityMapFeatures);
++    }
++
+     if (mDeviceInfo.HasExt(DeviceExt::ShaderIntegerDotProduct)) {
+         DAWN_ASSERT(usedKnobs.HasExt(DeviceExt::ShaderIntegerDotProduct));
+ 
+@@ -1081,6 +1089,8 @@ void Device::DestroyImpl(DestroyReason reason) {
+         pending->ClearUpTo(kMaxExecutionSerial);
+     });
+ 
++    DestroyFragmentDensityMap();
++
+     // Releasing the uploader enqueues buffers to be released.
+     // Call Tick() again to clear them before releasing the deleter.
+     GetResourceMemoryAllocator()->Tick(kMaxExecutionSerial);
+@@ -1294,4 +1304,202 @@ Ref<QuerySetBase> Device::UseEmptyPassQuerySet() {
+     return mEmptyPassQuerySet;
+ }
+ 
++// Fragment density map (party board patch): one device-wide map, attached to
++// every render pass, and every pipeline's compatible render pass, whose depth
++// format and sample count match (RenderPassCache). The map stays in
++// VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT between writes.
++bool Device::EnableFragmentDensityMap(wgpu::TextureFormat depthFormat,
++                                      uint32_t sampleCount,
++                                      uint32_t maxWidth,
++                                      uint32_t maxHeight) {
++    if (mFdm.enabled) {
++        return true;
++    }
++    if (!mDeviceInfo.HasExt(DeviceExt::FragmentDensityMap) ||
++        mDeviceInfo.fragmentDensityMapFeatures.fragmentDensityMap != VK_TRUE ||
++        mDeviceInfo.fragmentDensityMapFeatures.fragmentDensityMapNonSubsampledImages != VK_TRUE ||
++        GetRenderPassType() == VulkanRenderPassType::DynamicRendering) {
++        return false;
++    }
++    const VkExtent2D texel = mDeviceInfo.fragmentDensityMapProperties.minFragmentDensityTexelSize;
++    if (texel.width == 0 || texel.height == 0) {
++        return false;
++    }
++    mFdm.texelWidth = texel.width;
++    mFdm.texelHeight = texel.height;
++    mFdm.width = (maxWidth + texel.width - 1) / texel.width;
++    mFdm.height = (maxHeight + texel.height - 1) / texel.height;
++
++    VkImageCreateInfo imageInfo = {};
++    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
++    imageInfo.imageType = VK_IMAGE_TYPE_2D;
++    imageInfo.format = VK_FORMAT_R8G8_UNORM;
++    imageInfo.extent = {mFdm.width, mFdm.height, 1};
++    imageInfo.mipLevels = 1;
++    imageInfo.arrayLayers = 1;
++    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
++    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
++    imageInfo.usage = VK_IMAGE_USAGE_FRAGMENT_DENSITY_MAP_BIT_EXT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++    if (fn.CreateImage(GetVkDevice(), &imageInfo, nullptr, &*mFdm.image) != VK_SUCCESS) {
++        return false;
++    }
++    VkMemoryRequirements requirements;
++    fn.GetImageMemoryRequirements(GetVkDevice(), mFdm.image, &requirements);
++    auto allocation = GetResourceMemoryAllocator()->Allocate(requirements, MemoryKind::DeviceLocal);
++    if (allocation.IsError()) {
++        allocation.AcquireError();
++        fn.DestroyImage(GetVkDevice(), mFdm.image, nullptr);
++        mFdm.image = VK_NULL_HANDLE;
++        return false;
++    }
++    mFdm.memory = allocation.AcquireSuccess();
++    if (fn.BindImageMemory(GetVkDevice(), mFdm.image,
++                           ToBackend(mFdm.memory.GetResourceHeap())->GetMemory(),
++                           mFdm.memory.GetOffset()) != VK_SUCCESS) {
++        return false;
++    }
++    VkImageViewCreateInfo viewInfo = {};
++    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
++    viewInfo.image = mFdm.image;
++    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
++    viewInfo.format = VK_FORMAT_R8G8_UNORM;
++    viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
++    if (fn.CreateImageView(GetVkDevice(), &viewInfo, nullptr, &*mFdm.view) != VK_SUCCESS) {
++        return false;
++    }
++    mFdm.id = 0xFD00000000000000ull | reinterpret_cast<uintptr_t>(this);
++    mFdm.depthFormat = depthFormat;
++    mFdm.sampleCount = sampleCount;
++    // Full density everywhere until written.
++    std::vector<uint8_t> full(size_t(mFdm.width) * mFdm.height * 2, 255);
++    mFdm.enabled = true;
++    if (!WriteFragmentDensityMap(full.data(), mFdm.width, mFdm.height)) {
++        mFdm.enabled = false;
++        return false;
++    }
++    return true;
++}
++
++bool Device::WriteFragmentDensityMap(const uint8_t* rg8, uint32_t width, uint32_t height) {
++    if (!mFdm.enabled || rg8 == nullptr || width == 0 || height == 0 || width > mFdm.width ||
++        height > mFdm.height) {
++        return false;
++    }
++    const VkDeviceSize size = VkDeviceSize(width) * height * 2;
++    VkBufferCreateInfo bufferInfo = {};
++    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
++    bufferInfo.size = size;
++    bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
++    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++    VkBuffer staging = VK_NULL_HANDLE;
++    if (fn.CreateBuffer(GetVkDevice(), &bufferInfo, nullptr, &*staging) != VK_SUCCESS) {
++        return false;
++    }
++    VkMemoryRequirements requirements;
++    fn.GetBufferMemoryRequirements(GetVkDevice(), staging, &requirements);
++    auto allocation = GetResourceMemoryAllocator()->Allocate(
++        requirements, MemoryKind::Linear | MemoryKind::WriteMappable);
++    if (allocation.IsError()) {
++        allocation.AcquireError();
++        fn.DestroyBuffer(GetVkDevice(), staging, nullptr);
++        return false;
++    }
++    ResourceMemoryAllocation memory = allocation.AcquireSuccess();
++    fn.BindBufferMemory(GetVkDevice(), staging, ToBackend(memory.GetResourceHeap())->GetMemory(),
++                        memory.GetOffset());
++    std::memcpy(memory.GetMappedPointer(), rg8, size_t(size));
++    const size_t memoryType = ToBackend(memory.GetResourceHeap())->GetMemoryType();
++    if (!IsSubset(VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
++                  mDeviceInfo.memoryTypes[memoryType].propertyFlags)) {
++        const VkDeviceSize atom = mDeviceInfo.properties.limits.nonCoherentAtomSize;
++        const VkDeviceSize begin = memory.GetOffset() / atom * atom;
++        const VkDeviceSize end = (memory.GetOffset() + size + atom - 1) / atom * atom;
++        VkMappedMemoryRange range = {};
++        range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
++        range.memory = ToBackend(memory.GetResourceHeap())->GetMemory();
++        range.offset = begin;
++        range.size = end - begin;
++        fn.FlushMappedMemoryRanges(GetVkDevice(), 1, &range);
++    }
++
++    CommandRecordingContext* recordingContext = ToBackend(GetQueue())->GetPendingRecordingContext();
++    VkImageMemoryBarrier toTransfer = {};
++    toTransfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
++    toTransfer.srcAccessMask = mFdm.written ? VK_ACCESS_FRAGMENT_DENSITY_MAP_READ_BIT_EXT : 0;
++    toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++    toTransfer.oldLayout = mFdm.written ? VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT
++                                        : VK_IMAGE_LAYOUT_UNDEFINED;
++    toTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
++    toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++    toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++    toTransfer.image = mFdm.image;
++    toTransfer.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
++    fn.CmdPipelineBarrier(recordingContext->commandBuffer,
++                          mFdm.written ? VK_PIPELINE_STAGE_FRAGMENT_DENSITY_PROCESS_BIT_EXT
++                                       : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
++                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
++                          &toTransfer);
++    VkBufferImageCopy region = {};
++    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++    region.imageExtent = {width, height, 1};
++    fn.CmdCopyBufferToImage(recordingContext->commandBuffer, staging, mFdm.image,
++                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
++    VkImageMemoryBarrier toDensity = toTransfer;
++    toDensity.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++    toDensity.dstAccessMask = VK_ACCESS_FRAGMENT_DENSITY_MAP_READ_BIT_EXT;
++    toDensity.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
++    toDensity.newLayout = VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT;
++    fn.CmdPipelineBarrier(recordingContext->commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                          VK_PIPELINE_STAGE_FRAGMENT_DENSITY_PROCESS_BIT_EXT, 0, 0, nullptr, 0,
++                          nullptr, 1, &toDensity);
++    recordingContext->needsSubmit = true;
++    mFdm.written = true;
++
++    GetFencedDeleter()->DeleteWhenUnused(staging);
++    GetResourceMemoryAllocator()->Deallocate(&memory);
++    return true;
++}
++
++bool Device::FragmentDensityMapApplies(bool hasDepthStencil,
++                                       wgpu::TextureFormat depthFormat,
++                                       uint32_t sampleCount) const {
++    return mFdm.enabled && hasDepthStencil && depthFormat == mFdm.depthFormat &&
++           sampleCount == mFdm.sampleCount;
++}
++
++VkImageView Device::GetFragmentDensityMapView() const {
++    return mFdm.view;
++}
++
++uint64_t Device::GetFragmentDensityMapId() const {
++    return mFdm.id;
++}
++
++void Device::GetFragmentDensityMapLayout(uint32_t* texelWidth,
++                                         uint32_t* texelHeight,
++                                         uint32_t* mapWidth,
++                                         uint32_t* mapHeight) const {
++    *texelWidth = mFdm.enabled ? mFdm.texelWidth : 0;
++    *texelHeight = mFdm.enabled ? mFdm.texelHeight : 0;
++    *mapWidth = mFdm.enabled ? mFdm.width : 0;
++    *mapHeight = mFdm.enabled ? mFdm.height : 0;
++}
++
++void Device::DestroyFragmentDensityMap() {
++    if (mFdm.view != VK_NULL_HANDLE) {
++        fn.DestroyImageView(GetVkDevice(), mFdm.view, nullptr);
++        mFdm.view = VK_NULL_HANDLE;
++    }
++    if (mFdm.image != VK_NULL_HANDLE) {
++        fn.DestroyImage(GetVkDevice(), mFdm.image, nullptr);
++        mFdm.image = VK_NULL_HANDLE;
++    }
++    if (mFdm.memory.GetInfo().mMethod != AllocationMethod::kInvalid) {
++        GetResourceMemoryAllocator()->Deallocate(&mFdm.memory);
++    }
++    mFdm.enabled = false;
++}
++
+ }  // namespace dawn::native::vulkan
+diff --git a/src/dawn/native/vulkan/DeviceVk.h b/src/dawn/native/vulkan/DeviceVk.h
+index c6c46d0..6016d8a 100644
+--- a/src/dawn/native/vulkan/DeviceVk.h
++++ b/src/dawn/native/vulkan/DeviceVk.h
+@@ -36,6 +36,7 @@
+ #include "src/dawn/common/MutexProtected.h"
+ #include "src/dawn/common/SerialQueue.h"
+ #include "src/dawn/native/Device.h"
++#include "src/dawn/native/ResourceMemoryAllocation.h"
+ #include "src/dawn/native/dawn_platform.h"
+ #include "src/dawn/native/vulkan/CommandRecordingContextVk.h"
+ #include "src/dawn/native/vulkan/DescriptorSetAllocator.h"
+@@ -155,6 +156,22 @@ class Device final : public DeviceBase {
+ 
+     VulkanRenderPassType GetRenderPassType() { return mRenderPassType; }
+ 
++    // Fragment density map (party board patch, dawn::native::vulkan::EnableFragmentDensityMap).
++    bool EnableFragmentDensityMap(wgpu::TextureFormat depthFormat,
++                                  uint32_t sampleCount,
++                                  uint32_t maxWidth,
++                                  uint32_t maxHeight);
++    bool WriteFragmentDensityMap(const uint8_t* rg8, uint32_t width, uint32_t height);
++    bool FragmentDensityMapApplies(bool hasDepthStencil,
++                                   wgpu::TextureFormat depthFormat,
++                                   uint32_t sampleCount) const;
++    VkImageView GetFragmentDensityMapView() const;
++    uint64_t GetFragmentDensityMapId() const;
++    void GetFragmentDensityMapLayout(uint32_t* texelWidth,
++                                     uint32_t* texelHeight,
++                                     uint32_t* mapWidth,
++                                     uint32_t* mapHeight) const;
++
+   private:
+     Device(AdapterBase* adapter,
+            const UnpackedPtr<DeviceDescriptor>& descriptor,
+@@ -249,6 +266,20 @@ class Device final : public DeviceBase {
+ 
+     VulkanRenderPassType mRenderPassType = VulkanRenderPassType::CreateRenderPass;
+ 
++    void DestroyFragmentDensityMap();
++    struct FragmentDensityMap {
++        bool enabled = false;
++        bool written = false;
++        wgpu::TextureFormat depthFormat = wgpu::TextureFormat::Undefined;
++        uint32_t sampleCount = 0;
++        uint32_t texelWidth = 0, texelHeight = 0;
++        uint32_t width = 0, height = 0;
++        VkImage image = VK_NULL_HANDLE;
++        VkImageView view = VK_NULL_HANDLE;
++        ResourceMemoryAllocation memory;
++        uint64_t id = 0;
++    } mFdm;
++
+     MaybeError ImportExternalImage(const ExternalImageDescriptorVk* descriptor,
+                                    ExternalMemoryHandle memoryHandle,
+                                    VkImage image,
+diff --git a/src/dawn/native/vulkan/FramebufferCache.cpp b/src/dawn/native/vulkan/FramebufferCache.cpp
+index d905d14..625e31b 100644
+--- a/src/dawn/native/vulkan/FramebufferCache.cpp
++++ b/src/dawn/native/vulkan/FramebufferCache.cpp
+@@ -48,6 +48,15 @@ void FramebufferCacheQuery::SetRenderPass(uint64_t passId,
+     height = passHeight;
+ }
+ 
++void FramebufferCacheQuery::AddRawAttachment(VkImageView view, uint64_t id) {
++    DAWN_ASSERT(attachmentCount < kMaxFramebufferAttachments);
++    textureViews[attachmentCount].textureViewId = id;
++    textureViews[attachmentCount].depthSlice = 0;
++    attachments[attachmentCount] = view;
++    clearValues[attachmentCount] = {};
++    attachmentCount++;
++}
++
+ MaybeError FramebufferCacheQuery::AddAttachment(TextureView* view,
+                                                 VkClearValue clearValue,
+                                                 uint32_t depthSlice) {
+diff --git a/src/dawn/native/vulkan/FramebufferCache.h b/src/dawn/native/vulkan/FramebufferCache.h
+index 6e04772..8a355de 100644
+--- a/src/dawn/native/vulkan/FramebufferCache.h
++++ b/src/dawn/native/vulkan/FramebufferCache.h
+@@ -56,7 +56,7 @@ struct FramebufferCacheTextureView {
+ };
+ 
+ // A key to query the FramebufferCache
+-static const uint32_t kMaxFramebufferAttachments = kMaxColorAttachments * 2 + 1;
++static const uint32_t kMaxFramebufferAttachments = kMaxColorAttachments * 2 + 2;
+ struct FramebufferCacheQuery {
+     // Use these helpers to build the query, they make sure all relevant data is initialized and
+     // masks set.
+@@ -64,6 +64,8 @@ struct FramebufferCacheQuery {
+     MaybeError AddAttachment(TextureView* attachment,
+                              VkClearValue clearValue = {},
+                              uint32_t depthSlice = 0);
++    // A view Dawn does not track (the fragment density map), keyed by `id`.
++    void AddRawAttachment(VkImageView view, uint64_t id);
+ 
+     // A unique ID for the render pass is used for cache lookup rather than the VkRenderPass
+     // because Vulkan handles may be reused, making them unreliable as cache keys.
+diff --git a/src/dawn/native/vulkan/RenderPassCache.cpp b/src/dawn/native/vulkan/RenderPassCache.cpp
+index b097424..5261f2f 100644
+--- a/src/dawn/native/vulkan/RenderPassCache.cpp
++++ b/src/dawn/native/vulkan/RenderPassCache.cpp
+@@ -47,7 +47,7 @@ namespace {
+ 
+ // Contains the attachment description that will be chained in the create info
+ // The order of all attachments in attachmentDescs is "color-depthstencil-resolve".
+-constexpr uint8_t kMaxAttachmentCount = kMaxColorAttachments * 2 + 1;
++constexpr uint8_t kMaxAttachmentCount = kMaxColorAttachments * 2 + 2;
+ 
+ class RenderPassCreateInfo {
+   public:
+@@ -82,6 +82,7 @@ class RenderPassCreateInfo {
+     std::array<VkSubpassDependency, 2> subpassDependencies = {};
+ 
+     VkRenderPassCreateInfo createInfo = {};
++    VkRenderPassFragmentDensityMapCreateInfoEXT fragmentDensityMapInfo = {};
+ };
+ 
+ class RenderPassCreateInfo2 {
+@@ -139,6 +140,7 @@ class RenderPassCreateInfo2 {
+     std::array<VkSubpassDependency2, 2> subpassDependencies = {};
+ 
+     VkRenderPassCreateInfo2 createInfo = {};
++    VkRenderPassFragmentDensityMapCreateInfoEXT fragmentDensityMapInfo = {};
+ };
+ 
+ template <class InfoType>
+@@ -241,6 +243,26 @@ void InitializePassInfo(Device* device, const RenderPassCacheQuery& query, InfoT
+         resolveAttachmentCount++;
+     }
+ 
++    // The fragment density map, last.
++    if (query.fragmentDensityMap) {
++        auto& densityDesc = passInfo.attachmentDescs[attachmentCount];
++        densityDesc.flags = 0;
++        densityDesc.format = VK_FORMAT_R8G8_UNORM;
++        densityDesc.samples = VK_SAMPLE_COUNT_1_BIT;
++        densityDesc.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
++        densityDesc.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
++        densityDesc.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
++        densityDesc.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
++        densityDesc.initialLayout = VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT;
++        densityDesc.finalLayout = VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT;
++        passInfo.fragmentDensityMapInfo.sType =
++            VK_STRUCTURE_TYPE_RENDER_PASS_FRAGMENT_DENSITY_MAP_CREATE_INFO_EXT;
++        passInfo.fragmentDensityMapInfo.pNext = nullptr;
++        passInfo.fragmentDensityMapInfo.fragmentDensityMapAttachment = {
++            attachmentCount, VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT};
++        attachmentCount++;
++    }
++
+     uint32_t subpassCount = 0;
+     uint32_t dependencyCount = 0;
+     if (query.expandResolveMask.any()) {
+@@ -328,6 +350,7 @@ void InitializePassInfo(Device* device, const RenderPassCacheQuery& query, InfoT
+ 
+     // Chain everything in VkRenderPassCreateInfo
+     passInfo.createInfo.flags = 0;
++    passInfo.createInfo.pNext = query.fragmentDensityMap ? &passInfo.fragmentDensityMapInfo : nullptr;
+     passInfo.createInfo.attachmentCount = attachmentCount;
+     passInfo.createInfo.pAttachments = passInfo.attachmentDescs.data();
+     passInfo.createInfo.subpassCount = subpassCount;
+@@ -389,7 +412,12 @@ RenderPassCache::~RenderPassCache() {
+ }
+ 
+ ResultOrError<RenderPassCache::RenderPassInfo> RenderPassCache::GetRenderPass(
+-    const RenderPassCacheQuery& query) {
++    const RenderPassCacheQuery& queryIn) {
++    // Every render pass, and every pipeline's compatible one, with the fragment
++    // density map's depth format and sample count carries it.
++    RenderPassCacheQuery query = queryIn;
++    query.fragmentDensityMap = mDevice->FragmentDensityMapApplies(
++        query.hasDepthStencil, query.depthStencilFormat, query.sampleCount);
+     std::lock_guard<std::mutex> lock(mMutex);
+     auto it = mCache.find(query);
+     if (it != mCache.end()) {
+@@ -406,6 +434,7 @@ ResultOrError<RenderPassCache::RenderPassInfo> RenderPassCache::CreateRenderPass
+     const RenderPassCacheQuery& query) {
+     RenderPassInfo renderPassInfo;
+     renderPassInfo.uniqueId = nextRenderPassId++;
++    renderPassInfo.fragmentDensityMap = query.fragmentDensityMap;
+ 
+     switch (mDevice->GetRenderPassType()) {
+         case VulkanRenderPassType::CreateRenderPass2: {
+@@ -493,6 +522,7 @@ size_t RenderPassCache::CacheFuncs::operator()(const RenderPassCacheQuery& query
+                     query.stencilReadOnly);
+     }
+     HashCombine(&hash, query.sampleCount);
++    HashCombine(&hash, query.fragmentDensityMap);
+ 
+     return hash;
+ }
+@@ -511,6 +541,10 @@ bool RenderPassCache::CacheFuncs::operator()(const RenderPassCacheQuery& a,
+         return false;
+     }
+ 
++    if (a.fragmentDensityMap != b.fragmentDensityMap) {
++        return false;
++    }
++
+     for (auto i : a.colorMask) {
+         if ((a.colorFormats[i] != b.colorFormats[i]) || (a.colorLoadOp[i] != b.colorLoadOp[i]) ||
+             (a.colorStoreOp[i] != b.colorStoreOp[i])) {
+diff --git a/src/dawn/native/vulkan/RenderPassCache.h b/src/dawn/native/vulkan/RenderPassCache.h
+index c9349ad..9f9c621 100644
+--- a/src/dawn/native/vulkan/RenderPassCache.h
++++ b/src/dawn/native/vulkan/RenderPassCache.h
+@@ -86,6 +86,9 @@ struct RenderPassCacheQuery {
+     bool stencilReadOnly;
+ 
+     uint32_t sampleCount;
++
++    // Set by RenderPassCache::GetRenderPass (Device::FragmentDensityMapApplies).
++    bool fragmentDensityMap = false;
+ };
+ 
+ // Caches VkRenderPasses so that we don't create duplicate ones for every RenderPipeline or
+@@ -103,6 +106,7 @@ class RenderPassCache {
+         VkRenderPass renderPass = VK_NULL_HANDLE;
+         uint32_t mainSubpass = 0;
+         uint64_t uniqueId;
++        bool fragmentDensityMap = false;
+     };
+ 
+     ResultOrError<RenderPassInfo> GetRenderPass(const RenderPassCacheQuery& query);
+diff --git a/src/dawn/native/vulkan/VulkanBackend.cpp b/src/dawn/native/vulkan/VulkanBackend.cpp
+index 5e09cfe..cd95ea4 100644
+--- a/src/dawn/native/vulkan/VulkanBackend.cpp
++++ b/src/dawn/native/vulkan/VulkanBackend.cpp
+@@ -51,6 +51,33 @@ VkDevice GetVkDevice(WGPUDevice device) {
+     return backendDevice->GetVkDevice();
+ }
+ 
++bool EnableFragmentDensityMap(WGPUDevice device,
++                              WGPUTextureFormat depthFormat,
++                              uint32_t sampleCount,
++                              uint32_t maxWidth,
++                              uint32_t maxHeight) {
++    Device* backendDevice = ToBackend(FromAPI(device));
++    auto deviceGuard = backendDevice->GetGuard();
++    return backendDevice->EnableFragmentDensityMap(static_cast<wgpu::TextureFormat>(depthFormat),
++                                                   sampleCount, maxWidth, maxHeight);
++}
++
++void GetFragmentDensityMapLayout(WGPUDevice device,
++                                 uint32_t* texelWidth,
++                                 uint32_t* texelHeight,
++                                 uint32_t* mapWidth,
++                                 uint32_t* mapHeight) {
++    Device* backendDevice = ToBackend(FromAPI(device));
++    auto deviceGuard = backendDevice->GetGuard();
++    backendDevice->GetFragmentDensityMapLayout(texelWidth, texelHeight, mapWidth, mapHeight);
++}
++
++bool WriteFragmentDensityMap(WGPUDevice device, const uint8_t* rg8, uint32_t width, uint32_t height) {
++    Device* backendDevice = ToBackend(FromAPI(device));
++    auto deviceGuard = backendDevice->GetGuard();
++    return backendDevice->WriteFragmentDensityMap(rg8, width, height);
++}
++
+ DAWN_NATIVE_EXPORT PFN_vkVoidFunction GetInstanceProcAddr(WGPUDevice device, const char* pName) {
+     Device* backendDevice = ToBackend(FromAPI(device));
+     return (*backendDevice->fn.GetInstanceProcAddr)(backendDevice->GetVkInstance(), pName);
+diff --git a/src/dawn/native/vulkan/VulkanExtensions.cpp b/src/dawn/native/vulkan/VulkanExtensions.cpp
+index 5487266..a4c7fbc 100644
+--- a/src/dawn/native/vulkan/VulkanExtensions.cpp
++++ b/src/dawn/native/vulkan/VulkanExtensions.cpp
+@@ -156,6 +156,7 @@ static constexpr std::array<DeviceExtInfo, kDeviceExtCount> sDeviceExtInfos{{
+     {DeviceExt::MultisampledRenderToSingleSampled, "VK_EXT_multisampled_render_to_single_sampled"},
+     {DeviceExt::PhysicalDeviceDrm, "VK_EXT_physical_device_drm"},
+     {DeviceExt::RasterizationOrderAttachmentAccess, "VK_EXT_rasterization_order_attachment_access"},
++    {DeviceExt::FragmentDensityMap, "VK_EXT_fragment_density_map"},
+ 
+     {DeviceExt::ExternalMemoryAndroidHardwareBuffer,
+      "VK_ANDROID_external_memory_android_hardware_buffer"},
+@@ -223,6 +224,7 @@ DeviceExtSet EnsureDependencies(const DeviceExtSet& advertisedExts,
+             case DeviceExt::VulkanMemoryModel:
+             case DeviceExt::CooperativeMatrix:
+             case DeviceExt::RasterizationOrderAttachmentAccess:
++            case DeviceExt::FragmentDensityMap:
+             case DeviceExt::ShaderFloatControls:
+             case DeviceExt::DescriptorIndexing:
+             case DeviceExt::CreateRenderPass2:
+diff --git a/src/dawn/native/vulkan/VulkanExtensions.h b/src/dawn/native/vulkan/VulkanExtensions.h
+index e0ea4da..17a4c91 100644
+--- a/src/dawn/native/vulkan/VulkanExtensions.h
++++ b/src/dawn/native/vulkan/VulkanExtensions.h
+@@ -115,6 +115,7 @@ enum class DeviceExt : uint32_t {
+     MultisampledRenderToSingleSampled,
+     PhysicalDeviceDrm,
+     RasterizationOrderAttachmentAccess,
++    FragmentDensityMap,
+ 
+     // External* extensions
+     ExternalMemoryAndroidHardwareBuffer,
+diff --git a/src/dawn/native/vulkan/VulkanInfo.cpp b/src/dawn/native/vulkan/VulkanInfo.cpp
+index 5ee21ed..4045073 100644
+--- a/src/dawn/native/vulkan/VulkanInfo.cpp
++++ b/src/dawn/native/vulkan/VulkanInfo.cpp
+@@ -367,6 +367,13 @@ ResultOrError<VulkanDeviceInfo> GatherDeviceInfo(const PhysicalDevice& device) {
+                             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_PROPERTIES);
+     }
+ 
++    if (info.extensions[DeviceExt::FragmentDensityMap]) {
++        featuresChain.Add(&info.fragmentDensityMapFeatures,
++                          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_FEATURES_EXT);
++        propertiesChain.Add(&info.fragmentDensityMapProperties,
++                            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_PROPERTIES_EXT);
++    }
++
+     if (info.extensions[DeviceExt::RasterizationOrderAttachmentAccess]) {
+         featuresChain.Add(
+             &info.rasterizationOrderAttachmentAccessFeatures,
+diff --git a/src/dawn/native/vulkan/VulkanInfo.h b/src/dawn/native/vulkan/VulkanInfo.h
+index 0d82f2b..ebfa551 100644
+--- a/src/dawn/native/vulkan/VulkanInfo.h
++++ b/src/dawn/native/vulkan/VulkanInfo.h
+@@ -82,6 +82,7 @@ struct VulkanDeviceKnobs {
+     VkPhysicalDeviceMultisampledRenderToSingleSampledFeaturesEXT
+         multisampledRenderToSingleSampledFeatures;
+     VkPhysicalDeviceExtendedDynamicStateFeaturesEXT extendedDynamicStateFeatures;
++    VkPhysicalDeviceFragmentDensityMapFeaturesEXT fragmentDensityMapFeatures;
+ 
+     bool HasExt(DeviceExt ext) const;
+     DeviceExtSet extensions;
+@@ -101,6 +102,7 @@ struct VulkanDeviceInfo : VulkanDeviceKnobs {
+     VkPhysicalDevicePipelineRobustnessProperties pipelineRobustnessProperties;
+     VkPhysicalDeviceMaintenance5Properties propertiesMaintenance5;
+     VkPhysicalDeviceDrmPropertiesEXT drmProperties;
++    VkPhysicalDeviceFragmentDensityMapPropertiesEXT fragmentDensityMapProperties;
+ 
+     std::vector<VkQueueFamilyProperties> queueFamilies;
+     std::vector<VkCooperativeMatrixPropertiesKHR> cooperativeMatrixConfigs;
