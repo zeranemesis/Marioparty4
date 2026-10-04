@@ -1076,7 +1076,15 @@ void StereoView::adapt_resolution() {
   }
   mRequestIntervals.clear();
   mLastSlow = slow;
-  const float measuredScale = mQuality.update(mQualitySample, wanted, mAdaptRingFull, slow, mAdaptMissed);
+  // A scene arriving (a world shown again, a board entered or left) hitches
+  // while it loads: not the GPU's pressure. Entering the Toad board at 100%,
+  // its loading hitches took it to 95% a second later, kept there 20 s
+  // (2026-10-04). The controller sits out the first 3 seconds.
+  if (mShownHasWorld && !mSettleWorld) mSettleUntil = now + std::chrono::seconds(3);
+  mSettleWorld = mShownHasWorld;
+  const bool settling = now < mSettleUntil;
+  const float measuredScale = settling ? mQuality.scale()
+                                       : mQuality.update(mQualitySample, wanted, mAdaptRingFull, slow, mAdaptMissed);
   mAdaptMissed = 0;
   mRenderScale = std::min(1.0f, measuredScale / mMaxScale);
   if (mBoardMode && mShownHasWorld) mBoardQuality = measuredScale;
@@ -1167,6 +1175,7 @@ void StereoView::set_board_mode(bool board) {
   std::lock_guard lock{mMutex};
   // A board: never under 90% (AdaptiveQuality::set_floor).
   if (board != mBoardMode) {
+    mSettleUntil = std::chrono::steady_clock::now() + std::chrono::seconds(3); // adapt_resolution()
     mQuality.set_floor(board ? 0.9f : 0.65f);
     mRenderScale = std::min(1.0f, mQuality.scale() / mMaxScale);
   }

@@ -300,6 +300,9 @@ private:
   // at 100% (one missed in 26 s, eyes' pass 9.4 to 9.9 ms; build 195,
   // 2026-10-04); its pixels cost little.
   float mBoardQuality = 1.0f;
+  // No resolution decision until then: a scene just arrived (adapt_resolution()).
+  std::chrono::steady_clock::time_point mSettleUntil{};
+  bool mSettleWorld = false; // a world was shown at the last decision
   float mMaxScale = 1.0f;    // the images' size, relative to the recommended one
   AdaptiveQuality mQuality;
   QualitySample mQualitySample;
