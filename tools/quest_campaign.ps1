@@ -101,6 +101,10 @@ $live = @(
     @{ name = 'gpu-boost';        props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.gpu_level' = 'boost' } },
     @{ name = 'crossing-on';      props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.stereo_crossing' = '1' } },
     @{ name = 'all-cheap';        props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.alpha_test' = 'opaque-off'; 'debug.partyboard.anisotropy' = '4' } },
+    # Build 193: opaque draws grouped by pipeline and textures; the interface
+    # every other image (the default is now one in 3 at 72 Hz).
+    @{ name = 'sort-state';       props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.sort_opaque' = 'state' } },
+    @{ name = 'hud-half';         props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.hud_rate' = 'half' } },
     @{ name = 'render-120';     props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.render_hz' = '0' } },
     @{ name = 'reference-end'; props = @{ 'debug.partyboard.eye_scale' = $eye } }
 )
