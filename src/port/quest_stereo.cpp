@@ -204,6 +204,10 @@ bool find_quest()
             sQuest.tableSetupHold = reinterpret_cast<TableSetupHoldFn>(dlsym(lib, "PartyBoardQuest_TableSetupHold"));
             sQuest.followCamera = reinterpret_cast<FollowCameraFn>(dlsym(lib, "PartyBoardQuest_StereoFollowCamera"));
             sQuest.hiddenArea = reinterpret_cast<HiddenAreaFn>(dlsym(lib, "PartyBoardQuest_StereoHiddenArea"));
+            // The head's pose again once a frame is recorded (optional: an
+            // older library has none). Aurora calls it on this thread.
+            AuroraStereoSetLateLatch(
+                reinterpret_cast<AuroraStereoLateLatch>(dlsym(lib, "PartyBoardQuest_StereoLateLatch")));
             __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Stereo bridge: symbols %s",
                 sQuest.frame && sQuest.images && sQuest.releaseImages && sQuest.submitted && sQuest.generation
                     && sQuest.cancelled ? "ready" : "missing");

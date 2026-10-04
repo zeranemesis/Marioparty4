@@ -1601,6 +1601,7 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   const float modelScale = floating ? app.minigameScale : app.table.modelScale;
   app.stereo.set_quality_sample(g_perf.quality_sample());
   app.stereo.set_frame_time(time, frame.predictedDisplayPeriod);
+  app.stereo.set_locate_space(app.stage);
   app.stereo.update(views, modelPose, modelScale, model, app.table.screenWidth, app.table.screenWidth * 0.75f);
   // The table under the board, a little wider than the fitted scene, for the
   // compositor's depth; a floating minigame faces the head: none.

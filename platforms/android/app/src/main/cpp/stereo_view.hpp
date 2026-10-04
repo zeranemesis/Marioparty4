@@ -60,6 +60,16 @@ public:
   // instead of 18 (Toad board, 2026-10-04): its head poses were predicted
   // that much further. Here the GPU is idle between the game's frames.
   void early_copy();
+  // The space the eyes' views are located in (quest_xr.cpp's stage), for the
+  // late latch.
+  void set_locate_space(XrSpace space);
+  // Game thread, once the frame `tag` is recorded (Aurora's
+  // AuroraStereoSetLateLatch): the eyes located again for the display frame
+  // it is due in, and each eye's correction of its projection (row-major);
+  // the image is then placed with those newer poses. The pose the frame began
+  // with was taken up to a period before the game started it, and the game's
+  // draws took 4 to 5 ms more (2026-10-04). debug.partyboard.late_latch 0: off.
+  bool late_latch(uint64_t tag, float correction[2][16]);
   // The game's interface (scores, messages) as a quad at `pose` in `space`:
   // quest_xr.cpp stands it at the back of the model. nullptr while hidden.
   const XrCompositionLayerBaseHeader* hud_layer(XrSpace space, const XrPosef& pose, XrExtent2Df size,
@@ -268,6 +278,13 @@ private:
   // turns them off (read every 2 s). The last look, the display frame the
   // last early copy was for, and how many were made since the last perf line.
   bool mEarlyCopy = true, mSkipFrameCount = false;
+  // The late latch (late_latch()): on by default, its space, whether the
+  // views are frozen for a measurement, and since the last perf line, the
+  // frames corrected and how far the left eye had moved meanwhile.
+  bool mLateLatch = true, mViewsFrozen = false;
+  XrSpace mLocateSpace = XR_NULL_HANDLE;
+  uint32_t mLateApplied = 0;
+  double mLateMovedSumMm = 0, mLateMovedMaxMm = 0;
   int64_t mLastLookNs = 0, mEarlyDisplayNs = 0;
   uint32_t mEarlyCopies = 0, mDueEarly = 0;
   bool mGpuTiming = false;

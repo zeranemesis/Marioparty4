@@ -894,6 +894,7 @@ void StereoView::update(const XrView (&views)[2], const XrPosef& world, float sc
     frozen = wanted;
   }
   std::lock_guard lock{mMutex};
+  mViewsFrozen = frozen;
   if (!frozen || !(mViews[0].fov.angleRight > mViews[0].fov.angleLeft)) {
     mViews[0] = views[0];
     mViews[1] = views[1];
@@ -989,6 +990,113 @@ bool StereoView::game_frame(StereoFrame& out) {
   out.hudHeight = mHudHeight;
   out.eyeWidth = free->renderWidth;
   out.eyeHeight = free->renderHeight;
+  return true;
+}
+
+void StereoView::set_locate_space(XrSpace space) {
+  std::lock_guard lock{mMutex};
+  mLocateSpace = space;
+}
+
+namespace {
+// A 4x4 row-major matrix's inverse (Gauss-Jordan, partial pivoting); false
+// when singular.
+bool invert4(const float in[16], float out[16]) {
+  double a[4][8];
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      a[r][c] = in[r * 4 + c];
+      a[r][c + 4] = r == c ? 1.0 : 0.0;
+    }
+  }
+  for (int c = 0; c < 4; ++c) {
+    int pivot = c;
+    for (int r = c + 1; r < 4; ++r) {
+      if (std::fabs(a[r][c]) > std::fabs(a[pivot][c])) pivot = r;
+    }
+    if (std::fabs(a[pivot][c]) < 1e-12) return false;
+    if (pivot != c) std::swap(a[pivot], a[c]);
+    const double scale = 1.0 / a[c][c];
+    for (double& v : a[c]) v *= scale;
+    for (int r = 0; r < 4; ++r) {
+      if (r == c) continue;
+      const double f = a[r][c];
+      for (int k = 0; k < 8; ++k) a[r][k] -= f * a[c][k];
+    }
+  }
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) out[r * 4 + c] = static_cast<float>(a[r][c + 4]);
+  }
+  return true;
+}
+
+void multiply4(const float a[16], const float b[16], float out[16]) {
+  float result[16];
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      float sum = 0.f;
+      for (int k = 0; k < 4; ++k) sum += a[r * 4 + k] * b[k * 4 + c];
+      result[r * 4 + c] = sum;
+    }
+  }
+  std::copy(std::begin(result), std::end(result), out);
+}
+} // namespace
+
+bool StereoView::late_latch(uint64_t tag, float correction[2][16]) {
+  XrView old[2]{};
+  XrTime display = 0;
+  XrSpace space = XR_NULL_HANDLE;
+  {
+    std::lock_guard lock{mMutex};
+    if (!mLateLatch || mViewsFrozen || mSession == XR_NULL_HANDLE || mLocateSpace == XR_NULL_HANDLE) return false;
+    const auto slot = std::ranges::find_if(mSlots, [tag](const Slot& s) { return s.state == State::Drawing && s.tag == tag; });
+    if (slot == mSlots.end()) return false;
+    old[0] = slot->views[0];
+    old[1] = slot->views[1];
+    // The display frame it was located for: its paced one, else the measured delay.
+    display = slot->dueNs != 0 ? slot->dueNs
+                               : slot->leaseTime + static_cast<XrTime>(std::clamp(mLatencyNs, 0.0, kMaxPredictionNs));
+    space = mLocateSpace;
+  }
+  if (display <= 0 || !(old[0].fov.angleRight > old[0].fov.angleLeft)) return false;
+  XrView fresh[2]{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
+  XrViewLocateInfo info{XR_TYPE_VIEW_LOCATE_INFO};
+  info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+  info.displayTime = display;
+  info.space = space;
+  XrViewState state{XR_TYPE_VIEW_STATE};
+  uint32_t count = 0;
+  constexpr XrViewStateFlags valid = XR_VIEW_STATE_POSITION_VALID_BIT | XR_VIEW_STATE_ORIENTATION_VALID_BIT;
+  if (XR_FAILED(xrLocateViews(mSession, &info, &state, 2, &count, fresh)) || count != 2 ||
+      (state.viewStateFlags & valid) != valid) {
+    return false;
+  }
+  // Each eye: the projection the frame was recorded with, P V_old, becomes
+  // P' V_new: correction = P' V_new V_old^-1 P^-1.
+  for (int eye = 0; eye < 2; ++eye) {
+    float pOld[16], pNew[16], vNew[16], vOldInverse[16], pOldInverse[16], m[16];
+    projection_matrix(old[eye].fov, pOld);
+    projection_matrix(fresh[eye].fov, pNew);
+    view_matrix(fresh[eye].pose, vNew);
+    pose_matrix(old[eye].pose, 1.0f, vOldInverse);
+    if (!invert4(pOld, pOldInverse)) return false;
+    multiply4(vNew, vOldInverse, m);
+    multiply4(pNew, m, m);
+    multiply4(m, pOldInverse, correction[eye]);
+  }
+  std::lock_guard lock{mMutex};
+  const auto slot = std::ranges::find_if(mSlots, [tag](const Slot& s) { return s.state == State::Drawing && s.tag == tag; });
+  if (slot == mSlots.end()) return false;
+  // The compositor places the image with the poses it was drawn with.
+  slot->views[0] = fresh[0];
+  slot->views[1] = fresh[1];
+  const auto& a = old[0].pose.position;
+  const auto& b = fresh[0].pose.position;
+  const double moved = std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z));
+  ++mLateApplied;
+  mLateMovedSumMm += moved * 1000.0;
+  mLateMovedMaxMm = std::max(mLateMovedMaxMm, moved * 1000.0);
   return true;
 }
 
@@ -1658,6 +1766,16 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
         LOGI("Stereo: early copies %s (debug.partyboard.early_copy)", early ? "on" : "off");
         mEarlyCopy = early;
       }
+      LOGI("Late latch: %u frames corrected, the eye moved %.1f mm avg / %.1f max meanwhile", mLateApplied,
+           mLateApplied ? mLateMovedSumMm / mLateApplied : 0.0, mLateMovedMaxMm);
+      mLateApplied = 0;
+      mLateMovedSumMm = mLateMovedMaxMm = 0;
+      char lateLatch[PROP_VALUE_MAX] = {};
+      __system_property_get("debug.partyboard.late_latch", lateLatch);
+      if (const bool late = lateLatch[0] != '0'; late != mLateLatch) {
+        LOGI("Stereo: late latch %s (debug.partyboard.late_latch)", late ? "on" : "off");
+        mLateLatch = late;
+      }
       mDueSteps[0] = mDueSteps[1] = mDueSteps[2] = 0;
       mMissDoneEarly = mMissDoneLate = 0;
       mMissLateSumNs = mMissLateMaxNs = mMissEarlyMaxNs = mJitterMinNs = mJitterMaxNs = 0;
@@ -1899,6 +2017,11 @@ __attribute__((visibility("default"))) void PartyBoardQuest_StereoCancelled(uint
   if (quest::g_stereoView != nullptr) {
     quest::g_stereoView->cancelled(image, tag);
   }
+}
+
+__attribute__((visibility("default"))) bool PartyBoardQuest_StereoLateLatch(uint64_t tag, float correction[2][16]) {
+  quest::StereoView* view = quest::g_stereoView;
+  return view != nullptr && correction != nullptr && view->late_latch(tag, correction);
 }
 
 __attribute__((visibility("default"))) bool PartyBoardQuest_StereoFrame(quest::StereoFrame* out) {
