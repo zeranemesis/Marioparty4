@@ -383,6 +383,23 @@ int main() {
     assert(scattered.size() > 1000);
     assert(off_cadence(scattered) == 0);
   }
+  // A scene that gets heavier: two images over the budget within eight and
+  // the plan grows at once, not at the next update().
+  {
+    quest::FramePacer heavier;
+    const int64_t period = 13'888'889;
+    heavier.look(1'000'000'000, 1'020'000'000, period);
+    for (int i = 0; i < 30; ++i) heavier.finished(8'000'000);
+    heavier.update();
+    assert(heavier.looks() == 1);
+    heavier.finished(20'000'000);
+    assert(heavier.looks() == 1); // one over budget: a tail, not a new scene
+    heavier.finished(8'000'000);
+    heavier.finished(21'000'000);
+    assert(heavier.looks() == 2 && heavier.work_ns() == 21'000'000 && heavier.take_replans() == 1);
+    heavier.finished(21'500'000);
+    assert(heavier.looks() == 2); // within the new budget
+  }
   quest::FramePacer rates;
   rates.look(1'000'000'000, 1'020'000'000, 8'333'333);
   assert(rates.next_start(1'001'000'000, 72.0f) == 0);  // not 120 divided by a whole number

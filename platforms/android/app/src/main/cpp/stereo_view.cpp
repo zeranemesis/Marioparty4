@@ -30,6 +30,9 @@ constexpr float kFar = 100.0f;
 
 // The head is predicted at most this far ahead (nanoseconds).
 constexpr double kMaxPredictionNs = 50e6;
+// An early copy (StereoView::early_copy) gives up this long before the next
+// look is expected, so xrWaitFrame is not called late.
+constexpr int64_t kEarlyMarginNs = 2'000'000;
 
 constexpr GLenum kSrgb8Alpha8 = 0x8C43; // GL_SRGB8_ALPHA8
 constexpr GLenum kRgba8 = 0x8058;       // GL_RGBA8
@@ -1403,9 +1406,9 @@ void StereoView::early_copy() {
       return;
     }
     displayNs = mFrameTime + mPeriodNs;
-    // Back before the next look: it comes about a period after the last one
-    // (2 ms either way on the board), and xrWaitFrame must not be late.
-    deadlineNs = mLastLookNs + mPeriodNs - 3'000'000;
+    // Back before the next look: it comes about a period after the last one,
+    // and xrWaitFrame must not be late.
+    deadlineNs = mLastLookNs + mPeriodNs - kEarlyMarginNs;
   }
   Slot* due = nullptr;
   uint64_t tag = 0;
@@ -1490,7 +1493,11 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
     // This look's time: the grid the game's frames start on.
     const auto lookAt = std::chrono::steady_clock::now();
     const int64_t lookNs = steady_ns();
-    mPacer.look(lookNs, mFrameTime, mPeriodNs);
+    // With early copies, images are planned to finish by the early copy's
+    // deadline, not the look: at the look the copy waits behind the game's
+    // next eyes' pass. 3 ms before the look, 20% of the images still went
+    // the slow way (build 194, 2026-10-04).
+    mPacer.look(mEarlyCopy ? lookNs - kEarlyMarginNs : lookNs, mFrameTime, mPeriodNs);
     mJitterMinNs = std::min(mJitterMinNs, mPacer.jitter_ns());
     mJitterMaxNs = std::max(mJitterMaxNs, mPacer.jitter_ns());
     if (lookAt - mLastLayerAt > std::chrono::milliseconds(100)) {
@@ -1623,6 +1630,9 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
           mDestinationAcquireMaxMs[1], mDestinationWaitMaxMs[1], mHolds[0], mHolds[1], mHolds[2], mHolds[3],
           mLatencyMinMs, mLatencyMaxMs, mPacing, mPacer.work_ns() / 1e6, static_cast<long long>(mPacer.looks()),
           mPacer.phase_ns() / 1e6, mMissedLate, mMissedDropped);
+      if (const uint32_t replans = mPacer.take_replans(); replans != 0) {
+        LOGI("Pacing: the plan grew at once %u times (images over budget)", replans);
+      }
       LOGI("Pacing: missed %u finished before their look (up to %.1f ms before), %u after it (avg %.1f, max %.1f ms "
            "after); looks %.1f to %.1f ms after the earliest planned, %.1f ms before their display",
            mMissDoneEarly, mMissEarlyMaxNs / 1e6, mMissDoneLate,

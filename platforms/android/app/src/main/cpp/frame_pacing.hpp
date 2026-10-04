@@ -1,9 +1,11 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <utility>
 #include <vector>
 
 namespace quest {
@@ -56,24 +58,39 @@ public:
   }
 
   // An image shown: from its frame's start to the end of its GPU work.
+  // Over the plan's budget twice within kRecent images (the scene got
+  // heavier), the plan grows at once to the longer of the two instead of at
+  // the next update(): from a light view to the whole board, 34 images
+  // missed their display frame in 2 s before the plan caught up (Toad board,
+  // build 194, 2026-10-04). It shrinks back only at update().
+  static constexpr size_t kRecent = 8;
   void finished(int64_t workNs) {
-    if (workNs > 0 && workNs < 200'000'000 && mWork.size() < 512) mWork.push_back(workNs);
+    if (!(workNs > 0 && workNs < 200'000'000)) return;
+    if (mWork.size() < 512) mWork.push_back(workNs);
+    if (mLooks <= 0 || mPeriodNs <= 0) return;
+    const int64_t budget = mLooks * mPeriodNs - mPhaseNs - kMarginNs;
+    mRecentOver[mRecentIndex] = workNs > budget ? workNs : 0;
+    mRecentIndex = (mRecentIndex + 1) % kRecent;
+    int64_t over = 0, longest = 0;
+    for (const int64_t w : mRecentOver) {
+      over += w != 0;
+      longest = std::max(longest, w);
+    }
+    if (over >= 2) {
+      plan(longest);
+      mRecentOver.fill(0);
+      ++mReplans;
+    }
   }
+  // Plans grown at once since the last call (the "Pacing" log).
+  uint32_t take_replans() { return std::exchange(mReplans, 0u); }
 
   // Once a second: the start's place from the images finished since.
   void update() {
     if (mPeriodNs > 0 && mWork.size() >= 20) {
       const size_t index = mWork.size() * 98 / 100;
       std::nth_element(mWork.begin(), mWork.begin() + static_cast<std::ptrdiff_t>(index), mWork.end());
-      const int64_t work = mWork[index];
-      const int64_t looks = ceil_div(work + kMarginNs, mPeriodNs);
-      const int64_t phase = looks * mPeriodNs - work - kMarginNs;
-      // Each move shifts one start: only for a clear change.
-      if (looks != mLooks || std::llabs(phase - mPhaseNs) > 750'000) {
-        mPhaseNs = phase;
-        mLooks = looks;
-      }
-      mWorkNs = work;
+      plan(mWork[index]);
     }
     mWork.clear();
     if (mLeads.size() >= 20) {
@@ -124,6 +141,17 @@ public:
   int64_t lead_ns() const { return mLeadNs; }
 
 private:
+  // The start's place for `work` from start to GPU finish.
+  void plan(int64_t work) {
+    const int64_t looks = ceil_div(work + kMarginNs, mPeriodNs);
+    const int64_t phase = looks * mPeriodNs - work - kMarginNs;
+    // Each move shifts one start: only for a clear change.
+    if (looks != mLooks || std::llabs(phase - mPhaseNs) > 750'000) {
+      mPhaseNs = phase;
+      mLooks = looks;
+    }
+    mWorkNs = work;
+  }
   static int64_t floor_div(int64_t a, int64_t b) {
     const int64_t q = a / b;
     return (a % b != 0 && a < 0) ? q - 1 : q;
@@ -136,6 +164,9 @@ private:
   int64_t mLeadNs = 0;
   int64_t mJitterNs = 0;
   std::vector<int64_t> mLeads; // this second's, from each look to its display time
+  std::array<int64_t, kRecent> mRecentOver{}; // the last images' work when over budget, else 0
+  size_t mRecentIndex = 0;
+  uint32_t mReplans = 0;
   int64_t mLastLookNs = 0;
   int64_t mLastStartNs = 0;
   int64_t mPhaseNs = 0;    // start after a look
