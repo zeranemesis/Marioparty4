@@ -186,7 +186,7 @@ public:
 private:
 
   void release_slot(Slot& slot);
-  Slot* newest_completed(int64_t lookNs); // Caller holds mMutex.
+  Slot* newest_completed(int64_t displayNs); // Caller holds mMutex.
 
   EGLDisplay mDisplay = EGL_NO_DISPLAY;
   XrInstance mInstance = XR_NULL_HANDLE;
@@ -291,6 +291,13 @@ private:
   // replaced unseen by a newer one): this second's, for the controller, and
   // since the last perf line, for the log.
   uint32_t mAdaptMissed = 0, mMissedLate = 0, mMissedDropped = 0;
+  // Why they missed ("Pacing" log): finished before their due look (the look
+  // came early, or the fence was seen late) or after it, by how much; and
+  // the looks' distance from the grid they are paced on.
+  uint32_t mMissDoneEarly = 0, mMissDoneLate = 0;
+  int64_t mMissLateSumNs = 0, mMissLateMaxNs = 0, mMissEarlyMaxNs = 0;
+  int64_t mJitterMinNs = 0, mJitterMaxNs = 0;
+  void note_miss(int64_t doneNs, int64_t dueNs);
   std::chrono::steady_clock::time_point mAdaptAt = std::chrono::steady_clock::now();
   // Pose prediction: this XR frame's display time, and the measured delay
   // between taking an image and showing it (moving average, nanoseconds).

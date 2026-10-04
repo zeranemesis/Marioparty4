@@ -22,7 +22,8 @@ namespace quest {
 // two: the GPU's time varies more than a period (Quest 3, build 112).
 //
 // Not synchronized: the caller holds its lock. Times are steady-clock (Android:
-// CLOCK_MONOTONIC) nanoseconds.
+// CLOCK_MONOTONIC) nanoseconds, but display times, OpenXR's (only their
+// distance from the steady clock's is used).
 class FramePacer {
 public:
   static constexpr int64_t kMarginNs = 1'500'000;
@@ -31,16 +32,25 @@ public:
   // A start missed by less than this is taken at once, not a period later.
   static constexpr int64_t kLateNs = 1'000'000;
 
-  // XR thread, each look for a finished image.
-  void look(int64_t atNs, int64_t periodNs) {
+  // XR thread, each look for a finished image, for the display frame shown
+  // at `displayNs` (OpenXR's predicted display time). The looks themselves
+  // are not on a grid: with the board on the Quest 3 they came from 6.8 ms
+  // before to 6.9 ms after where a grid locked on them put them, and 29 of
+  // 30 missed images a second had finished before their due look, which had
+  // come early, or late enough to be taken for the next one (2026-10-04,
+  // 72 Hz). The display times are exact: an image is due for a display
+  // frame, and must be finished by the earliest its look comes, `lead`
+  // before that frame's display time (the looks' 98th percentile).
+  void look(int64_t atNs, int64_t displayNs, int64_t periodNs) {
     if (periodNs <= 0) return;
+    const int64_t lead = displayNs - atNs;
     if (periodNs != mPeriodNs || mGridNs == 0 || atNs - mLastLookNs > kStaleNs) {
-      mGridNs = atNs;
-    } else {
-      // Locked on the looks, an eighth of each one's scheduling jitter.
-      const int64_t predicted = mGridNs + round_div(atNs - mGridNs, periodNs) * periodNs;
-      mGridNs = predicted + (atNs - predicted) / 8;
+      mLeadNs = lead;
+      mLeads.clear();
     }
+    if (mLeads.size() < 512) mLeads.push_back(lead);
+    mJitterNs = mLeadNs - lead;
+    mGridNs = displayNs - mLeadNs;
     mPeriodNs = periodNs;
     mLastLookNs = atNs;
   }
@@ -66,11 +76,17 @@ public:
       mWorkNs = work;
     }
     mWork.clear();
+    if (mLeads.size() >= 20) {
+      const size_t index = mLeads.size() * 98 / 100;
+      std::nth_element(mLeads.begin(), mLeads.begin() + static_cast<std::ptrdiff_t>(index), mLeads.end());
+      if (std::llabs(mLeads[index] - mLeadNs) > 750'000) mLeadNs = mLeads[index];
+    }
+    mLeads.clear();
   }
 
   // Game thread, once its frame is done: when the next one starts, for
-  // `targetHz` images a second, and the look its image is for (`dueNs`, 0
-  // before the GPU's time is known). 0: not paced (no recent look, or a rate
+  // `targetHz` images a second, and the display frame its image is for
+  // (`dueNs`, a display time, 0 before the GPU's time is known). 0: not paced (no recent look, or a rate
   // that is not the display's divided by a whole number).
   int64_t next_start(int64_t nowNs, float targetHz, int64_t* dueNs = nullptr) {
     if (dueNs != nullptr) *dueNs = 0;
@@ -87,20 +103,25 @@ public:
     const int64_t scheduled = base + ceil_div(earliest - base, mPeriodNs) * mPeriodNs;
     const int64_t start = std::max(nowNs, scheduled);
     mLastStartNs = start;
-    if (dueNs != nullptr && mLooks > 0) *dueNs = scheduled - mPhaseNs + mLooks * mPeriodNs;
+    if (dueNs != nullptr && mLooks > 0) *dueNs = scheduled - mPhaseNs + mLooks * mPeriodNs + mLeadNs;
     return start;
   }
 
-  // XR thread: whether an image due at `dueNs` may be shown at this look.
-  // Earlier, it waits (it finished early: shown now, the one before it would
-  // stay a display frame only); a due time far off is not trusted.
-  bool is_due(int64_t dueNs, int64_t lookNs) const {
-    return dueNs == 0 || mPeriodNs <= 0 || lookNs >= dueNs - mPeriodNs / 4 || dueNs - lookNs > 4 * mPeriodNs;
+  // XR thread: whether an image due for the display frame at `dueNs` may be
+  // shown in the one at `displayNs`. Earlier, it waits (it finished early:
+  // shown now, the one before it would stay a display frame only); a due
+  // time far off is not trusted.
+  bool is_due(int64_t dueNs, int64_t displayNs) const {
+    return dueNs == 0 || mPeriodNs <= 0 || displayNs >= dueNs - mPeriodNs / 4 || dueNs - displayNs > 4 * mPeriodNs;
   }
 
   int64_t work_ns() const { return mWorkNs; }
   int64_t phase_ns() const { return mPhaseNs; }
   int64_t looks() const { return mLooks; }
+  // The last look's distance after the earliest planned for (negative: earlier).
+  int64_t jitter_ns() const { return mJitterNs; }
+  // From the earliest look to its display frame's display time.
+  int64_t lead_ns() const { return mLeadNs; }
 
 private:
   static int64_t floor_div(int64_t a, int64_t b) {
@@ -111,7 +132,10 @@ private:
   static int64_t round_div(int64_t a, int64_t b) { return floor_div(a + b / 2, b); }
 
   int64_t mPeriodNs = 0;
-  int64_t mGridNs = 0;     // a look, smoothed
+  int64_t mGridNs = 0;     // the latest display frame's earliest look
+  int64_t mLeadNs = 0;
+  int64_t mJitterNs = 0;
+  std::vector<int64_t> mLeads; // this second's, from each look to its display time
   int64_t mLastLookNs = 0;
   int64_t mLastStartNs = 0;
   int64_t mPhaseNs = 0;    // start after a look

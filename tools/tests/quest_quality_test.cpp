@@ -24,12 +24,16 @@ enum class Pacing {
 // 120 Hz display whose XR thread looks for a finished image once a period
 // and shows the newest it may. Returns the holds after the first two
 // seconds, and the largest start-to-display delay.
-std::vector<int64_t> simulate_holds(Pacing pacing, int64_t periodNs, int64_t& worstDelayNs) {
+std::vector<int64_t> simulate_holds(Pacing pacing, int64_t periodNs, int64_t& worstDelayNs,
+                                    int64_t lookJitterNs = 150'000) {
   quest::FramePacer pacer;
   std::mt19937 random{7};
   // Start to GPU finish varies more than a display period, as on the Toad
   // board (a 95th percentile of 18 to 26 ms from one second to the next).
-  std::uniform_int_distribution<int64_t> gpu{9'000'000, 19'000'000}, jitter{-150'000, 150'000};
+  std::uniform_int_distribution<int64_t> gpu{9'000'000, 19'000'000}, jitter{-lookJitterNs, lookJitterNs};
+  // Each look comes some time before its display frame (OpenXR's predicted
+  // display time, exact), how long varying with the runtime's wake-up.
+  const int64_t leadNs = 20'000'000;
   const int64_t ownPeriodNs = 16'666'667;
   int64_t now = 0, nextLook = 0, lastShown = -1;
   worstDelayNs = 0;
@@ -40,10 +44,11 @@ std::vector<int64_t> simulate_holds(Pacing pacing, int64_t periodNs, int64_t& wo
     const auto advance = [&](int64_t until) {
       while (nextLook <= until) {
         const int64_t at = nextLook + jitter(random);
-        pacer.look(at, periodNs);
+        const int64_t display = nextLook + leadNs;
+        pacer.look(at, display, periodNs);
         const Image* newest = nullptr;
         for (const auto& image : pending) {
-          const bool may = image.finish <= at && (pacing != Pacing::PacedDue || pacer.is_due(image.due, at));
+          const bool may = image.finish <= at && (pacing != Pacing::PacedDue || pacer.is_due(image.due, display));
           if (may && (newest == nullptr || image.start > newest->start)) newest = &image;
         }
         if (newest != nullptr) {
@@ -357,9 +362,14 @@ int main() {
     assert(paced.size() > 1000);
     assert(off_cadence(paced) == 0);
     assert(worstDelay <= 19'000'000 + quest::FramePacer::kMarginNs + period);
+    // Looks scattered over most of a period, as on the Quest 3 (2026-10-04):
+    // still every image on cadence, due by display frame, not by look time.
+    const auto scattered = simulate_holds(Pacing::PacedDue, period, worstDelay, 3'500'000);
+    assert(scattered.size() > 1000);
+    assert(off_cadence(scattered) == 0);
   }
   quest::FramePacer rates;
-  rates.look(1'000'000'000, 8'333'333);
+  rates.look(1'000'000'000, 1'020'000'000, 8'333'333);
   assert(rates.next_start(1'001'000'000, 72.0f) == 0);  // not 120 divided by a whole number
   assert(rates.next_start(1'001'000'000, 120.0f) != 0);
   assert(rates.next_start(1'200'000'000, 60.0f) == 0);  // no look for 200 ms: the game's clock

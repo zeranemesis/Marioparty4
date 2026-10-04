@@ -337,6 +337,19 @@ bool StereoView::resize_ready() {
   return mResizePending && std::ranges::all_of(mSlots, [](const Slot& slot) { return slot.state == State::Free; });
 }
 
+void StereoView::note_miss(int64_t doneNs, int64_t dueDisplayNs) {
+  if (doneNs == 0 || dueDisplayNs == 0) return;
+  const int64_t dueNs = dueDisplayNs - mPacer.lead_ns(); // the earliest look planned for
+  if (doneNs <= dueNs) {
+    ++mMissDoneEarly;
+    mMissEarlyMaxNs = std::max(mMissEarlyMaxNs, dueNs - doneNs);
+  } else {
+    ++mMissDoneLate;
+    mMissLateSumNs += doneNs - dueNs;
+    mMissLateMaxNs = std::max(mMissLateMaxNs, doneNs - dueNs);
+  }
+}
+
 void StereoView::release_slot(Slot& slot) {
   if (slot.fence >= 0) {
     close(slot.fence);
@@ -1180,11 +1193,11 @@ std::array<float, 3> StereoView::render_info() const {
           mEnabled ? mWorldRate : 0};
 }
 
-StereoView::Slot* StereoView::newest_completed(int64_t lookNs) {
+StereoView::Slot* StereoView::newest_completed(int64_t displayNs) {
   Slot* newest = nullptr;
   for (auto& slot : mSlots) {
     if (slot.state != State::Ready || slot.tag <= mPresentedTag) continue;
-    if (mPacing && !mPacer.is_due(slot.dueNs, lookNs)) continue; // finished early: its look comes
+    if (mPacing && !mPacer.is_due(slot.dueNs, displayNs)) continue; // finished early: its display frame comes
     pollfd finished{slot.fence, POLLIN, 0};
     const bool complete = slot.fence < 0 ||
         (poll(&finished, 1, 0) > 0 && (finished.revents & POLLIN));
@@ -1222,12 +1235,15 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
   }
   Slot* newest = nullptr;
   int fence = -1;
+  bool shownLate = false;
   {
     std::lock_guard lock{mMutex};
     // This look's time: the grid the game's frames start on.
     const auto lookAt = std::chrono::steady_clock::now();
     const int64_t lookNs = steady_ns();
-    mPacer.look(lookNs, mPeriodNs);
+    mPacer.look(lookNs, mFrameTime, mPeriodNs);
+    mJitterMinNs = std::min(mJitterMinNs, mPacer.jitter_ns());
+    mJitterMaxNs = std::max(mJitterMaxNs, mPacer.jitter_ns());
     if (lookAt - mLastLayerAt > std::chrono::milliseconds(100)) {
       mHoldCounted = false; // the layer was away: no hold to count
     }
@@ -1246,7 +1262,7 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
     }
     // Do not queue a GPU wait on unfinished game work into the XR copy stream.
     // Resubmit the previous layer until at least one source is complete.
-    newest = newest_completed(lookNs);
+    newest = newest_completed(mFrameTime);
     // Older finished images will never be shown now.
     for (auto& slot : mSlots) {
       if (slot.state == State::Ready &&
@@ -1260,6 +1276,7 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
           // counted and its 98% was nearer 85% (2026-10-04).
           if (const int64_t doneNs = fence_signal_time_ns(slot.fence); slot.startNs != 0 && doneNs > slot.startNs) {
             mPacer.finished(doneNs - slot.startNs);
+            note_miss(doneNs, slot.dueNs);
           }
           ++mAdaptMissed;
           ++mMissedDropped;
@@ -1271,9 +1288,10 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
       fence = newest->fence;
       newest->fence = -1;
       // Shown, but a display frame or more after the one it was paced for.
-      if (mPacing && newest->dueNs != 0 && lookNs > newest->dueNs + mPeriodNs / 2) {
+      if (mPacing && newest->dueNs != 0 && mFrameTime > newest->dueNs + mPeriodNs / 2) {
         ++mAdaptMissed;
         ++mMissedLate;
+        shownLate = true;
       }
     }
   }
@@ -1426,6 +1444,7 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
     }
     std::lock_guard lock{mMutex};
     if (finishedNs > newest->startNs) mPacer.finished(finishedNs - newest->startNs);
+    if (shownLate) note_miss(doneNs, newest->dueNs);
     {
       const int64_t copyNs = steady_ns();
       if (newest->submitNs > newest->leaseNs && newest->leaseNs != 0) mStageRecord.add(newest->submitNs - newest->leaseNs);
@@ -1469,6 +1488,13 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
           mDestinationAcquireMaxMs[1], mDestinationWaitMaxMs[1], mHolds[0], mHolds[1], mHolds[2], mHolds[3],
           mLatencyMinMs, mLatencyMaxMs, mPacing, mPacer.work_ns() / 1e6, static_cast<long long>(mPacer.looks()),
           mPacer.phase_ns() / 1e6, mMissedLate, mMissedDropped);
+      LOGI("Pacing: missed %u finished before their look (up to %.1f ms before), %u after it (avg %.1f, max %.1f ms "
+           "after); looks %.1f to %.1f ms after the earliest planned, %.1f ms before their display",
+           mMissDoneEarly, mMissEarlyMaxNs / 1e6, mMissDoneLate,
+           mMissDoneLate ? mMissLateSumNs / 1e6 / mMissDoneLate : 0.0, mMissLateMaxNs / 1e6, mJitterMinNs / 1e6,
+           mJitterMaxNs / 1e6, mPacer.lead_ns() / 1e6);
+      mMissDoneEarly = mMissDoneLate = 0;
+      mMissLateSumNs = mMissLateMaxNs = mMissEarlyMaxNs = mJitterMinNs = mJitterMaxNs = 0;
       mMissedLate = mMissedDropped = 0;
       LOGI("Stereo pipeline: images=%u record=%.1f/%.1fms gpu=%.1f/%.1fms wait=%.1f/%.1fms total=%.1f/%.1fms "
            "(avg/max) ring=%zu full=%u (at full, images drawing/ready/copying: %u/%u/%u)",
