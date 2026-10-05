@@ -2609,7 +2609,27 @@
  static std::atomic_bool g_shuttingDown = false;
  
  namespace {
-@@ -839,6 +849,7 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -752,7 +762,19 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+     }
+   }
+   {
++#if defined(__ANDROID__) && AURORA_DAWN_FOVEATION
++    // The fragment density map rides on Dawn's render passes (patched
++    // RenderPassCache), which dynamic rendering bypasses: render passes it is.
++    constexpr std::array adapterDisabledToggles{"vulkan_use_dynamic_rendering"};
++    wgpu::DawnTogglesDescriptor adapterToggles({
++        .disabledToggleCount = adapterDisabledToggles.size(),
++        .disabledToggles = adapterDisabledToggles.data(),
++    });
++#endif
+     const wgpu::RequestAdapterOptions options{
++#if defined(__ANDROID__) && AURORA_DAWN_FOVEATION
++        .nextInChain = &adapterToggles,
++#endif
+         .powerPreference = wgpu::PowerPreference::HighPerformance,
+         .backendType = backend,
+         .compatibleSurface = g_surface,
+@@ -839,6 +861,7 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
      g_astcTexturesSupported = false;
      g_textureComponentSwizzleSupported = false;
      g_clipDistancesSupported = false;
@@ -2617,7 +2637,7 @@
      wgpu::SupportedFeatures supportedFeatures;
      g_adapter.GetFeatures(&supportedFeatures);
      for (size_t i = 0; i < supportedFeatures.featureCount; ++i) {
-@@ -866,6 +877,27 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -866,6 +889,27 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
          requiredFeatures.push_back(feature);
          g_clipDistancesSupported = true;
        }
@@ -2645,7 +2665,7 @@
  #endif
      }
  #ifdef WEBGPU_DAWN
-@@ -961,6 +993,18 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -961,6 +1005,18 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
      });
    }
    g_queue = g_device.GetQueue();
