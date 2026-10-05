@@ -15,6 +15,16 @@ def syncPartyBoardAssets = tasks.register('syncPartyBoardAssets', Sync) {
     from(new File(partyboardRepoDir, 'initial_pipeline_cache.db'))
     into partyboardGeneratedAssetsDir
 }
+// The Quest's: every pipeline a headset built, its eyes' variants included
+// (tools/make_quest_pipeline_seed.py), in place of the PC's. The PC's was
+// GX config version 13, which the game no longer reads (2026-10-05).
+def partyboardQuestAssetsDir = layout.buildDirectory.dir('generated/assets/partyboard-quest').get().asFile
+def syncPartyBoardQuestAssets = tasks.register('syncPartyBoardQuestAssets', Sync) {
+    from(new File(partyboardRepoDir, 'initial_pipeline_cache_quest.db')) {
+        rename { 'initial_pipeline_cache.db' }
+    }
+    into partyboardQuestAssetsDir
+}
 
 android {
     namespace 'com.mariopartyrd.partyboard'
@@ -92,6 +102,10 @@ android {
             jniLibs.srcDirs = ['src/main/jniLibs']
             assets.srcDirs = [partyboardGeneratedAssetsDir]
         }
+        // Overrides main's initial_pipeline_cache.db.
+        quest {
+            assets.srcDirs = [partyboardQuestAssetsDir]
+        }
     }
 
     androidResources {
@@ -133,6 +147,6 @@ dependencies {
 tasks.configureEach { task ->
     if ((task.name.startsWith('merge') && task.name.endsWith('Assets')) ||
         task.name.toLowerCase().contains('lint')) {
-        task.dependsOn(syncPartyBoardAssets)
+        task.dependsOn(syncPartyBoardAssets, syncPartyBoardQuestAssets)
     }
 }
