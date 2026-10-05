@@ -1797,11 +1797,11 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
       mLateMovedSumMm = mLateMovedMaxMm = 0;
       char foveation[PROP_VALUE_MAX] = {};
       __system_property_get("debug.partyboard.foveation", foveation);
-      // Automatic with `auto`, and by default from 90 Hz up (11.1 ms a frame:
-      // the board's whole view did not fit at full resolution, 2026-10-04);
-      // `0` to `3` fix a level in Aurora, off here.
-      const bool fastDisplay = mPeriodNs > 0 && mPeriodNs <= 11'500'000;
-      if (const bool automatic = std::strcmp(foveation, "auto") == 0 || (foveation[0] == '\0' && fastDisplay);
+      // Automatic with `auto` only; `0` to `3` fix a level in Aurora, off here.
+      // Off by default: on the headset (2026-10-05) levels 1 to 3 saved
+      // nothing measurable on the Toad board and the player preferred
+      // the image without it.
+      if (const bool automatic = std::strcmp(foveation, "auto") == 0;
           automatic != mFoveationAuto) {
         LOGI("Stereo: automatic foveation %s (debug.partyboard.foveation)", automatic ? "on" : "off");
         mFoveationAuto = automatic;
