@@ -49,6 +49,17 @@ sealed class ModEntry {
     public string GameBananaUrl(){return "https://gamebanana.com/mods/"+Id;}
 }
 
+// One mod CubeShelf has installed whose files are still there, switched on or not.
+// On is what CubeShelf itself would load -- enabled in the launcher and not
+// switched off inside the game -- and is only the salon's starting point.
+sealed class InstalledMod {
+    public readonly ModEntry Entry;public readonly bool On;
+    public InstalledMod(ModEntry entry,bool on){Entry=entry;On=on;}
+    public static IReadOnlyList<InstalledMod> FromCubeShelf(string gameId,out string sourceDirectory) {
+        return ModSet.ReadInstalled(gameId,out sourceDirectory);
+    }
+}
+
 sealed class ModSet {
     public const int NameBytes=48;
     // A lockstep session with two dozen mods is already well past what anyone has
@@ -135,33 +146,60 @@ sealed class ModSet {
     // the two ever disagreed the salon would promise a load order the game does not
     // follow, which is the one failure this whole feature exists to prevent.
     public static ModSet FromCubeShelf(string gameId,out string sourceDirectory) {
+        return new ModSet(InstalledMod.FromCubeShelf(gameId,out sourceDirectory).Where(m=>m.On).Select(m=>m.Entry));
+    }
+
+    // The salon's own choice among what CubeShelf has installed, for this session
+    // only: CubeShelf's files are never written. A newly ticked mod takes CubeShelf's
+    // load order, so ticking boxes changes which mods run, not how the launcher's
+    // priorities resolve a conflict between them.
+    // Mods already in current keep their place, so unticking one box after aligning
+    // on the host does not quietly re-sort the rest into this machine's priorities.
+    public static ModSet Pick(IEnumerable<InstalledMod> installed,Func<ModEntry,bool> wanted,ModSet current=null) {
+        var chosen=(installed??Enumerable.Empty<InstalledMod>()).Select(m=>m.Entry).Where(wanted).ToArray();
+        var kept=(current??Empty).Entries.Select(c=>chosen.FirstOrDefault(e=>e.Id==c.Id)).Where(e=>e!=null).ToArray();
+        return new ModSet(kept.Concat(chosen.Where(e=>kept.All(k=>k.Id!=e.Id))));
+    }
+
+    // The host's list, rebuilt out of this player's own installed copies: same ids,
+    // same order as the host, local content roots and local fingerprints. A mod the
+    // host runs that is not installed here is left out, and a different build stays
+    // a different build -- aligning never pretends to agree, it only removes the
+    // clicking. Order is the host's even where CubeShelf's priorities here differ,
+    // because the session's load order is what both games must share.
+    public static ModSet AlignedTo(ModSet required,IEnumerable<InstalledMod> installed) {
+        if(required==null)return Empty;
+        var mine=(installed??Enumerable.Empty<InstalledMod>()).ToArray();
+        return new ModSet(required.Entries.Select(r=>mine.Select(m=>m.Entry).FirstOrDefault(e=>e.Id==r.Id)).Where(e=>e!=null));
+    }
+
+    internal static IReadOnlyList<InstalledMod> ReadInstalled(string gameId,out string sourceDirectory) {
         sourceDirectory=ModsDirectory(gameId);
-        if(sourceDirectory==null)return Empty;
+        var none=new InstalledMod[0];
+        if(sourceDirectory==null)return none;
         var installed=Path.Combine(sourceDirectory,"installed.json");
-        if(!File.Exists(installed))return Empty;
+        if(!File.Exists(installed))return none;
 
         var disabled=ReadDisabled(Path.Combine(sourceDirectory,"player-disabled.json"));
         var parser=new JavaScriptSerializer{MaxJsonLength=8*1024*1024};
         var rows=parser.Deserialize<object>(File.ReadAllText(installed)) as object[];
-        if(rows==null)return Empty;
+        if(rows==null)return none;
 
-        var active=new List<KeyValuePair<long,ModEntry>>();
+        var all=new List<KeyValuePair<long,InstalledMod>>();
         foreach(var row in rows) {
             var map=row as Dictionary<string,object>;
             if(map==null)continue;
-            if(!Truthy(map,"Enabled"))continue;
             int id=Int(map,"Id");if(id<=0)continue;
-            if(disabled.Contains(id))continue;
             string root=Str(map,"ContentRoot");
             if(root.Length==0 || !Directory.Exists(root))continue;
             var sha=Str(map,"Sha256");
-            active.Add(new KeyValuePair<long,ModEntry>(
+            all.Add(new KeyValuePair<long,InstalledMod>(
                 ((long)Int(map,"Priority")<<32)|(uint)id,
-                new ModEntry(id,Str(map,"Name"),Path.GetFullPath(root),Fingerprint(sha,id))));
+                new InstalledMod(new ModEntry(id,Str(map,"Name"),Path.GetFullPath(root),Fingerprint(sha,id)),Truthy(map,"Enabled") && !disabled.Contains(id))));
         }
         // Descending priority, then ascending id -- the key packs both so one sort does it.
-        active.Sort((a,b)=>{int p=(b.Key>>32).CompareTo(a.Key>>32);return p!=0?p:((uint)a.Key).CompareTo((uint)b.Key);});
-        return new ModSet(active.Select(p=>p.Value));
+        all.Sort((a,b)=>{int p=(b.Key>>32).CompareTo(a.Key>>32);return p!=0?p:((uint)a.Key).CompareTo((uint)b.Key);});
+        return all.Select(p=>p.Value).ToArray();
     }
 
     // A mod with no recorded hash still has to be comparable, or a player who
