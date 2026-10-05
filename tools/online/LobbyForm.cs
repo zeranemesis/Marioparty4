@@ -11,7 +11,9 @@ using System.Windows.Forms;
 namespace PartyBoardOnline {
 sealed class MainForm : Form {
     Label status,discLabel,footer;TextBox invitation,nickname;ListView players;ComboBox playerCount;FlowLayoutPanel missingMods;
-    Button host,join,copy,play,cancel,choose,paste,update;Session session;DiscFile disc;
+    Button host,join,copy,play,cancel,choose,paste,update,mods;Session session;DiscFile disc;
+    // Mods chosen in this window before any salon exists; null means CubeShelf's own list.
+    ModSet chosenMods;
     readonly CancellationTokenSource fileCancel=new CancellationTokenSource();bool closing,hashing;
     Report lastReport;readonly Startup startup;bool startupApplied;
     public MainForm():this(Startup.Manual) {}
@@ -33,7 +35,8 @@ sealed class MainForm : Form {
         playerCount=new ComboBox{DropDownStyle=ComboBoxStyle.DropDownList,Width=64,Margin=new Padding(0,3,12,3),AccessibleName="Nombre de joueurs"};
         playerCount.Items.AddRange(new object[]{"2","3","4"});playerCount.SelectedIndex=0;
         playerCount.SelectedIndexChanged+=(s,e)=>UpdateFooter();top.Controls.Add(playerCount);
-        host=Make("Créer un salon",()=>Begin(true,"",SelectedPlayers()));join=Make("Rejoindre",()=>Begin(false,invitation.Text));top.Controls.Add(host);top.Controls.Add(join);root.Controls.Add(top,0,4);
+        host=Make("Créer un salon",()=>Begin(true,"",SelectedPlayers()));join=Make("Rejoindre",()=>Begin(false,invitation.Text));top.Controls.Add(host);top.Controls.Add(join);
+        mods=Make("Mods…",ChooseMods);mods.MinimumSize=new Size(110,38);top.Controls.Add(mods);root.Controls.Add(top,0,4);
         invitation=new TextBox{Dock=DockStyle.Fill,Multiline=true,ScrollBars=ScrollBars.Vertical,Font=new Font("Segoe UI",10),AccessibleName="Invitation du salon",MaxLength=220};root.Controls.Add(invitation,0,5);
         var actions=new FlowLayoutPanel{Dock=DockStyle.Fill};copy=Make("Copier l'invitation",()=>{Clipboard.SetText(invitation.Text);SetStatus("Invitation copiée. Envoyez-la à votre ami ; gardez cette fenêtre ouverte.");});
         paste=Make("Coller l'invitation",()=>{if(session==null)invitation.Text=Clipboard.GetText();});actions.Controls.Add(copy);actions.Controls.Add(paste);root.Controls.Add(actions,0,6);
@@ -106,7 +109,8 @@ sealed class MainForm : Form {
         // salon's own seat count is what says whether there is still room to
         // invite someone else.
         copy.Enabled=session!=null && session.Invite!=null && session.Host && (session.Lobby==null?session.Bridge==null:session.Lobby.Occupied<session.MaxPlayers);
-        play.Enabled=session?.Lobby?.CanStart==true;}
+        play.Enabled=session?.Lobby?.CanStart==true;
+        mods.Enabled=!hashing && (idle || session.Lobby?.Phase==LobbyPhase.Waiting);}
     void RefreshLobby(){UI(()=>{
         if(players==null)return;RefreshControls();players.BeginUpdate();players.Items.Clear();
         var lobby=session?.Lobby;var local=lobby?.Local??session?.Profile;
@@ -148,7 +152,12 @@ sealed class MainForm : Form {
             if(!localMatch)SetStatus("Les fichiers disques sont différents : lancement bloqué. Quittez le salon, choisissez exactement le même fichier sur les deux PC, puis recréez le salon.");
             // Mods are checked after the disc because a different disc makes the mod
             // comparison meaningless, and reporting both at once helps nobody.
-            else if(!lobby.ModsMatch)SetStatus((session.Host?"Un invité n'a pas les mêmes mods que vous — ":"Vos mods ne correspondent pas à ceux de l'hôte — ")+lobby.ModAdvice+". Installez-les dans CubeShelf, puis recréez le salon.");
+            // The salon fixes this itself now: a guest aligns in one click, the host
+            // changes its own list with Mods…. Only a mod nobody here has installed
+            // still means a trip to CubeShelf, and the salon stays open meanwhile.
+            else if(!lobby.ModsMatch)SetStatus(session.Host
+                ?"Un invité n'a pas les mêmes mods que vous — "+lobby.ModAdvice+". Il peut cliquer sur « Utiliser les mods de l'hôte », ou changez les vôtres avec « Mods… »."
+                :"Vos mods ne correspondent pas à ceux de l'hôte — "+lobby.ModAdvice+(lobby.Local.Mods.Missing(lobby.RequiredMods).Any()?". Installez les mods manquants dans CubeShelf, puis cliquez sur « Utiliser les mods de l'hôte ».":". Cliquez sur « Utiliser les mods de l'hôte »."));
             else SetStatus(session.Host?"Disques et mods identiques. Vous pouvez lancer la partie pour tout le monde.":"Disques et mods identiques. Attendez que l'hôte lance la partie.");
         }
     });}
@@ -160,7 +169,13 @@ sealed class MainForm : Form {
     void RefreshMissingMods(Lobby lobby){
         missingMods.SuspendLayout();missingMods.Controls.Clear();
         ModEntry[] missing=lobby==null || session.Host || lobby.RequiredMods==null?new ModEntry[0]:lobby.Local.Mods.Missing(lobby.RequiredMods).ToArray();
-        missingMods.Visible=missing.Length>0;
+        bool differs=lobby!=null && !session.Host && lobby.HostInfo!=null && lobby.Phase==LobbyPhase.Waiting && !lobby.Local.SameMods(lobby.HostInfo);
+        missingMods.Visible=missing.Length>0 || differs;
+        if(differs){
+            var align=new Button{Text="Utiliser les mods de l'hôte",AutoSize=true,MaximumSize=new Size(160,0),FlatStyle=FlatStyle.Flat,BackColor=Color.White,Margin=new Padding(0,0,0,10)};
+            align.Click+=(s,e)=>{try{AlignOnHost();}catch(Exception ex){SetStatus(Friendly(ex));}};
+            missingMods.Controls.Add(align);
+        }
         if(missing.Length>0){
             missingMods.Controls.Add(new Label{Text="Mods manquants",Font=new Font("Segoe UI",10,FontStyle.Bold),AutoSize=true,Margin=new Padding(0,0,0,6)});
             foreach(var mod in missing){
@@ -195,13 +210,14 @@ sealed class MainForm : Form {
     }
     void Begin(bool create,string invitationText,int players=2){
         if(session!=null || disc==null || hashing)return;
-        // The mod list is read once, here, and frozen for the session. Re-reading it
-        // later would let a mod be enabled between the announcement and the launch,
-        // which is exactly the divergence the announcement exists to rule out.
-        string modsFrom;ModSet mods;
-        try {mods=ModSet.FromCubeShelf("GMPE01_00",out modsFrom);}
+        // The opening list: what was picked in Mods…, else what CubeShelf would load.
+        // It can change afterwards only through Session.ChangeMods, which re-announces
+        // it and is refused once a launch begins, so nothing the peers did not see can
+        // reach the game.
+        string modsFrom;ModSet opening;
+        try {opening=chosenMods??ModSet.FromCubeShelf(GameId,out modsFrom);}
         catch(Exception e){SetStatus(Friendly(e));return;}
-        var profile=new PlayerInfo(nickname.Text,disc.Hash,disc.Length,mods);
+        var profile=new PlayerInfo(nickname.Text,disc.Hash,disc.Length,opening);
         Session current=null;current=new Session(t=>UI(()=>{if(session==current)SetStatus(t);}),()=>UI(()=>{if(session==current)RefreshLobby();}),t=>UI(()=>{if(session==current){Reset();SetStatus(t);}}),profile,disc);
         session=current;lastReport=current.Report;current.Host=create;RefreshLobby();
         current.Report.Write("role="+(create?"host":"guest")+" connection_requested");
@@ -209,6 +225,56 @@ sealed class MainForm : Form {
             if(create){current.Create(players);UI(()=>{if(session==current && current.Bridge==null){var encoded=current.Invite.Encode();invitation.Text=encoded;PublishInvitation(encoded);RefreshControls();SetStatus(current.LocalOnly?"Salon ouvert en réseau local seulement : la box n'a pas pu s'ouvrir. Seuls les joueurs de ce réseau peuvent le rejoindre ; pour Internet, choisissez un port fixe et ouvrez-le sur la box.":(startup.InvitationOut!=null?"Salon créé. Ton launcher a l'invitation : invite tes amis depuis lui. Garde cette fenêtre ouverte.":"Salon créé. Copiez l'invitation et envoyez-la à "+(players>2?"vos amis":"votre ami")+". Vous seul pourrez lancer le jeu."));}});}
             else current.Join(invitationText);
         }catch(Exception e){current.Dispose();UI(()=>{if(session==current){Reset();SetStatus(Friendly(e));}});}});
+    }
+    const string GameId="GMPE01_00";
+    ModSet CurrentMods(){var lobby=session?.Lobby;if(lobby!=null)return lobby.Local.Mods;if(session!=null)return session.Profile.Mods;string from;return chosenMods??ModSet.FromCubeShelf(GameId,out from);}
+    // The same window whether CubeShelf opened the salon or PartyBoard did: both read
+    // CubeShelf's installed mods (PARTYBOARD_MOD_LIST says where, when it is set) and
+    // neither writes anything back. A choice made here lasts for this salon only.
+    void ChooseMods(){
+        string from;var installed=InstalledMod.FromCubeShelf(GameId,out from);
+        if(installed.Count==0){SetStatus("Aucun mod installé dans CubeShelf pour Mario Party 4. Installez-en depuis CubeShelf, puis rouvrez « Mods… ».");return;}
+        var current=CurrentMods();var lobby=session?.Lobby;
+        using(var dialog=new Form{Text="Mods de ce salon",FormBorderStyle=FormBorderStyle.FixedDialog,StartPosition=FormStartPosition.CenterParent,MinimizeBox=false,MaximizeBox=false,AutoSize=true,AutoSizeMode=AutoSizeMode.GrowAndShrink,Padding=new Padding(12),Font=Font}) {
+            var layout=new TableLayoutPanel{ColumnCount=1,AutoSize=true,Dock=DockStyle.Fill};
+            layout.Controls.Add(new Label{Text="Cochez les mods à utiliser dans ce salon. Tous les joueurs doivent avoir les mêmes, dans le même ordre. CubeShelf n'est pas modifié.",AutoSize=true,MaximumSize=new Size(460,0),Margin=new Padding(0,0,0,8)});
+            var list=new CheckedListBox{Width=460,Height=Math.Min(12,Math.Max(4,installed.Count))*24+8,CheckOnClick=true,IntegralHeight=false,AccessibleName="Mods installés"};
+            foreach(var mod in installed)list.Items.Add(mod.Entry.Describe(),current.Find(mod.Entry.Id)!=null);
+            layout.Controls.Add(list);
+            var buttons=new FlowLayoutPanel{AutoSize=true,FlowDirection=FlowDirection.RightToLeft,Dock=DockStyle.Fill,Margin=new Padding(0,10,0,0)};
+            var ok=new Button{Text="Appliquer",AutoSize=true,DialogResult=DialogResult.OK};var no=new Button{Text="Annuler",AutoSize=true,DialogResult=DialogResult.Cancel};
+            buttons.Controls.Add(no);buttons.Controls.Add(ok);
+            var reset=new Button{Text="Comme CubeShelf",AutoSize=true};reset.Click+=(s,e)=>{for(int i=0;i<installed.Count;i++)list.SetItemChecked(i,installed[i].On);};buttons.Controls.Add(reset);
+            if(lobby!=null && !session.Host && lobby.RequiredMods!=null){
+                var host=new Button{Text="Comme l'hôte",AutoSize=true};
+                host.Click+=(s,e)=>{for(int i=0;i<installed.Count;i++)list.SetItemChecked(i,lobby.RequiredMods.Find(installed[i].Entry.Id)!=null);};
+                buttons.Controls.Add(host);
+            }
+            layout.Controls.Add(buttons);dialog.Controls.Add(layout);dialog.AcceptButton=ok;dialog.CancelButton=no;
+            if(dialog.ShowDialog(this)!=DialogResult.OK)return;
+            var ticked=new System.Collections.Generic.HashSet<int>();for(int i=0;i<installed.Count;i++)if(list.GetItemChecked(i))ticked.Add(installed[i].Entry.Id);
+            // A guest who ticked exactly the host's mods means the host's order too:
+            // CubeShelf's priorities on this PC are not what the session agreed on.
+            var required=lobby!=null && !session.Host?lobby.RequiredMods:null;
+            ModSet picked=required!=null && required.Entries.Length==ticked.Count && required.Entries.All(m=>ticked.Contains(m.Id))
+                ?ModSet.AlignedTo(required,installed)
+                :ModSet.Pick(installed,e=>ticked.Contains(e.Id),current);
+            ApplyMods(picked);
+        }
+    }
+    void AlignOnHost(){
+        var lobby=session?.Lobby;if(lobby==null || session.Host || lobby.RequiredMods==null)return;
+        string from;ApplyMods(ModSet.AlignedTo(lobby.RequiredMods,InstalledMod.FromCubeShelf(GameId,out from)));
+    }
+    void ApplyMods(ModSet picked){
+        var current=session;
+        if(current==null){chosenMods=picked;SetStatus(picked.None?"Aucun mod pour ce salon.":"Mods de ce salon : "+string.Join(", ",picked.Entries.Select(m=>m.Describe()).ToArray())+".");return;}
+        mods.Enabled=false;
+        Task.Run(()=>{
+            try{current.ChangeMods(picked);}
+            catch(Exception e){UI(()=>{if(session==current)SetStatus(Friendly(e));});}
+            UI(()=>{if(session==current)RefreshLobby();});
+        });
     }
     internal void PreviewLobby(){
         // Deterministic render fixture; no session, network, or selected disk.

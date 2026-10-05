@@ -71,6 +71,21 @@ The overlay is applied in online sessions too, and the game logs a warning when
 that happens. Every player must run the same mod list: a mod that changes game
 logic on one side only will show up as a netplay desync.
 
+The salon (`PartyBoardOnline.exe`) enforces that and lets players fix it in
+place. It reads CubeShelf's `installed.json` beside `PARTYBOARD_MOD_LIST` (the
+default CubeShelf data folder when the variable is unset), so it behaves the same
+whether CubeShelf or PartyBoard opened it:
+
+- **Mods…** lists every installed mod whose files are still there, ticked as
+  CubeShelf would load them. The choice lasts for that salon only; CubeShelf's
+  files are never written.
+- While the salon waits, a change is re-announced to every player. Once the host
+  launches, the list is frozen and is the one written to the game's
+  `online-mods.txt`.
+- A guest whose list differs gets **Utiliser les mods de l'hôte**: the host's
+  mods, in the host's order, from the guest's own installed copies. A mod the
+  guest lacks keeps its *Télécharger* link; a different build still blocks.
+
 ## Testing
 
 ```bash

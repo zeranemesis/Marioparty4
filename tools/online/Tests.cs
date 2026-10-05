@@ -539,6 +539,7 @@ static class Tests {
         Check(PlayerInfo.Decode(host.Encode()).Mods.Same(full),"mod list survives the wire");
         Check(PlayerInfo.Decode(new PlayerInfo("Zoé",disc,3).Encode()).Mods.None,"a player with no mods announces none");
         Reject(()=>new ModSet(Enumerable.Range(1,ModSet.MaxMods+1).Select(i=>Mod(i,"m"+i,(byte)i))),"more mods than one message can carry is refused");
+        SalonMods(disc);
         ModsFromDisk();
     }
 
@@ -568,6 +569,8 @@ static class Tests {
             Check(set.Entries[0].Id==200 && set.Entries[1].Id==100,"highest priority first, exactly as the game loads them");
             Check(set.Entries[0].Fingerprint[0]==0x11 && set.Entries[1].Fingerprint[0]==0x01,"the recorded SHA-256 is what identifies a build");
             Check(set.Entries[1].Name.Contains("GO!"),"a name with escaped quotes survives");
+            var all=InstalledMod.FromCubeShelf("GMPE01_00",out from);
+            Check(all.Count==3 && all[0].Entry.Id==300 && !all[0].On && all[1].On && all[2].On,"the salon offers switched-off mods too, but only those still on disk, in load order");
 
             File.WriteAllText(Path.Combine(root,"player-disabled.json"),"[200]",new UTF8Encoding(false));
             set=ModSet.FromCubeShelf("GMPE01_00",out from);
@@ -580,6 +583,43 @@ static class Tests {
             Environment.SetEnvironmentVariable("PARTYBOARD_MOD_LIST",previous);
             try{Directory.Delete(root,true);}catch{}
         }
+    }
+
+    // Mods chosen inside the salon instead of only in CubeShelf before it opened.
+    // The wire already carried a re-announced profile; what is checked here is that
+    // a change made while waiting reaches the other side, that a guest can align on
+    // the host in one step, and that the order agreed is the host's.
+    static void SalonMods(byte[] disc) {
+        var dx=Mod(546878,"MP4DX",0x10);var fix=Mod(620561,"Candlelight Fright Name Fix",0x40);var other=Mod(407132,"Other",0x50);
+        var installed=new[]{new InstalledMod(fix,true),new InstalledMod(dx,false),new InstalledMod(other,false)};
+
+        var picked=ModSet.Pick(installed,e=>e.Id!=407132);
+        Check(picked.Entries.Length==2 && picked.Entries[0].Id==620561 && picked.Entries[1].Id==546878,"a fresh pick follows CubeShelf's load order");
+        var kept=ModSet.Pick(installed,e=>true,new ModSet(new[]{dx,fix}));
+        Check(kept.Entries[0].Id==546878 && kept.Entries[1].Id==620561 && kept.Entries[2].Id==407132,"mods already chosen keep their place, new ones go after");
+        Check(ModSet.Pick(installed,e=>false).None,"nothing ticked is no mods, not CubeShelf's list");
+
+        var hostWants=new ModSet(new[]{dx,fix,Mod(999,"Not here",0x77)});
+        var aligned=ModSet.AlignedTo(hostWants,installed);
+        Check(aligned.Entries.Length==2 && aligned.Entries[0].Id==546878 && aligned.Entries[1].Id==620561,"aligning takes the host's order and skips what is not installed");
+        Check(aligned.Missing(hostWants).Single().Id==999,"what aligning could not provide is still reported missing");
+        var stale=new[]{new InstalledMod(Mod(546878,"MP4DX",0x99),true)};
+        Check(!ModSet.AlignedTo(new ModSet(new[]{dx}),stale).Same(new ModSet(new[]{dx})),"aligning never makes a different build agree");
+        Check(ModSet.AlignedTo(null,installed).None,"no host list yet aligns to nothing");
+
+        // The case from the screenshot: the guest runs MP4DX, the host nothing.
+        var hq=new Queue<byte[]>();var cq=new Queue<byte[]>();
+        var h=new Lobby(true,new PlayerInfo("Valentin",disc,3),(seat,x)=>hq.Enqueue(x),id=>{},id=>{},()=>{});
+        var c=new Lobby(false,new PlayerInfo("Joueur",disc,3,new ModSet(new[]{dx})),(seat,x)=>cq.Enqueue(x),id=>{},id=>{},()=>{});
+        h.Announce();c.Announce();c.Receive(hq.Dequeue());h.Receive(cq.Dequeue());
+        Check(!h.CanStart,"guest with an extra mod blocks the start");
+        h.Update(new PlayerInfo("Valentin",disc,3,new ModSet(new[]{dx,fix})));c.Receive(hq.Dequeue());
+        Check(c.RequiredMods.Entries.Length==2,"the host's change reaches the guest while waiting");
+        c.Update(new PlayerInfo("Joueur",disc,3,ModSet.AlignedTo(c.RequiredMods,installed)));h.Receive(cq.Dequeue());
+        Check(h.ModsMatch && h.CanStart,"one click on the guest's side unblocks the launch");
+        h.Start();c.Receive(hq.Dequeue());
+        Reject(()=>c.Update(new PlayerInfo("Joueur",disc,3)),"mods cannot change once the launch has begun");
+        Check(c.Local.Mods.Same(h.Local.Mods),"what is launched is what was agreed");
     }
 
     static string Quote(string path){return "\""+path.Replace("\\","\\\\")+"\"";}

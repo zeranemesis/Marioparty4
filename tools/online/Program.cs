@@ -62,7 +62,19 @@ sealed class Firewall : IDisposable {
 
 sealed class Session : IDisposable {
     public Invitation Invite; public Bridge Bridge; public bool Host;
-    public Lobby Lobby;public readonly PlayerInfo Profile;readonly DiscFile disc;
+    public Lobby Lobby;readonly PlayerInfo initialProfile;readonly DiscFile disc;
+    // What this player announces right now. The salon may change its mods while
+    // waiting (ChangeMods), so the copy that counts is the Lobby's own seat, and the
+    // one passed in only stands in until the Lobby exists. Lobby.Update refuses any
+    // change once a launch begins, which is what makes reading this in LoadGame
+    // safe: the list handed to the game is the one every peer agreed to.
+    public PlayerInfo Profile {get{var lobby=Lobby;return lobby!=null?lobby.Local:initialProfile;}}
+    public void ChangeMods(ModSet mods) {
+        var lobby=Lobby;if(lobby==null)throw new IOException("Attendez que le salon soit prêt pour changer les mods.");
+        var current=lobby.Local;
+        lobby.Update(new PlayerInfo(current.Name,current.DiscHash,current.DiscLength,mods));
+        Report.Write("mods_changed count="+mods.Entries.Length+" ids="+string.Join(",",mods.Entries.Select(m=>m.Id.ToString()).ToArray()));
+    }
     public int? PingMs;GameStart gameStart;string modListDirectory;
     public readonly Report Report=new Report();System.Threading.Timer diagnosticTimer;
     TcpListener listener;TcpClient peer,peerWrite;X509Certificate2 cert;Gateway mapping,mappingUdp;Firewall firewall;UdpClient internetGame;
@@ -81,7 +93,7 @@ sealed class Session : IDisposable {
     readonly CancellationTokenSource cancel=new CancellationTokenSource();
     readonly Action<string> status;readonly Action connected;readonly Action<string> failed;
     byte[] build; volatile bool disposed;public Process Game;
-    public Session(Action<string> s,Action c,Action<string> f,PlayerInfo profile,DiscFile verifiedDisc) {status=s;connected=c;failed=f;Profile=profile;disc=verifiedDisc;}
+    public Session(Action<string> s,Action c,Action<string> f,PlayerInfo profile,DiscFile verifiedDisc) {status=s;connected=c;failed=f;initialProfile=profile;disc=verifiedDisc;}
     // players==2 is byte for byte what Create() always did: the box maps one
     // UDP port too, and Bridge relays the single guest's game data directly.
     // Above two, there is no "the guest" to relay for -- every seat, this
