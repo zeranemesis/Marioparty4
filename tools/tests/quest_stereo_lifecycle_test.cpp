@@ -14,7 +14,13 @@ struct StereoViewTestAccess {
     auto* slot = view.newest_completed(0);
     return slot ? static_cast<int>(slot - view.mSlots.data()) : -1;
   }
-  static void enable(StereoView& view) { view.mEnabled = true; }
+  // A ring of 3 images (allocate_images makes 4 on the headset, from the
+  // eyes' buffers this test has none of).
+  static void enable(StereoView& view) {
+    view.mEnabled = true;
+    if (view.mSlots.empty()) view.mSlots.resize(3);
+  }
+  static bool hud(const StereoView& view, uint32_t image) { return view.mSlots[image].hud; }
   static void copying(StereoView& view, uint32_t image) {
     view.mSlots[image].state = StereoView::State::Copying;
   }
@@ -138,5 +144,32 @@ int main() {
   quest::StereoViewTestAccess::copied(view, frame.image);
   assert(view.game_frame(spare));
   assert(spare.tag != frame.tag);
-  std::puts("PASS: rapid surface replacement, scene framing, empty cameras, ring exhaustion, GPU ownership and stale callbacks");
+  // The interface: Aurora keeps the one drawn before when nothing in it
+  // changed, so one it drew that never reached the headset is drawn again.
+  {
+    quest::StereoView hudView;
+    quest::StereoViewTestAccess::enable(hudView);
+    const auto leaseHud = [&](quest::StereoFrame& out) {
+      for (;;) {
+        assert(hudView.game_frame(out));
+        if (out.drawHud != 0) return;
+        hudView.cancelled(out.image, out.tag);
+      }
+    };
+    quest::StereoFrame kept{}, lost{}, again{};
+    leaseHud(kept);
+    assert(kept.drawHud == 1);
+    hudView.submitted(kept.image, kept.tag, -1, true, false); // unchanged: not drawn
+    assert(!quest::StereoViewTestAccess::hud(hudView, kept.image));
+    quest::StereoViewTestAccess::copied(hudView, kept.image);
+    leaseHud(lost);
+    assert(lost.drawHud == 1);
+    hudView.cancelled(lost.image, lost.tag); // its interface never shown
+    leaseHud(again);
+    assert(again.drawHud == 2);
+    hudView.submitted(again.image, again.tag, -1, true, true);
+    assert(quest::StereoViewTestAccess::hud(hudView, again.image));
+  }
+  std::puts("PASS: rapid surface replacement, scene framing, empty cameras, ring exhaustion, GPU ownership, stale callbacks "
+            "and the interface kept or drawn again");
 }

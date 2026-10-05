@@ -968,9 +968,12 @@ bool StereoView::game_frame(StereoFrame& out) {
   const int64_t displayHz = mPeriodNs > 0 ? 1'000'000'000 / mPeriodNs : 60;
   const uint32_t hudEvery = mHudEveryImage ? 1u : mHudHalf ? 2u
                                                   : static_cast<uint32_t>(std::max<int64_t>(2, (displayHz + 13) / 26));
+  // Aurora draws it only when it changed (debug.partyboard.hud_keep), unless
+  // the last one it drew never reached the headset.
   free->hud = mHudSinceLease + 1 >= hudEvery;
   mHudSinceLease = free->hud ? 0 : mHudSinceLease + 1;
-  out.drawHud = free->hud ? 1 : 0;
+  out.drawHud = free->hud ? (mHudLost ? 2 : 1) : 0;
+  if (free->hud) mHudLost = false;
   out.foveation = mFoveationAuto && mFoveationAvailable ? mFoveation : 0;
   out.generation = mGeneration;
   free->state = State::Drawing;
@@ -1335,23 +1338,28 @@ bool StereoView::minigame_mode() const {
   return !mScreenRequired && !mBoardMode;
 }
 
-void StereoView::submitted(uint32_t image, uint64_t tag, int syncFd, bool hasWorld) {
+void StereoView::submitted(uint32_t image, uint64_t tag, int syncFd, bool hasWorld, bool hudDrawn) {
   std::lock_guard lock{mMutex};
   if (image >= mSlots.size() || mSlots[image].state != State::Drawing || mSlots[image].tag != tag) {
     if (syncFd >= 0) {
       close(syncFd);
     }
+    // An interface it drew is not coming.
+    if (hudDrawn) mHudLost = true;
     return;
   }
   mSlots[image].state = State::Ready;
   mSlots[image].submitNs = steady_ns();
   mSlots[image].fence = syncFd;
   mSlots[image].hasWorld = hasWorld;
+  // Unchanged, Aurora kept the one before: the headset keeps showing it.
+  if (!hudDrawn) mSlots[image].hud = false;
 }
 
 void StereoView::cancelled(uint32_t image, uint64_t tag) {
   std::lock_guard lock{mMutex};
   if (image < mSlots.size() && mSlots[image].state == State::Drawing && mSlots[image].tag == tag) {
+    if (mSlots[image].hud) mHudLost = true;
     release_slot(mSlots[image]);
   }
 }
@@ -1466,7 +1474,7 @@ void StereoView::present(Slot* newest, int fence, int64_t doneNs, int64_t finish
     // When the GPU finishes the copy ("Copy GPU" probe): it waits behind
     // the game's own drawing unless the driver lets it go first.
     EGLSyncKHR copyDone = EGL_NO_SYNC_KHR;
-    if (g_gl.dupNativeFence != nullptr && newest->copyDoneFd < 0) {
+    if (mProbes && g_gl.dupNativeFence != nullptr && newest->copyDoneFd < 0) {
       const EGLint none[] = {EGL_NONE};
       copyDone = g_gl.createSync(mDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, none);
     }
@@ -1486,6 +1494,8 @@ void StereoView::present(Slot* newest, int fence, int64_t doneNs, int64_t finish
       mHudShown = XR_SUCCEEDED(xrReleaseSwapchainImage(mHudSwapchain, &release));
       if (mHudShown) ++mNewHudCount;
     }
+    // Drawn but not copied (at most 30 copies a second, or no destination).
+    if (newest->hud && !(hudReady && mHudShown)) mHudLost = true;
     accepted = keepBoard || XR_SUCCEEDED(xrReleaseSwapchainImage(mSwapchain, &release));
     if (accepted && !keepBoard) {
       ++mNewWorldCount;
@@ -1705,6 +1715,7 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
           }
           ++mAdaptMissed;
           ++mMissedDropped;
+          if (slot.hud) mHudLost = true;
           release_slot(slot);
         }
       }
@@ -1822,8 +1833,18 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
            mStageTotal.count, mStageRecord.avg(), mStageRecord.max, mStageGpu.avg(), mStageGpu.max, mStageWait.avg(),
            mStageWait.max, mStageTotal.avg(), mStageTotal.max, mSlots.size(), mRingFullCount, mFullDrawing, mFullReady,
            mFullCopying);
-      LOGI("Copy GPU: %u copies, sent to finished %.2f ms avg, %.2f max; looks %.1f ms before their display",
-           mStageCopy.count, mStageCopy.avg(), mStageCopy.max, mPacer.lead_ns() / 1e6);
+      if (mProbes) {
+        LOGI("Copy GPU: %u copies, sent to finished %.2f ms avg, %.2f max", mStageCopy.count, mStageCopy.avg(),
+             mStageCopy.max);
+      }
+      // Probes (debug.partyboard.probes 1): the copies' GPU end ("Copy GPU"),
+      // a native fence made and read for each copy.
+      char probes[PROP_VALUE_MAX] = {};
+      __system_property_get("debug.partyboard.probes", probes);
+      if (const bool on = std::strcmp(probes, "1") == 0; on != mProbes) {
+        LOGI("Stereo: probes %s (debug.partyboard.probes)", on ? "on" : "off");
+        mProbes = on;
+      }
       mStageRecord = mStageGpu = mStageWait = mStageTotal = mStageCopy = Stage{};
       mFullDrawing = mFullReady = mFullCopying = 0;
       mHolds.fill(0);
@@ -2113,10 +2134,10 @@ __attribute__((visibility("default"))) uint32_t PartyBoardQuest_StereoGeneration
 }
 
 __attribute__((visibility("default"))) void PartyBoardQuest_StereoSubmitted(uint32_t image, uint64_t tag, int syncFd, bool hasWorld,
-                                                                            void*) {
+                                                                            bool hudDrawn, void*) {
   quest::StereoView* view = quest::g_stereoView;
   if (view != nullptr) {
-    view->submitted(image, tag, syncFd, hasWorld);
+    view->submitted(image, tag, syncFd, hasWorld, hudDrawn);
   } else if (syncFd >= 0) {
     close(syncFd);
   }

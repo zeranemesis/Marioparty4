@@ -19,6 +19,7 @@
 #include <android/hardware_buffer.h>
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <chrono>
 #include <mutex>
@@ -37,7 +38,7 @@ struct StereoFrame {
   float hudWidth, hudHeight;
   uint32_t eyeWidth, eyeHeight; // drawn part of each eye's half (dynamic resolution)
   uint32_t generation;          // of the images the lease is in
-  uint32_t drawHud;             // 1: draw the interface into its image this frame
+  uint32_t drawHud;             // 1: draw the interface if it changed, 2: whatever (the last one was lost), 0: not
   uint32_t foveation;           // the eyes' foveation level (0: none), StereoView::adapt_resolution
 };
 
@@ -102,7 +103,7 @@ public:
   // which changes with them. capacity 0: the version only.
   uint32_t hidden_area(uint32_t eye, float* rects, uint32_t capacity, uint32_t& version) const;
   // Aurora's render thread: the frame drawing `image` went to the GPU.
-  void submitted(uint32_t image, uint64_t tag, int syncFd, bool hasWorld = false);
+  void submitted(uint32_t image, uint64_t tag, int syncFd, bool hasWorld = false, bool hudDrawn = true);
   void set_screen_required(bool required);
   void set_board_mode(bool board);
   // XR_KHR_composition_layer_depth, once the extension is enabled (after
@@ -395,6 +396,11 @@ private:
   bool mHudEveryImage = false;
   bool mHudHalf = false, mHudRateLogged = false;
   uint32_t mHudSinceLease = 0; // leases since the last one that drew it
+  // An interface Aurora drew never reached the headset (its image was dropped,
+  // or not copied): the next frame that may draw it must, changed or not,
+  // since Aurora draws it only when it changed (hud_keep).
+  bool mProbes = false; // debug.partyboard.probes 1: the copies' GPU end ("Copy GPU")
+  std::atomic<bool> mHudLost{false}; // written by present(), outside the lock
 
   // The last image shown, resubmitted until the game draws the next one.
   uint64_t mPresentedTag = 0;

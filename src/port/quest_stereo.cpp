@@ -55,14 +55,14 @@ struct QuestStereoFrame {
     float hudWidth, hudHeight;
     uint32_t eyeWidth, eyeHeight; // drawn part of each eye's half (dynamic resolution)
     uint32_t generation;          // of the images the lease is in
-    uint32_t drawHud;             // 1: draw the interface into its image this frame
+    uint32_t drawHud;             // 1: draw the interface if it changed, 2: whatever (the last one was lost), 0: not
     uint32_t foveation;           // the eyes' foveation level (0: none)
 };
 
 using FrameFn = bool (*)(QuestStereoFrame *frame);
 using ImagesFn = bool (*)(void **eyeBuffers, void **hudBuffers, uint32_t capacity, uint32_t *count, uint32_t *width,
     uint32_t *height, uint32_t *generation, uint32_t *hudWidth, uint32_t *hudHeight);
-using SubmittedFn = void (*)(uint32_t image, uint64_t tag, int syncFd, bool hasWorld, void *user);
+using SubmittedFn = void (*)(uint32_t image, uint64_t tag, int syncFd, bool hasWorld, bool hudDrawn, void *user);
 using GenerationFn = uint32_t (*)(void);
 using WorldOnlyFn = bool (*)();
 using ScreenRequiredFn = void (*)(bool);
@@ -533,6 +533,9 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
     std::memcpy(sEyeClip, clip, sizeof(sEyeClip));
     AuroraStereoSetEyeSize(sFrame.eyeWidth, sFrame.eyeHeight);
     AuroraStereoSetHud(sFrame.drawHud != 0);
+    if (sFrame.drawHud == 2) {
+        AuroraStereoRedrawHud();
+    }
     // Whether the renderer can foveate, told once it has its device; the
     // level the headset chose for this frame (StereoView::adapt_resolution).
     static bool sFoveationTold = false;
