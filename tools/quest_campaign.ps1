@@ -29,6 +29,8 @@ param(
     [switch]$NoAlternate,
     # Only these tested phases (names), each still after its reference.
     [string[]]$Only,
+    # Only these restart phases (names, restart-reference included only if named).
+    [string[]]$RestartOnly,
     # The scene the restart phases wait for (89: the Toad board), and how long.
     [int]$Scene = 89,
     [int]$SceneWaitSeconds = 300,
@@ -92,6 +94,7 @@ $live = @(
     @{ name = 'full-precision';   props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.eye_depth' = '32'; 'debug.partyboard.eye_f16' = '0' } },
     # Display modes (display_hz and space_warp are read live since build 174/169).
     @{ name = 'hz90';             props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.display_hz' = '90' } },
+    @{ name = 'hz90-res110';      props = @{ 'debug.partyboard.eye_scale' = '110'; 'debug.partyboard.display_hz' = '90' } },
     @{ name = 'appsw120';         props = @{ 'debug.partyboard.eye_scale' = '85'; 'debug.partyboard.display_hz' = '120'; 'debug.partyboard.space_warp' = '1' } },
     # No MSAA, more pixels instead: four times fewer bytes a pixel in tile
     # memory (fewer bins), the compositor's filter smoothing the larger image.
@@ -131,8 +134,12 @@ $restart = @(
     @{ name = 'tev-overflow-all';    props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.tev_overflow' = 'all' } },
     @{ name = 'xr-priority-off';     props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.xr_priority' = 'off' } },
     @{ name = 'msaa-1';              props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.stereo_msaa' = '1' } },
-    @{ name = 'shader-f16';          props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.shader_f16' = '1' } }
+    @{ name = 'shader-f16';          props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.shader_f16' = '1' } },
+    # World textures uploaded as decoded RGBA8 instead of ASTC 4x4 (build 201).
+    @{ name = 'astc-off';            props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.astc' = '0' } }
 )
+if ($RestartOnly) { $RestartOnly = @($RestartOnly | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+if ($RestartOnly) { $restart = @($restart | Where-Object { $RestartOnly -contains $_.name }) }
 
 function Adb([string[]]$arguments) { & $adb -s $Serial @arguments }
 function Set-Switch([string]$name, [string]$value) {

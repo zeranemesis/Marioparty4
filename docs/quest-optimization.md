@@ -425,6 +425,16 @@ Reglages par defaut a la fin : 72 Hz, images retenues pour leur affichage, GPU e
 - Textures du decor en ASTC 4x4 (8 bits par texel au lieu de 32), encodees en arriere-plan par astc-encoder (ARM, Apache-2.0) et gardees en cache (`astc4x4/`), `debug.partyboard.astc 0` pour couper.
 - Foveation fixe : demande un Dawn modifie (`VK_EXT_fragment_density_map`, carte de densite attachee a la passe des yeux) ; Dawn se compile depuis ses sources pour Android (`C:\mp4w\dawn-src`).
 
+## Bilan du 05/10 (builds 205 a 210)
+
+Base au plateau Toad, 72 Hz, 100 % (build 210) : 72/72 images neuves, 0 ratee, 0 saccade, delai constant 27,8 ms, toutes les images copiees en avance, GPU 65-85 % selon la frequence choisie par le systeme, passe des yeux ~9,4 ms.
+
+- Cache de pipelines du Quest (build 205) : le cache livre (PC) etait en version 13, ignore par le jeu (version 14) ; le Quest livre maintenant celui du casque, 2840 pipelines charges au demarrage (53 que le casque ne peut construire sont ecartes).
+- Foveation : Dawn choisissait le dynamic rendering, que la carte de densite ne suit pas ; avec les render passes (build 206) la carte est appliquee (`foveation test` : tout pixelise ; `split` : un oeil net, l'autre pixelise), mais les niveaux 1 a 3 ne changent ni les fragments (-9,5, +2,2, -1,5 %) ni la passe des yeux (9,2-9,6 ms), et l'image plait moins. **Coupee par defaut** (build 210), Dawn garde son dynamic rendering sauf si `debug.partyboard.foveation` est donne au demarrage.
+- ASTC : -5 % de memoire lue (4,36 contre 4,57 Go/s), passe des yeux 9,22 contre 9,49 ms, travail GPU dans le bruit. Garde (rien de visible), sans gain de vitesse.
+- Filtre automatique de Meta (`layer_filter auto`) : aucune difference visible, compositeur 2,0 -> 3,7 ms par image affichee. Non retenu.
+- 90 Hz a 110 % (en jeu) : 79-82 images neuves sur 90, ~5 ratees par seconde, delai 35-38 ms (25 a 52), mouvement->photon 64 ms contre 48, GPU 95 %. Ressenti : latence et manque de fluidite. **72 Hz a 100 % reste le defaut.**
+
 ## Sources Meta du plan
 
 - [OVR Metrics Tool](https://developers.meta.com/horizon/documentation/native/android/ts-ovrmetricstool/)
