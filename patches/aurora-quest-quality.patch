@@ -2251,7 +2251,102 @@
      return half ? fmt::format("f16(tev_overflow_f32(f32({})))", reg) : fmt::format("tev_overflow_f32({})", reg);
    };
    std::string expr =
-@@ -963,6 +1024,55 @@ static void add_stereo_discard(std::string& source) noexcept {
+@@ -686,7 +747,14 @@ auto fetch_fixed16_attr(std::string_view fetchFn, const AttrConfig& mapping, std
+   return fmt::format("{}_{}(&{}, {}, {}u, {})", fetchFn, mapping.cnt, buf, offs, mapping.frac, le);
+ }
+ 
+-auto fetch_attr(const AttrConfig& mapping, std::string_view buf, std::string_view offs, bool le) -> std::string {
++// `aligned`: the address is surely a multiple of 4 (attr_address), so F32
++// components are whole words: one load each, without load_u32_raw's test
++// and second word for an unaligned address.
++auto fetch_attr(const AttrConfig& mapping, std::string_view buf, std::string_view offs, bool le, bool aligned = false)
++    -> std::string {
++  if (aligned && mapping.compType == GX_F32) {
++    return fmt::format("fetch_f32a_{}(&{}, {}, {})", mapping.cnt, buf, offs, le);
++  }
+   switch (mapping.compType) {
+   case GX_U8:
+     return fmt::format("fetch_u8_{}(&{}, {}, {}, {})", mapping.cnt, buf, offs, mapping.frac, le);
+@@ -728,6 +796,10 @@ struct AttrAddress {
+   std::string offs;
+   std::string_view buf;
+   bool le;
++  // An indexed array's element: array_start is aligned (push_storage, at
++  // least 4 bytes), so with a stride and an offset in it that are multiples
++  // of 4 the address is too.
++  bool aligned = false;
+ };
+ 
+ auto attr_address(const AttrConfig& mapping, GXAttr attr, std::string_view vidx, u32 vtxStride, u32 dlExtra, u32 within)
+@@ -736,13 +808,13 @@ auto attr_address(const AttrConfig& mapping, GXAttr attr, std::string_view vidx,
+   if (mapping.attrType == GX_INDEX8) {
+     return {fmt::format("ubuf.array_start[{}] + raw_fetch_u8_1(&vbuf, ubuf.vtx_start + {} * {}u + {}u) * {}u + {}u",
+                         attr - GX_VA_POS, vidx, vtxStride, dlOffset, mapping.stride, within),
+-            "abuf"sv, mapping.le};
++            "abuf"sv, mapping.le, mapping.stride % 4 == 0 && within % 4 == 0};
+   }
+   if (mapping.attrType == GX_INDEX16) {
+     return {
+         fmt::format("ubuf.array_start[{}] + raw_fetch_u16_1(&vbuf, ubuf.vtx_start + {} * {}u + {}u, false) * {}u + {}u",
+                     attr - GX_VA_POS, vidx, vtxStride, dlOffset, mapping.stride, within),
+-        "abuf"sv, mapping.le};
++        "abuf"sv, mapping.le, mapping.stride % 4 == 0 && within % 4 == 0};
+   }
+   return {fmt::format("ubuf.vtx_start + {} * {}u + {}u", vidx, vtxStride, dlOffset + within), "vbuf"sv, false};
+ }
+@@ -752,7 +824,7 @@ auto attr_load(const ShaderConfig& config, GXAttr attr, std::string_view vidx) -
+   if (mapping.attrType == GX_NONE) {
+     return vtx_attr(config, attr);
+   }
+-  const auto [offs, buf, le] = attr_address(mapping, attr, vidx, config.vtxStride, 0u, 0u);
++  const auto [offs, buf, le, aligned] = attr_address(mapping, attr, vidx, config.vtxStride, 0u, 0u);
+   switch (attr) {
+   case GX_VA_PNMTXIDX:
+     return fmt::format("(raw_fetch_u8_1(&{}, {}) / 3u)", buf, offs);
+@@ -766,7 +838,7 @@ auto attr_load(const ShaderConfig& config, GXAttr attr, std::string_view vidx) -
+   case GX_VA_TEX7MTXIDX:
+     return fmt::format("raw_fetch_u8_1(&{}, {})", buf, offs);
+   case GX_VA_POS: {
+-    const auto posLoad = fetch_attr(mapping, buf, offs, le);
++    const auto posLoad = fetch_attr(mapping, buf, offs, le, aligned);
+     if (mapping.cnt == 2) {
+       return fmt::format("vec3f({}, 0.0)", posLoad);
+     }
+@@ -777,9 +849,9 @@ auto attr_load(const ShaderConfig& config, GXAttr attr, std::string_view vidx) -
+     if (mapping.cnt > 3) {
+       auto nrmMapping = mapping;
+       nrmMapping.cnt = 3;
+-      return fetch_attr(nrmMapping, buf, offs, le);
++      return fetch_attr(nrmMapping, buf, offs, le, aligned);
+     }
+-    return fetch_attr(mapping, buf, offs, le);
++    return fetch_attr(mapping, buf, offs, le, aligned);
+   case GX_VA_CLR0:
+   case GX_VA_CLR1:
+     return fetch_color_attr(mapping, buf, offs, le);
+@@ -791,7 +863,7 @@ auto attr_load(const ShaderConfig& config, GXAttr attr, std::string_view vidx) -
+   case GX_VA_TEX5:
+   case GX_VA_TEX6:
+   case GX_VA_TEX7: {
+-    const auto texLoad = fetch_attr(mapping, buf, offs, le);
++    const auto texLoad = fetch_attr(mapping, buf, offs, le, aligned);
+     if (mapping.cnt == 1) {
+       return fmt::format("vec2f({}, 0.0)", texLoad);
+     }
+@@ -824,10 +896,10 @@ auto attr_load_nbt_slice(const ShaderConfig& config, NbtSlice slice, std::string
+     }
+   }
+   const u32 within = sliceIdx * 3u * compsize;
+-  const auto [offs, buf, le] = attr_address(mapping, GX_VA_NRM, vidx, config.vtxStride, dlExtra, within);
++  const auto [offs, buf, le, aligned] = attr_address(mapping, GX_VA_NRM, vidx, config.vtxStride, dlExtra, within);
+   auto sliceMapping = mapping;
+   sliceMapping.cnt = 3;
+-  return fetch_attr(sliceMapping, buf, offs, le);
++  return fetch_attr(sliceMapping, buf, offs, le, aligned);
+ }
+ 
+ static constexpr std::string_view nbt_slice_local(NbtSlice slice) noexcept {
+@@ -963,6 +1035,55 @@ static void add_stereo_discard(std::string& source) noexcept {
    source.insert(body + 1, "\n    if (in.stereo_side < 0.0) { discard; }");
  }
  
@@ -2307,7 +2402,7 @@
  std::string build_shader_source(const ShaderConfig& config) noexcept {
    ZoneScoped;
    const auto hash = xxh3_hash(config);
-@@ -1222,6 +1332,14 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+@@ -1222,6 +1343,14 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
      std::string operand = alpha_arg_reg(arg, idx, config, stage);
      return half ? half_operand(std::move(operand), true) : operand;
    };
@@ -2322,7 +2417,7 @@
    for (u32 idx = 0; idx < config.tevStageCount; ++idx) {
      const auto& stage = config.tevStages[idx];
      {
-@@ -1229,7 +1347,7 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+@@ -1229,7 +1358,7 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
        std::string op = tev_color_op(
            stage.colorOp.op, tev_bias(stage.colorOp.bias), tev_scale(stage.colorOp.scale), stage.colorOp.clamp,
            color_operand(stage.colorPass.a, idx, stage), color_operand(stage.colorPass.b, idx, stage),
@@ -2331,7 +2426,7 @@
        fragmentFn += fmt::format("\n    // TEV stage {2}\n    {0} = {3}({1}, {0}.a);", outReg, op, idx, vec4);
      }
      {
-@@ -1237,10 +1355,20 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+@@ -1237,10 +1366,20 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
        std::string op = tev_alpha_op(
            stage.alphaOp.op, tev_bias(stage.alphaOp.bias), tev_scale(stage.alphaOp.scale), stage.alphaOp.clamp,
            alpha_operand(stage.alphaPass.a, idx, stage), alpha_operand(stage.alphaPass.b, idx, stage),
@@ -2353,7 +2448,7 @@
  
    {
      const auto& lastStage = config.tevStages[config.tevStageCount - 1];
-@@ -1777,23 +1905,17 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+@@ -1777,23 +1916,17 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
          "var tex{0}_samp: sampler;",
          i, i * 2, i * 2 + 1);
    }
@@ -2387,7 +2482,35 @@
    }
    if (config.alphaCompare) {
      const auto comp0 = alpha_compare(config.alphaCompare.comp0, config.alphaCompare.ref0);
-@@ -2198,6 +2320,9 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
+@@ -2079,6 +2212,27 @@ fn fetch_s16_4(p: ptr<storage, array<u32>>, byte_off: u32, frac: u32, le: bool)
+   return vec4f(v) / f32(1u << frac);
+ }}
+ 
++fn fetch_f32a_1(p: ptr<storage, array<u32>>, byte_off: u32, le: bool) -> f32 {{
++  return bitcast<f32>(bswap32(load_word(p, byte_off >> 2u), le));
++}}
++
++fn fetch_f32a_2(p: ptr<storage, array<u32>>, byte_off: u32, le: bool) -> vec2f {{
++  let w = byte_off >> 2u;
++  return vec2f(bitcast<f32>(bswap32(load_word(p, w), le)), bitcast<f32>(bswap32(load_word(p, w + 1u), le)));
++}}
++
++fn fetch_f32a_3(p: ptr<storage, array<u32>>, byte_off: u32, le: bool) -> vec3f {{
++  let w = byte_off >> 2u;
++  return vec3f(bitcast<f32>(bswap32(load_word(p, w), le)), bitcast<f32>(bswap32(load_word(p, w + 1u), le)),
++               bitcast<f32>(bswap32(load_word(p, w + 2u), le)));
++}}
++
++fn fetch_f32a_4(p: ptr<storage, array<u32>>, byte_off: u32, le: bool) -> vec4f {{
++  let w = byte_off >> 2u;
++  return vec4f(bitcast<f32>(bswap32(load_word(p, w), le)), bitcast<f32>(bswap32(load_word(p, w + 1u), le)),
++               bitcast<f32>(bswap32(load_word(p, w + 2u), le)), bitcast<f32>(bswap32(load_word(p, w + 3u), le)));
++}}
++
+ fn fetch_f32_1(p: ptr<storage, array<u32>>, byte_off: u32, le: bool) -> f32 {{
+   return raw_fetch_f32_1(p, byte_off, le);
+ }}
+@@ -2198,6 +2352,9 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
    } else if (config.stereo == StereoDiscard) {
      add_stereo_discard(shaderSource);
    }
@@ -2397,7 +2520,7 @@
    if (config.halfPrecision) {
      shaderSource.insert(0, "enable f16;\n");
    }
-@@ -2208,6 +2333,12 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
+@@ -2208,6 +2365,12 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}
    return shaderSource;
  }
  

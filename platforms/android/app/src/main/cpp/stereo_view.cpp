@@ -1797,7 +1797,12 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
       mLateMovedSumMm = mLateMovedMaxMm = 0;
       char foveation[PROP_VALUE_MAX] = {};
       __system_property_get("debug.partyboard.foveation", foveation);
-      if (const bool automatic = std::strcmp(foveation, "auto") == 0; automatic != mFoveationAuto) {
+      // Automatic with `auto`, and by default from 90 Hz up (11.1 ms a frame:
+      // the board's whole view did not fit at full resolution, 2026-10-04);
+      // `0` to `3` fix a level in Aurora, off here.
+      const bool fastDisplay = mPeriodNs > 0 && mPeriodNs <= 11'500'000;
+      if (const bool automatic = std::strcmp(foveation, "auto") == 0 || (foveation[0] == '\0' && fastDisplay);
+          automatic != mFoveationAuto) {
         LOGI("Stereo: automatic foveation %s (debug.partyboard.foveation)", automatic ? "on" : "off");
         mFoveationAuto = automatic;
         if (!automatic) mFoveation = 0;
