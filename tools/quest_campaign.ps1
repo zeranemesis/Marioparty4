@@ -57,7 +57,8 @@ $switches = @('debug.partyboard.sort_opaque', 'debug.partyboard.stereo_crossing'
               'debug.partyboard.eye_depth', 'debug.partyboard.eye_f16', 'debug.partyboard.eye_msaa',
               'debug.partyboard.display_hz', 'debug.partyboard.space_warp', 'debug.partyboard.hud_msaa',
               'debug.partyboard.batch_draws', 'debug.partyboard.cull_objects', 'debug.partyboard.foveation',
-              'debug.partyboard.astc', 'debug.partyboard.late_latch', 'debug.partyboard.early_copy')
+              'debug.partyboard.astc', 'debug.partyboard.late_latch', 'debug.partyboard.early_copy',
+              'debug.partyboard.hud_keep', 'debug.partyboard.gx_thread', 'debug.partyboard.probes')
 $freeze = if ($NoFreeze) { '' } else { '1' }
 $live = @(
     @{ name = 'reference';     props = @{ 'debug.partyboard.eye_scale' = $eye } },
@@ -110,6 +111,8 @@ $live = @(
     # the interface every other image (one in 3 at 72 Hz by default).
     @{ name = 'sort-depth';       props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.sort_opaque' = 'depth' } },
     @{ name = 'hud-half';         props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.hud_rate' = 'half' } },
+    # The interface drawn in every frame that may, changed or not (only when it changed by default since build 211).
+    @{ name = 'hud-keep-off';     props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.hud_keep' = '0' } },
     # The eyes' fragment density map (a Dawn built by tools/build_dawn_android_fdm.ps1): levels 1 to 3.
     @{ name = 'fov-1';            props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.foveation' = '1' } },
     @{ name = 'fov-2';            props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.foveation' = '2' } },
@@ -136,7 +139,9 @@ $restart = @(
     @{ name = 'msaa-1';              props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.stereo_msaa' = '1' } },
     @{ name = 'shader-f16';          props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.shader_f16' = '1' } },
     # World textures uploaded as decoded RGBA8 instead of ASTC 4x4 (build 201).
-    @{ name = 'astc-off';            props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.astc' = '0' } }
+    @{ name = 'astc-off';            props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.astc' = '0' } },
+    # GX commands decoded on a thread of their own (build 211; off by default until measured).
+    @{ name = 'gx-thread';           props = @{ 'debug.partyboard.eye_scale' = $eye; 'debug.partyboard.gx_thread' = '1' } }
 )
 if ($RestartOnly) { $RestartOnly = @($RestartOnly | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
 if ($RestartOnly) { $restart = @($restart | Where-Object { $RestartOnly -contains $_.name }) }
@@ -292,6 +297,11 @@ foreach ($name in $marks) {
         worker_busy_pct  = Average (& $number 'Render worker: .*? busy (\d+)%')
         loop_draw_ms     = Average (& $number 'Game loop: .*? draw=([\d.]+)/')
         loop_done_ms     = Average (& $number 'Game loop: .*? doneRender=([\d.]+)/')
+        # Build 211: GX decoding a frame (game thread or its own), the game
+        # thread's waits for it, and the interface frames kept unchanged.
+        gx_decode_ms     = Average (& $number 'GX decode: ([\d.]+) ms a frame')
+        gx_wait_ms       = Average (& $number 'GX decode: .*? waited ([\d.]+) ms a frame')
+        hud_kept         = Average (& $number 'Stereo interface: kept (\d+) of')
     }
 }
 # Each tested phase against the reference just before it (ref-<name>), else
@@ -310,4 +320,5 @@ $rows | Format-Table phase, images_s, stutters, off_cadence_pct, res_pct, frag_M
 $rows | Format-Table phase, tex_stall_pct, mem_stall_pct, read_GB_s, compositor_ms, motion_photon_ms, predicted_ms, draws_eye -AutoSize | Out-String
 $rows | Where-Object { $_.phase -notlike 'ref-*' } | Format-Table phase, delta_frag_pct, delta_gpu_pct, delta_m2p_pct -AutoSize | Out-String
 $rows | Format-Table phase, eyes_gpu_ms, hud_gpu_ms, ring_gpu_ms, ring_wait_ms, worker_busy_pct, loop_draw_ms, loop_done_ms -AutoSize | Out-String
+$rows | Format-Table phase, gx_decode_ms, gx_wait_ms, hud_kept -AutoSize | Out-String
 Write-Output "Output: $OutputDirectory"

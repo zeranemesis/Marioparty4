@@ -435,6 +435,12 @@ Base au plateau Toad, 72 Hz, 100 % (build 210) : 72/72 images neuves, 0 ratee, 0
 - Filtre automatique de Meta (`layer_filter auto`) : aucune difference visible, compositeur 2,0 -> 3,7 ms par image affichee. Non retenu.
 - 90 Hz a 110 % (en jeu) : 79-82 images neuves sur 90, ~5 ratees par seconde, delai 35-38 ms (25 a 52), mouvement->photon 64 ms contre 48, GPU 95 %. Ressenti : latence et manque de fluidite. **72 Hz a 100 % reste le defaut.**
 
+### Pistes du soir (build 211, non mesure)
+
+- Interface redessinee seulement quand elle change (`hud_keep`, actif par defaut) : Aurora hache chaque dessin de l'interface (pipeline, sommets, indices, uniformes sans leurs decalages de tampon, tableaux indexes, textures et leurs ecritures) ; meme hache que la derniere dessinee : pas de passe, le casque garde l'image d'avant. Une interface dessinee mais jamais copiee (image abandonnee) force la suivante. A mesurer : `Stereo interface: kept N of M`, phase `hud-keep-off`.
+- Sondes coupees par defaut (`debug.partyboard.probes 1` pour les remettre) : horodatages GPU des passes (`gpu_timing 1` aussi, au demarrage), barriere de fin de copie (`Copy GPU`), statistiques par type de dessin (`Stereo kinds`).
+- Decodage GX sur un fil a lui (`debug.partyboard.gx_thread 1` au demarrage, **coupe par defaut**) : le fil du jeu ne fait qu'ecrire ses commandes, un autre coeur les decode dans l'ordre, comme le GPU de la GameCube lisait sa FIFO ; ce qui change l'etat hors FIFO (copies EFB, crochets stereo, TLUT) passe dans le meme ordre (`fifo::ordered`), et la fin de l'image ou `GXDrawDone` attendent le decodeur. La ligne `GX decode: X ms a frame` dit ce que le decodage coute au fil du jeu (aujourd'hui) ou au sien, et l'attente du jeu : c'est le gain possible. Phase `gx-thread` (redemarrage).
+
 ## Sources Meta du plan
 
 - [OVR Metrics Tool](https://developers.meta.com/horizon/documentation/native/android/ts-ovrmetricstool/)

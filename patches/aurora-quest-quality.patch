@@ -134,6 +134,229 @@
  
  #ifdef __cplusplus
  }
+--- a/lib/aurora.cpp
++++ b/lib/aurora.cpp
+@@ -202,6 +202,9 @@ const AuroraEvent* update() noexcept {
+ bool begin_frame() noexcept {
+   ZoneScoped;
+ #ifdef AURORA_ENABLE_GX
++  // Commands handed to the GX decoder thread since the last frame's end go
++  // into that frame's state, not into the one this begins.
++  gx::fifo::wait_decoded();
+   {
+ #if defined(SDL_PLATFORM_ANDROID)
+     // SurfaceLock is SDL's Android activity mutex, and the render worker takes
+@@ -247,6 +250,8 @@ void end_frame() noexcept {
+   ZoneScoped;
+ #ifdef AURORA_ENABLE_GX
+   gx::fifo::drain();
++  gx::fifo::sync(); // the GX decoder thread's frame is recorded
++  gx::fifo::frame_done();
+   gfx::finish();
+   auto imguiDrawData = imgui::freeze();
+ 
+--- a/lib/dolphin/gx/GXAurora.cpp
++++ b/lib/dolphin/gx/GXAurora.cpp
+@@ -35,7 +35,7 @@ void GXInsertDebugMarker(const char* label) {
+ }
+ 
+ void AuroraSetViewportPolicy(AuroraViewportPolicy policy) {
+-  g_gxState.viewportPolicy = policy;
++  aurora::gx::fifo::ordered([policy] { g_gxState.viewportPolicy = policy; }, false);
+   aurora::window::set_frame_buffer_aspect_fit(policy == AURORA_VIEWPORT_FIT);
+ }
+ 
+@@ -95,11 +95,9 @@ void GX2SetPolygonOffset(f32 mFrontOffset, f32 mFrontScale, f32 mBackOffset, f32
+ }
+ 
+ void GXCreateFrameBuffer(u32 width, u32 height) {
+-  aurora::gx::fifo::drain();
+-  aurora::gfx::begin_offscreen(width, height);
++  aurora::gx::fifo::ordered([width, height] { aurora::gfx::begin_offscreen(width, height); });
+ }
+ 
+ void GXRestoreFrameBuffer() {
+-  aurora::gx::fifo::drain();
+-  aurora::gfx::end_offscreen();
++  aurora::gx::fifo::ordered([] { aurora::gfx::end_offscreen(); });
+ }
+--- a/lib/dolphin/gx/GXCpu2Efb.cpp
++++ b/lib/dolphin/gx/GXCpu2Efb.cpp
+@@ -1,10 +1,13 @@
+ #include "gx.hpp"
+ 
+ #include "../../gfx/depth_peek.hpp"
++#include "../../gx/fifo.hpp"
+ 
+ #include <dolphin/gx/GXCpu2Efb.h>
+ 
+ void GXPeekZ(u16 x, u16 y, u32* z) {
++  // What the GX decoder thread decoded so far (no-op without it).
++  aurora::gx::fifo::sync();
+   if (z != nullptr) {
+     u32 value = 0;
+     if (aurora::gfx::depth_peek::read_latest(x, y, value)) {
+--- a/lib/dolphin/gx/GXDispList.cpp
++++ b/lib/dolphin/gx/GXDispList.cpp
+@@ -79,10 +79,9 @@ void GXCallDisplayListLE(const void* data, u32 nbytes) {
+ 
+   // Drain the internal FIFO so that any pending CP register writes
+   // (VCD, VAT, etc.) are processed into g_gxState before the display
+-  // list's draw commands reference them.
+-  aurora::gx::fifo::drain();
+-
+-  // Process the display list through the command processor (little-endian)
+-  aurora::gx::fifo::process(static_cast<const u8*>(data), nbytes, false);
++  // list's draw commands reference them, then process the display list
++  // through the command processor (little-endian; on the GX decoder thread
++  // when it runs, from a copy).
++  aurora::gx::fifo::call_display_list_le(data, nbytes);
+ }
+ }
+--- a/lib/dolphin/gx/GXFrameBuffer.cpp
++++ b/lib/dolphin/gx/GXFrameBuffer.cpp
+@@ -13,6 +13,8 @@
+ #include <cmath>
+ 
+ namespace {
++void copy_tex(void* dest, GXBool clear);
++
+ aurora::Vec2<uint32_t> scale_copy_dst(u32 logicalWidth, u32 logicalHeight) {
+   if (g_gxState.viewportPolicy == AURORA_VIEWPORT_NATIVE) {
+     return {logicalWidth, logicalHeight};
+@@ -105,14 +107,22 @@ void GXAdjustForOverscan(GXRenderModeObj* rmin, GXRenderModeObj* rmout, u16 hor,
+ 
+ void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {}
+ 
+-void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) { g_gxState.texCopySrc = {left, top, wd, ht}; }
++// The copy's state is read by GXCopyTex as decoded (the GX decoder thread's
++// order, aurora::gx::fifo::ordered); set at once without it, as before.
++void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
++  aurora::gx::fifo::ordered([=] { g_gxState.texCopySrc = {left, top, wd, ht}; }, false);
++}
+ 
+ void GXSetDispCopyDst(u16 wd, u16 ht) {}
+ 
+ void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
+-  g_gxState.texCopyFmt = fmt;
+-  g_gxState.texCopyDstWidth = wd;
+-  g_gxState.texCopyDstHeight = ht;
++  aurora::gx::fifo::ordered(
++      [=] {
++        g_gxState.texCopyFmt = fmt;
++        g_gxState.texCopyDstWidth = wd;
++        g_gxState.texCopyDstHeight = ht;
++      },
++      false);
+ }
+ 
+ // TODO GXSetDispCopyFrame2Field
+@@ -149,18 +159,25 @@ void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[
+   // caller: an effect whose EFB copy feeds its own next frame relies on that
+   // blur to stay stable, and without it the feedback sharpens every frame.
+   if (!vf || vfilter == nullptr) {
+-    g_gxState.copyFilterEnabled = false;
++    aurora::gx::fifo::ordered([] { g_gxState.copyFilterEnabled = false; }, false);
+     return;
+   }
++  decltype(g_gxState.copyFilter) taps{};
+   u32 sum = 0;
+-  for (size_t i = 0; i < g_gxState.copyFilter.size(); ++i) {
+-    g_gxState.copyFilter[i] = vfilter[i];
++  for (size_t i = 0; i < taps.size(); ++i) {
++    taps[i] = vfilter[i];
+     sum += vfilter[i];
+   }
+   // A filter that is only its centre tap is the identity; treating it as
+   // enabled would cost a shader pass per copy to change nothing.
+-  const bool centreOnly = g_gxState.copyFilter[3] == sum;
+-  g_gxState.copyFilterEnabled = sum > 0 && !centreOnly;
++  const bool centreOnly = taps[3] == sum;
++  const bool enabled = sum > 0 && !centreOnly;
++  aurora::gx::fifo::ordered(
++      [taps, enabled] {
++        g_gxState.copyFilter = taps;
++        g_gxState.copyFilterEnabled = enabled;
++      },
++      false);
+ }
+ 
+ void GXSetDispCopyGamma(GXGamma gamma) {}
+@@ -168,8 +185,13 @@ void GXSetDispCopyGamma(GXGamma gamma) {}
+ void GXCopyDisp(void* dest, GXBool clear) {}
+ 
+ void GXCopyTex(void* dest, GXBool clear) {
+-  aurora::gx::fifo::drain();
++  // After the draws so far (on the GX decoder thread when it runs).
++  aurora::gx::fifo::ordered([dest, clear] { copy_tex(dest, clear); });
++}
++}
+ 
++namespace {
++void copy_tex(void* dest, GXBool clear) {
+   const auto rect = aurora::gx::map_logical_scissor(g_gxState.texCopySrc);
+   const auto [dstWidth, dstHeight] = scale_copy_dst(g_gxState.texCopyDstWidth, g_gxState.texCopyDstHeight);
+   const auto texCopyFmt = g_gxState.texCopyFmt;
+@@ -220,6 +242,9 @@ void GXCopyTex(void* dest, GXBool clear) {
+   ++handle.revision;
+   g_gxState.copyTextures[dest] = handle;
+ }
++} // namespace
++
++extern "C" {
+ 
+ // TODO GXGetYScaleFactor
+ // TODO GXGetNumXfbLines
+--- a/lib/dolphin/gx/GXManage.cpp
++++ b/lib/dolphin/gx/GXManage.cpp
+@@ -262,6 +262,9 @@ GXFifoObj* GXInit(void* base, u32 size) {
+ }
+ 
+ void GXDrawDone() {
++  // The GPU done with what it was given: the GX decoder thread has read the
++  // arrays, textures and display lists so far, the game may change them.
++  aurora::gx::fifo::sync();
+   if (DrawDoneCB != nullptr)
+     DrawDoneCB();
+ }
+--- a/lib/dolphin/gx/GXTexture.cpp
++++ b/lib/dolphin/gx/GXTexture.cpp
+@@ -6,6 +6,7 @@
+ #include "dolphin/gx/GXAurora.h"
+ 
+ #include <algorithm>
++#include <vector>
+ 
+ #include "tracy/Tracy.hpp"
+ 
+@@ -317,7 +318,17 @@ void GXInitTlutObj(GXTlutObj* obj_, const void* data, GXTlutFmt format, u16 entr
+ 
+   SET_REG_FIELD(0, obj->tlut, 2, 10, format);
+   SET_REG_FIELD(0, obj->loadTlut0, 8, 24, 0x64);
+-  aurora::gfx::texture_replacement::register_tlut(obj_, data, format, entries);
++  // Its colors now, registered in the GX decoder thread's order (which reads them).
++  std::vector<u8> colors;
++  if (data != nullptr) {
++    colors.assign(static_cast<const u8*>(data), static_cast<const u8*>(data) + static_cast<size_t>(entries) * 2);
++  }
++  aurora::gx::fifo::ordered(
++      [obj_, colors = std::move(colors), format, entries] {
++        aurora::gfx::texture_replacement::register_tlut(obj_, colors.empty() ? nullptr : colors.data(), format,
++                                                        entries);
++      },
++      false);
+ }
+ 
+ void GXInitTlutObjData(GXTlutObj* obj_, const void* data) {
+@@ -338,7 +349,7 @@ void GXLoadTlut(const GXTlutObj* obj_, u32 idx) {
+   GX_WRITE_RAS_REG(loadTlut1);
+   __GXFlushTextureState();
+ 
+-  aurora::gfx::texture_replacement::load_tlut(obj_, idx);
++  aurora::gx::fifo::ordered([obj_, idx] { aurora::gfx::texture_replacement::load_tlut(obj_, idx); }, false);
+   emit_loaded_tlut_metadata(*obj, idx);
+ }
+ 
 --- /dev/null
 +++ b/lib/gfx/astc_cache.cpp
 @@ -0,0 +1,277 @@
@@ -487,7 +710,15 @@
  constexpr uint32_t ClearPipelineConfigVersion = 2;
 --- a/lib/gfx/common.cpp
 +++ b/lib/gfx/common.cpp
-@@ -16,10 +16,12 @@
+@@ -5,6 +5,7 @@
+ #include "depth_peek.hpp"
+ #include "../internal.hpp"
+ #include "../webgpu/gpu.hpp"
++#include "../gx/fifo.hpp"
+ #include "../gx/pipeline.hpp"
+ #ifdef AURORA_ENABLE_RMLUI
+ #include "../rmlui/pipeline.hpp"
+@@ -16,10 +17,12 @@
  #include "tex_palette_conv.hpp"
  #include "texture_replacement.hpp"
  #include "texture.hpp"
@@ -500,7 +731,7 @@
  #include <deque>
  #include <mutex>
  #include <optional>
-@@ -140,6 +142,8 @@ static PipelineRef g_currentPipeline;
+@@ -140,6 +143,8 @@ static PipelineRef g_currentPipeline;
  wgpu::BindGroupLayout g_staticBindGroupLayout;
  wgpu::BindGroup g_staticBindGroup;
  wgpu::BindGroupLayout g_uniformBindGroupLayout;
@@ -509,7 +740,39 @@
  wgpu::BindGroup g_uniformBindGroup;
  
  // for imgui debug
-@@ -574,6 +578,7 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
+@@ -379,7 +384,15 @@ static void enqueue_pass(FramePacket& frame, size_t frameSlot, uint32_t passInde
+   enqueue_op(frame, frameSlot, opIndex);
+ }
+ 
++// A texture the game thread makes (RmlUi's, say) while the GX decoder thread
++// records the frame (gx::fifo): its upload joins the frame once the decoder
++// is idle, not under it.
++static void wait_for_gx_decoder() {
++  if (!render_worker::is_worker_thread()) gx::fifo::wait_decoded();
++}
++
+ void queue_texture_upload(TextureUpload upload) {
++  wait_for_gx_decoder();
+   if (g_currentRenderPass != UINT32_MAX) {
+     ASSERT(!current_render_passes()[g_currentRenderPass].sealed,
+            "Attempted to append texture upload to sealed render pass {}", g_currentRenderPass);
+@@ -389,6 +402,7 @@ void queue_texture_upload(TextureUpload upload) {
+ 
+ void queue_texture_upload_data(const uint8_t* data, size_t length, uint32_t bytesPerRow, uint32_t rowsPerImage,
+                                wgpu::TexelCopyTextureInfo tex, wgpu::Extent3D size) {
++  wait_for_gx_decoder();
+   const auto copyBytesPerRow = AURORA_ALIGN(bytesPerRow, 256);
+   auto& frame = current_frame_packet();
+   if (frame.textureUpload.size() + copyBytesPerRow * rowsPerImage <= TextureUploadSize) {
+@@ -428,6 +442,7 @@ void queue_texture_upload_data(const uint8_t* data, size_t length, uint32_t byte
+ 
+ void queue_texture_copy(wgpu::TexelCopyTextureInfo src, wgpu::TexelCopyTextureInfo dst, wgpu::Extent3D size) {
+   ZoneScoped;
++  wait_for_gx_decoder();
+   auto& frame = current_frame_packet();
+   if (g_currentRenderPass != UINT32_MAX) {
+     enqueue_pass(frame, g_recordingFrameSlot, g_currentRenderPass);
+@@ -574,6 +589,7 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
                    Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat) {
    // Resolve current render pass
    auto& prevPass = current_render_passes()[g_currentRenderPass];
@@ -517,7 +780,7 @@
    prevPass.resolveTarget = std::move(texture);
    prevPass.resolveRect = rect;
    prevPass.resolveFormat = resolveFormat;
-@@ -662,6 +667,7 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
+@@ -662,6 +678,7 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
  void queue_palette_conv(tex_palette_conv::ConvRequest req) {
    auto& renderPass = current_render_passes()[g_currentRenderPass];
    ASSERT(!renderPass.sealed, "Attempted to append palette conversion to sealed render pass {}", g_currentRenderPass);
@@ -525,7 +788,7 @@
    renderPass.paletteConvs.push_back(std::move(req));
  }
  
-@@ -960,6 +966,40 @@ void initialize() {
+@@ -960,6 +977,40 @@ void initialize() {
      };
      g_uniformBindGroup = g_device.CreateBindGroup(&bindGroupDescriptor);
    }
@@ -566,7 +829,15 @@
  
    gx::initialize();
  #ifdef AURORA_ENABLE_RMLUI
-@@ -1006,6 +1046,8 @@ void shutdown() {
+@@ -969,6 +1020,7 @@ void initialize() {
+ }
+ 
+ void shutdown() {
++  gx::fifo::stop_decoder();
+   render_worker::synchronize();
+   render_worker::shutdown();
+   shutdown_pipeline_cache();
+@@ -1006,6 +1058,8 @@ void shutdown() {
    g_staticBindGroupLayout = {};
    g_uniformBindGroup = {};
    g_uniformBindGroupLayout = {};
@@ -575,7 +846,7 @@
    g_inOffscreen = false;
    g_frameIndex = UINT32_MAX;
    g_frameSlots.reset();
-@@ -1116,6 +1158,7 @@ bool begin_frame() {
+@@ -1116,6 +1170,7 @@ bool begin_frame() {
    push_command(CommandType::SetViewport, Command::Data{.setViewport = g_cachedViewport});
    push_command(CommandType::SetScissor, Command::Data{.setScissor = g_cachedScissor});
    begin_pipeline_frame();
@@ -583,7 +854,7 @@
    render_worker::enqueue_begin_frame(frame.frameId, [frameSlot] {
      const auto encoderDescriptor = wgpu::CommandEncoderDescriptor{
          .label = "Redraw encoder",
-@@ -1214,16 +1257,116 @@ void stereo::enqueue_pass(const PassDesc& desc) noexcept {
+@@ -1214,16 +1269,116 @@ void stereo::enqueue_pass(const PassDesc& desc) noexcept {
    const auto instanced = [&](size_t i) {
      return desc.instanced != nullptr && i < desc.instanced->size() && (*desc.instanced)[i] != 0;
    };
@@ -701,7 +972,7 @@
        auto draw = leftDraws[sequence[p++]];
        draw.instanceCount = 2;
        push_gx(draw);
-@@ -1460,16 +1603,23 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+@@ -1460,16 +1615,23 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
      stereo::begin_access(passInfo.stereoImage, passInfo.stereoTag, passInfo.stereoHasWorld, passInfo.stereoHud);
    }
    const auto label = fmt::format("Render pass {}", passIndex);
@@ -725,7 +996,7 @@
  
    if (passInfo.captureDepthSnapshot) {
      depth_peek::encode_frame_snapshot(cmd, passInfo.copySourceDepthView, passInfo.targetSize, passInfo.msaaSamples);
-@@ -1539,6 +1689,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
+@@ -1539,6 +1701,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
    // Bind static bind group for the whole pass
    pass.SetBindGroup(0, g_staticBindGroup);
    pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
@@ -733,7 +1004,7 @@
  
    for (const auto& cmd : passInfo.commands) {
  #ifdef AURORA_GFX_DEBUG_GROUPS
-@@ -1580,6 +1731,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
+@@ -1580,6 +1743,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
        switch (draw.type) {
        case ShaderType::Clear:
          clear::render(draw.clear, pass, passInfo.targetSize);
@@ -741,7 +1012,7 @@
          break;
        case ShaderType::GX:
          gx::render(draw.gx, pass);
-@@ -1587,6 +1739,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
+@@ -1587,6 +1751,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
  #ifdef AURORA_ENABLE_RMLUI
        case ShaderType::Rml:
          rmlui::render(draw.rml, pass);
@@ -749,7 +1020,7 @@
          break;
  #endif
        }
-@@ -1692,6 +1845,10 @@ std::pair<ByteBuffer, Range> map_uniform(size_t length) {
+@@ -1692,6 +1857,10 @@ std::pair<ByteBuffer, Range> map_uniform(size_t length) {
    const auto range = map(current_frame_packet().uniforms, length, g_cachedLimits.minUniformBufferOffsetAlignment);
    return {ByteBuffer{current_frame_packet().uniforms.data() + range.offset, range.size}, range};
  }
@@ -1098,7 +1369,18 @@
    static const uint32_t samples = [] {
      char value[PROP_VALUE_MAX] = {};
      __system_property_get("debug.partyboard.stereo_msaa", value);
-@@ -105,6 +111,12 @@ bool g_loggedGeometry = false;
+@@ -98,6 +104,10 @@ bool g_worldMergeable = false;
+ bool g_worldOnly = false;
+ // The draws being recorded cannot reach the other eye (AuroraStereoSetUncut).
+ bool g_uncut = false;
++// The game thread's copies of g_uncut and g_sortKey, for its early outs: the
++// GX decoder thread's may lag behind them (gx::fifo::ordered).
++bool g_uncutGame = false;
++float g_sortKeyGame = -1.f;
+ int32_t g_image = -1;
+ uint64_t g_frameTag = 0;
+ bool g_loggedGeometry = false;
+@@ -105,6 +115,12 @@ bool g_loggedGeometry = false;
  uint32_t g_frameEyeWidth = 0, g_frameEyeHeight = 0;
  // Whether this frame draws the HUD image (AuroraStereoSetHud).
  bool g_frameDrawHud = true;
@@ -1111,7 +1393,7 @@
  // The game's own frame is not on show in the headset (aurora.cpp skips presenting it).
  std::atomic_bool g_screenHidden = false;
  // 8x once a headset uses the eyes' images (gx.cpp's samplers read it), or
-@@ -127,7 +139,60 @@ uint64_t g_statInstanced = 0, g_statPerEye = 0;
+@@ -127,7 +143,60 @@ uint64_t g_statInstanced = 0, g_statPerEye = 0;
  float g_sortKey = -1.f;
  uint32_t g_sortObject = 0;
  std::vector<DrawOrder> g_eyeOrder;
@@ -1172,7 +1454,7 @@
  // Headset A/B switches, read again every 2 s so a capture can flip them
  // without restarting the game. On the Toad board (Quest 3, build 118,
  // 2026-09-28) the sort with the opaque blend off shaded 35% fewer fragments
-@@ -135,14 +200,23 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
+@@ -135,14 +204,23 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
  // instead of 68), with no difference the player could see: both are on by
  // default.
  //   debug.partyboard.sort_opaque 0       opaque draws of objects in the game's
@@ -1203,7 +1485,7 @@
  //   debug.partyboard.opaque_blend off    the game's opaque objects drawn without
  //                                        their alpha blend (edges of translucent
  //                                        textures turn hard). Build 119 found no
-@@ -154,15 +228,127 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
+@@ -154,15 +232,127 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
  //                                        across the table, where 8x reads the
  //                                        most texels: an A/B tells what the
  //                                        textures cost before compressing them
@@ -1332,7 +1614,7 @@
  void refresh_switches() {
    const auto now = std::chrono::steady_clock::now();
    if (g_switchesAt != std::chrono::steady_clock::time_point{} && now - g_switchesAt < std::chrono::seconds(2)) {
-@@ -173,9 +359,17 @@ void refresh_switches() {
+@@ -173,9 +363,17 @@ void refresh_switches() {
    Switches read;
    __system_property_get("debug.partyboard.sort_opaque", value);
    read.sortOpaque = value[0] != '0';
@@ -1351,7 +1633,7 @@
    value[0] = '\0';
    __system_property_get("debug.partyboard.opaque_blend", value);
    read.opaqueBlendOff = std::string_view{value} == "off";
-@@ -183,12 +377,65 @@ void refresh_switches() {
+@@ -183,12 +381,65 @@ void refresh_switches() {
    __system_property_get("debug.partyboard.anisotropy", value);
    const std::string_view anisotropy{value};
    read.anisotropy = anisotropy == "1" ? 1 : anisotropy == "2" ? 2 : anisotropy == "4" ? 4 : anisotropy == "16" ? 16 : 8;
@@ -1421,7 +1703,7 @@
    }
    g_switches = read;
    // New samplers from the next draw on (gx.cpp builds them per descriptor).
-@@ -200,6 +447,66 @@ void refresh_switches() {
+@@ -200,6 +451,66 @@ void refresh_switches() {
  // take its lock on every draw.
  std::unordered_set<PipelineRef> g_readyInstanced;
  std::vector<gx::DrawData> g_hudDraws;
@@ -1488,7 +1770,7 @@
  webgpu::TextureWithSampler g_color; // multisampled, when the game's frame is
  webgpu::TextureWithSampler g_depth;
  webgpu::TextureWithSampler g_hudColor, g_hudDepth; // the same for the interface's pass
-@@ -359,7 +666,11 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -359,7 +670,11 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
      return false;
    }
    auto spatialConfig = config;
@@ -1501,7 +1783,7 @@
    if (spatialConfig.colorUpdate) {
      spatialConfig.alphaUpdate = true; // transparent MR targets need coverage
    }
-@@ -374,6 +685,10 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -374,6 +689,10 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
      // The original orthographic uniforms draw the interface once in an atlas
      // region. OpenXR presents it as a separate, sharp quad for both eyes.
      draw.uniformRange = gx::build_uniform(info, vtxStart, ranges);
@@ -1512,7 +1794,7 @@
      g_hudDraws.push_back(draw);
      // Once this frame has a world, its screen is hidden. Avoid drawing the
      // same interface again into that unused screen; empty frames retain it.
-@@ -384,7 +699,7 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -384,7 +703,7 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
    // use instances, one draw per eye.
    // An opaque draw of an object may go to the GPU in front-to-back order.
    const bool inObject = g_sortKey >= 0.f;
@@ -1521,7 +1803,7 @@
        .key = g_sortKey,
        .object = g_sortObject,
        // The game draws its opaque objects with the usual alpha blend on
-@@ -397,9 +712,35 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -397,9 +716,35 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
                      config.blendFacDst == GX_BL_INVSRCALPHA)),
    };
    g_statSortable += order.sortable;
@@ -1557,7 +1839,7 @@
    // An object that reaches both eyes, drawn once per eye when asked: no
    // fragment test, so the GPU keeps rejecting its hidden fragments early.
    const bool crossingPerEye = g_switches.crossingPerEye && inObject && !g_uncut;
-@@ -422,11 +763,34 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -422,11 +767,34 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
      }
      if (ready) {
        draw.pipeline = instancedRef;
@@ -1594,7 +1876,7 @@
        g_eyeOrder.push_back(order);
        ++g_statInstanced;
        g_worldMergeable = true;
-@@ -435,12 +799,17 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -435,12 +803,17 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
    }
    ++g_statPerEye;
    g_eyeInstanced.push_back(0);
@@ -1614,7 +1896,15 @@
      g_eyeDraws[eye].push_back(draw);
    }
    g_worldMergeable = world;
-@@ -482,7 +851,9 @@ void end_frame() noexcept {
+@@ -466,6 +839,7 @@ void end_frame() noexcept {
+ #if defined(__ANDROID__)
+   g_worldMergeable = false;
+   g_uncut = false;
++  g_uncutGame = false;
+   g_recording = false;
+   // Even without geometry, clear and submit the leased image. Dropping it
+   // leaks a ring slot and leaves the preceding scene visible in the room.
+@@ -482,7 +856,9 @@ void end_frame() noexcept {
        g_eyeDraws[1].clear();
        g_eyeInstanced.clear();
    g_eyeOrder.clear();
@@ -1625,7 +1915,7 @@
        return;
      }
      image = g_images[g_image];
-@@ -491,21 +862,59 @@ void end_frame() noexcept {
+@@ -491,21 +867,59 @@ void end_frame() noexcept {
    // Same sample count and formats as the game's frame, so its pipelines draw here too.
    const auto& config = webgpu::g_graphicsConfig;
    const uint32_t samples = stereo_samples();
@@ -1692,7 +1982,7 @@
    const uint32_t eyeStride = g_width / 2;
    PassDesc desc{
        .color = samples > 1 ? g_color.view : image.view,
-@@ -524,8 +933,33 @@ void end_frame() noexcept {
+@@ -524,8 +938,33 @@ void end_frame() noexcept {
        .instanced = &g_eyeInstanced,
        .order = &g_eyeOrder,
        .sortOpaque = g_switches.sortOpaque,
@@ -1727,7 +2017,7 @@
    enqueue_pass(desc);
    // The interface, in its own image, when this frame draws it (its image's
    // contents are not kept: a frame that draws it draws all of it): its pass
-@@ -534,11 +968,11 @@ void end_frame() noexcept {
+@@ -534,11 +973,11 @@ void end_frame() noexcept {
    static const std::vector<gx::DrawData> noDraws;
    const PassDesc hud{
        .label = "Stereo HUD",
@@ -1742,7 +2032,7 @@
        .hudTop = 0,
        .hudWidth = g_hudWidth,
        .hudHeight = g_hudHeight,
-@@ -546,7 +980,7 @@ void end_frame() noexcept {
+@@ -546,7 +985,7 @@ void end_frame() noexcept {
        .eyes = {&noDraws, &noDraws},
        .hud = &g_hudDraws,
    };
@@ -1751,7 +2041,7 @@
      enqueue_pass(hud);
    }
    if (!g_loggedGeometry && hasWorld) {
-@@ -573,6 +1007,27 @@ void end_frame() noexcept {
+@@ -573,6 +1012,27 @@ void end_frame() noexcept {
               recorded != 0 ? g_statSortable * 100 / recorded : 0, g_switches.sortOpaque ? " (sorted)" : "",
               recorded != 0 ? g_statCrossingPerEye * 100 / recorded : 0);
      g_statInstanced = g_statPerEye = g_statSortable = g_statCrossingPerEye = 0;
@@ -1779,7 +2069,7 @@
      statsAt = now;
      statFrames = statWorld = statHud = 0;
      statWorldMax = 0;
-@@ -581,7 +1036,9 @@ void end_frame() noexcept {
+@@ -581,7 +1041,9 @@ void end_frame() noexcept {
    g_eyeDraws[1].clear();
    g_eyeInstanced.clear();
    g_eyeOrder.clear();
@@ -1790,7 +2080,7 @@
    g_image = -1;
  #endif
  }
-@@ -622,8 +1079,128 @@ void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept
+@@ -622,8 +1084,128 @@ void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept
  #endif
  }
  
@@ -1919,7 +2209,7 @@
    for (const auto& accessed : g_accessed) {
      Image target;
      {
-@@ -658,7 +1235,8 @@ void after_submit() noexcept {
+@@ -658,7 +1240,8 @@ void after_submit() noexcept {
      const int eyesFd = end_access(target.memory, target.texture);
      const int fd = accessed.hud ? merge_fences(eyesFd, end_access(target.hudMemory, target.hudTexture)) : eyesFd;
      if (g_callback != nullptr) {
@@ -1929,20 +2219,127 @@
      } else if (fd >= 0) {
        close(fd);
      }
-@@ -802,6 +1380,12 @@ void AuroraStereoSetHud(bool draw) {
+@@ -676,6 +1259,7 @@ bool AuroraStereoRegisterImages(void* const* eyeBuffers, void* const* hudBuffers
+                                 uint32_t height, uint32_t hudWidth, uint32_t hudHeight,
+                                 AuroraStereoCallback callback, void* user) {
+ #if defined(__ANDROID__)
++  gx::fifo::sync(); // the GX decoder thread draws into the images being replaced
+   if (!webgpu::g_device) {
+     return false;
+   }
+@@ -750,21 +1334,25 @@ bool AuroraStereoRegisterImages(void* const* eyeBuffers, void* const* hudBuffers
+ void AuroraStereoBegin(uint32_t image, const float clip[2][16], uint64_t frameTag) {
+ #if defined(__ANDROID__)
+   // GX queues draws in its FIFO. Consume the preceding camera's commands
+-  // with its existing clip matrices before switching to this camera/view.
+-  gx::fifo::drain();
+-  g_worldMergeable = false;
+-  refresh_switches();
+-  g_clip[0] = to_mat(clip[0]);
+-  g_clip[1] = to_mat(clip[1]);
+-  g_image = static_cast<int32_t>(image);
+-  // Instanced draws: a viewport over both eyes' rectangles (common.cpp).
+-  {
+-    const float stride = static_cast<float>(g_width / 2);
+-    const float width = g_frameEyeWidth != 0 ? std::min(static_cast<float>(g_frameEyeWidth), stride) : stride;
+-    instanced_placement(stride, width, g_eyeX, g_eyeClip);
+-  }
+-  g_frameTag = frameTag;
+-  g_recording = true;
++  // with its existing clip matrices before switching to this camera/view
++  // (on the GX decoder thread, in its order, when it runs).
++  std::array<float, 32> clips;
++  std::memcpy(clips.data(), clip, sizeof(float) * 32);
++  gx::fifo::ordered([clips, image, frameTag] {
++    g_worldMergeable = false;
++    refresh_switches();
++    g_clip[0] = to_mat(clips.data());
++    g_clip[1] = to_mat(clips.data() + 16);
++    g_image = static_cast<int32_t>(image);
++    // Instanced draws: a viewport over both eyes' rectangles (common.cpp).
++    {
++      const float stride = static_cast<float>(g_width / 2);
++      const float width = g_frameEyeWidth != 0 ? std::min(static_cast<float>(g_frameEyeWidth), stride) : stride;
++      instanced_placement(stride, width, g_eyeX, g_eyeClip);
++    }
++    g_frameTag = frameTag;
++    g_recording = true;
++  });
+ #else
+   (void)image;
+   (void)clip;
+@@ -776,9 +1364,10 @@ void AuroraStereoEnd(void) {
+ #if defined(__ANDROID__)
+   // Closing recording before draining loses deferred display-list draws:
+   // they would only be decoded at aurora_end_frame, after g_recording is off.
+-  gx::fifo::drain();
+-  g_recording = false;
+-  g_worldMergeable = false;
++  gx::fifo::ordered([] {
++    g_recording = false;
++    g_worldMergeable = false;
++  });
+ #endif
+ }
+ 
+@@ -786,8 +1375,12 @@ bool AuroraStereoActive(void) { return recording(); }
+ 
+ void AuroraStereoSetEyeSize(uint32_t width, uint32_t height) {
+ #if defined(__ANDROID__)
+-  g_frameEyeWidth = width;
+-  g_frameEyeHeight = height;
++  gx::fifo::ordered(
++      [width, height] {
++        g_frameEyeWidth = width;
++        g_frameEyeHeight = height;
++      },
++      false);
+ #else
+   (void)width;
+   (void)height;
+@@ -796,12 +1389,18 @@ void AuroraStereoSetEyeSize(uint32_t width, uint32_t height) {
+ 
+ void AuroraStereoSetHud(bool draw) {
+ #if defined(__ANDROID__)
+-  g_frameDrawHud = draw;
++  gx::fifo::ordered([draw] { g_frameDrawHud = draw; }, false);
+ #else
+   (void)draw;
  #endif
  }
  
 +void AuroraStereoRedrawHud(void) {
 +#if defined(__ANDROID__)
-+  g_hudRedraw = true;
++  gx::fifo::ordered([] { g_hudRedraw = true; }, false);
 +#endif
 +}
 +
  void AuroraStereoHideScreen(bool hidden) {
  #if defined(__ANDROID__)
    g_screenHidden.store(hidden, std::memory_order_relaxed);
-@@ -827,6 +1411,57 @@ extern "C" void AuroraStereoSetSortKey(float key) {
+@@ -813,30 +1412,85 @@ void AuroraStereoHideScreen(bool hidden) {
+ extern "C" void AuroraStereoSetSortKey(float key) {
+ #if defined(__ANDROID__)
+   using namespace aurora::gfx::stereo;
+-  if (key < 0.f && g_sortKey < 0.f) {
++  if (key < 0.f && g_sortKeyGame < 0.f) {
+     return;
+   }
++  g_sortKeyGame = key < 0.f ? -1.f : key;
+   // The FIFO is deferred: its draws so far belong to the previous object.
+-  aurora::gx::fifo::drain();
+-  g_sortKey = key < 0.f ? -1.f : key;
+-  if (key >= 0.f) {
+-    ++g_sortObject;
+-  }
++  aurora::gx::fifo::ordered([key] {
++    g_sortKey = key < 0.f ? -1.f : key;
++    if (key >= 0.f) {
++      ++g_sortObject;
++    }
++  });
+ #else
+   (void)key;
  #endif
  }
  
@@ -1967,7 +2364,7 @@
 +
 +extern "C" void AuroraStereoSetFoveation(uint32_t level) {
 +#if defined(__ANDROID__)
-+  aurora::gfx::stereo::g_frameFoveation = level;
++  aurora::gx::fifo::ordered([level] { aurora::gfx::stereo::g_frameFoveation = level; }, false);
 +#else
 +  (void)level;
 +#endif
@@ -1999,7 +2396,33 @@
 +
  extern "C" void AuroraStereoSetUncut(bool uncut) {
  #if defined(__ANDROID__)
-   if (aurora::gfx::stereo::g_uncut == uncut) {
+-  if (aurora::gfx::stereo::g_uncut == uncut) {
++  if (aurora::gfx::stereo::g_uncutGame == uncut) {
+     return;
+   }
++  aurora::gfx::stereo::g_uncutGame = uncut;
+   // The FIFO is deferred: its draws so far go with the previous value, and
+   // none is merged across the change.
+-  aurora::gx::fifo::drain();
+-  aurora::gfx::stereo::g_uncut = uncut;
+-  aurora::gfx::stereo::g_worldMergeable = false;
++  aurora::gx::fifo::ordered([uncut] {
++    aurora::gfx::stereo::g_uncut = uncut;
++    aurora::gfx::stereo::g_worldMergeable = false;
++  });
+ #else
+   (void)uncut;
+ #endif
+@@ -845,8 +1499,7 @@ extern "C" void AuroraStereoSetUncut(bool uncut) {
+ extern "C" void AuroraStereoWorldOnly(bool enabled) {
+ #if defined(__ANDROID__)
+   // The FIFO is deferred: process camera draws before changing the scope.
+-  aurora::gx::fifo::drain();
+-  aurora::gfx::stereo::g_worldOnly = enabled;
++  aurora::gx::fifo::ordered([enabled] { aurora::gfx::stereo::g_worldOnly = enabled; });
+ #else
+   (void)enabled;
+ #endif
 --- a/lib/gfx/stereo.hpp
 +++ b/lib/gfx/stereo.hpp
 @@ -58,6 +58,11 @@ void instanced_failed(const std::string& message) noexcept;
@@ -2204,6 +2627,301 @@
  TextureHandle new_dynamic_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 gxFormat,
                                       const char* label) noexcept;
  TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept;
+--- a/lib/gx/fifo.cpp
++++ b/lib/gx/fifo.cpp
+@@ -2,8 +2,21 @@
+ #include "command_processor.hpp"
+ #include "../internal.hpp"
+ 
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <condition_variable>
+ #include <cstdlib>
+ #include <cstring>
++#include <deque>
++#include <mutex>
++#include <thread>
++#include <vector>
++
++#if defined(__ANDROID__)
++#include <pthread.h>
++#include <sys/system_properties.h>
++#endif
+ 
+ namespace aurora::gx::fifo {
+ static Module Log("aurora::gx::fifo");
+@@ -28,6 +41,11 @@ void init() {
+   detail::sDlBuffer = nullptr;
+   detail::sDlSize = 0;
+   detail::sDlWritePos = 0;
++#if defined(__ANDROID__)
++  char value[PROP_VALUE_MAX] = {};
++  __system_property_get("debug.partyboard.gx_thread", value);
++  if (value[0] == '1' && value[1] == '\0') start_decoder();
++#endif
+ }
+ 
+ void write_data_grow(const void* data, uint32_t length) {
+@@ -68,14 +86,212 @@ uint32_t end_display_list() {
+ 
+ bool in_display_list() { return detail::sInDisplayList; }
+ 
++namespace {
++int64_t now_ns() {
++  return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
++      .count();
++}
++
++// What the decoder thread is handed, in order: commands (the FIFO's, or a
++// display list's), or a call that must come after them (ordered()).
++struct Item {
++  std::vector<uint8_t> bytes;
++  bool bigEndian = true;
++  std::function<void()> fn;
++};
++std::mutex sMutex;
++std::condition_variable sWork, sIdle;
++std::deque<Item> sItems;
++std::vector<std::vector<uint8_t>> sSpare; // emptied buffers, for the next hand-overs
++bool sBusy = false, sWaiting = false, sStop = false;
++std::thread sThread;
++std::atomic_bool sRunning = false;
++std::atomic<std::thread::id> sDecoderId{};
++// Since the last report (frame_done): time spent decoding, and the game
++// thread's waits for the decoder.
++std::atomic<int64_t> sDecodeNs = 0;
++int64_t sWaitNs = 0;
++uint32_t sWaits = 0, sFrames = 0, sHandOvers = 0;
++std::chrono::steady_clock::time_point sReportAt = std::chrono::steady_clock::now();
++
++void decode(const uint8_t* data, uint32_t size, bool bigEndian) {
++  const int64_t start = now_ns();
++  process(data, size, bigEndian);
++  sDecodeNs.fetch_add(now_ns() - start, std::memory_order_relaxed);
++}
++
++std::vector<uint8_t> spare_buffer() {
++  std::lock_guard lock{sMutex};
++  if (sSpare.empty()) return {};
++  auto bytes = std::move(sSpare.back());
++  sSpare.pop_back();
++  return bytes;
++}
++
++void push(Item item) {
++  std::unique_lock lock{sMutex};
++  sItems.push_back(std::move(item));
++  ++sHandOvers;
++  const bool wake = sWaiting;
++  lock.unlock();
++  if (wake) sWork.notify_one();
++}
++
++// The commands written so far, copied for the decoder (a frame's FIFO is a
++// few hundred KB at most; the game thread's buffer is reused at once, and
++// GXBegin/GXEnd's patches stay within it).
++void hand_over() {
++  if (detail::sBufferSize == 0) return;
++  auto bytes = spare_buffer();
++  bytes.assign(detail::sBufferData, detail::sBufferData + detail::sBufferSize);
++  detail::sBufferSize = 0;
++  push(Item{.bytes = std::move(bytes), .bigEndian = true});
++}
++
++void wait_idle() {
++  const int64_t start = now_ns();
++  std::unique_lock lock{sMutex};
++  sIdle.wait(lock, [] { return sItems.empty() && !sBusy; });
++  sWaitNs += now_ns() - start;
++  ++sWaits;
++}
++
++void decoder_main() {
++#if defined(__ANDROID__)
++  pthread_setname_np(pthread_self(), "GX decoder");
++#endif
++  sDecoderId.store(std::this_thread::get_id());
++  std::unique_lock lock{sMutex};
++  while (true) {
++    while (sItems.empty() && !sStop) {
++      sBusy = false;
++      sIdle.notify_all();
++      sWaiting = true;
++      sWork.wait(lock);
++      sWaiting = false;
++    }
++    if (sItems.empty()) break; // stopping, all decoded
++    Item item = std::move(sItems.front());
++    sItems.pop_front();
++    sBusy = true;
++    lock.unlock();
++    if (item.fn) {
++      const int64_t start = now_ns();
++      item.fn();
++      sDecodeNs.fetch_add(now_ns() - start, std::memory_order_relaxed);
++    } else {
++      decode(item.bytes.data(), static_cast<uint32_t>(item.bytes.size()), item.bigEndian);
++    }
++    item.bytes.clear();
++    lock.lock();
++    if (sSpare.size() < 16 && item.bytes.capacity() <= (4u << 20)) sSpare.push_back(std::move(item.bytes));
++  }
++  sBusy = false;
++  sIdle.notify_all();
++}
++} // namespace
++
+ void drain() {
++  if (sRunning.load(std::memory_order_acquire)) {
++    // The decoder's ordered calls may drain: the FIFO is the game thread's,
++    // and what it held before them was handed over before them.
++    if (!on_decoder_thread()) hand_over();
++    return;
++  }
+   if (detail::sBufferSize == 0) {
+     return;
+   }
+-  process(detail::sBufferData, detail::sBufferSize, true);
++  decode(detail::sBufferData, detail::sBufferSize, true);
+   detail::sBufferSize = 0;
+ }
+ 
++bool decoder_running() { return sRunning.load(std::memory_order_acquire); }
++
++bool on_decoder_thread() { return sDecoderId.load() == std::this_thread::get_id(); }
++
++void start_decoder() {
++  if (sRunning.load()) return;
++  {
++    std::lock_guard lock{sMutex};
++    sStop = false;
++    sBusy = false;
++  }
++  sThread = std::thread(decoder_main);
++  sRunning.store(true, std::memory_order_release);
++  Log.info("GX commands decoded on a thread of their own (debug.partyboard.gx_thread)");
++}
++
++void stop_decoder() {
++  if (!sRunning.load()) return;
++  hand_over();
++  {
++    std::lock_guard lock{sMutex};
++    sStop = true;
++  }
++  sWork.notify_one();
++  if (sThread.joinable()) sThread.join();
++  sRunning.store(false, std::memory_order_release);
++  sDecoderId.store(std::thread::id{});
++}
++
++void ordered(std::function<void()> fn, bool drainInline) {
++  if (!sRunning.load(std::memory_order_acquire)) {
++    if (drainInline) drain();
++    fn();
++    return;
++  }
++  if (on_decoder_thread()) {
++    fn();
++    return;
++  }
++  hand_over();
++  push(Item{.fn = std::move(fn)});
++}
++
++void sync() {
++  if (!sRunning.load(std::memory_order_acquire) || on_decoder_thread()) return;
++  hand_over();
++  wait_idle();
++}
++
++void wait_decoded() {
++  if (!sRunning.load(std::memory_order_acquire) || on_decoder_thread()) return;
++  wait_idle();
++}
++
++void call_display_list_le(const void* data, uint32_t size) {
++  if (!sRunning.load(std::memory_order_acquire) || on_decoder_thread()) {
++    drain();
++    decode(static_cast<const uint8_t*>(data), size, false);
++    return;
++  }
++  hand_over();
++  auto bytes = spare_buffer();
++  bytes.assign(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size);
++  push(Item{.bytes = std::move(bytes), .bigEndian = false});
++}
++
++void frame_done() {
++  ++sFrames;
++  const auto now = std::chrono::steady_clock::now();
++  if (now - sReportAt < std::chrono::seconds(5)) return;
++  const double frames = sFrames;
++  uint32_t handOvers = 0;
++  {
++    std::lock_guard lock{sMutex};
++    handOvers = sHandOvers;
++    sHandOvers = 0;
++  }
++  Log.info("GX decode: {:.2f} ms a frame {}; the game thread waited {:.2f} ms a frame for it ({} waits, {} hand-overs "
++           "a frame)",
++           sDecodeNs.exchange(0) / 1e6 / frames, sRunning.load() ? "on its own thread" : "on the game thread",
++           sWaitNs / 1e6 / frames, sWaits, static_cast<uint32_t>(handOvers / frames));
++  sWaitNs = 0;
++  sWaits = 0;
++  sFrames = 0;
++  sReportAt = now;
++}
++
+ const uint8_t* get_buffer_data() { return detail::sBufferData; }
+ uint32_t get_buffer_size() { return detail::sBufferSize; }
+ void clear_buffer() { detail::sBufferSize = 0; }
+--- a/lib/gx/fifo.hpp
++++ b/lib/gx/fifo.hpp
+@@ -3,6 +3,7 @@
+ #include "../internal.hpp"
+ 
+ #include <cstring>
++#include <functional>
+ 
+ namespace aurora::gx::fifo {
+ 
+@@ -85,6 +86,34 @@ bool in_display_list();
+ // Drain the internal FIFO buffer through the command processor
+ void drain();
+ 
++// The decoder thread (debug.partyboard.gx_thread 1, read at start; Android):
++// drain() hands the commands written so far to a thread of its own, as the
++// GameCube's CPU hands its FIFO to the GPU, and returns; the game thread goes
++// on with its next object meanwhile. Arrays, textures and display lists are
++// read when decoded, as the GPU did: the game keeps them until GXDrawDone or
++// the frame's end, which wait for the decoder (sync()).
++void start_decoder();
++void stop_decoder();
++bool decoder_running();
++bool on_decoder_thread();
++// Runs fn after every command written so far is decoded: on the decoder when
++// it runs (the commands so far handed to it first), else at once, after
++// drain() unless !drainInline (a state the pending commands do not read, set
++// at once as before). For whatever changes what the decoder reads, outside
++// the FIFO.
++void ordered(std::function<void()> fn, bool drainInline = true);
++// Waits until every command written so far is decoded (no-op without the
++// decoder, or on it).
++void sync();
++// Waits until what was handed to the decoder is decoded, without handing it
++// the commands written since (aurora::begin_frame).
++void wait_decoded();
++// A little-endian display list built by Aurora (GXCallDisplayListLE): after
++// the commands so far, decoded from a copy (the caller may reuse its buffer).
++void call_display_list_le(const void* data, uint32_t size);
++// Once per frame (aurora::end_frame): the time spent decoding, every 5 s.
++void frame_done();
++
+ // Internal buffer inspection
+ const uint8_t* get_buffer_data();
+ uint32_t get_buffer_size();
 --- a/lib/gx/gx.cpp
 +++ b/lib/gx/gx.cpp
 @@ -42,6 +42,7 @@ static absl::flat_hash_map<u32, std::pair<wgpu::BindGroupLayout, wgpu::BindGroup
