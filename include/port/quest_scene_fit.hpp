@@ -70,6 +70,24 @@ inline bool board_fit(const float minimum[3], const float maximum[3], float& sca
     return true;
 }
 
+// A minigame seen through a window (quest_stereo.cpp): the camera's view space
+// into the window's frame (meters, +Z toward the player), what the camera
+// looks at (`distance` ahead) in the window's plane and its vertical field of
+// view as tall as the window:
+//   window = scale * view + (0, 0, scale * distance)
+// A distance or a field of view the camera does not give sensibly falls back
+// to 1000 units and 45 degrees.
+inline float view_to_window_scale(float& distance, float fovDegrees, float windowHeight) {
+    if (!std::isfinite(distance) || distance < 1.0f) {
+        distance = 1000.0f;
+    }
+    float tanHalf = std::tan(fovDegrees * 0.00872664626f);
+    if (!std::isfinite(tanHalf) || tanHalf <= 0.01f || tanHalf > 50.0f) {
+        tanHalf = 0.41421356f;
+    }
+    return windowHeight / (2.0f * distance * tanHalf);
+}
+
 inline bool scene_scale(float distance, float fovDegrees, float aspect, float& scale) {
     if (!std::isfinite(distance) || !std::isfinite(fovDegrees) || !std::isfinite(aspect)
         || distance < 1.0f || fovDegrees <= 1.0f || fovDegrees >= 175.0f || aspect <= 0.0f) {

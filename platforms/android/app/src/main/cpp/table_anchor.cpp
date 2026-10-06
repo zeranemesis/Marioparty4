@@ -77,10 +77,10 @@ bool TableSettings::load(const std::string& path) {
       diorama = on != 0;
     } else if (key == "model_scale") {
       fields >> modelScale;
-    } else if (key == "follow_camera") {
+    } else if (key == "minigame_window") {
       int on = 1;
       fields >> on;
-      followCamera = on != 0;
+      minigameWindow = on != 0;
     }
   }
   if (resolution != 1080 && resolution != 1440 && resolution != 2160) {
@@ -132,7 +132,7 @@ void TableSettings::save(const std::string& path) const {
     out << "passthrough " << (passthrough ? 1 : 0) << '\n';
     out << "diorama " << (diorama ? 1 : 0) << '\n';
     out << "model_scale " << modelScale << '\n';
-    out << "follow_camera " << (followCamera ? 1 : 0) << '\n';
+    out << "minigame_window " << (minigameWindow ? 1 : 0) << '\n';
     if (!anchorUuid.empty()) {
       out << "anchor " << anchorUuid << '\n';
     }

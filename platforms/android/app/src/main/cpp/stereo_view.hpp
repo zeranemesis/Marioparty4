@@ -40,6 +40,12 @@ struct StereoFrame {
   uint32_t generation;          // of the images the lease is in
   uint32_t drawHud;             // 1: draw the interface if it changed, 2: whatever (the last one was lost), 0: not
   uint32_t foveation;           // the eyes' foveation level (0: none), StereoView::adapt_resolution
+  // 1: a window (set_window): eyeView and eyeProj look through it from each
+  // eye, world is the window's frame (stage space, +Z toward the player, 1
+  // per meter), and the game maps its camera's view into it, its vertical
+  // field of view as tall as windowHeight (meters).
+  uint32_t window;
+  float windowHeight;
 };
 
 class StereoView {
@@ -126,8 +132,20 @@ public:
   void enable_space_warp(XrInstance instance, XrSystemId system, XrSession session);
   bool screen_required() const;
   // A minigame is on show (the game's 3D world, not a board): quest_xr.cpp
-  // stands it where the board's screen is.
+  // shows it through a window where the game's screen stands.
   bool minigame_mode() const;
+  // XR thread, each frame: the game's frames from now on look at its camera's
+  // view through a window (stage space, its center, +Z toward the player;
+  // size in meters), shown as two quads, one per eye: each eye's image is
+  // what that eye sees through the window, its relief included, and the
+  // window stays put in the room whatever the game camera does.
+  void set_window(bool on, const XrPosef& pose, XrExtent2Df size);
+  // The window shown (the image on show was drawn through it): the eyes'
+  // layer is its left eye's quad (layer()), and this its right eye's.
+  const XrCompositionLayerBaseHeader* window_second_layer() const;
+  bool window_shown() const { return mShown && mShownWindow; }
+  XrPosef window_shown_pose() const { return mShownWindowPose; }
+  XrExtent2Df window_shown_size() const { return mShownWindowSize; }
   bool world_only() const;
   bool world_visible() const { return mShown && mShownHasWorld; }
   // A camera with no view never enqueues GPU work: return its lease explicitly.
@@ -170,6 +188,9 @@ private:
     int64_t startNs = 0;                        // its frame's paced start, 0 when not paced
     int64_t dueNs = 0;                          // the look it is for, 0: as soon as finished
     bool hud = false;                           // its interface image was drawn
+    bool window = false;                        // drawn through the window (set_window)
+    XrPosef windowPose{{0, 0, 0, 1}, {0, 0, 0}};
+    XrExtent2Df windowSize{};
     int64_t leaseNs = 0, submitNs = 0;          // steady clock: lent to the game, sent to the GPU
     int copyDoneFd = -1;                        // the copy's native fence, for its GPU finish time
     int64_t copyFlushNs = 0;                    // steady clock: the copy sent to the GPU
@@ -410,6 +431,14 @@ private:
   uint32_t mShownWidth = 0, mShownHeight = 0;
   XrCompositionLayerProjectionView mProjectionViews[2]{};
   XrCompositionLayerProjection mLayer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+  // The window (set_window): asked for, and the one of the image on show.
+  bool mWindowOn = false;
+  XrPosef mWindowPose{{0, 0, 0, 1}, {0, 0, 0}};
+  XrExtent2Df mWindowSize{};
+  bool mShownWindow = false;
+  XrPosef mShownWindowPose{{0, 0, 0, 1}, {0, 0, 0}};
+  XrExtent2Df mShownWindowSize{};
+  XrCompositionLayerQuad mWindowLayers[2]{{XR_TYPE_COMPOSITION_LAYER_QUAD}, {XR_TYPE_COMPOSITION_LAYER_QUAD}};
 };
 
 // The one the exported functions (PartyBoardQuest_Stereo*) reach; null without a session.

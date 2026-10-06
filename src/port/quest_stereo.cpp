@@ -14,10 +14,13 @@
 // the image back once the GPU has drawn it. On a phone the library is not
 // loaded and nothing here does anything.
 //
-// The game camera itself is cancelled (the headset is the viewpoint). A
-// minigame's model floats where the board's screen stands (quest_xr.cpp),
-// turned so the player sees it as its camera does once the camera rests
-// (quest_camera_follow.hpp). A board stays as placed on the table.
+// On a board, the game camera itself is cancelled (the headset is the
+// viewpoint) and the board stays as placed on the table. A minigame is seen
+// through a window where the game's screen stands (quest_xr.cpp,
+// StereoView::set_window): its camera is kept, and its view space mapped into
+// the window, what the camera looks at in the window's plane, its relief in
+// front of and behind it; each eye looks through the window from where it is.
+// With the left grip off, a minigame stands on the table like a board.
 
 extern "C" {
 #include "port/quest_stereo.h"
@@ -25,7 +28,6 @@ extern "C" {
 #include "game/object.h"
 #include "game/board/space.h"
 }
-#include "port/quest_camera_follow.hpp"
 #include "port/quest_scene_fit.hpp"
 #include "ui/ui.hpp"
 
@@ -57,6 +59,8 @@ struct QuestStereoFrame {
     uint32_t generation;          // of the images the lease is in
     uint32_t drawHud;             // 1: draw the interface if it changed, 2: whatever (the last one was lost), 0: not
     uint32_t foveation;           // the eyes' foveation level (0: none)
+    uint32_t window;              // 1: through a window (eyeView, eyeProj, world: the window's)
+    float windowHeight;           // the window's height, meters
 };
 
 using FrameFn = bool (*)(QuestStereoFrame *frame);
@@ -71,7 +75,6 @@ using CancelledFn = void (*)(uint32_t image, uint64_t tag);
 using ReleaseImagesFn = void (*)(void **buffers, uint32_t count);
 using ScreenHiddenFn = bool (*)();
 using TableSetupHoldFn = bool (*)();
-using FollowCameraFn = bool (*)();
 using HiddenAreaFn = uint32_t (*)(uint32_t eye, float *rects, uint32_t capacity, uint32_t *version);
 using FoveationAvailableFn = void (*)(bool available);
 
@@ -88,7 +91,6 @@ struct Quest {
     WorldOnlyFn worldOnly = nullptr;
     ScreenHiddenFn screenHidden = nullptr; // optional: an older library has none
     TableSetupHoldFn tableSetupHold = nullptr; // optional
-    FollowCameraFn followCamera = nullptr;     // optional: following by default
     HiddenAreaFn hiddenArea = nullptr;         // optional: every pixel drawn
     FoveationAvailableFn foveationAvailable = nullptr; // optional: no automatic foveation
     uint32_t registeredGeneration = 0;
@@ -101,6 +103,8 @@ bool sCameraViewSet = false;
 QuestStereoFrame sFrame;
 OMOVL sScene = DLL_NONE;
 bool sSceneFitted = false;
+// This frame's eyes look through the window (QuestStereoFrame::window).
+bool sWindow = false;
 float sSceneScale = 1.0f;
 float sSceneCenter[3]{};
 float sEyeClip[2][16]{};
@@ -111,10 +115,6 @@ float sSceneExtent = 0.0f;
 // A backdrop is an object around the eyes much larger than the scene on the table.
 constexpr float kBackdropExtents = 2.5f;
 
-// A minigame's model turned to its camera's point of view; restarted with each scene.
-partyboard::quest::CameraFollow sFollow;
-bool sFollowStarted = false;
-std::chrono::steady_clock::time_point sFollowAt {};
 
 bool board_scene(OMOVL scene)
 {
@@ -205,7 +205,6 @@ bool find_quest()
             sQuest.cancelled = reinterpret_cast<CancelledFn>(dlsym(lib, "PartyBoardQuest_StereoCancelled"));
             sQuest.screenHidden = reinterpret_cast<ScreenHiddenFn>(dlsym(lib, "PartyBoardQuest_StereoScreenHidden"));
             sQuest.tableSetupHold = reinterpret_cast<TableSetupHoldFn>(dlsym(lib, "PartyBoardQuest_TableSetupHold"));
-            sQuest.followCamera = reinterpret_cast<FollowCameraFn>(dlsym(lib, "PartyBoardQuest_StereoFollowCamera"));
             sQuest.hiddenArea = reinterpret_cast<HiddenAreaFn>(dlsym(lib, "PartyBoardQuest_StereoHiddenArea"));
             sQuest.foveationAvailable =
                 reinterpret_cast<FoveationAvailableFn>(dlsym(lib, "PartyBoardQuest_StereoFoveationAvailable"));
@@ -357,13 +356,21 @@ extern "C" void PartyBoard_StereoBeginCamera(s16 cameraNo)
     const bool spatialScene = spatial_scene(scene);
     // Selection rooms and title scenes combine several cameras and projections;
     // preserve their original composition until each has a dedicated MR layout.
-    const bool screenRequired = !spatialScene || partyboard::ui::any_document_visible();
+    // So do minigames with more than one camera (split screen): only camera 0
+    // goes to the eyes.
+    bool splitScreen = false;
+    if (scene >= DLL_m401Dll && scene <= DLL_m463Dll) {
+        for (int other = 1; other < HU3D_CAM_MAX; ++other) {
+            splitScreen = splitScreen || -1.0f != Hu3DCamera[other].fov;
+        }
+    }
+    const bool screenRequired = !spatialScene || splitScreen || partyboard::ui::any_document_visible();
 #if defined(__ANDROID__)
     static int loggedScene = -999;
     static bool loggedScreenRequired = false;
     if (loggedScene != static_cast<int>(scene) || loggedScreenRequired != screenRequired) {
-        __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Scene %d: %s", static_cast<int>(scene),
-            screenRequired ? "classic screen" : "spatial rendering");
+        __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Scene %d: %s%s", static_cast<int>(scene),
+            screenRequired ? "classic screen" : "spatial rendering", splitScreen ? " (more than one camera)" : "");
         loggedScene = static_cast<int>(scene);
         loggedScreenRequired = screenRequired;
     }
@@ -402,10 +409,10 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
         sFloorY = INFINITY;
         sFloorFrames = 0;
         sFloorSettled = false;
-        sFollowStarted = false;
     }
     sViewToWorld = inverse_affine(view);
     const bool board = board_scene(scene);
+    const bool window = sFrame.window != 0 && !board;
     if (board && !sSceneFitted) {
         const int count = BoardSpaceCountGet(0);
         if (count > 0 && count <= 256) {
@@ -435,7 +442,7 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
     }
     // Minigames have very different coordinate scales: fit their initial camera once.
     const bool minigame = scene >= DLL_m401Dll && scene <= DLL_m463Dll;
-    if (minigame && !sSceneFitted) {
+    if (minigame && !window && !sSceneFitted) {
         const auto& camera = Hu3DCamera[cameraNo];
         const float dx = camera.pos.x - camera.target.x;
         const float dy = camera.pos.y - camera.target.y;
@@ -453,54 +460,50 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
 #endif
         }
     }
-    // A minigame, where the board's screen stands (quest_xr.cpp puts the
-    // model's frame there, its +Z toward the player's eyes): turned so the
-    // camera looks along -Z, about what it looks at. The player, on +Z, sees
-    // the arena from the camera's side and height:
-    //   sceneWorld = scale * turn(yaw, pitch) * move(-center)
-    // Not following, and on a board: unturned, the lowest floor on the table.
-    // A board never moves: sliding or turning it made the player sick.
-    const bool follow = sSceneFitted && !board && (sQuest.followCamera == nullptr || sQuest.followCamera());
-    float turn[3][3] {{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}};
-    if (follow) {
-        float cameraYaw = NAN, cameraPitch = NAN;
-        if (!partyboard::quest::camera_yaw(view, cameraYaw)) {
-            cameraYaw = NAN;
+    Mat4 world{};
+    if (window) {
+        // The game camera's view space into the window (+Z toward the
+        // player, meters): what the camera looks at in the window's plane,
+        // its vertical field of view as tall as the window, so the window
+        // frames the scene as the screen did; nearer things stand out of it,
+        // farther ones behind it:
+        //   window = scale * view + (0, 0, scale * distance)
+        // The camera's moves and cuts happen behind the window, which stays put.
+        const auto& camera = Hu3DCamera[cameraNo];
+        const float dx = camera.pos.x - camera.target.x;
+        const float dy = camera.pos.y - camera.target.y;
+        const float dz = camera.pos.z - camera.target.z;
+        float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+        const float scale = partyboard::quest::view_to_window_scale(distance, camera.fov, sFrame.windowHeight);
+        Mat4 viewToWindow{};
+        for (int axis = 0; axis < 3; ++axis) {
+            viewToWindow.m[axis][axis] = scale;
         }
-        if (!partyboard::quest::camera_pitch(view, cameraPitch)) {
-            cameraPitch = NAN;
-        }
-        const auto now = std::chrono::steady_clock::now();
-        if (!sFollowStarted) {
-            sFollow.reset(cameraYaw, cameraPitch);
-            sFollowStarted = true;
-        } else {
-            sFollow.update(cameraYaw, cameraPitch, std::chrono::duration<float>(now - sFollowAt).count());
-        }
-        sFollowAt = now;
-        partyboard::quest::camera_turn(sFollow.yaw(), sFollow.pitch(), turn);
+        viewToWindow.m[2][3] = scale * distance;
+        viewToWindow.m[3][3] = 1.0f;
+        world = multiply(from_rows(sFrame.world), viewToWindow);
+        // The sky and the far scenery are the game's, seen through the window.
+        sSceneExtent = 0.0f;
     } else {
-        sFollowStarted = false; // following again starts from the camera of that moment
-    }
-    Mat4 sceneWorld{};
-    for (int r = 0; r < 3; ++r) {
-        for (int c = 0; c < 3; ++c) {
-            sceneWorld.m[r][c] = turn[r][c] * sSceneScale;
+        // A board (or a minigame on the table): unturned, the lowest floor on
+        // the table, the game camera cancelled every frame: the tracked
+        // headset supplies the viewpoint. A board never moves: sliding or
+        // turning it made the player sick.
+        //   sceneWorld = scale * move(-center)
+        Mat4 sceneWorld{};
+        for (int r = 0; r < 3; ++r) {
+            sceneWorld.m[r][r] = sSceneScale;
+            sceneWorld.m[r][3] = -sSceneCenter[r] * sSceneScale;
         }
-        sceneWorld.m[r][3] = -(turn[r][0] * sSceneCenter[0] + turn[r][1] * sSceneCenter[1]
-            + turn[r][2] * sSceneCenter[2]) * sSceneScale;
+        sceneWorld.m[3][3] = 1.0f;
+        // The measured floor on the table (the table's height is the anchor's).
+        if (sFloorSettled && std::isfinite(sFloorY)) {
+            sceneWorld.m[1][3] = -sFloorY * sSceneScale;
+        }
+        world = multiply(multiply(from_rows(sFrame.world), sceneWorld), inverse_affine(view));
+        sSceneExtent = sSceneFitted ? 2800.0f / sSceneScale : 0.0f;
     }
-    sceneWorld.m[3][3] = 1.0f;
-    // Unturned, the measured floor on the table (the table's height is the
-    // anchor's). A minigame in the air turns about its center instead.
-    if (!follow && sFloorSettled && std::isfinite(sFloorY)) {
-        sceneWorld.m[1][3] = -sFloorY * sSceneScale;
-    }
-    // Cancel the game camera every frame: the tracked headset supplies the
-    // viewpoint, while the board stays at its physical table anchor.
-    const Mat4 world = multiply(multiply(from_rows(sFrame.world), sceneWorld),
-        inverse_affine(view));
-    sSceneExtent = sSceneFitted ? 2800.0f / sSceneScale : 0.0f;
+    sWindow = window;
     {
         // Each eye's position (the room -> eye matrix's inverse translation),
         // brought into the game camera's view space: room -> game view.
@@ -532,6 +535,7 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
     }
     std::memcpy(sEyeClip, clip, sizeof(sEyeClip));
     AuroraStereoSetEyeSize(sFrame.eyeWidth, sFrame.eyeHeight);
+    AuroraStereoSetWindow(window);
     AuroraStereoSetHud(sFrame.drawHud != 0);
     if (sFrame.drawHud == 2) {
         AuroraStereoRedrawHud();
@@ -784,7 +788,8 @@ extern "C" void PartyBoard_StereoObjectEnd(void)
 
 extern "C" BOOL PartyBoard_StereoObjectVisible(float x, float y, float z, float radius)
 {
-    if (!sActive || !sCameraViewSet || !sFloorSettled) return TRUE;
+    // Through a window, the eyes' clip planes are the window's: culling is right at once.
+    if (!sActive || !sCameraViewSet || !(sFloorSettled || sWindow)) return TRUE;
 #if defined(__ANDROID__)
     static bool enabled = true;
     static uint32_t tested = 0, culled = 0;

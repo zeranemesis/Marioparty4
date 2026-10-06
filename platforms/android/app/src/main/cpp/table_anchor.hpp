@@ -25,9 +25,10 @@ struct TableSettings {
   bool passthrough = true;      // the room around the game (mixed reality)
   bool diorama = true;          // the game's world as a model on the table
   float modelScale = 0.00025f;  // the model: meters per game unit
-  // The model turns to the game camera's side, and a board brings the player
-  // whose turn it is to the table's center (quest_camera_follow.hpp).
-  bool followCamera = true;
+  // Minigames seen through a window where the screen stands (their camera's
+  // view, in relief: StereoView::set_window), else on the table like a board.
+  // A new key: the former follow_camera turned a floating model, now gone.
+  bool minigameWindow = true;
   std::string anchorUuid;       // hex; empty without an anchor
 
   bool load(const std::string& path);

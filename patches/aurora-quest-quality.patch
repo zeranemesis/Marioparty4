@@ -100,17 +100,22 @@
  
  bool AuroraStereoRegisterImages(void* const* eyeBuffers, void* const* hudBuffers, uint32_t count, uint32_t width,
                                  uint32_t height, uint32_t hudWidth, uint32_t hudHeight,
-@@ -48,6 +51,9 @@ void AuroraStereoSetEyeSize(uint32_t width, uint32_t height);
+@@ -48,6 +51,14 @@ void AuroraStereoSetEyeSize(uint32_t width, uint32_t height);
  // told otherwise). A frame that does not leaves it untouched: the headset
  // copies the HUD only from frames that drew it.
  void AuroraStereoSetHud(bool draw);
++// Before AuroraStereoBegin: whether the eyes look through a window at the
++// game camera's view (a minigame in the headset): the eyes' images then
++// show the game's background where nothing is drawn, opaque, instead of
++// letting the room through.
++void AuroraStereoSetWindow(bool window);
 +// The HUD image last drawn may not reach the headset (its frame was dropped):
 +// the next frame that may draw the HUD draws it, changed or not.
 +void AuroraStereoRedrawHud(void);
  // The headset does not show the game's own frame (the model replaces it):
  // the frame is still drawn for the eyes, but not presented to the screen.
  void AuroraStereoHideScreen(bool hidden);
-@@ -59,6 +65,23 @@ void AuroraStereoSetUncut(bool uncut);
+@@ -59,6 +70,23 @@ void AuroraStereoSetUncut(bool uncut);
  // eyes (any unit, the same for every object); < 0: outside any object. Opaque
  // draws of objects can then go to the GPU front to back (debug.partyboard.sort_opaque).
  void AuroraStereoSetSortKey(float key);
@@ -854,6 +859,15 @@
    render_worker::enqueue_begin_frame(frame.frameId, [frameSlot] {
      const auto encoderDescriptor = wgpu::CommandEncoderDescriptor{
          .label = "Redraw encoder",
+@@ -1160,7 +1215,7 @@ void stereo::enqueue_pass(const PassDesc& desc) noexcept {
+       .depthStencilView = desc.depth,
+       .targetSize = desc.size,
+       .msaaSamples = desc.sampleCount,
+-      .clearColorValue = {0.f, 0.f, 0.f, 0.f},
++      .clearColorValue = desc.clearColor,
+       .clearDepthValue = gx::UseReversedZ ? 0.f : 1.f,
+       .colorStoreOp = desc.sampleCount > 1 ? wgpu::StoreOp::Discard : wgpu::StoreOp::Store,
+       .depthStoreOp = wgpu::StoreOp::Discard,
 @@ -1214,16 +1269,116 @@ void stereo::enqueue_pass(const PassDesc& desc) noexcept {
    const auto instanced = [&](size_t i) {
      return desc.instanced != nullptr && i < desc.instanced->size() && (*desc.instanced)[i] != 0;
@@ -1380,10 +1394,13 @@
  int32_t g_image = -1;
  uint64_t g_frameTag = 0;
  bool g_loggedGeometry = false;
-@@ -105,6 +115,12 @@ bool g_loggedGeometry = false;
+@@ -105,6 +115,15 @@ bool g_loggedGeometry = false;
  uint32_t g_frameEyeWidth = 0, g_frameEyeHeight = 0;
  // Whether this frame draws the HUD image (AuroraStereoSetHud).
  bool g_frameDrawHud = true;
++// This frame's eyes look through a window at the game's camera view
++// (AuroraStereoSetWindow): its background instead of the room.
++bool g_frameWindow = false;
 +// The lenses' hidden area (AuroraStereoSetHiddenArea): per eye, rectangles
 +// {x0, y0, x1, y1} of the eye's rectangle, 0..1 from its top-left. Set by the
 +// headset's thread, copied per frame by the game's.
@@ -1393,7 +1410,7 @@
  // The game's own frame is not on show in the headset (aurora.cpp skips presenting it).
  std::atomic_bool g_screenHidden = false;
  // 8x once a headset uses the eyes' images (gx.cpp's samplers read it), or
-@@ -127,7 +143,60 @@ uint64_t g_statInstanced = 0, g_statPerEye = 0;
+@@ -127,7 +146,60 @@ uint64_t g_statInstanced = 0, g_statPerEye = 0;
  float g_sortKey = -1.f;
  uint32_t g_sortObject = 0;
  std::vector<DrawOrder> g_eyeOrder;
@@ -1454,7 +1471,7 @@
  // Headset A/B switches, read again every 2 s so a capture can flip them
  // without restarting the game. On the Toad board (Quest 3, build 118,
  // 2026-09-28) the sort with the opaque blend off shaded 35% fewer fragments
-@@ -135,14 +204,23 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
+@@ -135,14 +207,23 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
  // instead of 68), with no difference the player could see: both are on by
  // default.
  //   debug.partyboard.sort_opaque 0       opaque draws of objects in the game's
@@ -1485,7 +1502,7 @@
  //   debug.partyboard.opaque_blend off    the game's opaque objects drawn without
  //                                        their alpha blend (edges of translucent
  //                                        textures turn hard). Build 119 found no
-@@ -154,15 +232,127 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
+@@ -154,15 +235,127 @@ uint64_t g_statSortable = 0, g_statCrossingPerEye = 0;
  //                                        across the table, where 8x reads the
  //                                        most texels: an A/B tells what the
  //                                        textures cost before compressing them
@@ -1614,7 +1631,7 @@
  void refresh_switches() {
    const auto now = std::chrono::steady_clock::now();
    if (g_switchesAt != std::chrono::steady_clock::time_point{} && now - g_switchesAt < std::chrono::seconds(2)) {
-@@ -173,9 +363,17 @@ void refresh_switches() {
+@@ -173,9 +366,17 @@ void refresh_switches() {
    Switches read;
    __system_property_get("debug.partyboard.sort_opaque", value);
    read.sortOpaque = value[0] != '0';
@@ -1633,7 +1650,7 @@
    value[0] = '\0';
    __system_property_get("debug.partyboard.opaque_blend", value);
    read.opaqueBlendOff = std::string_view{value} == "off";
-@@ -183,12 +381,65 @@ void refresh_switches() {
+@@ -183,12 +384,65 @@ void refresh_switches() {
    __system_property_get("debug.partyboard.anisotropy", value);
    const std::string_view anisotropy{value};
    read.anisotropy = anisotropy == "1" ? 1 : anisotropy == "2" ? 2 : anisotropy == "4" ? 4 : anisotropy == "16" ? 16 : 8;
@@ -1703,7 +1720,7 @@
    }
    g_switches = read;
    // New samplers from the next draw on (gx.cpp builds them per descriptor).
-@@ -200,6 +451,66 @@ void refresh_switches() {
+@@ -200,6 +454,66 @@ void refresh_switches() {
  // take its lock on every draw.
  std::unordered_set<PipelineRef> g_readyInstanced;
  std::vector<gx::DrawData> g_hudDraws;
@@ -1770,7 +1787,7 @@
  webgpu::TextureWithSampler g_color; // multisampled, when the game's frame is
  webgpu::TextureWithSampler g_depth;
  webgpu::TextureWithSampler g_hudColor, g_hudDepth; // the same for the interface's pass
-@@ -359,7 +670,11 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -359,7 +673,11 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
      return false;
    }
    auto spatialConfig = config;
@@ -1783,7 +1800,7 @@
    if (spatialConfig.colorUpdate) {
      spatialConfig.alphaUpdate = true; // transparent MR targets need coverage
    }
-@@ -374,6 +689,10 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -374,6 +692,10 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
      // The original orthographic uniforms draw the interface once in an atlas
      // region. OpenXR presents it as a separate, sharp quad for both eyes.
      draw.uniformRange = gx::build_uniform(info, vtxStart, ranges);
@@ -1794,7 +1811,7 @@
      g_hudDraws.push_back(draw);
      // Once this frame has a world, its screen is hidden. Avoid drawing the
      // same interface again into that unused screen; empty frames retain it.
-@@ -384,7 +703,7 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -384,7 +706,7 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
    // use instances, one draw per eye.
    // An opaque draw of an object may go to the GPU in front-to-back order.
    const bool inObject = g_sortKey >= 0.f;
@@ -1803,7 +1820,7 @@
        .key = g_sortKey,
        .object = g_sortObject,
        // The game draws its opaque objects with the usual alpha blend on
-@@ -397,9 +716,35 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -397,9 +719,35 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
                      config.blendFacDst == GX_BL_INVSRCALPHA)),
    };
    g_statSortable += order.sortable;
@@ -1839,7 +1856,7 @@
    // An object that reaches both eyes, drawn once per eye when asked: no
    // fragment test, so the GPU keeps rejecting its hidden fragments early.
    const bool crossingPerEye = g_switches.crossingPerEye && inObject && !g_uncut;
-@@ -422,11 +767,34 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -422,11 +770,34 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
      }
      if (ready) {
        draw.pipeline = instancedRef;
@@ -1876,7 +1893,7 @@
        g_eyeOrder.push_back(order);
        ++g_statInstanced;
        g_worldMergeable = true;
-@@ -435,12 +803,17 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -435,12 +806,17 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
    }
    ++g_statPerEye;
    g_eyeInstanced.push_back(0);
@@ -1896,7 +1913,7 @@
      g_eyeDraws[eye].push_back(draw);
    }
    g_worldMergeable = world;
-@@ -466,6 +839,7 @@ void end_frame() noexcept {
+@@ -466,6 +842,7 @@ void end_frame() noexcept {
  #if defined(__ANDROID__)
    g_worldMergeable = false;
    g_uncut = false;
@@ -1904,7 +1921,7 @@
    g_recording = false;
    // Even without geometry, clear and submit the leased image. Dropping it
    // leaks a ring slot and leaves the preceding scene visible in the room.
-@@ -482,7 +856,9 @@ void end_frame() noexcept {
+@@ -482,7 +859,9 @@ void end_frame() noexcept {
        g_eyeDraws[1].clear();
        g_eyeInstanced.clear();
    g_eyeOrder.clear();
@@ -1915,7 +1932,7 @@
        return;
      }
      image = g_images[g_image];
-@@ -491,21 +867,59 @@ void end_frame() noexcept {
+@@ -491,21 +870,59 @@ void end_frame() noexcept {
    // Same sample count and formats as the game's frame, so its pipelines draw here too.
    const auto& config = webgpu::g_graphicsConfig;
    const uint32_t samples = stereo_samples();
@@ -1972,7 +1989,7 @@
 +    std::lock_guard lock{g_hiddenMutex};
 +    for (int eye = 0; eye < 2; ++eye) {
 +      // The hidden area's clear pipeline has the game's depth format.
-+      if (g_switches.hiddenArea && hasWorld && !g_switches.depth16) {
++      if (g_switches.hiddenArea && hasWorld && !g_switches.depth16 && !g_frameWindow) {
 +        g_frameHidden[eye] = g_hiddenArea[eye];
 +      } else {
 +        g_frameHidden[eye].clear();
@@ -1982,7 +1999,7 @@
    const uint32_t eyeStride = g_width / 2;
    PassDesc desc{
        .color = samples > 1 ? g_color.view : image.view,
-@@ -524,8 +938,33 @@ void end_frame() noexcept {
+@@ -524,8 +941,37 @@ void end_frame() noexcept {
        .instanced = &g_eyeInstanced,
        .order = &g_eyeOrder,
        .sortOpaque = g_switches.sortOpaque,
@@ -1991,6 +2008,10 @@
 +      .hidden = {&g_frameHidden[0], &g_frameHidden[1]},
 +      .batched = g_switches.batchDraws && g_eyeBatched.size() == worldDraws ? &g_eyeBatched : nullptr,
 +      .drawHud = drawHud,
++      // A window shows the game's background, opaque, as the screen did.
++      .clearColor = g_frameWindow ? Vec4<float>{gx::g_gxState.clearColor.x(), gx::g_gxState.clearColor.y(),
++                                                gx::g_gxState.clearColor.z(), 1.f}
++                                  : Vec4<float>{0.f, 0.f, 0.f, 0.f},
    };
 +  // The late latch: the head's pose again, now that the frame is recorded
 +  // (the game's draws took 4 to 5 ms after the pose it began with, itself
@@ -2017,7 +2038,7 @@
    enqueue_pass(desc);
    // The interface, in its own image, when this frame draws it (its image's
    // contents are not kept: a frame that draws it draws all of it): its pass
-@@ -534,11 +973,11 @@ void end_frame() noexcept {
+@@ -534,11 +980,11 @@ void end_frame() noexcept {
    static const std::vector<gx::DrawData> noDraws;
    const PassDesc hud{
        .label = "Stereo HUD",
@@ -2032,7 +2053,7 @@
        .hudTop = 0,
        .hudWidth = g_hudWidth,
        .hudHeight = g_hudHeight,
-@@ -546,7 +985,7 @@ void end_frame() noexcept {
+@@ -546,7 +992,7 @@ void end_frame() noexcept {
        .eyes = {&noDraws, &noDraws},
        .hud = &g_hudDraws,
    };
@@ -2041,7 +2062,7 @@
      enqueue_pass(hud);
    }
    if (!g_loggedGeometry && hasWorld) {
-@@ -573,6 +1012,27 @@ void end_frame() noexcept {
+@@ -573,6 +1019,27 @@ void end_frame() noexcept {
               recorded != 0 ? g_statSortable * 100 / recorded : 0, g_switches.sortOpaque ? " (sorted)" : "",
               recorded != 0 ? g_statCrossingPerEye * 100 / recorded : 0);
      g_statInstanced = g_statPerEye = g_statSortable = g_statCrossingPerEye = 0;
@@ -2069,7 +2090,7 @@
      statsAt = now;
      statFrames = statWorld = statHud = 0;
      statWorldMax = 0;
-@@ -581,7 +1041,9 @@ void end_frame() noexcept {
+@@ -581,7 +1048,9 @@ void end_frame() noexcept {
    g_eyeDraws[1].clear();
    g_eyeInstanced.clear();
    g_eyeOrder.clear();
@@ -2080,7 +2101,7 @@
    g_image = -1;
  #endif
  }
-@@ -622,8 +1084,128 @@ void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept
+@@ -622,8 +1091,128 @@ void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept
  #endif
  }
  
@@ -2209,7 +2230,7 @@
    for (const auto& accessed : g_accessed) {
      Image target;
      {
-@@ -658,7 +1240,8 @@ void after_submit() noexcept {
+@@ -658,7 +1247,8 @@ void after_submit() noexcept {
      const int eyesFd = end_access(target.memory, target.texture);
      const int fd = accessed.hud ? merge_fences(eyesFd, end_access(target.hudMemory, target.hudTexture)) : eyesFd;
      if (g_callback != nullptr) {
@@ -2219,7 +2240,7 @@
      } else if (fd >= 0) {
        close(fd);
      }
-@@ -676,6 +1259,7 @@ bool AuroraStereoRegisterImages(void* const* eyeBuffers, void* const* hudBuffers
+@@ -676,6 +1266,7 @@ bool AuroraStereoRegisterImages(void* const* eyeBuffers, void* const* hudBuffers
                                  uint32_t height, uint32_t hudWidth, uint32_t hudHeight,
                                  AuroraStereoCallback callback, void* user) {
  #if defined(__ANDROID__)
@@ -2227,7 +2248,7 @@
    if (!webgpu::g_device) {
      return false;
    }
-@@ -750,21 +1334,25 @@ bool AuroraStereoRegisterImages(void* const* eyeBuffers, void* const* hudBuffers
+@@ -750,21 +1341,25 @@ bool AuroraStereoRegisterImages(void* const* eyeBuffers, void* const* hudBuffers
  void AuroraStereoBegin(uint32_t image, const float clip[2][16], uint64_t frameTag) {
  #if defined(__ANDROID__)
    // GX queues draws in its FIFO. Consume the preceding camera's commands
@@ -2268,7 +2289,7 @@
  #else
    (void)image;
    (void)clip;
-@@ -776,9 +1364,10 @@ void AuroraStereoEnd(void) {
+@@ -776,9 +1371,10 @@ void AuroraStereoEnd(void) {
  #if defined(__ANDROID__)
    // Closing recording before draining loses deferred display-list draws:
    // they would only be decoded at aurora_end_frame, after g_recording is off.
@@ -2282,7 +2303,7 @@
  #endif
  }
  
-@@ -786,8 +1375,12 @@ bool AuroraStereoActive(void) { return recording(); }
+@@ -786,8 +1382,12 @@ bool AuroraStereoActive(void) { return recording(); }
  
  void AuroraStereoSetEyeSize(uint32_t width, uint32_t height) {
  #if defined(__ANDROID__)
@@ -2297,7 +2318,7 @@
  #else
    (void)width;
    (void)height;
-@@ -796,12 +1389,18 @@ void AuroraStereoSetEyeSize(uint32_t width, uint32_t height) {
+@@ -796,12 +1396,26 @@ void AuroraStereoSetEyeSize(uint32_t width, uint32_t height) {
  
  void AuroraStereoSetHud(bool draw) {
  #if defined(__ANDROID__)
@@ -2308,6 +2329,14 @@
  #endif
  }
  
++void AuroraStereoSetWindow(bool window) {
++#if defined(__ANDROID__)
++  gx::fifo::ordered([window] { g_frameWindow = window; }, false);
++#else
++  (void)window;
++#endif
++}
++
 +void AuroraStereoRedrawHud(void) {
 +#if defined(__ANDROID__)
 +  gx::fifo::ordered([] { g_hudRedraw = true; }, false);
@@ -2317,7 +2346,7 @@
  void AuroraStereoHideScreen(bool hidden) {
  #if defined(__ANDROID__)
    g_screenHidden.store(hidden, std::memory_order_relaxed);
-@@ -813,30 +1412,85 @@ void AuroraStereoHideScreen(bool hidden) {
+@@ -813,30 +1427,85 @@ void AuroraStereoHideScreen(bool hidden) {
  extern "C" void AuroraStereoSetSortKey(float key) {
  #if defined(__ANDROID__)
    using namespace aurora::gfx::stereo;
@@ -2413,7 +2442,7 @@
  #else
    (void)uncut;
  #endif
-@@ -845,8 +1499,7 @@ extern "C" void AuroraStereoSetUncut(bool uncut) {
+@@ -845,8 +1514,7 @@ extern "C" void AuroraStereoSetUncut(bool uncut) {
  extern "C" void AuroraStereoWorldOnly(bool enabled) {
  #if defined(__ANDROID__)
    // The FIFO is deferred: process camera draws before changing the scope.
@@ -2437,7 +2466,7 @@
  void after_submit() noexcept;
  
  // What common.cpp turns into a render pass: the eyes' (hud null), or the
-@@ -86,8 +91,18 @@ struct PassDesc {
+@@ -86,8 +91,21 @@ struct PassDesc {
    // sortOpaque sends the sortable runs front to back.
    const std::vector<DrawOrder>* order = nullptr;
    bool sortOpaque = false;
@@ -2450,6 +2479,9 @@
 +  // y1}, 0..1 of the eye's rectangle), filled with the nearest depth first.
 +  const std::vector<float>* hidden[2]{};
    const std::vector<gx::DrawData>* hud = nullptr;
++  // Eyes' pass: transparent where nothing is drawn (the room shows through
++  // the model), or the game's background in a window (AuroraStereoSetWindow).
++  Vec4<float> clearColor{0.f, 0.f, 0.f, 0.f};
  };
  void enqueue_pass(const PassDesc& desc) noexcept; // common.cpp
 +// common.cpp joined `count` world draws into one (for "Stereo draws").

@@ -1,4 +1,5 @@
 #include "stereo_view.hpp"
+#include "window_view.hpp"
 
 #include <GLES2/gl2ext.h>
 #include <unistd.h>
@@ -950,6 +951,19 @@ bool StereoView::game_frame(StereoFrame& out) {
   const auto [drawWidth, drawHeight] = eye_size(mRenderScale);
   free->renderWidth = std::min(drawWidth, mImageEyeWidth);
   free->renderHeight = std::min(drawHeight, mImageEyeHeight);
+  // Through a window, each eye draws the window's shape, as large as the
+  // controller's size allows: its pixels all land on the window.
+  free->window = mWindowOn && mWindowSize.width > 0.0f && mWindowSize.height > 0.0f;
+  if (free->window) {
+    const float aspect = mWindowSize.width / mWindowSize.height;
+    if (free->renderWidth > free->renderHeight * aspect) {
+      free->renderWidth = std::max(16u, static_cast<uint32_t>(free->renderHeight * aspect));
+    } else {
+      free->renderHeight = std::max(16u, static_cast<uint32_t>(free->renderWidth / aspect));
+    }
+    free->windowPose = mWindowPose;
+    free->windowSize = mWindowSize;
+  }
   free->leaseTime = mFrameTime;
   // The paced start this frame began at (next_frame_start()), for the pacer.
   free->startNs = mStartGiven ? mGivenStartNs : 0;
@@ -985,11 +999,35 @@ bool StereoView::game_frame(StereoFrame& out) {
   free->board = mBoardMode;
   out.image = static_cast<uint32_t>(free - mSlots.begin());
   out.tag = free->tag;
-  for (int eye = 0; eye < 2; ++eye) {
-    view_matrix(mViews[eye].pose, out.eyeView[eye]);
-    projection_matrix(mViews[eye].fov, out.eyeProj[eye]);
+  if (free->window) {
+    // Each eye looks through the window: its view keeps the window's axes
+    // (the image lies in the window's plane, the compositor turns it with the
+    // head), and its field of view is the window's edges as seen from that
+    // eye, whatever its own: off center as soon as the eye is.
+    const XrPosef toWindow = inverse(free->windowPose);
+    const float halfWidth = free->windowSize.width * 0.5f, halfHeight = free->windowSize.height * 0.5f;
+    for (int eye = 0; eye < 2; ++eye) {
+      const XrVector3f e = compose(toWindow, mViews[eye].pose).position;
+      const float position[3]{e.x, e.y, e.z};
+      const WindowTangents tangents = window_tangents(halfWidth, halfHeight, position);
+      XrFovf fov{};
+      fov.angleLeft = std::atan(tangents.left);
+      fov.angleRight = std::atan(tangents.right);
+      fov.angleUp = std::atan(tangents.up);
+      fov.angleDown = std::atan(tangents.down);
+      view_matrix(XrPosef{free->windowPose.orientation, mViews[eye].pose.position}, out.eyeView[eye]);
+      projection_matrix(fov, out.eyeProj[eye]);
+    }
+    pose_matrix(free->windowPose, 1.0f, out.world);
+  } else {
+    for (int eye = 0; eye < 2; ++eye) {
+      view_matrix(mViews[eye].pose, out.eyeView[eye]);
+      projection_matrix(mViews[eye].fov, out.eyeProj[eye]);
+    }
+    std::copy(std::begin(mWorld), std::end(mWorld), out.world);
   }
-  std::copy(std::begin(mWorld), std::end(mWorld), out.world);
+  out.window = free->window ? 1u : 0u;
+  out.windowHeight = free->window ? free->windowSize.height : 0.0f;
   out.hudWidth = mHudWidth;
   out.hudHeight = mHudHeight;
   out.eyeWidth = free->renderWidth;
@@ -1061,7 +1099,9 @@ bool StereoView::late_latch(uint64_t tag, float correction[2][16]) {
     std::lock_guard lock{mMutex};
     if (!mLateLatch || mViewsFrozen || mSession == XR_NULL_HANDLE || mLocateSpace == XR_NULL_HANDLE) return false;
     const auto slot = std::ranges::find_if(mSlots, [tag](const Slot& s) { return s.state == State::Drawing && s.tag == tag; });
-    if (slot == mSlots.end()) return false;
+    // Through a window, the projection is the window's from each eye, not the
+    // eye's own: the correction does not apply (the compositor turns the quads).
+    if (slot == mSlots.end() || slot->window) return false;
     old[0] = slot->views[0];
     old[1] = slot->views[1];
     // The display frame it was located for: its paced one, else the measured delay.
@@ -1338,6 +1378,21 @@ bool StereoView::minigame_mode() const {
   return !mScreenRequired && !mBoardMode;
 }
 
+void StereoView::set_window(bool on, const XrPosef& pose, XrExtent2Df size) {
+  std::lock_guard lock{mMutex};
+  if (on != mWindowOn) {
+    LOGI("Stereo: %s (%.2f x %.2f m at %.2f %.2f %.2f)", on ? "the game seen through a window" : "no window",
+         size.width, size.height, pose.position.x, pose.position.y, pose.position.z);
+  }
+  mWindowOn = on;
+  mWindowPose = pose;
+  mWindowSize = size;
+}
+
+const XrCompositionLayerBaseHeader* StereoView::window_second_layer() const {
+  return window_shown() ? reinterpret_cast<const XrCompositionLayerBaseHeader*>(&mWindowLayers[1]) : nullptr;
+}
+
 void StereoView::submitted(uint32_t image, uint64_t tag, int syncFd, bool hasWorld, bool hudDrawn) {
   std::lock_guard lock{mMutex};
   if (image >= mSlots.size() || mSlots[image].state != State::Drawing || mSlots[image].tag != tag) {
@@ -1503,6 +1558,9 @@ void StereoView::present(Slot* newest, int fence, int64_t doneNs, int64_t finish
       mShownViews[1] = newest->views[1];
       mShownHasWorld = newest->hasWorld;
       mShownIsBoard = newest->board;
+      mShownWindow = newest->window;
+      mShownWindowPose = newest->windowPose;
+      mShownWindowSize = newest->windowSize;
       mShownWidth = newest->renderWidth;
       mShownHeight = newest->renderHeight;
       if (mHoldCounted) ++mHolds[std::min<uint32_t>(std::max<uint32_t>(mFramesSinceNew + holdExtra, 1), 4) - 1];
@@ -1904,6 +1962,26 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
   }
   if (!mShown) {
     return nullptr;
+  }
+  if (mShownWindow) {
+    // The window: one quad per eye, each showing that eye's half of the image,
+    // opaque (the game's background, Aurora's window clear).
+    const uint32_t shownWidth = mShownWidth != 0 ? mShownWidth : mEyeWidth;
+    const uint32_t shownHeight = mShownHeight != 0 ? mShownHeight : mEyeHeight;
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+      auto& quad = mWindowLayers[eye];
+      quad = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+      quad.next = next;
+      quad.space = space;
+      quad.eyeVisibility = eye == 0 ? XR_EYE_VISIBILITY_LEFT : XR_EYE_VISIBILITY_RIGHT;
+      quad.subImage.swapchain = mSwapchain;
+      quad.subImage.imageRect = {
+          {static_cast<int32_t>(eye * mEyeWidth), static_cast<int32_t>((mEyeHeight - shownHeight) / 2)},
+          {static_cast<int32_t>(shownWidth), static_cast<int32_t>(shownHeight)}};
+      quad.pose = mShownWindowPose;
+      quad.size = mShownWindowSize;
+    }
+    return reinterpret_cast<const XrCompositionLayerBaseHeader*>(&mWindowLayers[0]);
   }
   for (uint32_t eye = 0; eye < 2; ++eye) {
     auto& view = mProjectionViews[eye];

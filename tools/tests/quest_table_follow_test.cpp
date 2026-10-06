@@ -2,6 +2,8 @@
 // (table_fit.hpp, quest_camera_follow.hpp): plain math, run on a PC.
 #include "../../platforms/android/app/src/main/cpp/table_fit.hpp"
 #include "../../include/port/quest_camera_follow.hpp"
+#include "../../include/port/quest_scene_fit.hpp"
+#include "../../platforms/android/app/src/main/cpp/window_view.hpp"
 
 #include <cassert>
 #include <cmath>
@@ -230,14 +232,48 @@ void test_camera_turn() {
   assert(!camera_pitch(broken, pitch));
 }
 
+// A minigame through a window: each eye's field is the window's edges from
+// where it is, and the game camera's view lands in the window as it framed it.
+void test_window() {
+  // Centered, 1.5 m in front of a 1.6 x 0.9 m window: symmetric.
+  const float centered[3]{0.0f, 0.0f, 1.5f};
+  const auto even = quest::window_tangents(0.8f, 0.45f, centered);
+  assert(near(even.left, -0.8f / 1.5f, 1e-5f) && near(even.right, 0.8f / 1.5f, 1e-5f));
+  assert(near(even.up, 0.45f / 1.5f, 1e-5f) && near(even.down, -0.45f / 1.5f, 1e-5f));
+  // A left eye 3 cm left of center sees more of the window's right side.
+  const float left[3]{-0.03f, 0.0f, 1.5f};
+  const auto off = quest::window_tangents(0.8f, 0.45f, left);
+  assert(off.right > -off.left && near(off.right - off.left, 1.6f / 1.5f, 1e-5f));
+  // Through the window: as if 5 cm in front, never a reversed field.
+  const float through[3]{0.0f, 0.0f, -0.2f};
+  const auto close = quest::window_tangents(0.8f, 0.45f, through);
+  assert(close.left < 0.0f && close.right > 0.0f && close.up > 0.0f && close.down < 0.0f);
+
+  // A camera 1500 units from its target, 45 degrees tall, into a 0.9 m window.
+  float distance = 1500.0f;
+  const float scale = partyboard::quest::view_to_window_scale(distance, 45.0f, 0.9f);
+  // Its target in the window's plane; the top of its view there, the window's top edge.
+  assert(near(scale * -distance + scale * distance, 0.0f, 1e-6f));
+  const float topView = distance * std::tan(45.0f * 0.00872664626f);
+  assert(near(scale * topView, 0.45f, 1e-4f));
+  // From where the camera stands (scale * distance in front), the window's
+  // half height is seen under the camera's half field: the same framing.
+  assert(near(std::atan(0.45f / (scale * distance)), 22.5f * 0.0174532925f, 1e-4f));
+  // Nonsense from the camera: 1000 units, 45 degrees.
+  float broken = NAN;
+  const float fallback = partyboard::quest::view_to_window_scale(broken, NAN, 0.9f);
+  assert(broken == 1000.0f && near(fallback, 0.9f / (2.0f * 1000.0f * 0.41421356f), 1e-7f));
+}
+
 } // namespace
 
 int main() {
+  test_window();
   test_table_from_plane();
   test_pick_and_scale();
   test_camera_yaw();
   test_follow();
   test_camera_turn();
-  std::puts("quest table and camera follow: PASS");
+  std::puts("quest table, camera follow and minigame window: PASS");
   return 0;
 }

@@ -200,12 +200,12 @@ public final class QuestVr {
     }
 
     private static void onPlacement(boolean placing, int resolution, boolean passthrough, boolean model,
-                                    boolean calibrating, boolean calibrationConfirmed, boolean followCamera,
+                                    boolean calibrating, boolean calibrationConfirmed, boolean minigameWindow,
                                     int sceneState, float tableLength, float tableWidth) {
         final Activity activity = sActivity;
         if (placing && activity != null) {
             activity.runOnUiThread(() -> drawHelp(resolution, passthrough, model, calibrating,
-                                                  calibrationConfirmed, followCamera, sceneState,
+                                                  calibrationConfirmed, minigameWindow, sceneState,
                                                   tableLength, tableWidth));
         }
     }
@@ -287,7 +287,7 @@ public final class QuestVr {
     // current resolution, room visibility and model. While calibrating: the
     // controller to lay on the table, and what the room scan found.
     private static void drawHelp(int resolution, boolean passthrough, boolean model, boolean calibrating,
-                                 boolean calibrationConfirmed, boolean followCamera, int sceneState,
+                                 boolean calibrationConfirmed, boolean minigameWindow, int sceneState,
                                  float tableLength, float tableWidth) {
         Surface surface = sHelpSurface;
         if (surface == null || !surface.isValid()) {
@@ -330,7 +330,7 @@ public final class QuestVr {
             "Stick droit : ↕ taille de l'écran   ↔ tourner",
             "Stick gauche : ↕ hauteur   ↔ taille du plateau",
             "Clic stick gauche : plateau 3D — " + (model ? "oui" : "non"),
-            "Grip gauche : mini-jeux sur l'écran, vus comme à la télé — " + (followCamera ? "oui" : "non"),
+            "Grip gauche : mini-jeux en 3D dans l'écran (sinon sur la table) — " + (minigameWindow ? "oui" : "non"),
             "X : pièce visible — " + (passthrough ? "oui" : "non"),
             "Y : qualité — " + resolutionName(resolution),
             "A : recalibrer avec la manette droite",
@@ -341,7 +341,7 @@ public final class QuestVr {
             "Right stick: ↕ screen size   ↔ turn",
             "Left stick: ↕ height   ↔ board size",
             "Left stick click: 3D board — " + (model ? "yes" : "no"),
-            "Left grip: minigames on the screen, seen as on TV — " + (followCamera ? "yes" : "no"),
+            "Left grip: minigames in 3D in the screen (else on the table) — " + (minigameWindow ? "yes" : "no"),
             "X: room visible — " + (passthrough ? "yes" : "no"),
             "Y: quality — " + resolutionName(resolution),
             "A: recalibrate with the right controller",

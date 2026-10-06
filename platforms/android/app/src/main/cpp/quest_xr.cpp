@@ -94,6 +94,10 @@ constexpr float kSceneryPerRadius = 0.35f;
 constexpr float kHudSightMarginMeters = 0.03f;
 constexpr float kHudAboveEyesMeters = 0.05f; // the interface's center, over the eyes' height
 constexpr float kHudWidthPerScene = 1.3f;
+// A minigame's interface over its window (StereoView::set_window), just in
+// front of it: the compositor draws it last, the gap only keeps it off the
+// window's plane.
+constexpr float kWindowHudInFrontMeters = 0.003f;
 constexpr float kMinHudWidth = 0.9f;
 constexpr float kMaxHudWidth = 1.6f;
 
@@ -224,9 +228,6 @@ struct App {
   // of the player for this session, until a new placement or calibration.
   bool savedPlaceIgnored = false;
   // A minigame's place, where the board's screen stands, taken when it starts.
-  bool minigamePlaced = false;
-  XrPosef minigamePose = identity_pose();
-  float minigameScale = 0.0f;
   XrTime firstFrameTime = 0;
   // The eyes' height (STAGE) the flat screen is raised to at least: taken
   // while placing or calibrating, and once at startup (NaN until then).
@@ -282,9 +283,6 @@ std::atomic_int g_scenePermission = -1;
 std::atomic_bool g_setupNeeded = false;
 std::atomic_bool g_setupOpen = false;
 std::atomic_bool g_setupRequested = false;
-
-// The model follows the game camera (PartyBoardQuest_StereoFollowCamera).
-std::atomic_bool g_followCamera = true;
 
 void clear_exception(JNIEnv* env) {
   if (env->ExceptionCheck()) {
@@ -955,7 +953,7 @@ void notify_placement(App& app, JNIEnv* env) {
   app.shownSceneState = static_cast<int>(app.scene.state());
   env->CallStaticVoidMethod(g_java.questVr, g_java.onPlacement, app.placing, app.table.resolution,
                             app.table.passthrough && passthrough_available(app), app.table.diorama, app.calibrating,
-                            app.calibrationConfirmed, app.table.followCamera, app.shownSceneState, length, width);
+                            app.calibrationConfirmed, app.table.minigameWindow, app.shownSceneState, length, width);
   clear_exception(env);
 }
 
@@ -1006,22 +1004,26 @@ XrPosef hud_pose(const XrPosef& table, float modelScale, XrExtent2Df& size, cons
   return compose(table, local);
 }
 
-// A minigame's place: the center of the board's screen (hud_pose), its +Z
-// toward `head` (quest_stereo.cpp turns the arena to look along -Z as its
-// camera does), and the scale that makes the fitted scene as wide as the
-// screen. Taken once when the minigame starts: the arena does not follow the head.
-XrPosef minigame_pose(const XrPosef& table, float modelScale, const XrPosef& head, float& scale) {
-  XrExtent2Df size{};
-  XrPosef pose = hud_pose(table, modelScale, size);
-  scale = std::clamp(size.width / kSceneExtentUnits, kMinModelScale, kMaxModelScale);
-  const XrVector3f to{head.position.x - pose.position.x, head.position.y - pose.position.y,
-                      head.position.z - pose.position.z};
-  const float flat = std::hypot(to.x, to.z);
-  if (flat > 0.05f) {
-    // Turned toward the head, then its +Z raised (or lowered) to the eyes.
-    const float pitch = std::atan2(to.y, flat);
-    const XrQuaternionf raise{std::sin(-pitch * 0.5f), 0.0f, 0.0f, std::cos(-pitch * 0.5f)};
-    pose.orientation = multiply(yaw_rotation(std::atan2(to.x, to.z)), raise);
+// The game's screen standing at the table (`app.pose`, +Z toward the player),
+// behind the model when one shows: its center, and its size. Never below the
+// eyes' comfortable level: standing on the table, a low table (or one placed
+// on the floor, 0.04 m on 2026-09-28) took the menus, instructions and
+// results down with it. The eyes' height is the one measured while placing
+// (or first seen), not the live head, so the screen does not bob as the
+// player moves. A minigame shows through a window there (StereoView::set_window).
+XrPosef screen_pose(const App& app, bool behindModel, XrExtent2Df& size) {
+  size.width = app.table.screenWidth;
+  size.height = app.screen.width > 0 && app.screen.height > 0
+      ? size.width * static_cast<float>(app.screen.height) / static_cast<float>(app.screen.width)
+      : size.width * 9.0f / 16.0f;
+  XrPosef onTable = identity_pose();
+  onTable.position.y = kScreenLiftMeters + size.height * 0.5f;
+  if (behindModel) {
+    onTable.position.z = -kScreenBehindModelMeters;
+  }
+  XrPosef pose = compose(app.pose, onTable);
+  if (std::isfinite(app.screenEyeHeight)) {
+    pose.position.y = std::max(pose.position.y, app.screenEyeHeight - kDefaultDropMeters);
   }
   return pose;
 }
@@ -1338,12 +1340,12 @@ void place(App& app, JNIEnv* env, const ControllerState& input, int pressed, flo
     tick(app);
     notify_placement(app, env);
   }
-  // Left grip: the model follows the game camera, or stays as placed.
+  // Left grip: minigames through a window where the screen stands (seen as
+  // on TV, in relief), or on the table like the board.
   const bool leftGrip = input.leftGrip > (app.leftGripHeld ? 0.4f : 0.6f);
   if (leftGrip && !app.leftGripHeld) {
-    app.table.followCamera = !app.table.followCamera;
-    g_followCamera.store(app.table.followCamera, std::memory_order_relaxed);
-    LOGI("Model follows the game camera: %s", app.table.followCamera ? "yes" : "no");
+    app.table.minigameWindow = !app.table.minigameWindow;
+    LOGI("Minigames through a window: %s", app.table.minigameWindow ? "yes" : "no");
     tick(app);
     notify_placement(app, env);
   }
@@ -1587,27 +1589,24 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   // Invalid tracking must disable new game leases, rather than leave the
   // previous valid eye poses enabled while the headset cannot render.
   // The board's floor is measured by the game (quest_stereo.cpp) and put on
-  // the table exactly: no clearance. A minigame, following its camera, floats
-  // where the board's screen stands instead, and the table stays empty.
-  const bool minigameView = app.table.followCamera && app.stereo.minigame_mode();
-  if (!minigameView) {
-    app.minigamePlaced = false;
-  } else if (!app.minigamePlaced && haveHead) {
-    app.minigamePose = minigame_pose(app.pose, app.table.modelScale, head, app.minigameScale);
-    app.minigamePlaced = true;
-    LOGI("Minigame view: at %.2f %.2f %.2f, %.2f m across", app.minigamePose.position.x, app.minigamePose.position.y,
-         app.minigamePose.position.z, app.minigameScale * kSceneExtentUnits);
-  }
-  const bool floating = minigameView && app.minigamePlaced;
-  const XrPosef modelPose = floating ? app.minigamePose : app.pose;
-  const float modelScale = floating ? app.minigameScale : app.table.modelScale;
+  // the table exactly: no clearance. A minigame (unless the left grip put it
+  // on the table too) is seen as on TV, through a window where the game's
+  // screen stands, with its relief: its camera's framing, which the floating
+  // model it replaces lost (the action out of it, tilted, misplaced:
+  // 2026-10-06), and the window stays put whatever the camera does.
+  const bool windowView = app.table.minigameWindow && app.stereo.minigame_mode();
+  XrExtent2Df windowSize{};
+  const XrPosef windowPose = screen_pose(app, true, windowSize);
+  app.stereo.set_window(windowView, windowPose, windowSize);
+  const XrPosef modelPose = app.pose;
+  const float modelScale = app.table.modelScale;
   app.stereo.set_quality_sample(g_perf.quality_sample());
   app.stereo.set_frame_time(time, frame.predictedDisplayPeriod);
   app.stereo.set_locate_space(app.stage);
   app.stereo.update(views, modelPose, modelScale, model, app.table.screenWidth, app.table.screenWidth * 0.75f);
   // The table under the board, a little wider than the fitted scene, for the
-  // compositor's depth; a floating minigame faces the head: none.
-  app.stereo.set_depth_plane(modelPose, floating ? 0.0f : 0.55f * kSceneExtentUnits * modelScale);
+  // compositor's depth; a window: none.
+  app.stereo.set_depth_plane(modelPose, windowView ? 0.0f : 0.55f * kSceneExtentUnits * modelScale);
   XrCompositionLayerImageLayoutFB modelFlip{XR_TYPE_COMPOSITION_LAYER_IMAGE_LAYOUT_FB};
   modelFlip.flags = XR_COMPOSITION_LAYER_IMAGE_LAYOUT_VERTICAL_FLIP_BIT_FB;
   XrCompositionLayerSettingsFB modelSettings{XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB};
@@ -1652,7 +1651,7 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
                                                                              : modelSettings.next;
   const auto* modelLayer = model ? app.stereo.layer(app.stage, modelChain) : nullptr;
 
-  std::array<const XrCompositionLayerBaseHeader*, 6> layers{};
+  std::array<const XrCompositionLayerBaseHeader*, 8> layers{};
   uint32_t layerCount = 0;
 
   XrCompositionLayerPassthroughFB room{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
@@ -1665,8 +1664,8 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   // The game's screen, standing on the table. A 4K or 1440p picture is larger
   // than what the headset shows of it: the compositor's supersampling filters
   // it down cleanly; a 1080p one is sharpened instead.
-  const float screenWidth = app.table.screenWidth;
-  const float screenHeight = screenWidth * static_cast<float>(app.screen.height) / static_cast<float>(app.screen.width);
+  XrExtent2Df screenSize{};
+  const XrPosef screenPose = screen_pose(app, model, screenSize);
   XrCompositionLayerSettingsFB settings{XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB};
   settings.layerFlags = app.screen.height > 1080 ? XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SUPER_SAMPLING_BIT_FB
                                                  : XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SHARPENING_BIT_FB;
@@ -1695,21 +1694,8 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   screen.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
   screen.subImage.swapchain = app.screen.swapchain;
   screen.subImage.imageRect = {{0, 0}, {app.screen.width, app.screen.height}};
-  XrPosef onTable = identity_pose();
-  onTable.position.y = kScreenLiftMeters + screenHeight * 0.5f;
-  if (model) {
-    onTable.position.z = -kScreenBehindModelMeters;
-  }
-  screen.pose = compose(app.pose, onTable);
-  // Behind the board, but never below the eyes' comfortable level: standing
-  // on the table, a low table (or one placed on the floor, 0.04 m on
-  // 2026-09-28) took the menus, instructions and results down with it. The
-  // eyes' height is the one measured while placing (or first seen), not the
-  // live head, so the screen does not bob as the player moves.
-  if (std::isfinite(app.screenEyeHeight)) {
-    screen.pose.position.y = std::max(screen.pose.position.y, app.screenEyeHeight - kDefaultDropMeters);
-  }
-  screen.size = {screenWidth, screenHeight};
+  screen.pose = screenPose;
+  screen.size = screenSize;
   const bool screenShown = app.poseKnown && (!modelLayer || !app.stereo.world_visible() || app.placing);
   if (screenShown) {
     layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&screen);
@@ -1722,12 +1708,26 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   // The interface's screen goes over the model, so it is always seen whole;
   // it stands at the back of the board, raised over the board's scenery as
   // seen from the player's place (hud_pose), so the two do not overlap and it
-  // reads as standing behind. A minigame, floating there, shows its
-  // interface over it without the screen: no frame, no face.
+  // reads as standing behind. A minigame's window shows its interface over
+  // it, as on the screen: its 4:3 as tall as the window, centered, just in
+  // front (the second quad is the window's right eye).
   if (modelLayer) {
     layers[layerCount++] = modelLayer;
+    const bool window = app.stereo.window_shown();
+    if (const auto* second = app.stereo.window_second_layer()) {
+      layers[layerCount++] = second;
+    }
     XrExtent2Df hudSize{};
-    const XrPosef hudPose = hud_pose(app.pose, app.table.modelScale, hudSize, floating ? nullptr : &app.screenEye);
+    XrPosef hudPose{};
+    if (window) {
+      const XrExtent2Df shown = app.stereo.window_shown_size();
+      hudSize = {shown.height * 4.0f / 3.0f, shown.height};
+      XrPosef inFront = identity_pose();
+      inFront.position.z = kWindowHudInFrontMeters;
+      hudPose = compose(app.stereo.window_shown_pose(), inFront);
+    } else {
+      hudPose = hud_pose(app.pose, app.table.modelScale, hudSize, &app.screenEye);
+    }
     // The dark screen behind the interface: only with `debug.partyboard.hud_screen
     // 1`; the interface floats on the room by default (asked for 2026-10-03).
     static bool hudScreen = false;
@@ -1738,7 +1738,7 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
       __system_property_get("debug.partyboard.hud_screen", value);
       hudScreen = value[0] == '1';
     }
-    if (const auto* screen = floating || !hudScreen ? nullptr : app.stereo.hud_screen_layer(app.stage, hudPose, hudSize)) {
+    if (const auto* screen = window || !hudScreen ? nullptr : app.stereo.hud_screen_layer(app.stage, hudPose, hudSize)) {
       layers[layerCount++] = screen;
     }
     if (const auto* hud =
@@ -1831,7 +1831,6 @@ bool set_up(App& app, JNIEnv* env) {
     if (app.extensions.layerDepth) app.stereo.enable_depth_layer(app.instance, app.session);
     if (app.extensions.spaceWarp) app.stereo.enable_space_warp(app.instance, app.system, app.session);
   }
-  g_followCamera.store(app.table.followCamera, std::memory_order_relaxed);
   app.stereo.set_quality_cap(quality_cap(app.table.resolution));
   query_refresh_rates(app);
   if (app.extensions.anchors) {
@@ -1961,11 +1960,6 @@ __attribute__((visibility("default"))) bool PartyBoardQuest_TableSetupHold() {
   }
   g_setupRequested.store(true);
   return true;
-}
-
-// The game thread, each eye frame: whether the model follows the game camera.
-__attribute__((visibility("default"))) bool PartyBoardQuest_StereoFollowCamera() {
-  return g_followCamera.load(std::memory_order_relaxed);
 }
 
 JNIEXPORT jboolean JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_nativeStart(JNIEnv* env, jclass clazz,
