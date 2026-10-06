@@ -73,6 +73,10 @@ State state();
 std::string statusText();
 std::string username();
 
+// The set's rich presence ("Toad's Midway Madness - Turn 12/20 ..."), as last computed, or empty
+// while no set is being played. Main thread.
+std::string richPresence();
+
 // The password is passed straight to rcheevos and never stored; only the
 // session token the server returns is kept, as every RetroAchievements client
 // does.

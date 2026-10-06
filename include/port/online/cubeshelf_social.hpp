@@ -75,6 +75,14 @@ struct Snapshot {
     Status status = Status::Offline;
     std::string currentGameTitle;
     std::optional<Invite> invite;
+    // Added in CubeShelf 0.10; empty in an older document.
+    // Where the author publishes, as they state it: an https address, followed when it changes
+    // (FriendStore.AdoptAddress) -- how a friend who moved is not lost.
+    std::string address;
+    // "away" or "busy" when the author said so; empty otherwise.
+    std::string availability;
+    // What the author's game says is happening ("Plateau de Toad — tour 12/20"), one clean line.
+    std::string activity;
 };
 
 // Opens a friend's sealed presence document, or nothing if it is not addressed to us, was
@@ -88,6 +96,10 @@ bool invites(const Snapshot &snapshot, const Profile &me, std::string_view gameI
 
 bool decode_public_key(std::string_view base64, PublicKey &out);
 std::string encode_base64(const std::uint8_t *data, std::size_t length);
+
+// PresenceComposer.CleanActivity: one line of plain text -- controls and bidi overrides out,
+// line breaks as spaces -- at most maxCodepoints long.
+std::string clean_line(std::string_view untrusted, std::size_t maxCodepoints);
 
 // PeerName.Sanitize, and PeerName.Handle: "Zera#4821", or six digits with longTag.
 std::string sanitize_name(std::string_view untrusted);

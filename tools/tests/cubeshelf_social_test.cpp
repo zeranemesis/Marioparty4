@@ -102,6 +102,31 @@ int main(int argc, char **argv)
     tampered[at] = tampered[at] == 'A' ? 'B' : 'A';
     check(!open_presence(*profile, alexKey, tampered), "tampering is caught");
     check(!open_presence(*profile, alexKey, "{}") && !open_presence(*profile, alexKey, "not json"), "garbage is refused");
+    if (snapshot) {
+        check(snapshot->address.empty() && snapshot->availability.empty() && snapshot->activity.empty(),
+            "a document from before 0.10 has none of the newer fields");
+    }
+
+    // Version 2: a document CubeShelf 0.10 wrote -- padded to 4 KiB with spaces after the JSON,
+    // and carrying the address it lives at, an availability, the game's activity line and a note
+    // sealed for one friend (which this reader leaves alone).
+    const auto riley = deserialize_profile(read(dir + "/cubeshelf_device_profile_v2.json"));
+    check(riley.has_value() && riley->name == "Riley" && riley->friends.size() == 1, "the v2 device profile loads");
+    if (riley) {
+        PublicKey kimKey {};
+        check(decode_public_key(riley->friends[0].publicKey, kimKey), "Kim's key decodes");
+        const auto kim = open_presence(*riley, kimKey, read(dir + "/cubeshelf_presence_kim_v2.json"));
+        check(kim.has_value(), "a padded document with the newer fields opens");
+        if (kim) {
+            check(kim->sequence == 77 && kim->status == Status::InGame && kim->currentGameTitle == "Mario Party 4", "v2 snapshot fields");
+            check(kim->address == "https://new.example.org/kim.json", "the stated address is read");
+            check(kim->availability == "busy", "the availability is read");
+            check(kim->activity == "Plateau de Toad \xE2\x80\x94 tour 12/20", "the game's activity line is read");
+            check(effective_status(*kim, kPublished + 60) == Status::InGame, "a busy friend is still in game");
+        }
+    }
+    check(clean_line("a\x1b[31mb\nc\xE2\x80\xAE" "d", 120) == "a[31mb cd", "controls and overrides go, a line break is a space");
+    check(clean_line("  \n  ", 120).empty() && clean_line("abcdef", 3) == "abc", "blank is empty, the length is capped");
 
     check(sanitize_name("  Za\tra  <b># x ") == "Zara b x", "PeerName.Sanitize rules");
     check(sanitize_name(std::string(40, 'a')).size() == 32, "names are capped");

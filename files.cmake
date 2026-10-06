@@ -91,6 +91,7 @@ set(PORT_FILES
         src/port/retroachievements.cpp
         src/port/retroachievements_badges.cpp
         src/port/retroachievements_memory.cpp
+        src/port/game_activity.cpp
         src/port/board_coverage.cpp
         src/port/app_update.cpp
         src/port/app_update_manifest.cpp

@@ -139,6 +139,7 @@ namespace {
 
         bool changed = false;
         bool sequencesAdvanced = false;
+        bool addressesMoved = false;
         for (auto &f : profile.friends) {
             PublicKey key;
             if (f.paused || !decode_public_key(f.publicKey, key)) {
@@ -179,18 +180,27 @@ namespace {
                     f.lastSequence = opened->sequence;
                     sequencesAdvanced = true;
                 }
+                // The friend moved their document: the old one says where, and only they could
+                // have written it (it opened under the key we share). Followed from now on.
+                if (!opened->address.empty() && opened->address != f.presenceUrl) {
+                    f.presenceUrl = opened->address;
+                    addressesMoved = true;
+                }
                 state.snapshot = std::move(opened);
                 changed = true;
             }
         }
 
         std::lock_guard lock(s.mutex);
-        if (sequencesAdvanced && s.profile && s.profile->publicKey == profile.publicKey) {
-            // Only the sequences move; the list itself may have been replaced meanwhile.
+        if ((sequencesAdvanced || addressesMoved) && s.profile && s.profile->publicKey == profile.publicKey) {
+            // Only the sequences and the addresses move; the list itself may have been replaced meanwhile.
             for (auto &stored : s.profile->friends) {
                 for (const auto &seen : profile.friends) {
                     if (stored.publicKey == seen.publicKey) {
                         stored.lastSequence = std::max(stored.lastSequence, seen.lastSequence);
+                        if (seen.presenceUrl.starts_with("https://")) {
+                            stored.presenceUrl = seen.presenceUrl;
+                        }
                     }
                 }
             }
@@ -307,9 +317,18 @@ NativeView view(bool french)
         const Status effective = known != nullptr ? effective_status(*known, now) : Status::Offline;
         v.status = f.paused ? "paused" : effective == Status::InGame ? "ingame" : effective == Status::Online ? "online" : "offline";
         const std::string game = known != nullptr && !known->currentGameTitle.empty() ? known->currentGameTitle : t("un jeu", "a game");
+        // As MainWindow.InGame.cs composes it: what the game says, and away / do not disturb.
+        const bool busy = known != nullptr && known->availability == "busy";
+        const bool away = known != nullptr && known->availability == "away";
+        std::string activity;
+        if (known != nullptr && !known->activity.empty()) {
+            const std::string shortened = clean_line(known->activity, 48);
+            activity = " \xE2\x80\x94 " + shortened + (shortened.size() < known->activity.size() ? "\xE2\x80\xA6" : "");
+        }
         v.label = v.status == "paused" ? t("En pause", "Paused")
-            : v.status == "ingame"     ? (french ? "En jeu : " + game : "Playing " + game)
-            : v.status == "online"     ? t("En ligne", "Online")
+            : v.status == "ingame"     ? (french ? "En jeu : " + game + activity : "Playing " + game + activity)
+                + (busy ? t(" (ne pas d\xC3\xA9ranger)", " (do not disturb)") : std::string())
+            : v.status == "online"     ? (busy ? t("Ne pas d\xC3\xA9ranger", "Do not disturb") : away ? t("Absent", "Away") : t("En ligne", "Online"))
                                        : t("Hors ligne", "Offline");
         v.invitesYou = !f.paused && known != nullptr && invites(*known, me, kGameId, now);
         if (v.invitesYou) {

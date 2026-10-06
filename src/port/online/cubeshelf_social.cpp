@@ -634,6 +634,18 @@ std::optional<Snapshot> open_presence(const Profile &me, const PublicKey &author
         }
         snapshot.currentGameTitle = string_field(document, "CurrentGameTitle");
 
+        // Fields CubeShelf 0.10 added. Each is read strictly: an address is https or nothing, an
+        // availability is one of the two words, and the activity is cleaned like the C# side does.
+        const std::string address = string_field(document, "Address");
+        if (address.size() <= 2048 && address.starts_with("https://")) {
+            snapshot.address = address;
+        }
+        const std::string availability = string_field(document, "Availability");
+        if (availability == "away" || availability == "busy") {
+            snapshot.availability = availability;
+        }
+        snapshot.activity = clean_line(string_field(document, "Activity"), 120);
+
         if (const auto *invite = field(document, "Invite"); invite != nullptr && invite->is_object()) {
             Invite parsed;
             parsed.gameId = string_field(*invite, "GameId");
@@ -707,6 +719,34 @@ std::string sanitize_name(std::string_view untrusted)
         units += width;
         append_utf8(out, cp);
     }
+    while (!out.empty() && out.back() == ' ') {
+        out.pop_back();
+    }
+    return out;
+}
+
+std::string clean_line(std::string_view untrusted, std::size_t maxCodepoints)
+{
+    std::string out;
+    std::size_t kept = 0;
+    for (std::size_t i = 0; i < untrusted.size() && kept < maxCodepoints;) {
+        char32_t cp = next_codepoint(untrusted, i);
+        if (cp == '\n') {
+            cp = ' ';
+        }
+        // No terminal escapes, no right-to-left override turning a board name around.
+        if (is_control(cp) || cp == 0x202A || cp == 0x202B || cp == 0x202C || cp == 0x202D || cp == 0x202E
+            || (cp >= 0x2066 && cp <= 0x2069)) {
+            continue;
+        }
+        append_utf8(out, cp);
+        ++kept;
+    }
+    const auto first = out.find_first_not_of(' ');
+    if (first == std::string::npos) {
+        return {};
+    }
+    out.erase(0, first);
     while (!out.empty() && out.back() == ' ') {
         out.pop_back();
     }

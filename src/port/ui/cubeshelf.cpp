@@ -8,6 +8,8 @@
 #include "port/android_bridge.hpp"
 #include "port/main.h"
 #include "port/online/cubeshelf_friends.hpp"
+#include "port/game_activity.hpp"
+#include "port/retroachievements.h"
 #include "string_button.hpp"
 
 #include <SDL3/SDL_clipboard.h>
@@ -177,6 +179,66 @@ namespace {
         return getSettings().game.language.getValue() == GameLanguage::French;
     }
 
+    // What is happening, in one line, for CubeShelf to tell friends ("what the game says"). The
+    // RetroAchievements set's rich presence when one is being played -- it names every minigame;
+    // otherwise what the port can see for itself: which board and which turn, a minigame, or the
+    // menus. Board names stay in English, as on the disc.
+    std::string activity_text()
+    {
+        if (auto rich = ra::richPresence(); !rich.empty()) {
+            return rich;
+        }
+        static constexpr const char *kBoards[] = {
+            "Toad's Midway Madness", "Goomba's Greedy Gala", "Boo's Haunted Bash",
+            "Koopa's Seaside Soiree", "Shy Guy's Jungle Jam", "Bowser's Gnarly Party",
+        };
+        const bool fr = french();
+        const auto activity = current_game_activity();
+        if (activity.scene == GameActivity::Scene::Board && activity.board >= 0 && activity.board < 6) {
+            std::string text = kBoards[activity.board];
+            if (activity.maxTurn > 0) {
+                text += fmt::format(fr ? " \xE2\x80\x94 tour {}/{}" : " \xE2\x80\x94 turn {}/{}", activity.turn, activity.maxTurn);
+            }
+            return text;
+        }
+        if (activity.scene == GameActivity::Scene::Minigame) {
+            return fr ? "Mini-jeu" : "Minigame";
+        }
+        return fr ? "Dans les menus" : "In the menus";
+    }
+
+    // Written beside the state CubeShelf writes, every few seconds while it changes and every
+    // half minute while it does not, so CubeShelf can tell a current line from a stale one
+    // (InGameBridge.ReadActivity drops anything older than 90 seconds).
+    void write_activity() noexcept
+    {
+        static clock::time_point lastWrite {};
+        static std::string lastText;
+        const auto now = clock::now();
+        if (now - lastWrite < std::chrono::seconds(5)) {
+            return;
+        }
+        const auto dir = directory();
+        if (!dir) {
+            return;
+        }
+        std::string text;
+        try {
+            text = activity_text();
+        }
+        catch (...) {
+            return;
+        }
+        if (text == lastText && now - lastWrite < std::chrono::seconds(30)) {
+            return;
+        }
+        lastWrite = now;
+        lastText = text;
+        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+        nlohmann::json document = { { "schema", 1 }, { "text", text }, { "updatedAt", seconds } };
+        write_atomically(*dir / "activity.json", document.dump());
+    }
+
     // MainWindow.InGame.cs InGameText, for a device that reads its friends but never hosts.
     std::map<std::string, std::string> native_text(bool fr)
     {
@@ -340,6 +402,7 @@ void tick() noexcept
         return;
     }
     sLastTick = now;
+    write_activity();
 
     const auto state = read_state();
     if (!state || !state->fresh) {

@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "name": "Riley",
+  "d": "3nM5LVQEmSFq0kHaUIBpdWf5H5lK2g8xbuD7vF48wqs=",
+  "q": "BJjrWhXJ6bZXvmM5mnJ5Pvnt4qBpPlnCbw9j2lmsnSfr462sfERGxfn6aW51kKh9Yz4EnCXubkTwt4I0WpG74qo=",
+  "at": 1790337600,
+  "friends": [
+    {
+      "k": "BDFtsV\u002BxvrsxZ9JuWlvOK8M\u002BClkG\u002B8z0GkijXwmX221qV1zjGoo1PHyZB3Cp0UQkVXSsq3MJmyLoDLHjZeZ7Zb0=",
+      "n": "Kim",
+      "u": "https://old.example.org/kim.json",
+      "s": 10,
+      "p": false
+    }
+  ]
+}

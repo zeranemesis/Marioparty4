@@ -73,6 +73,8 @@ std::string s_userAgent;
 // a loading screen), so it can keep the session alive.
 bool s_tickedThisFrame = false;
 uint32_t s_revision = 0;
+// The last rich presence message, refreshed once a second while a set is played.
+std::string s_richPresence;
 
 void set_state(State state, std::string status) {
     s_state = state;
@@ -384,6 +386,8 @@ std::vector<AchievementInfo> achievements() {
 }
 std::string statusText() { return s_status; }
 
+std::string richPresence() { return s_state == State::Playing ? s_richPresence : std::string(); }
+
 std::string username() {
     if (s_client != nullptr) {
         if (const rc_client_user_t* user = rc_client_get_user_info(s_client)) {
@@ -492,13 +496,12 @@ void PartyBoard_RAFramePump(void) {
     // the characters...).
     if (s_state == State::Playing) {
         static uint32_t frames = 0;
-        static std::string lastPresence;
         if (++frames % 60 == 0) {
             char presence[256] = {};
             rc_client_get_rich_presence_message(s_client, presence, sizeof(presence));
-            if (lastPresence != presence) {
-                lastPresence = presence;
-                Log.info("Rich presence: {}", lastPresence);
+            if (s_richPresence != presence) {
+                s_richPresence = presence;
+                Log.info("Rich presence: {}", s_richPresence);
             }
         }
     }
