@@ -26,6 +26,10 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#ifndef MSG_NOSIGNAL
+// Older macOS SDKs lack it; SO_NOSIGPIPE on the client socket does the same job.
+#define MSG_NOSIGNAL 0
+#endif
 #endif
 
 namespace {
@@ -55,7 +59,15 @@ void open_listener()
     if (port <= 0 || port > 65535) {
         return;
     }
+#ifdef SOCK_CLOEXEC
     gListen = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+#else
+    // macOS has no SOCK_CLOEXEC; set the same flag right after.
+    gListen = socket(AF_INET, SOCK_STREAM, 0);
+    if (gListen >= 0) {
+        fcntl(gListen, F_SETFD, FD_CLOEXEC);
+    }
+#endif
     if (gListen < 0) {
         return;
     }
@@ -82,6 +94,10 @@ void read_commands()
             return;
         }
         set_nonblocking(gClient);
+#ifdef SO_NOSIGPIPE
+        const int on = 1;
+        setsockopt(gClient, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+#endif
         gPending.clear();
     }
     char buffer[512];

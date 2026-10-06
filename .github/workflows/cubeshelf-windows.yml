@@ -300,6 +300,9 @@ jobs:
               "release-notes.txt" `
               --clobber
           } else {
+            # On a v* tag build.yml publishes Linux, macOS and Android to this same
+            # release and may create it between the check above and this line.
+            $ErrorActionPreference = "Continue"
             gh release create $releaseTag `
               "PartyBoard-win-x64.zip" `
               "manifest.json" `
@@ -309,6 +312,16 @@ jobs:
               --title "PartyBoard Windows - $releaseTag" `
               --notes-file "release-notes.txt" `
               --prerelease
+            $created = ($LASTEXITCODE -eq 0)
+            $ErrorActionPreference = "Stop"
+            if (-not $created) {
+              gh release upload $releaseTag `
+                "PartyBoard-win-x64.zip" `
+                "manifest.json" `
+                "checksums.txt" `
+                "release-notes.txt" `
+                --clobber
+            }
           }
 
           # CubeShelf asks for one fixed URL. Its Manifest source builds

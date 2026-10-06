@@ -4,6 +4,10 @@ on:
   push:
     branches-ignore:
       - switch-native-bootstrap
+    # Without this a push filter that names only branches ignores tags entirely,
+    # so the v* tag publish-desktop and build-android wait for never ran here.
+    tags:
+      - 'v*'
     paths-ignore:
       - '*.md'
       - '*LICENSE'
@@ -526,3 +530,76 @@ jobs:
             build/install/*.dll
             build/install/res/
             build/install/debug.7z
+
+  # A v* tag is one release for every platform. Windows reaches it from
+  # cubeshelf-windows.yml, the package CubeShelf installs and the one to download;
+  # Android keeps its own update channel (partyboard-android-latest) and is also
+  # attached here. This adds the Linux AppImage and the macOS apps, which until
+  # now only ever existed as 14-day Actions artifacts.
+  #
+  # always(): a platform that failed to build is missing from the release rather
+  # than holding back the ones that built. The job summary names what is absent.
+  publish-desktop:
+    name: Publish release (Linux, macOS, Android)
+    if: always() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [build-linux, build-apple, build-android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v5
+        with:
+          pattern: partyboard-*
+          path: artifacts
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p out
+          shopt -s nullglob
+          for appimage in artifacts/*linux*/Party_Board-*.AppImage; do
+            cp "$appimage" "out/PartyBoard-$TAG-linux-x86_64.AppImage"
+          done
+          for dir in artifacts/*macos-appleclang-*; do
+            arch="${dir##*macos-appleclang-}"
+            if [ -d "$dir/PartyBoard.app" ]; then
+              # Artifacts drop file modes; restore the executable bit before zipping.
+              chmod +x "$dir"/PartyBoard.app/Contents/MacOS/* || true
+              (cd "$dir" && zip -qry "$GITHUB_WORKSPACE/out/PartyBoard-$TAG-macos-$arch.zip" PartyBoard.app)
+            fi
+          done
+          for apk in artifacts/*android*/*/release/app-*-signed.apk; do
+            case "$apk" in *unsigned*) continue;; esac
+            name=$(basename "$apk"); flavor=$(echo "$name" | cut -d- -f2)
+            cp "$apk" "out/PartyBoard-$TAG-$flavor-arm64-v8a.apk"
+          done
+          ls -la out
+          {
+            echo "### $TAG"
+            for want in linux-x86_64.AppImage macos-arm64.zip macos-x86_64.zip phone-arm64-v8a.apk quest-arm64-v8a.apk; do
+              if [ -e "out/PartyBoard-$TAG-$want" ]; then echo "- OK $want"; else echo "- **missing** $want (its build failed)"; fi
+            done
+            echo "- Windows: cubeshelf-windows.yml"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{github.token}}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          shopt -s nullglob
+          files=(out/*)
+          [ ${#files[@]} -gt 0 ] || { echo "No platform built; nothing to publish."; exit 1; }
+          # cubeshelf-windows.yml may have created this release first, or may be
+          # about to: create it if absent, and never fail because the other got there.
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "PartyBoard $TAG" \
+              --notes "PartyBoard $TAG for Windows, Linux, macOS and Android." --prerelease || true
+          gh release upload "$TAG" "${files[@]}" --clobber
