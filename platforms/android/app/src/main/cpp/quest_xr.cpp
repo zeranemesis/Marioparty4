@@ -1837,11 +1837,14 @@ bool set_up(App& app, JNIEnv* env) {
   create_surface_quad(app, env, kHelpWidthPixels, kHelpHeightPixels, app.help);
   create_passthrough(app);
   g_perf.init(app.instance, app.session, app.extensions.perfMetrics);
-  // The eyes' images, at most 125% of the headset's recommended size (about
-  // the Quest 3 panel's own pixels): sharp polygons and textures on the table.
-  // Dynamic resolution (stereo_view.cpp) draws less of them when 120 Hz needs it.
-  const float eyeScale = 1.25f;
+  // The eyes' images, at most 130% of the headset's recommended size (a
+  // minigame's; a board's at most 125%, about the Quest 3 panel's own pixels).
+  // Dynamic resolution (stereo_view.cpp) draws less of them when needed.
+  const float eyeScale = AdaptiveQuality::kMaxCap;
   app.modelAvailable = app.stereo.init(app.instance, app.session, app.system, app.egl.display, eyeScale);
+  if (const auto slash = app.statePath.find_last_of('/'); slash != std::string::npos) {
+    app.stereo.set_snapshot_dir(app.statePath.substr(0, slash));
+  }
   if (!app.modelAvailable) {
     LOGW("No model on the table: the game stays on its screen");
   } else {

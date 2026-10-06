@@ -1208,7 +1208,8 @@ void StereoView::set_quality_sample(const QualitySample& sample) {
 
 void StereoView::set_quality_cap(float recommendedScale) {
   std::lock_guard lock{mMutex};
-  mQuality.set_cap(recommendedScale);
+  mQualityCap = recommendedScale;
+  mQuality.set_cap(mMinigameQuality ? AdaptiveQuality::kMaxCap : recommendedScale);
   mDesiredHudWidth = recommendedScale <= 0.8f ? 1280 : recommendedScale <= 1.0f ? 1600 : 1920;
   mRenderScale = std::min(1.0f, mQuality.scale() / mMaxScale);
   // A lower ceiling: drawn in a part of the images until ImageSizePolicy
@@ -1368,6 +1369,17 @@ void StereoView::set_board_mode(bool board) {
     LOGI("Stereo: a board again, resolution back to %.0f%% of recommended", mBoardQuality * 100.0f);
   }
   mBoardMode = board;
+  // A minigame: its eyes at 130% from its start (lighter than a board).
+  if (const bool minigame = !board && !mScreenRequired; minigame != mMinigameQuality) {
+    mMinigameQuality = minigame;
+    mQuality.set_cap(minigame ? AdaptiveQuality::kMaxCap : mQualityCap);
+    if (minigame) mQuality.start_at(AdaptiveQuality::kMaxCap);
+    mRenderScale = std::min(1.0f, mQuality.scale() / mMaxScale);
+    const auto [width, height] = eye_size(mRenderScale);
+    if (width > mImageEyeWidth || height > mImageEyeHeight) mResizePending = true;
+    LOGI("Stereo: %s, resolution up to %.0f%% of recommended", minigame ? "a minigame" : "no minigame",
+         mQuality.cap() * 100.0f);
+  }
 }
 
 bool StereoView::world_only() const {
@@ -1378,6 +1390,30 @@ bool StereoView::world_only() const {
 bool StereoView::screen_required() const {
   std::lock_guard lock{mMutex};
   return mScreenRequired;
+}
+
+void StereoView::write_snapshot(GLuint texture, GLint x, GLint y, GLsizei width, GLsizei height, const char* name,
+                                uint64_t tag) {
+  if (texture == 0 || width <= 0 || height <= 0) return;
+  GLuint framebuffer = 0;
+  glGenFramebuffers(1, &framebuffer);
+  glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+  std::vector<uint8_t> pixels(static_cast<size_t>(width) * height * 4);
+  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+    glReadPixels(x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+  }
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  glDeleteFramebuffers(1, &framebuffer);
+  const std::string path = mSnapshotDir + "/snapshot-" + std::to_string(tag) + "-" + name + ".rgba";
+  if (FILE* file = std::fopen(path.c_str(), "wb")) {
+    const uint32_t header[2] = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+    std::fwrite("RGBA", 1, 4, file);
+    std::fwrite(header, sizeof(header), 1, file);
+    std::fwrite(pixels.data(), 1, pixels.size(), file);
+    std::fclose(file);
+    LOGI("Stereo: snapshot %s (%dx%d)", path.c_str(), width, height);
+  }
 }
 
 bool StereoView::minigame_mode() const {
@@ -1528,6 +1564,15 @@ void StereoView::present(Slot* newest, int fence, int64_t doneNs, int64_t finish
                     mHudImages[hudIndex].image, GL_TEXTURE_2D, 0, 0, 0, 0,
                     static_cast<GLsizei>(mHudPixelsWidth), static_cast<GLsizei>(mHudPixelsHeight), 1);
 
+    }
+    // A snapshot: this image's left eye and its interface (set_snapshot_dir).
+    if (mSnapshotWanted && newest->hud && !mSnapshotDir.empty()) {
+      mSnapshotWanted = false;
+      const auto srcY = static_cast<GLint>((mImageEyeHeight - newest->renderHeight) / 2);
+      write_snapshot(newest->texture, 0, srcY, static_cast<GLsizei>(newest->renderWidth),
+                     static_cast<GLsizei>(newest->renderHeight), "eye", newest->tag);
+      write_snapshot(newest->hudTexture, 0, 0, static_cast<GLsizei>(mHudPixelsWidth),
+                     static_cast<GLsizei>(mHudPixelsHeight), "hud", newest->tag);
     }
     // Keep the source lease until this GPU copy completes. The compositor
     // synchronizes the released destination; the game must not reuse its source.
@@ -1907,6 +1952,13 @@ const XrCompositionLayerBaseHeader* StereoView::layer(XrSpace space, const void*
       }
       // Probes (debug.partyboard.probes 1): the copies' GPU end ("Copy GPU"),
       // a native fence made and read for each copy.
+      char snapshot[PROP_VALUE_MAX] = {};
+      __system_property_get("debug.partyboard.snapshot", snapshot);
+      if (snapshot[0] != '\0' && mSnapshotValue != snapshot) {
+        mSnapshotValue = snapshot;
+        mSnapshotWanted = true;
+        mHudLost = true; // the interface drawn again, for the snapshot to have it
+      }
       char probes[PROP_VALUE_MAX] = {};
       __system_property_get("debug.partyboard.probes", probes);
       if (const bool on = std::strcmp(probes, "1") == 0; on != mProbes) {

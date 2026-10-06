@@ -27,9 +27,12 @@ public:
   // making new images (the ring drains, a hitch) and bringing back the late
   // images the lowering had removed.
   static constexpr unsigned kRaiseHoldWindows = 20;
+  // The highest scale of the recommended eye size: a minigame, lighter than
+  // a board, starts there (StereoView::set_board_mode).
+  static constexpr float kMaxCap = 1.3f;
 
   void set_cap(float cap) {
-    mCap = std::clamp(cap, 0.65f, 1.25f);
+    mCap = std::clamp(cap, 0.65f, kMaxCap);
     mScale = std::min(mScale, mCap);
     mCalm = 0;
     mTrial = {};

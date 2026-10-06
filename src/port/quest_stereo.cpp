@@ -102,6 +102,13 @@ struct Quest {
 Quest sQuest;
 bool sActive = false;
 bool sCameraViewSet = false;
+// The cameras drawn for the eyes: the first one active (the scene's main
+// view), and with a minigame's window any other over the same part of the
+// screen (a layer drawn over it), mapped as the first was this frame.
+int sCurrentCamera = -1;
+bool sSecondary = false;
+bool sFrameRecording = false; // the first camera's eyes frame is being recorded
+float sWindowScale = 0.0f, sWindowDistance = 0.0f;
 QuestStereoFrame sFrame;
 OMOVL sScene = DLL_NONE;
 bool sSceneFitted = false;
@@ -119,9 +126,10 @@ constexpr float kBackdropExtents = 2.5f;
 // A minigame in 3D from its camera's point of view: a sky is an object with
 // the game camera deep inside (within kOpenSkyCore of its radius from its
 // center) and at least this many times the camera's distance to what it
-// looks at (a dome, a skybox): skies measured 15 and 47 times, Avalanche!'s
-// course 8.6 times, seen from its intro's camera (2026-10-06).
-constexpr float kOpenSkyPerDistance = 12.0f;
+// looks at (a dome, a skybox): skies measured 47 to 84 times; Avalanche!'s
+// course 8.6 times seen from its intro's camera, and objects of 12 times
+// left holes in Paratrooper Plunge and Manta Rings (2026-10-06).
+constexpr float kOpenSkyPerDistance = 25.0f;
 constexpr float kOpenSkyCore = 0.5f;
 float sOpenSkyRadius = 0.0f;
 
@@ -350,14 +358,49 @@ GamePerf sGamePerf;
 
 } // namespace
 
+static void begin_eyes(const Mat4& world);
+
+// The first active camera: the scene's main view (camera 0 unless the scene
+// leaves it unused).
+static int primary_camera()
+{
+    for (int camera = 0; camera < HU3D_CAM_MAX; ++camera) {
+        if (-1.0f != Hu3DCamera[camera].fov) {
+            return camera;
+        }
+    }
+    return -1;
+}
+
+static bool same_viewport(int a, int b)
+{
+    const auto& first = Hu3DCamera[a];
+    const auto& second = Hu3DCamera[b];
+    return std::abs(first.viewportX - second.viewportX) < 1.0f && std::abs(first.viewportY - second.viewportY) < 1.0f
+        && std::abs(first.viewportW - second.viewportW) < 1.0f && std::abs(first.viewportH - second.viewportH) < 1.0f;
+}
+
 extern "C" void PartyBoard_StereoBeginCamera(s16 cameraNo)
 {
     sActive = false;
     sCameraViewSet = false;
+    sSecondary = false;
     AuroraStereoWorldOnly(false);
-    if (cameraNo != 0) {
+    const int primary = primary_camera();
+    if (cameraNo != primary) {
+        // Another camera over the same part of the screen (a layer over the
+        // first: a foreground, effects) goes to the eyes too, through the same
+        // mapping. One over another part (a split screen's other players)
+        // stays in the game's frame: the eyes show the first player's view.
+        if (sFrameRecording && sWindow && primary >= 0 && same_viewport(cameraNo, primary)) {
+            sActive = true;
+            sSecondary = true;
+            sCurrentCamera = cameraNo;
+        }
         return;
     }
+    sFrameRecording = false;
+    sCurrentCamera = cameraNo;
     if (!find_quest()) {
         AuroraStereoHideScreen(false);
         return;
@@ -366,33 +409,33 @@ extern "C" void PartyBoard_StereoBeginCamera(s16 cameraNo)
     const bool spatialScene = spatial_scene(scene);
     // Selection rooms and title scenes combine several cameras and projections;
     // preserve their original composition until each has a dedicated MR layout.
-    // So do minigames with more than one camera (split screen): only camera 0
-    // goes to the eyes.
-    bool splitScreen = false;
-    if (scene >= DLL_m401Dll && scene <= DLL_m463Dll) {
-        for (int other = 1; other < HU3D_CAM_MAX; ++other) {
-            splitScreen = splitScreen || -1.0f != Hu3DCamera[other].fov;
-        }
+    // A minigame with several cameras (layers, or a split screen) shows its
+    // first one in 3D, with the layers over it (every minigame in 3D, asked
+    // for 2026-10-06).
+    int cameras = 0;
+    for (int other = 0; other < HU3D_CAM_MAX; ++other) {
+        cameras += -1.0f != Hu3DCamera[other].fov ? 1 : 0;
     }
     // A scene that copies its frame into a texture while the eyes record its
-    // camera (Mario Medley's panels) copies a frame without what only the
-    // eyes drew: the classic screen for the rest of that scene.
+    // camera (Mario Medley's panels, Three Throw) would copy a frame without
+    // what only the eyes drew: for the rest of that scene its world is drawn
+    // into the game's frame too.
     static OMOVL sCopyScene = DLL_NONE;
     if (AuroraStereoTakeEfbCopied() && sCopyScene != scene) {
         sCopyScene = scene;
 #if defined(__ANDROID__)
         __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Scene %d copies its frame while drawn for the eyes: "
-            "classic screen", static_cast<int>(scene));
+            "its world drawn into that frame too", static_cast<int>(scene));
 #endif
     }
-    const bool frameCopies = scene == sCopyScene;
-    const bool screenRequired = !spatialScene || splitScreen || frameCopies || partyboard::ui::any_document_visible();
+    AuroraStereoSetKeepFlat(scene == sCopyScene);
+    const bool screenRequired = !spatialScene || partyboard::ui::any_document_visible();
 #if defined(__ANDROID__)
     static int loggedScene = -999;
     static bool loggedScreenRequired = false;
     if (loggedScene != static_cast<int>(scene) || loggedScreenRequired != screenRequired) {
-        __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Scene %d: %s%s", static_cast<int>(scene),
-            screenRequired ? "classic screen" : "spatial rendering", splitScreen ? " (more than one camera)" : "");
+        __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Scene %d: %s (%d cameras, the eyes' from camera %d)",
+            static_cast<int>(scene), screenRequired ? "classic screen" : "spatial rendering", cameras, cameraNo);
         loggedScene = static_cast<int>(scene);
         loggedScreenRequired = screenRequired;
     }
@@ -419,7 +462,18 @@ extern "C" void PartyBoard_StereoBeginCamera(s16 cameraNo)
 
 extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
 {
-    if (!sActive || cameraNo != 0) {
+    if (!sActive || cameraNo != sCurrentCamera) {
+        return;
+    }
+    if (sSecondary) {
+        // A layer over the first camera: its view space mapped as the first's.
+        Mat4 viewToWindow{};
+        for (int axis = 0; axis < 3; ++axis) {
+            viewToWindow.m[axis][axis] = sWindowScale;
+        }
+        viewToWindow.m[2][3] = sWindowScale * sWindowDistance;
+        viewToWindow.m[3][3] = 1.0f;
+        begin_eyes(multiply(from_rows(sFrame.world), viewToWindow));
         return;
     }
     const OMOVL scene = omCurrentOvlGet();
@@ -512,6 +566,8 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
         viewToWindow.m[2][3] = scale * distance;
         viewToWindow.m[3][3] = 1.0f;
         world = multiply(from_rows(sFrame.world), viewToWindow);
+        sWindowScale = scale;
+        sWindowDistance = distance;
         // Framed, the sky and the far scenery are the game's, seen through the
         // window. Open, a sky would surround the player and hide the room: an
         // object around the game camera itself, much larger than its distance
@@ -541,6 +597,15 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
         sOpenSkyRadius = 0.0f;
     }
     sWindow = window;
+    begin_eyes(world);
+    sFrameRecording = true;
+}
+
+// The eyes' clip matrices from `world` (the game camera's view space -> the
+// room), the eyes' positions in that view space, and this camera's recording.
+static void begin_eyes(const Mat4& world)
+{
+    const bool framed = sWindow && sFrame.window == 1;
     {
         // Each eye's position (the room -> eye matrix's inverse translation),
         // brought into the game camera's view space: room -> game view.
@@ -573,7 +638,7 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
     std::memcpy(sEyeClip, clip, sizeof(sEyeClip));
     AuroraStereoSetEyeSize(sFrame.eyeWidth, sFrame.eyeHeight);
     AuroraStereoSetWindow(framed);
-    AuroraStereoSetCoverAlpha(window && !framed);
+    AuroraStereoSetCoverAlpha(sWindow && !framed);
     AuroraStereoSetHud(sFrame.drawHud != 0);
     if (sFrame.drawHud == 2) {
         AuroraStereoRedrawHud();
@@ -592,7 +657,7 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
 
 extern "C" void PartyBoard_StereoEndCamera(void)
 {
-    if (sActive && sCameraViewSet && sSceneFitted && !sFloorSettled && ++sFloorFrames >= kFloorFrames) {
+    if (sActive && !sSecondary && sCameraViewSet && sSceneFitted && !sFloorSettled && ++sFloorFrames >= kFloorFrames) {
         sFloorSettled = true;
 #if defined(__ANDROID__)
         __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Scene %d floor: %s %.1f (scene center %.1f)",
@@ -603,11 +668,14 @@ extern "C" void PartyBoard_StereoEndCamera(void)
     if (sActive) {
         if (sCameraViewSet) {
             AuroraStereoEnd();
-            sGamePerf.end(static_cast<int>(omCurrentOvlGet()));
-        } else {
+            if (!sSecondary) {
+                sGamePerf.end(static_cast<int>(omCurrentOvlGet()));
+            }
+        } else if (!sSecondary) {
             sQuest.cancelled(sFrame.image, sFrame.tag);
         }
         sActive = false;
+        sSecondary = false;
     }
     AuroraStereoWorldOnly(false);
 }

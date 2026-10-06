@@ -19,6 +19,7 @@
 #include <android/hardware_buffer.h>
 
 #include <array>
+#include <string>
 #include <atomic>
 #include <cstdint>
 #include <chrono>
@@ -168,6 +169,12 @@ public:
   void set_screen_hidden(bool hidden);
   bool screen_hidden() const;
   void set_quality_sample(const QualitySample& sample);
+  // Snapshots (`adb shell setprop debug.partyboard.snapshot <any new value>`):
+  // the next image shown with its interface drawn, its left eye and its
+  // interface written raw into `dir` (snapshot-<tag>-eye.rgba, -hud.rgba:
+  // "RGBA", width, height as u32, then rows bottom first), for a look at what
+  // the headset shows (Meta's screenshots of it come out black).
+  void set_snapshot_dir(std::string dir) { mSnapshotDir = std::move(dir); }
   void set_quality_cap(float recommendedScale);
 
 private:
@@ -353,6 +360,11 @@ private:
   // at 100% (one missed in 26 s, eyes' pass 9.4 to 9.9 ms; build 195,
   // 2026-10-04); its pixels cost little.
   float mBoardQuality = 1.0f;
+  // A minigame from its camera's place (lighter than a board): its eyes at
+  // 130% of the recommended size, the controller lowering it if it must;
+  // the player's cap (set_quality_cap) back afterwards.
+  bool mMinigameQuality = false;
+  float mQualityCap = 1.0f;
   // No resolution decision until then: a scene just arrived (adapt_resolution()).
   std::chrono::steady_clock::time_point mSettleUntil{};
   bool mSettleWorld = false; // a world was shown at the last decision
@@ -425,6 +437,9 @@ private:
   // or not copied): the next frame that may draw it must, changed or not,
   // since Aurora draws it only when it changed (hud_keep).
   bool mProbes = false; // debug.partyboard.probes 1: the copies' GPU end ("Copy GPU")
+  std::string mSnapshotDir, mSnapshotValue;
+  bool mSnapshotWanted = false;
+  void write_snapshot(GLuint texture, GLint x, GLint y, GLsizei width, GLsizei height, const char* name, uint64_t tag);
   std::atomic<bool> mHudLost{false}; // written by present(), outside the lock
 
   // The last image shown, resubmitted until the game draws the next one.
