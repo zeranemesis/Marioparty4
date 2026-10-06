@@ -197,7 +197,9 @@ namespace {
         if (activity.scene == GameActivity::Scene::Board && activity.board >= 0 && activity.board < 6) {
             std::string text = kBoards[activity.board];
             if (activity.maxTurn > 0) {
-                text += fmt::format(fr ? " \xE2\x80\x94 tour {}/{}" : " \xE2\x80\x94 turn {}/{}", activity.turn, activity.maxTurn);
+                // Two calls, not one with a chosen string: fmt checks the format at compile time.
+                text += fr ? fmt::format(" \xE2\x80\x94 tour {}/{}", activity.turn, activity.maxTurn)
+                           : fmt::format(" \xE2\x80\x94 turn {}/{}", activity.turn, activity.maxTurn);
             }
             return text;
         }
