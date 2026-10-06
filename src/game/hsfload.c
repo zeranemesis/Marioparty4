@@ -655,6 +655,38 @@ static void DumpHSF(HSFDATA *hsf) {
 }
 #endif
 
+#ifdef TARGET_PC
+// Each material's attributes (texture layers) must be a run of the symbol
+// table naming existing attributes. A material whose pointer was still a
+// file offset crashed minigames as they loaded (MaterialLoad's rgba overrun,
+// 2026-10-06): any such material left is reported and kept without
+// attributes (untextured) rather than crash.
+static void CheckMaterials(void)
+{
+    s32 i;
+    s32 j;
+    for (i = 0; i < Model.materialNum; i++) {
+        HSFMATERIAL *material = &Model.material[i];
+        BOOL valid;
+        if (material->attrNum == 0) {
+            continue;
+        }
+        valid = (uintptr_t)material->attr >= (uintptr_t)NSymIndex
+            && (uintptr_t)(material->attr + material->attrNum) <= (uintptr_t)(NSymIndex + head.symbol.count);
+        for (j = 0; valid && j < material->attrNum; j++) {
+            valid = material->attr[j] >= 0 && material->attr[j] < Model.attributeNum;
+        }
+        if (!valid) {
+            OSReport("HSF: material %d of %d (%s): %d attributes at %p, symbols %p (%d), %d attributes in the model: "
+                     "none kept\n",
+                i, Model.materialNum, material->name ? material->name : "?", material->attrNum, (void *)material->attr,
+                (void *)NSymIndex, (int)head.symbol.count, Model.attributeNum);
+            material->attrNum = 0;
+        }
+    }
+}
+#endif
+
 HSFDATA *LoadHSF(void *data)
 {
 #ifdef BYTESWAPPING
@@ -689,6 +721,9 @@ HSFDATA *LoadHSF(void *data)
 #endif
     MotionLoad();
     MatrixLoad();
+#ifdef TARGET_PC
+    CheckMaterials();
+#endif
     hsf = SetHsfModel();
     InitEnvelope(hsf);
     objtop = NULL;
@@ -882,10 +917,21 @@ static void MaterialLoad(void)
             new_mat->attrNum = curr_mat->attrNum;
             // the pointers are being treated as values
             new_mat->attr = (intptr_t *)(NSymIndex+((uintptr_t)curr_mat->attr));
-            rgba[i].r = new_mat->litColor[0];
-            rgba[i].g = new_mat->litColor[1];
-            rgba[i].b = new_mat->litColor[2];
-            rgba[i].a = 255;
+#ifdef TARGET_PC
+            // rgba holds 100 colors; past them (Toad's Quick Draw's model has
+            // 122 materials) the writes ran over the globals after it, head
+            // among them: head.material.count fell to 109 mid-loop and the
+            // last materials kept their file offsets for pointers (crashes in
+            // MDFaceCnt loading m401, m408, m409 on the Quest, 2026-10-06).
+            // Nothing reads rgba.
+            if (i < (s32)(sizeof(rgba) / sizeof(rgba[0])))
+#endif
+            {
+                rgba[i].r = new_mat->litColor[0];
+                rgba[i].g = new_mat->litColor[1];
+                rgba[i].b = new_mat->litColor[2];
+                rgba[i].a = 255;
+            }
             for(j=0; j<new_mat->attrNum; j++) {
                 new_mat->attr[j] = new_mat->attr[j];
             }
