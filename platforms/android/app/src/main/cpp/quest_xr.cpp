@@ -98,6 +98,10 @@ constexpr float kHudWidthPerScene = 1.3f;
 // front of it: the compositor draws it last, the gap only keeps it off the
 // window's plane.
 constexpr float kWindowHudInFrontMeters = 0.003f;
+// A minigame in 3D puts the player where its camera stands, at their distance
+// to the screen, within these.
+constexpr float kMinViewerDistanceMeters = 0.4f;
+constexpr float kMaxViewerDistanceMeters = 4.0f;
 constexpr float kMinHudWidth = 0.9f;
 constexpr float kMaxHudWidth = 1.6f;
 
@@ -232,6 +236,8 @@ struct App {
   // The eyes' height (STAGE) the flat screen is raised to at least: taken
   // while placing or calibrating, and once at startup (NaN until then).
   float screenEyeHeight = std::numeric_limits<float>::quiet_NaN();
+  // A minigame in 3D: the player's distance to the screen when it started (0: none yet).
+  float minigameViewerDistance = 0.0f;
   // Where the eyes were then (stage space): the interface's screen is raised
   // to be seen over the board from there (hud_pose).
   XrVector3f screenEye{0.0f, std::numeric_limits<float>::quiet_NaN(), 0.0f};
@@ -953,7 +959,7 @@ void notify_placement(App& app, JNIEnv* env) {
   app.shownSceneState = static_cast<int>(app.scene.state());
   env->CallStaticVoidMethod(g_java.questVr, g_java.onPlacement, app.placing, app.table.resolution,
                             app.table.passthrough && passthrough_available(app), app.table.diorama, app.calibrating,
-                            app.calibrationConfirmed, app.table.minigameWindow, app.shownSceneState, length, width);
+                            app.calibrationConfirmed, app.table.minigameView, app.shownSceneState, length, width);
   clear_exception(env);
 }
 
@@ -1340,12 +1346,13 @@ void place(App& app, JNIEnv* env, const ControllerState& input, int pressed, flo
     tick(app);
     notify_placement(app, env);
   }
-  // Left grip: minigames through a window where the screen stands (seen as
-  // on TV, in relief), or on the table like the board.
+  // Left grip: minigames in 3D from the game camera's point of view, the
+  // same through a window where the screen stands, or on the table.
   const bool leftGrip = input.leftGrip > (app.leftGripHeld ? 0.4f : 0.6f);
   if (leftGrip && !app.leftGripHeld) {
-    app.table.minigameWindow = !app.table.minigameWindow;
-    LOGI("Minigames through a window: %s", app.table.minigameWindow ? "yes" : "no");
+    app.table.minigameView = (app.table.minigameView + 1) % 3;
+    static const char* const kViews[] = {"in 3D from the camera's point of view", "through a window", "on the table"};
+    LOGI("Minigames %s", kViews[app.table.minigameView]);
     tick(app);
     notify_placement(app, env);
   }
@@ -1590,14 +1597,26 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   // previous valid eye poses enabled while the headset cannot render.
   // The board's floor is measured by the game (quest_stereo.cpp) and put on
   // the table exactly: no clearance. A minigame (unless the left grip put it
-  // on the table too) is seen as on TV, through a window where the game's
-  // screen stands, with its relief: its camera's framing, which the floating
-  // model it replaces lost (the action out of it, tilted, misplaced:
-  // 2026-10-06), and the window stays put whatever the camera does.
-  const bool windowView = app.table.minigameWindow && app.stereo.minigame_mode();
+  // on the table too) is seen from its camera's point of view, as on TV: its
+  // framing, which the floating model it replaces lost (the action out of
+  // it, tilted, misplaced: 2026-10-06), the screen's place as its frame. In
+  // 3D in the room by default (preferred to the window, 2026-10-06), or
+  // through a window there, which stays put whatever the camera does.
+  const bool windowView = app.table.minigameView != 2 && app.stereo.minigame_mode();
   XrExtent2Df windowSize{};
   const XrPosef windowPose = screen_pose(app, true, windowSize);
-  app.stereo.set_window(windowView, windowPose, windowSize);
+  // In 3D, the player stands where the game camera does: their distance to
+  // the screen, taken when the minigame starts (so the scene does not
+  // grow and shrink as they lean).
+  if (!windowView) {
+    app.minigameViewerDistance = 0.0f;
+  } else if (app.minigameViewerDistance <= 0.0f && haveHead) {
+    const float z = compose(inverse(windowPose), head).position.z;
+    app.minigameViewerDistance = std::clamp(z, kMinViewerDistanceMeters, kMaxViewerDistanceMeters);
+    LOGI("Minigame view: the player %.2f m from the screen", app.minigameViewerDistance);
+  }
+  app.stereo.set_window(windowView, windowPose, windowSize, app.table.minigameView == 1,
+                        app.minigameViewerDistance);
   const XrPosef modelPose = app.pose;
   const float modelScale = app.table.modelScale;
   app.stereo.set_quality_sample(g_perf.quality_sample());
@@ -1708,23 +1727,22 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   // The interface's screen goes over the model, so it is always seen whole;
   // it stands at the back of the board, raised over the board's scenery as
   // seen from the player's place (hud_pose), so the two do not overlap and it
-  // reads as standing behind. A minigame's window shows its interface over
-  // it, as on the screen: its 4:3 as tall as the window, centered, just in
-  // front (the second quad is the window's right eye).
+  // reads as standing behind. A minigame shows its interface where the screen
+  // stands, as on TV: its 4:3 as tall as the screen, centered, just in front
+  // (with a window, the second quad is the window's right eye).
   if (modelLayer) {
     layers[layerCount++] = modelLayer;
-    const bool window = app.stereo.window_shown();
+    const bool window = windowView;
     if (const auto* second = app.stereo.window_second_layer()) {
       layers[layerCount++] = second;
     }
     XrExtent2Df hudSize{};
     XrPosef hudPose{};
     if (window) {
-      const XrExtent2Df shown = app.stereo.window_shown_size();
-      hudSize = {shown.height * 4.0f / 3.0f, shown.height};
+      hudSize = {windowSize.height * 4.0f / 3.0f, windowSize.height};
       XrPosef inFront = identity_pose();
       inFront.position.z = kWindowHudInFrontMeters;
-      hudPose = compose(app.stereo.window_shown_pose(), inFront);
+      hudPose = compose(windowPose, inFront);
     } else {
       hudPose = hud_pose(app.pose, app.table.modelScale, hudSize, &app.screenEye);
     }
@@ -1977,7 +1995,7 @@ JNIEXPORT jboolean JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_native
   g_java.onSessionState = static_method(env, clazz, "onSessionState", "(ZZ)V");
   g_java.onControllers = static_method(env, clazz, "onControllers", "(IFFFFFFFF)V");
   g_java.onExit = static_method(env, clazz, "onExit", "()V");
-  g_java.onPlacement = static_method(env, clazz, "onPlacement", "(ZIZZZZZIFF)V");
+  g_java.onPlacement = static_method(env, clazz, "onPlacement", "(ZIZZZZIIFF)V");
   g_java.requestScenePermission = static_method(env, clazz, "requestScenePermission", "()V");
   for (jmethodID method : {g_java.onSurface, g_java.onSurfaceReplaced, g_java.onHelpSurface, g_java.onPlacement,
                            g_java.onSessionState, g_java.onControllers, g_java.onExit,

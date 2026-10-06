@@ -16,11 +16,12 @@
 //
 // On a board, the game camera itself is cancelled (the headset is the
 // viewpoint) and the board stays as placed on the table. A minigame is seen
-// through a window where the game's screen stands (quest_xr.cpp,
+// from its camera's point of view, as on TV (quest_xr.cpp,
 // StereoView::set_window): its camera is kept, and its view space mapped into
-// the window, what the camera looks at in the window's plane, its relief in
-// front of and behind it; each eye looks through the window from where it is.
-// With the left grip off, a minigame stands on the table like a board.
+// a window where the game's screen stands, what the camera looks at in the
+// window's plane; in 3D in the room by default, or framed by the window,
+// each eye looking through it from where it is. The left grip can also put a
+// minigame on the table like a board.
 
 extern "C" {
 #include "port/quest_stereo.h"
@@ -59,8 +60,9 @@ struct QuestStereoFrame {
     uint32_t generation;          // of the images the lease is in
     uint32_t drawHud;             // 1: draw the interface if it changed, 2: whatever (the last one was lost), 0: not
     uint32_t foveation;           // the eyes' foveation level (0: none)
-    uint32_t window;              // 1: through a window (eyeView, eyeProj, world: the window's)
+    uint32_t window;              // 1: through a window (eyeView, eyeProj, world: the window's); 2: open (world)
     float windowHeight;           // the window's height, meters
+    float windowDistance;         // open: the player's distance to the window, meters
 };
 
 using FrameFn = bool (*)(QuestStereoFrame *frame);
@@ -114,6 +116,14 @@ float sEyeInView[2][3]{};
 float sSceneExtent = 0.0f;
 // A backdrop is an object around the eyes much larger than the scene on the table.
 constexpr float kBackdropExtents = 2.5f;
+// A minigame in 3D from its camera's point of view: a sky is an object with
+// the game camera deep inside (within kOpenSkyCore of its radius from its
+// center) and at least this many times the camera's distance to what it
+// looks at (a dome, a skybox): skies measured 15 and 47 times, Avalanche!'s
+// course 8.6 times, seen from its intro's camera (2026-10-06).
+constexpr float kOpenSkyPerDistance = 12.0f;
+constexpr float kOpenSkyCore = 0.5f;
+float sOpenSkyRadius = 0.0f;
 
 
 bool board_scene(OMOVL scene)
@@ -364,7 +374,19 @@ extern "C" void PartyBoard_StereoBeginCamera(s16 cameraNo)
             splitScreen = splitScreen || -1.0f != Hu3DCamera[other].fov;
         }
     }
-    const bool screenRequired = !spatialScene || splitScreen || partyboard::ui::any_document_visible();
+    // A scene that copies its frame into a texture while the eyes record its
+    // camera (Mario Medley's panels) copies a frame without what only the
+    // eyes drew: the classic screen for the rest of that scene.
+    static OMOVL sCopyScene = DLL_NONE;
+    if (AuroraStereoTakeEfbCopied() && sCopyScene != scene) {
+        sCopyScene = scene;
+#if defined(__ANDROID__)
+        __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Scene %d copies its frame while drawn for the eyes: "
+            "classic screen", static_cast<int>(scene));
+#endif
+    }
+    const bool frameCopies = scene == sCopyScene;
+    const bool screenRequired = !spatialScene || splitScreen || frameCopies || partyboard::ui::any_document_visible();
 #if defined(__ANDROID__)
     static int loggedScene = -999;
     static bool loggedScreenRequired = false;
@@ -413,6 +435,7 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
     sViewToWorld = inverse_affine(view);
     const bool board = board_scene(scene);
     const bool window = sFrame.window != 0 && !board;
+    const bool framed = window && sFrame.window == 1;
     if (board && !sSceneFitted) {
         const int count = BoardSpaceCountGet(0);
         if (count > 0 && count <= 256) {
@@ -474,7 +497,14 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
         const float dy = camera.pos.y - camera.target.y;
         const float dz = camera.pos.z - camera.target.z;
         float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-        const float scale = partyboard::quest::view_to_window_scale(distance, camera.fov, sFrame.windowHeight);
+        float scale = partyboard::quest::view_to_window_scale(distance, camera.fov, sFrame.windowHeight);
+        // Open, the player stands where the camera does: what it looks at
+        // where the screen is, at the player's distance, and its field of
+        // view as wide in the player's: the same point of view (the window's
+        // height made it a smaller picture, "not zoomed enough", 2026-10-06).
+        if (!framed && sFrame.windowDistance > 0.0f) {
+            scale = sFrame.windowDistance / distance;
+        }
         Mat4 viewToWindow{};
         for (int axis = 0; axis < 3; ++axis) {
             viewToWindow.m[axis][axis] = scale;
@@ -482,8 +512,14 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
         viewToWindow.m[2][3] = scale * distance;
         viewToWindow.m[3][3] = 1.0f;
         world = multiply(from_rows(sFrame.world), viewToWindow);
-        // The sky and the far scenery are the game's, seen through the window.
+        // Framed, the sky and the far scenery are the game's, seen through the
+        // window. Open, a sky would surround the player and hide the room: an
+        // object around the game camera itself, much larger than its distance
+        // to what it looks at (PartyBoard_StereoBackdrop). Not the eyes': an
+        // arena's floor holds them too, and it came and went with the head
+        // (2026-10-06).
         sSceneExtent = 0.0f;
+        sOpenSkyRadius = framed ? 0.0f : kOpenSkyPerDistance * distance;
     } else {
         // A board (or a minigame on the table): unturned, the lowest floor on
         // the table, the game camera cancelled every frame: the tracked
@@ -502,6 +538,7 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
         }
         world = multiply(multiply(from_rows(sFrame.world), sceneWorld), inverse_affine(view));
         sSceneExtent = sSceneFitted ? 2800.0f / sSceneScale : 0.0f;
+        sOpenSkyRadius = 0.0f;
     }
     sWindow = window;
     {
@@ -535,7 +572,8 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
     }
     std::memcpy(sEyeClip, clip, sizeof(sEyeClip));
     AuroraStereoSetEyeSize(sFrame.eyeWidth, sFrame.eyeHeight);
-    AuroraStereoSetWindow(window);
+    AuroraStereoSetWindow(framed);
+    AuroraStereoSetCoverAlpha(window && !framed);
     AuroraStereoSetHud(sFrame.drawHud != 0);
     if (sFrame.drawHud == 2) {
         AuroraStereoRedrawHud();
@@ -585,12 +623,14 @@ extern "C" BOOL PartyBoard_StereoBoardPresentation(void)
     return board_scene(scene) && find_quest() && sQuest.worldOnly() ? TRUE : FALSE;
 }
 
-// Before a board or a minigame starts: wait while the headset asks the player
-// to lay the controller on the table (the first time, or when the saved table
-// is out of reach). An online game never waits: its peers would not.
+// Before a board starts: wait while the headset asks the player to lay the
+// controller on the table (the first time, or when the saved table is out of
+// reach). A minigame needs no table: it shows where the screen stands (or,
+// put on the table, where the screen's table is). An online game never
+// waits: its peers would not.
 extern "C" BOOL PartyBoard_QuestHoldOverlay(OMOVL next)
 {
-    if (!spatial_scene(next) || PartyBoard_NetplayEnabled() || !find_quest() || sQuest.tableSetupHold == nullptr) {
+    if (!board_scene(next) || PartyBoard_NetplayEnabled() || !find_quest() || sQuest.tableSetupHold == nullptr) {
         return FALSE;
     }
     const bool hold = sQuest.tableSetupHold();
@@ -611,6 +651,21 @@ extern "C" BOOL PartyBoard_QuestHoldOverlay(OMOVL next)
 // larger than the scene on the table; the table and the room replace it.
 extern "C" BOOL PartyBoard_StereoBackdrop(float x, float y, float z, float radius)
 {
+    if (sActive && sCameraViewSet && sOpenSkyRadius > 0.0f) {
+        // Around the game camera (its view space's origin), whatever the head does.
+        const float core = kOpenSkyCore * radius;
+        const bool sky = std::isfinite(radius) && radius >= sOpenSkyRadius && x * x + y * y + z * z < core * core;
+#if defined(__ANDROID__)
+        static int loggedScene = -1;
+        if (sky && loggedScene != static_cast<int>(sScene)) {
+            loggedScene = static_cast<int>(sScene);
+            __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Scene %d: a sky left out, %.0f units around the "
+                "camera (%.1f times its distance to its target)", static_cast<int>(sScene), radius,
+                radius * kOpenSkyPerDistance / sOpenSkyRadius);
+        }
+#endif
+        return sky ? TRUE : FALSE;
+    }
     if (!sActive || !sCameraViewSet || !(sSceneExtent > 0.0f) || !std::isfinite(radius)
         || radius < kBackdropExtents * sSceneExtent) {
         return FALSE;
@@ -633,8 +688,8 @@ extern "C" BOOL PartyBoard_StereoBackdrop(float x, float y, float z, float radiu
 // from the object's model-view matrix (as hsfdraw.c draws it).
 extern "C" void PartyBoard_StereoObserveBounds(Mtx modelView, const HuVecF *min, const HuVecF *max)
 {
-    if (!sActive || !sCameraViewSet || sFloorSettled || !(sSceneExtent > 0.0f)) {
-        return;
+    if (!sActive || !sCameraViewSet || sFloorSettled || sWindow || !(sSceneExtent > 0.0f)) {
+        return; // from the camera's point of view, no floor goes on the table
     }
     float low[3] {INFINITY, INFINITY, INFINITY};
     float high[3] {-INFINITY, -INFINITY, -INFINITY};

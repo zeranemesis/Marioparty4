@@ -40,12 +40,14 @@ struct StereoFrame {
   uint32_t generation;          // of the images the lease is in
   uint32_t drawHud;             // 1: draw the interface if it changed, 2: whatever (the last one was lost), 0: not
   uint32_t foveation;           // the eyes' foveation level (0: none), StereoView::adapt_resolution
-  // 1: a window (set_window): eyeView and eyeProj look through it from each
-  // eye, world is the window's frame (stage space, +Z toward the player, 1
-  // per meter), and the game maps its camera's view into it, its vertical
-  // field of view as tall as windowHeight (meters).
+  // A minigame from its camera's point of view (set_window): world is the
+  // window's frame (stage space, +Z toward the player, 1 per meter), and the
+  // game maps its camera's view into it, its vertical field of view as tall
+  // as windowHeight (meters). 1: framed, eyeView and eyeProj look through
+  // the window from each eye; 2: open, the eyes' own (3D in the room).
   uint32_t window;
   float windowHeight;
+  float windowDistance; // open: the player's distance to the window (meters), where the camera stands
 };
 
 class StereoView {
@@ -134,12 +136,14 @@ public:
   // A minigame is on show (the game's 3D world, not a board): quest_xr.cpp
   // shows it through a window where the game's screen stands.
   bool minigame_mode() const;
-  // XR thread, each frame: the game's frames from now on look at its camera's
-  // view through a window (stage space, its center, +Z toward the player;
-  // size in meters), shown as two quads, one per eye: each eye's image is
-  // what that eye sees through the window, its relief included, and the
-  // window stays put in the room whatever the game camera does.
-  void set_window(bool on, const XrPosef& pose, XrExtent2Df size);
+  // XR thread, each frame: the game's frames from now on show its camera's
+  // view, mapped into a window (stage space, its center, +Z toward the
+  // player; size in meters): framed, shown as two quads, one per eye, each
+  // eye's image what that eye sees through the window, its relief included,
+  // and the window stays put in the room whatever the game camera does;
+  // open, the scene in 3D in the room as the eyes see it, the window only
+  // placing it (what the camera looks at in its plane).
+  void set_window(bool on, const XrPosef& pose, XrExtent2Df size, bool framed, float viewerDistance = 0.0f);
   // The window shown (the image on show was drawn through it): the eyes'
   // layer is its left eye's quad (layer()), and this its right eye's.
   const XrCompositionLayerBaseHeader* window_second_layer() const;
@@ -188,7 +192,7 @@ private:
     int64_t startNs = 0;                        // its frame's paced start, 0 when not paced
     int64_t dueNs = 0;                          // the look it is for, 0: as soon as finished
     bool hud = false;                           // its interface image was drawn
-    bool window = false;                        // drawn through the window (set_window)
+    bool window = false;                        // drawn through the framed window (set_window)
     XrPosef windowPose{{0, 0, 0, 1}, {0, 0, 0}};
     XrExtent2Df windowSize{};
     int64_t leaseNs = 0, submitNs = 0;          // steady clock: lent to the game, sent to the GPU
@@ -432,7 +436,8 @@ private:
   XrCompositionLayerProjectionView mProjectionViews[2]{};
   XrCompositionLayerProjection mLayer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
   // The window (set_window): asked for, and the one of the image on show.
-  bool mWindowOn = false;
+  bool mWindowOn = false, mWindowFramed = false;
+  float mWindowViewerDistance = 0.0f;
   XrPosef mWindowPose{{0, 0, 0, 1}, {0, 0, 0}};
   XrExtent2Df mWindowSize{};
   bool mShownWindow = false;

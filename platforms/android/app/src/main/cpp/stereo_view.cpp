@@ -953,7 +953,8 @@ bool StereoView::game_frame(StereoFrame& out) {
   free->renderHeight = std::min(drawHeight, mImageEyeHeight);
   // Through a window, each eye draws the window's shape, as large as the
   // controller's size allows: its pixels all land on the window.
-  free->window = mWindowOn && mWindowSize.width > 0.0f && mWindowSize.height > 0.0f;
+  const bool mapped = mWindowOn && mWindowSize.width > 0.0f && mWindowSize.height > 0.0f;
+  free->window = mapped && mWindowFramed;
   if (free->window) {
     const float aspect = mWindowSize.width / mWindowSize.height;
     if (free->renderWidth > free->renderHeight * aspect) {
@@ -1024,10 +1025,16 @@ bool StereoView::game_frame(StereoFrame& out) {
       view_matrix(mViews[eye].pose, out.eyeView[eye]);
       projection_matrix(mViews[eye].fov, out.eyeProj[eye]);
     }
-    std::copy(std::begin(mWorld), std::end(mWorld), out.world);
+    // Open, the window only places the camera's view in the room.
+    if (mapped) {
+      pose_matrix(mWindowPose, 1.0f, out.world);
+    } else {
+      std::copy(std::begin(mWorld), std::end(mWorld), out.world);
+    }
   }
-  out.window = free->window ? 1u : 0u;
-  out.windowHeight = free->window ? free->windowSize.height : 0.0f;
+  out.window = free->window ? 1u : mapped ? 2u : 0u;
+  out.windowHeight = mapped ? mWindowSize.height : 0.0f;
+  out.windowDistance = mapped ? mWindowViewerDistance : 0.0f;
   out.hudWidth = mHudWidth;
   out.hudHeight = mHudHeight;
   out.eyeWidth = free->renderWidth;
@@ -1378,13 +1385,16 @@ bool StereoView::minigame_mode() const {
   return !mScreenRequired && !mBoardMode;
 }
 
-void StereoView::set_window(bool on, const XrPosef& pose, XrExtent2Df size) {
+void StereoView::set_window(bool on, const XrPosef& pose, XrExtent2Df size, bool framed, float viewerDistance) {
   std::lock_guard lock{mMutex};
-  if (on != mWindowOn) {
-    LOGI("Stereo: %s (%.2f x %.2f m at %.2f %.2f %.2f)", on ? "the game seen through a window" : "no window",
+  if (on != mWindowOn || (on && framed != mWindowFramed)) {
+    LOGI("Stereo: %s (%.2f x %.2f m at %.2f %.2f %.2f)",
+         !on ? "no window" : framed ? "the game seen through a window" : "the game in 3D from its camera's place",
          size.width, size.height, pose.position.x, pose.position.y, pose.position.z);
   }
   mWindowOn = on;
+  mWindowFramed = framed;
+  mWindowViewerDistance = viewerDistance;
   mWindowPose = pose;
   mWindowSize = size;
 }

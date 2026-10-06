@@ -25,10 +25,13 @@ struct TableSettings {
   bool passthrough = true;      // the room around the game (mixed reality)
   bool diorama = true;          // the game's world as a model on the table
   float modelScale = 0.00025f;  // the model: meters per game unit
-  // Minigames seen through a window where the screen stands (their camera's
-  // view, in relief: StereoView::set_window), else on the table like a board.
+  // How a minigame shows (the left grip in Placement mode cycles them):
+  //   0 in 3D in the room from the game camera's point of view, as on TV
+  //     but without a frame (StereoView::set_window, open);
+  //   1 the same through a window where the screen stands (framed);
+  //   2 on the table like a board.
   // A new key: the former follow_camera turned a floating model, now gone.
-  bool minigameWindow = true;
+  int minigameView = 0;
   std::string anchorUuid;       // hex; empty without an anchor
 
   bool load(const std::string& path);
