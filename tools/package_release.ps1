@@ -260,7 +260,9 @@ try {
         # than probing: an older companion treats an unknown flag as no flag, opens its ordinary
         # window and says nothing, so the launcher would wait on a lobby nobody is creating.
         # An absent field means an older package, which is exactly the answer needed.
-        capabilities = @('launcher-invites')
+        # retroachievements-login: the game takes the RetroAchievements session CubeShelf hands
+        # over, and reports logins and progress back; CubeShelf gives it to no package without it.
+        capabilities = @('launcher-invites', 'retroachievements-login')
         discIncluded = $false
         validation   = 'TEST. Aucune session entre deux machines physiques n a jamais ete menee.'
     } | ConvertTo-Json -Depth 4

@@ -9,6 +9,7 @@
 #include "pane.hpp"
 #include "localization.hpp"
 #include "ui.hpp"
+#include "cubeshelf.hpp"
 
 namespace partyboard::ui {
 namespace {
@@ -139,7 +140,7 @@ namespace {
     // A RetroAchievements row: read-only, the server owns the unlock.
     class RaAchievementRow : public FluentComponent<RaAchievementRow> {
     public:
-        RaAchievementRow(Rml::Element *parent, const ra::AchievementInfo &a)
+        RaAchievementRow(Rml::Element *parent, const ra::AchievementInfo &a, const std::string &friends = {})
             : FluentComponent(createRowRoot(parent))
         {
             // The badge, or an empty square of the same size while it downloads,
@@ -156,7 +157,12 @@ namespace {
             }
             auto *infoDiv = append(mRoot, "div");
             infoDiv->SetClass("achievement-info", true);
-            infoDiv->SetInnerRML(build_ra_info_rml(a));
+            Rml::String rml = build_ra_info_rml(a);
+            // Which friends have it too, when CubeShelf launched the game and they share it.
+            if (!friends.empty()) {
+                rml += fmt::format(R"(<p class="achievement-desc">{}</p>)", escape(friends));
+            }
+            infoDiv->SetInnerRML(rml);
         }
 
     private:
@@ -187,6 +193,8 @@ void AchievementsWindow::buildRetroAchievements()
     for (const bool unlockedTab : { false, true }) {
         add_tab(unlockedTab ? "Unlocked" : "Locked", [this, unlockedTab](Rml::Element *content) {
             const auto list = ra::achievements();
+            const auto byFriend = cubeshelf::friends_by_achievement();
+            const std::string also = byFriend.empty() ? std::string() : cubeshelf::text("achievementsAlso", "Also unlocked by");
             auto &pane = add_child<Pane>(content, Pane::Type::Controlled);
             int unlocked = 0;
             uint32_t points = 0, totalPoints = 0;
@@ -204,7 +212,13 @@ void AchievementsWindow::buildRetroAchievements()
                 ra::username(), unlocked, list.size(), ui_translate("unlocked"), points, totalPoints, fraction));
             for (const auto &a : list) {
                 if (a.unlocked == unlockedTab) {
-                    pane.add_child<RaAchievementRow>(a);
+                    std::string friends;
+                    if (const auto it = byFriend.find(a.id); it != byFriend.end()) {
+                        for (const auto &handle : it->second) {
+                            friends += (friends.empty() ? also + ": " : std::string(", ")) + handle;
+                        }
+                    }
+                    pane.add_child<RaAchievementRow>(a, friends);
                 }
             }
             pane.finalize();

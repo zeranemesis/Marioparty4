@@ -15,6 +15,7 @@
 #include <rc_client.h>
 #include <rc_hash.h>
 #include <SDL3/SDL_platform.h>
+#include <SDL3/SDL_stdinc.h>
 
 #include <chrono>
 #include <cstdio>
@@ -75,6 +76,32 @@ bool s_tickedThisFrame = false;
 uint32_t s_revision = 0;
 // The last rich presence message, refreshed once a second while a set is played.
 std::string s_richPresence;
+// The session came from CubeShelf (CUBESHELF_RA_USER / CUBESHELF_RA_TOKEN): used
+// for this run, never saved over the player's own settings.
+bool s_fromLauncher = false;
+// What CubeShelf should hear next about the session; one at a time, the latest wins.
+SessionReport s_report;
+
+void report(SessionEvent event, std::string user = {}, std::string token = {}) {
+    s_report = SessionReport{event, std::move(user), std::move(token)};
+}
+
+// What a launcher hands over goes into a server request: letters, digits and
+// "_.-" only, so nothing in it can change the request.
+bool plain(const char* value, size_t maximum) {
+    if (value == nullptr || *value == '\0') {
+        return false;
+    }
+    size_t length = 0;
+    for (const char* c = value; *c != '\0'; ++c, ++length) {
+        const bool ok = (*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '_'
+            || *c == '.' || *c == '-';
+        if (!ok || length >= maximum) {
+            return false;
+        }
+    }
+    return true;
+}
 
 void set_state(State state, std::string status) {
     s_state = state;
@@ -323,10 +350,15 @@ void load_game() {
 
 void on_logged_in() {
     const rc_client_user_t* user = rc_client_get_user_info(s_client);
-    auto& settings = getSettings().retroAchievements;
-    settings.username.setValue(user->username);
-    settings.token.setValue(user->token);
-    config::Save();
+    if (!s_fromLauncher) {
+        // Our own session: kept in the settings, and handed to CubeShelf so every
+        // other game it launches starts logged in too.
+        auto& settings = getSettings().retroAchievements;
+        settings.username.setValue(user->username);
+        settings.token.setValue(user->token);
+        config::Save();
+        report(SessionEvent::Login, user->username, user->token);
+    }
     set_state(State::LoggedIn, std::string("Logged in as ") + user->display_name);
     load_game();
 }
@@ -337,10 +369,16 @@ void RC_CCONV login_callback(int result, const char* error, rc_client_t*, void*)
         return;
     }
     // A rejected token is stale, not merely unusable right now: forget it so
-    // the settings screen asks for the password again.
+    // the settings screen asks for the password again. CubeShelf's is CubeShelf's
+    // to forget: it is told, and asks for the password there.
     if (result == RC_INVALID_CREDENTIALS || result == RC_EXPIRED_TOKEN) {
-        getSettings().retroAchievements.token.setValue("");
-        config::Save();
+        if (s_fromLauncher) {
+            report(SessionEvent::Rejected);
+            s_fromLauncher = false;
+        } else {
+            getSettings().retroAchievements.token.setValue("");
+            config::Save();
+        }
     }
     set_state(State::LoggedOut, std::string("Login failed: ") + (error ? error : "unknown error"));
 }
@@ -401,6 +439,8 @@ void loginWithPassword(const std::string& user, const std::string& password) {
     if (s_client == nullptr || user.empty() || password.empty()) {
         return;
     }
+    // Typed here: this becomes the player's own session, saved and reported.
+    s_fromLauncher = false;
     set_state(State::LoggingIn, "Logging in...");
     rc_client_begin_login_with_password(s_client, user.c_str(), password.c_str(), login_callback, nullptr);
 }
@@ -413,7 +453,43 @@ void logout() {
     rc_client_logout(s_client);
     getSettings().retroAchievements.token.setValue("");
     config::Save();
+    // Logging out here logs out everywhere CubeShelf launches.
+    report(SessionEvent::Logout);
+    s_fromLauncher = false;
     set_state(State::LoggedOut, "Logged out");
+}
+
+uint32_t gameId() {
+    if (s_client == nullptr || s_state != State::Playing) {
+        return 0;
+    }
+    const rc_client_game_t* game = rc_client_get_game_info(s_client);
+    return game != nullptr ? game->id : 0;
+}
+
+std::string gameTitle() {
+    if (s_client == nullptr || s_state != State::Playing) {
+        return {};
+    }
+    const rc_client_game_t* game = rc_client_get_game_info(s_client);
+    return game != nullptr && game->title != nullptr ? std::string(game->title) : std::string();
+}
+
+bool fromLauncher() { return s_fromLauncher; }
+
+std::string accountName() {
+    if (s_client != nullptr) {
+        if (const rc_client_user_t* user = rc_client_get_user_info(s_client)) {
+            return user->username;
+        }
+    }
+    return {};
+}
+
+SessionReport takeSessionReport() {
+    SessionReport taken = std::move(s_report);
+    s_report = SessionReport{};
+    return taken;
 }
 
 } // namespace partyboard::ra
@@ -451,8 +527,17 @@ void PartyBoard_RAInit(void) {
     s_userAgent = build_user_agent();
     Log.info("User agent: {}", s_userAgent);
 
-    const std::string user = settings.username.getValue();
-    const std::string token = settings.token.getValue();
+    std::string user = settings.username.getValue();
+    std::string token = settings.token.getValue();
+    // Launched by CubeShelf with its session: that one, for this run.
+    const char* launcherUser = SDL_getenv("CUBESHELF_RA_USER");
+    const char* launcherToken = SDL_getenv("CUBESHELF_RA_TOKEN");
+    if (plain(launcherUser, 64) && plain(launcherToken, 128)) {
+        user = launcherUser;
+        token = launcherToken;
+        s_fromLauncher = true;
+        Log.info("Using the RetroAchievements session CubeShelf handed over");
+    }
     if (!user.empty() && !token.empty()) {
         set_state(State::LoggingIn, "Logging in...");
         rc_client_begin_login_with_token(s_client, user.c_str(), token.c_str(), login_callback, nullptr);

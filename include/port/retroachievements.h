@@ -83,5 +83,37 @@ std::string richPresence();
 void loginWithPassword(const std::string& user, const std::string& password);
 void logout();
 
+// The loaded set: its RetroAchievements game id and title, 0 and empty while
+// none is loaded.
+uint32_t gameId();
+std::string gameTitle();
+
+// CubeShelf keeps one RetroAchievements session for every game it launches.
+// When it starts this one, it hands the session over in CUBESHELF_RA_USER and
+// CUBESHELF_RA_TOKEN: that session is used for the run and never written to
+// the settings, so the settings keep whatever the player had here. Whatever
+// happens to a session -- a login or logout made here, the server refusing the
+// session CubeShelf gave -- is reported back to it (src/port/ui/cubeshelf.cpp).
+bool fromLauncher();
+// The account's user name, as the server knows it -- what CubeShelf matches its
+// session against, where username() is the name shown. Empty while logged out.
+std::string accountName();
+
+enum class SessionEvent {
+    None,
+    Login,    // logged in here: CubeShelf takes the session for every game
+    Logout,   // logged out here: CubeShelf forgets it too
+    Rejected, // the server refused the session CubeShelf handed over
+};
+
+struct SessionReport {
+    SessionEvent event = SessionEvent::None;
+    std::string user;
+    std::string token; // only for Login
+};
+
+// The latest thing to tell CubeShelf about the session, once. Main thread.
+SessionReport takeSessionReport();
+
 } // namespace partyboard::ra
 #endif

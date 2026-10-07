@@ -211,6 +211,10 @@ jobs:
           # outlive the feature.
           $capabilities = @()
           if (Test-Path "tools/online/Startup.cs") { $capabilities += "launcher-invites" }
+          # The game takes the RetroAchievements session CubeShelf hands over (CUBESHELF_RA_USER /
+          # CUBESHELF_RA_TOKEN) and reports logins and progress back. CubeShelf gives its session
+          # only to a package that declares this.
+          if (Test-Path "src/port/retroachievements.cpp") { $capabilities += "retroachievements-login" }
 
 
           $manifest = [ordered]@{

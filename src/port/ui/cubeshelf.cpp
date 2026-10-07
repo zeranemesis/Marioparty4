@@ -241,6 +241,80 @@ namespace {
         write_atomically(*dir / "activity.json", document.dump());
     }
 
+    // The session CubeShelf should hear about: a login or logout made here, or its own session
+    // refused by the server. Read once and deleted there (AchievementsBridge.TakeSessionEvent).
+    void write_session_report() noexcept
+    {
+        auto said = ra::takeSessionReport();
+        const auto &dir = directory();
+        if (said.event == ra::SessionEvent::None || !dir) {
+            return;
+        }
+        try {
+            const char *event = said.event == ra::SessionEvent::Login ? "login"
+                : said.event == ra::SessionEvent::Logout              ? "logout"
+                                                                      : "rejected";
+            nlohmann::json document = { { "schema", 1 }, { "event", event }, { "at", unix_now() } };
+            if (said.event == ra::SessionEvent::Login) {
+                document["user"] = said.user;
+                document["token"] = said.token;
+            }
+            write_atomically(*dir / "ra-session.json", document.dump());
+        }
+        catch (...) {
+        }
+    }
+
+    // Where the player stands in the set being played, for CubeShelf to share with friends
+    // (AchievementsBridge.ReadSummary). Rewritten when an achievement unlocks or the set changes.
+    void write_achievements() noexcept
+    {
+        static uint32_t lastRevision = 0;
+        static uint32_t lastGame = 0;
+        const auto &dir = directory();
+        if (!dir || ra::state() != ra::State::Playing) {
+            return;
+        }
+        const uint32_t game = ra::gameId();
+        const uint32_t revision = ra::revision();
+        if (game == 0 || (game == lastGame && revision == lastRevision)) {
+            return;
+        }
+        try {
+            const auto list = ra::achievements();
+            nlohmann::json unlocked = nlohmann::json::array();
+            long long points = 0;
+            long long totalPoints = 0;
+            for (const auto &a : list) {
+                totalPoints += a.points;
+                if (a.unlocked) {
+                    unlocked.push_back(a.id);
+                    points += a.points;
+                }
+            }
+            nlohmann::json document = {
+                { "schema", 1 },
+                { "gameId", game },
+                { "title", ra::gameTitle() },
+                { "user", ra::accountName() },
+                { "unlocked", unlocked },
+                { "total", list.size() },
+                { "points", points },
+                { "totalPoints", totalPoints },
+                { "updatedAt", unix_now() },
+            };
+            write_atomically(*dir / "achievements.json", document.dump());
+            lastGame = game;
+            lastRevision = revision;
+        }
+        catch (...) {
+        }
+    }
+
+    // A friend's unlocks already seen, so only new ones are announced -- and not the whole list the
+    // first time a friend is read.
+    std::map<std::string, std::set<uint32_t>> sFriendUnlocks;
+
     // MainWindow.InGame.cs InGameText, for a device that reads its friends but never hosts.
     std::map<std::string, std::string> native_text(bool fr)
     {
@@ -380,12 +454,65 @@ std::optional<State> read_state_unchecked()
             f.label = text_of(entry, "label");
             f.inviteId = text_of(entry, "inviteId");
             f.invitesYou = flag_of(entry, "invitesYou");
+            if (const auto progress = entry.find("achievements"); progress != entry.end() && progress->is_object()) {
+                FriendAchievements a;
+                a.user = text_of(*progress, "user");
+                a.raGameId = progress->value("raGameId", 0LL);
+                a.total = progress->value("total", 0);
+                a.points = progress->value("points", 0);
+                a.totalPoints = progress->value("totalPoints", 0);
+                if (const auto ids = progress->find("ids"); ids != progress->end() && ids->is_array()) {
+                    for (const auto &id : *ids) {
+                        if (id.is_number_unsigned() && a.ids.size() < 2000) {
+                            a.ids.push_back(id.get<uint32_t>());
+                        }
+                    }
+                }
+                if (a.raGameId > 0 && a.total > 0 && a.ids.size() <= static_cast<size_t>(a.total)) {
+                    f.achievements = std::move(a);
+                }
+            }
             if (!f.key.empty() && !f.handle.empty()) {
                 state.friends.push_back(std::move(f));
             }
         }
     }
     return state;
+}
+
+std::map<uint32_t, std::vector<std::string>> friends_by_achievement() noexcept
+{
+    std::map<uint32_t, std::vector<std::string>> result;
+    try {
+        const uint32_t game = ra::gameId();
+        const auto state = read_state();
+        if (game == 0 || !state) {
+            return result;
+        }
+        for (const auto &f : state->friends) {
+            if (!f.achievements || f.achievements->raGameId != static_cast<long long>(game)) {
+                continue;
+            }
+            for (const uint32_t id : f.achievements->ids) {
+                result[id].push_back(f.handle);
+            }
+        }
+    }
+    catch (...) {
+        result.clear();
+    }
+    return result;
+}
+
+std::string text(const char *key, const char *fallback) noexcept
+{
+    try {
+        const auto state = read_state();
+        return state ? state->t(key, fallback) : std::string(fallback);
+    }
+    catch (...) {
+        return std::string(fallback);
+    }
 }
 
 std::string tab_title() noexcept
@@ -405,10 +532,48 @@ void tick() noexcept
     }
     sLastTick = now;
     write_activity();
+    write_session_report();
+    write_achievements();
 
     const auto state = read_state();
     if (!state || !state->fresh) {
         return;
+    }
+
+    // A friend unlocked something in the set being played: said once, with its title.
+    if (const uint32_t game = ra::gameId(); game != 0) {
+        std::vector<ra::AchievementInfo> list;
+        int announced = 0;
+        for (const auto &f : state->friends) {
+            if (!f.achievements || f.achievements->raGameId != static_cast<long long>(game)) {
+                continue;
+            }
+            const std::set<uint32_t> current(f.achievements->ids.begin(), f.achievements->ids.end());
+            const auto known = sFriendUnlocks.find(f.key);
+            if (known != sFriendUnlocks.end()) {
+                for (const uint32_t id : current) {
+                    if (known->second.count(id) != 0 || announced >= 3) {
+                        continue;
+                    }
+                    if (list.empty()) {
+                        list = ra::achievements();
+                    }
+                    for (const auto &a : list) {
+                        if (a.id == id) {
+                            push_toast({
+                                .type = "",
+                                .title = as_toast_text(state->t("achievementsUnlockedTitle", "A friend's achievement")),
+                                .content = as_toast_text(f.handle + " " + state->t("achievementsUnlocked", "unlocked") + " " + a.title),
+                                .duration = std::chrono::seconds(6),
+                            });
+                            ++announced;
+                            break;
+                        }
+                    }
+                }
+            }
+            sFriendUnlocks[f.key] = current;
+        }
     }
     for (const auto &f : state->friends) {
         if (!f.invitesYou || f.inviteId.empty()) {
@@ -483,8 +648,14 @@ void FriendsWindow::build(Rml::Element *content)
     }
 
     const std::string separator = "  -  ";
+    const uint32_t game = ra::gameId();
     for (const auto &f : state->friends) {
-        const std::string line = f.handle + separator + f.label;
+        std::string line = f.handle + separator + f.label;
+        // Their progress in this game's achievements, when they share it.
+        if (f.achievements && (game == 0 || f.achievements->raGameId == static_cast<long long>(game))) {
+            line += separator + std::to_string(f.achievements->ids.size()) + "/" + std::to_string(f.achievements->total) + " "
+                + state->t("achievementsShort", "achievements");
+        }
         const bool reachable = f.status == "online" || f.status == "ingame";
         if (mPendingId.empty() && f.invitesYou) {
             pane.add_button(line + separator + state->t("join", "Join"))

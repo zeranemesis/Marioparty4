@@ -6,6 +6,7 @@ namespace partyboard::ui {
 class Pane;
 }
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
@@ -32,6 +33,16 @@ namespace partyboard::ui::cubeshelf {
 // True when CubeShelf launched this game and named a directory that exists.
 bool available() noexcept;
 
+// A friend's progress in the RetroAchievements set of this game, as their CubeShelf published it.
+struct FriendAchievements {
+    std::string user;
+    long long raGameId = 0;
+    int total = 0;
+    int points = 0;
+    int totalPoints = 0;
+    std::vector<uint32_t> ids;
+};
+
 struct Friend {
     std::string key;
     std::string handle;
@@ -39,6 +50,7 @@ struct Friend {
     std::string label;    // the status in words, from CubeShelf
     std::string inviteId; // changes when a friend opens a new lobby
     bool invitesYou = false;
+    std::optional<FriendAchievements> achievements;
 };
 
 struct State {
@@ -63,6 +75,13 @@ std::string tab_title() noexcept;
 
 // Called every frame from ui::update(). Rate-limits itself.
 void tick() noexcept;
+
+// For the achievements window: which friends have each achievement of the set being played, by
+// handle. Empty when CubeShelf did not launch the game or no friend shares their progress.
+std::map<uint32_t, std::vector<std::string>> friends_by_achievement() noexcept;
+
+// A string CubeShelf supplied in the player's language, or the fallback.
+std::string text(const char *key, const char *fallback) noexcept;
 
 class FriendsWindow : public Window {
 public:
