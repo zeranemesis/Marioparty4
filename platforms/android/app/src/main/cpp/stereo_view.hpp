@@ -149,6 +149,11 @@ public:
   // layer is its left eye's quad (layer()), and this its right eye's.
   const XrCompositionLayerBaseHeader* window_second_layer() const;
   bool window_shown() const { return mShown && mShownWindow; }
+  // Game thread, each frame: the part of the interface to show (fractions of
+  // the TV's screen: a split screen's own part), whole by default.
+  void set_hud_crop(float x, float y, float width, float height);
+  // XR thread: that part, as {x, y, width, height}.
+  std::array<float, 4> hud_crop() const;
   XrPosef window_shown_pose() const { return mShownWindowPose; }
   XrExtent2Df window_shown_size() const { return mShownWindowSize; }
   bool world_only() const;
@@ -441,6 +446,7 @@ private:
   bool mSnapshotWanted = false;
   void write_snapshot(GLuint texture, GLint x, GLint y, GLsizei width, GLsizei height, const char* name, uint64_t tag);
   std::atomic<bool> mHudLost{false}; // written by present(), outside the lock
+  std::array<float, 4> mHudCrop{0.0f, 0.0f, 1.0f, 1.0f}; // set_hud_crop
 
   // The last image shown, resubmitted until the game draws the next one.
   uint64_t mPresentedTag = 0;

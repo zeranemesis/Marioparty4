@@ -28,6 +28,8 @@ extern "C" {
 #include "port/netplay_runtime.h"
 #include "game/object.h"
 #include "game/board/space.h"
+#include "game/chrman.h"
+#include "game/gamework_data.h"
 }
 #include "port/quest_scene_fit.hpp"
 #include "ui/ui.hpp"
@@ -76,6 +78,7 @@ using BoardModeFn = void (*)(bool);
 using CancelledFn = void (*)(uint32_t image, uint64_t tag);
 using ReleaseImagesFn = void (*)(void **buffers, uint32_t count);
 using ScreenHiddenFn = bool (*)();
+using HudCropFn = void (*)(float x, float y, float width, float height);
 using TableSetupHoldFn = bool (*)();
 using HiddenAreaFn = uint32_t (*)(uint32_t eye, float *rects, uint32_t capacity, uint32_t *version);
 using FoveationAvailableFn = void (*)(bool available);
@@ -92,6 +95,7 @@ struct Quest {
     BoardModeFn boardMode = nullptr;
     WorldOnlyFn worldOnly = nullptr;
     ScreenHiddenFn screenHidden = nullptr; // optional: an older library has none
+    HudCropFn hudCrop = nullptr;           // optional: the interface's part to show
     TableSetupHoldFn tableSetupHold = nullptr; // optional
     HiddenAreaFn hiddenArea = nullptr;         // optional: every pixel drawn
     FoveationAvailableFn foveationAvailable = nullptr; // optional: no automatic foveation
@@ -222,6 +226,7 @@ bool find_quest()
             sQuest.boardMode = reinterpret_cast<BoardModeFn>(dlsym(lib, "PartyBoardQuest_StereoBoardMode"));
             sQuest.cancelled = reinterpret_cast<CancelledFn>(dlsym(lib, "PartyBoardQuest_StereoCancelled"));
             sQuest.screenHidden = reinterpret_cast<ScreenHiddenFn>(dlsym(lib, "PartyBoardQuest_StereoScreenHidden"));
+            sQuest.hudCrop = reinterpret_cast<HudCropFn>(dlsym(lib, "PartyBoardQuest_StereoHudCrop"));
             sQuest.tableSetupHold = reinterpret_cast<TableSetupHoldFn>(dlsym(lib, "PartyBoardQuest_TableSetupHold"));
             sQuest.hiddenArea = reinterpret_cast<HiddenAreaFn>(dlsym(lib, "PartyBoardQuest_StereoHiddenArea"));
             sQuest.foveationAvailable =
@@ -360,16 +365,73 @@ GamePerf sGamePerf;
 
 static void begin_eyes(const Mat4& world);
 
-// The first active camera: the scene's main view (camera 0 unless the scene
-// leaves it unused).
-static int primary_camera()
+static bool same_viewport(int a, int b);
+
+// The player this headset plays: the human whose pad is this machine's (its
+// seat online, pad 0 offline), else the first human, else player 0.
+static int local_player()
 {
-    for (int camera = 0; camera < HU3D_CAM_MAX; ++camera) {
-        if (-1.0f != Hu3DCamera[camera].fov) {
-            return camera;
+    const int port = PartyBoard_NetplayEnabled() ? PartyBoard_NetplayLocalPort() : 0;
+    for (int player = 0; player < 4; ++player) {
+        if (!GWPlayerCfg[player].iscom && GWPlayerCfg[player].pad_idx == port) {
+            return player;
         }
     }
-    return -1;
+    for (int player = 0; player < 4; ++player) {
+        if (!GWPlayerCfg[player].iscom) {
+            return player;
+        }
+    }
+    return 0;
+}
+
+// The camera the eyes take: the first active one, or with a split screen (an
+// active camera over another part of the screen) the one looking nearest to
+// this headset's player, its own view as on its part of the TV (a team's, in
+// two against two). Each headset of a game played together takes its own.
+static int primary_camera()
+{
+    int first = -1;
+    bool split = false;
+    for (int camera = 0; camera < HU3D_CAM_MAX; ++camera) {
+        if (-1.0f == Hu3DCamera[camera].fov) continue;
+        if (first < 0) {
+            first = camera;
+        } else if (!same_viewport(camera, first)) {
+            split = true;
+        }
+    }
+    if (!split) {
+        return first;
+    }
+    HuVecF player{};
+    if (!CharModelPosGet(GWPlayerCfg[local_player()].character, &player)) {
+        return first;
+    }
+    // The camera chosen before stays until another looks clearly nearer (a
+    // player halfway between two would make the view jump back and forth).
+    static int sChosen = -1;
+    int nearest = first;
+    float nearestDistance = INFINITY, chosenDistance = INFINITY;
+    for (int camera = 0; camera < HU3D_CAM_MAX; ++camera) {
+        const auto& view = Hu3DCamera[camera];
+        if (-1.0f == view.fov) continue;
+        const float dx = view.target.x - player.x;
+        const float dy = view.target.y - player.y;
+        const float dz = view.target.z - player.z;
+        const float distance = dx * dx + dy * dy + dz * dz;
+        if (!std::isfinite(distance)) continue;
+        if (camera == sChosen) chosenDistance = distance;
+        if (distance < nearestDistance) {
+            nearestDistance = distance;
+            nearest = camera;
+        }
+    }
+    if (sChosen >= 0 && chosenDistance < INFINITY && chosenDistance <= 1.5f * nearestDistance) {
+        return sChosen;
+    }
+    sChosen = nearest;
+    return nearest;
 }
 
 static bool same_viewport(int a, int b)
@@ -401,6 +463,21 @@ extern "C" void PartyBoard_StereoBeginCamera(s16 cameraNo)
     }
     sFrameRecording = false;
     sCurrentCamera = cameraNo;
+    // Only this camera's part of the interface (a split screen's other
+    // players' scores and timers are theirs), from the TV's 640 x 480.
+    if (sQuest.hudCrop != nullptr) {
+        const auto& view = Hu3DCamera[cameraNo];
+        bool split = false;
+        for (int other = 0; other < HU3D_CAM_MAX; ++other) {
+            split = split || (other != cameraNo && -1.0f != Hu3DCamera[other].fov && !same_viewport(other, cameraNo));
+        }
+        if (split && view.viewportW > 1.0f && view.viewportH > 1.0f) {
+            sQuest.hudCrop(view.viewportX / 640.0f, view.viewportY / 480.0f, view.viewportW / 640.0f,
+                view.viewportH / 480.0f);
+        } else {
+            sQuest.hudCrop(0.0f, 0.0f, 1.0f, 1.0f);
+        }
+    }
     if (!find_quest()) {
         AuroraStereoHideScreen(false);
         return;
@@ -822,7 +899,10 @@ extern "C" void PartyBoard_StereoObjectBegin(Mtx modelView, const HuVecF *min, c
         const float half = (high[r] - low[r]) * 0.5f;
         radius2 += half * half;
     }
-    AuroraStereoSetUncut(partyboard::quest::sphere_inside_eye_sides(sEyeClip, center, std::sqrt(radius2)));
+    // A minigame keeps the cut: its objects' bounds proved wrong from the
+    // camera's place (ObjectVisible), and an uncut draw past them spills into
+    // the other eye.
+    AuroraStereoSetUncut(!sWindow && partyboard::quest::sphere_inside_eye_sides(sEyeClip, center, std::sqrt(radius2)));
     // Its distance from between the eyes: opaque objects may go to the GPU
     // front to back (debug.partyboard.sort_opaque), for its early depth test.
     float distance2 = 0.0f;
@@ -911,8 +991,10 @@ extern "C" void PartyBoard_StereoObjectEnd(void)
 
 extern "C" BOOL PartyBoard_StereoObjectVisible(float x, float y, float z, float radius)
 {
-    // Through a window, the eyes' clip planes are the window's: culling is right at once.
-    if (!sActive || !sCameraViewSet || !(sFloorSettled || sWindow)) return TRUE;
+    // From the camera's place (a minigame), nothing is culled: it took most of
+    // Three Throw's balls away (snapshots with and without, 2026-10-06), and
+    // a minigame has the GPU to spare.
+    if (!sActive || !sCameraViewSet || !sFloorSettled || sWindow) return TRUE;
 #if defined(__ANDROID__)
     static bool enabled = true;
     static uint32_t tested = 0, culled = 0;
@@ -943,7 +1025,7 @@ extern "C" BOOL PartyBoard_StereoObjectVisible(float x, float y, float z, float 
 
 extern "C" BOOL PartyBoard_StereoSphereVisible(float x, float y, float z, float radius)
 {
-    if (!sActive || !sCameraViewSet) return TRUE;
+    if (!sActive || !sCameraViewSet || sWindow) return TRUE; // a minigame: nothing culled (ObjectVisible)
     const float center[3]{x, y, z};
     return partyboard::quest::sphere_visible(sEyeClip, center, radius) ? TRUE : FALSE;
 }

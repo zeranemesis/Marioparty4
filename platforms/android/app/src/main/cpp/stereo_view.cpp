@@ -1218,6 +1218,9 @@ void StereoView::set_quality_cap(float recommendedScale) {
   if (width > mImageEyeWidth || height > mImageEyeHeight || mDesiredHudWidth != mHudPixelsWidth) mResizePending = true;
 }
 
+// A minigame's eyes at its start, of the recommended size (set_board_mode).
+constexpr float kMinigameStartQuality = 1.2f;
+
 // One decision per fresh one-second metric window; do not lower resolution
 // merely because the CPU or the image bridge is late while the GPU has headroom.
 void StereoView::adapt_resolution() {
@@ -1369,11 +1372,14 @@ void StereoView::set_board_mode(bool board) {
     LOGI("Stereo: a board again, resolution back to %.0f%% of recommended", mBoardQuality * 100.0f);
   }
   mBoardMode = board;
-  // A minigame: its eyes at 130% from its start (lighter than a board).
+  // A minigame (lighter than a board): its eyes at 120% from its start, up to
+  // 130% when the GPU has room. Started at 130%, Three Throw (its world drawn
+  // twice, it copies its frame) fell to 60 images a second while the
+  // controller came down to 110% (2026-10-06).
   if (const bool minigame = !board && !mScreenRequired; minigame != mMinigameQuality) {
     mMinigameQuality = minigame;
     mQuality.set_cap(minigame ? AdaptiveQuality::kMaxCap : mQualityCap);
-    if (minigame) mQuality.start_at(AdaptiveQuality::kMaxCap);
+    if (minigame) mQuality.start_at(kMinigameStartQuality);
     mRenderScale = std::min(1.0f, mQuality.scale() / mMaxScale);
     const auto [width, height] = eye_size(mRenderScale);
     if (width > mImageEyeWidth || height > mImageEyeHeight) mResizePending = true;
@@ -1433,6 +1439,25 @@ void StereoView::set_window(bool on, const XrPosef& pose, XrExtent2Df size, bool
   mWindowViewerDistance = viewerDistance;
   mWindowPose = pose;
   mWindowSize = size;
+}
+
+void StereoView::set_hud_crop(float x, float y, float width, float height) {
+  std::lock_guard lock{mMutex};
+  const auto clamp01 = [](float v) { return std::isfinite(v) ? std::clamp(v, 0.0f, 1.0f) : 0.0f; };
+  x = clamp01(x);
+  y = clamp01(y);
+  width = std::max(0.05f, std::min(clamp01(width), 1.0f - x));
+  height = std::max(0.05f, std::min(clamp01(height), 1.0f - y));
+  if (std::abs(width - mHudCrop[2]) > 0.001f || std::abs(height - mHudCrop[3]) > 0.001f ||
+      std::abs(x - mHudCrop[0]) > 0.001f || std::abs(y - mHudCrop[1]) > 0.001f) {
+    LOGI("Stereo: interface shown from %.2f %.2f, %.2f x %.2f of the screen", x, y, width, height);
+  }
+  mHudCrop = {x, y, width, height};
+}
+
+std::array<float, 4> StereoView::hud_crop() const {
+  std::lock_guard lock{mMutex};
+  return mHudCrop;
 }
 
 const XrCompositionLayerBaseHeader* StereoView::window_second_layer() const {
@@ -2102,7 +2127,12 @@ const XrCompositionLayerBaseHeader* StereoView::hud_layer(XrSpace space, const X
   mHudLayer.space = space;
   mHudLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
   mHudLayer.subImage.swapchain = mHudSwapchain;
-  mHudLayer.subImage.imageRect = {{0, 0}, {static_cast<int32_t>(mHudPixelsWidth), static_cast<int32_t>(mHudPixelsHeight)}};
+  // Only the part set_hud_crop gave (rows from the interface's top).
+  const auto crop = hud_crop();
+  mHudLayer.subImage.imageRect = {
+      {static_cast<int32_t>(crop[0] * mHudPixelsWidth), static_cast<int32_t>(crop[1] * mHudPixelsHeight)},
+      {std::max(1, static_cast<int32_t>(crop[2] * mHudPixelsWidth)),
+       std::max(1, static_cast<int32_t>(crop[3] * mHudPixelsHeight))}};
   mHudLayer.pose = pose;
   mHudLayer.size = size;
   return reinterpret_cast<const XrCompositionLayerBaseHeader*>(&mHudLayer);
@@ -2266,6 +2296,11 @@ __attribute__((visibility("default"))) uint32_t PartyBoardQuest_StereoHiddenArea
   const uint32_t count = view != nullptr ? view->hidden_area(eye, rects, capacity, current) : 0;
   if (version != nullptr) *version = current;
   return count;
+}
+
+__attribute__((visibility("default"))) void PartyBoardQuest_StereoHudCrop(float x, float y, float width,
+                                                                          float height) {
+  if (quest::StereoView* view = quest::g_stereoView) view->set_hud_crop(x, y, width, height);
 }
 
 __attribute__((visibility("default"))) uint32_t PartyBoardQuest_StereoGeneration(void) {

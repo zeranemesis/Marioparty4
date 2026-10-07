@@ -214,6 +214,17 @@ void CharClose(void)
     effectAMemP = NULL;
 }
 
+#ifdef TARGET_PC
+BOOL CharModelPosGet(s16 charNo, HuVecF *pos)
+{
+    if (charNo < 0 || charNo >= CHARNO_MAX || charWork[charNo].modelId == HU3D_MODELID_NONE || pos == NULL) {
+        return FALSE;
+    }
+    *pos = Hu3DData[charWork[charNo].modelId].pos;
+    return TRUE;
+}
+#endif
+
 HU3DMODELID CharModelCreate(s16 charNo, s16 model)
 {
     s16 sp8 = 0;

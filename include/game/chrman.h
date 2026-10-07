@@ -30,6 +30,11 @@ void CharMotionClose(s16 charNo);
 void CharDataClose(s16 charNo);
 void CharClose(void);
 HU3DMODELID CharModelCreate(s16 charNo, s16 model);
+#ifdef TARGET_PC
+// Where a character's model stands (its Hu3D position), FALSE without one
+// (the headset's minigame camera for the local player, src/port/quest_stereo.cpp).
+BOOL CharModelPosGet(s16 charNo, HuVecF *pos);
+#endif
 HU3DMOTID CharMotionCreate(s16 charNo, s32 data_num);
 void CharMotionNoSet(s16 charNo, HU3DMOTID motId, s32 motNo);
 void CharMotionKill(s16 charNo, u32 motId);

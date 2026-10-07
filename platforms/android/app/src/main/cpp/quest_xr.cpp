@@ -1739,7 +1739,10 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
     XrExtent2Df hudSize{};
     XrPosef hudPose{};
     if (window) {
-      hudSize = {windowSize.height * 4.0f / 3.0f, windowSize.height};
+      // The interface's part on show (a split screen's own), as tall as the
+      // screen: the TV's 640 x 480 has square pixels.
+      const auto crop = app.stereo.hud_crop();
+      hudSize = {windowSize.height * (crop[2] * 640.0f) / (crop[3] * 480.0f), windowSize.height};
       XrPosef inFront = identity_pose();
       inFront.position.z = kWindowHudInFrontMeters;
       hudPose = compose(windowPose, inFront);

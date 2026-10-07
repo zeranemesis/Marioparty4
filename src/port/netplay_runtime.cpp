@@ -2199,6 +2199,13 @@ extern "C" bool PartyBoard_NetplayEnabled(void)
     return partyboard::netplay::gRuntime.enabled;
 }
 
+// The game's pad port this machine plays on: its seat (PartyBoard_NetplayControlMotor
+// maps the local seat's port to the physical pad). -1 offline.
+extern "C" int PartyBoard_NetplayLocalPort(void)
+{
+    return partyboard::netplay::gRuntime.enabled ? partyboard::netplay::gRuntime.localPlayer : -1;
+}
+
 // Called by a menu that has a cursor a scripted walk must move, to say
 // whether it is reading the stick this frame. Both peers run the same menu
 // code on the same simulation tick, so this stays in step by construction -
