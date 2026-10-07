@@ -773,6 +773,20 @@ void Hu3DMotionExec(s16 arg0, s16 arg1, float arg2, s32 arg3)
     if (arg3 == 0) {
         for (var_r18 = 0; var_r18 < temp_r29->objectNum; var_r19++, var_r18++) {
             temp_r31 = var_r19;
+#ifdef TARGET_PC
+            // A pointer whose low half is zero crashed Chain Chomp Fever (m438)
+            // here on the Quest (2026-10-06): reported and skipped until the
+            // cause is found.
+            if (temp_r31->constData && ((uintptr_t)temp_r31->constData & 0xFFFFFFFFu) == 0) {
+                static int reported;
+                if (reported++ < 8) {
+                    OSReport("Hu3DMotionExec: model %d motion %d object %d (%s) of %d: constData %p, skipped\n",
+                        arg0, arg1, var_r18, temp_r31->name ? temp_r31->name : "?", temp_r29->objectNum,
+                        temp_r31->constData);
+                }
+                continue;
+            }
+#endif
             if (temp_r31->constData) {
                 temp_r28 = temp_r31->constData;
                 if (temp_r28->attr & 0x3F0) {
