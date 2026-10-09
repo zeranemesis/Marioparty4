@@ -21,6 +21,7 @@
 // frame loop and tear-down. The controllers go to Java (QuestVr.onControllers),
 // which presents them to SDL as a gamepad.
 
+#include "hands_view.hpp"
 #include "perf_metrics.hpp"
 #include "stereo_view.hpp"
 #include "table_anchor.hpp"
@@ -153,11 +154,13 @@ struct Actions {
   XrAction leftGrip = XR_NULL_HANDLE, rightGrip = XR_NULL_HANDLE;
   XrAction aim = XR_NULL_HANDLE;
   XrAction rightGripPose = XR_NULL_HANDLE;
+  XrAction gripPose = XR_NULL_HANDLE; // both controllers, drawn over the game (HandsView)
   XrAction haptic = XR_NULL_HANDLE;
   XrPath leftHand = XR_NULL_PATH, rightHand = XR_NULL_PATH;
   XrSpace rightAim = XR_NULL_HANDLE;
   XrSpace rightGripPoseSpace = XR_NULL_HANDLE;
   XrSpace leftAim = XR_NULL_HANDLE; // the table's height, in placement mode
+  XrSpace grip[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE}; // left, right
 };
 
 struct Egl {
@@ -197,6 +200,7 @@ struct Extensions {
   bool visibilityMask = false; // the lenses' hidden pixels, skipped by the eyes' draws
   bool layerDepth = false;     // the model's depth to the compositor (StereoView::enable_depth_layer)
   bool spaceWarp = false;      // Application SpaceWarp (StereoView::enable_space_warp)
+  bool handTracking = false;   // XR_EXT_hand_tracking: the hands drawn, and pinching
 };
 
 struct App {
@@ -225,6 +229,8 @@ struct App {
   TableAnchor anchor;
   TableScene scene;  // the tables of the headset's room scan
   StereoView stereo; // the game's world as a model on the table
+  HandsView hands;   // the controllers and hands, over the game
+  bool handsAvailable = false;
   bool modelAvailable = false; // the stereo images exist: the model can show
   XrPosef pose = identity_pose(); // the anchor point, in STAGE space
   bool poseKnown = false;
@@ -258,6 +264,13 @@ struct App {
   bool leftTriggerHeld = false;
   bool leftGripHeld = false;
   XrPosef grabOffset = identity_pose();
+  // The game held by pinching hands (hand_grab): which hands (bit 0 left,
+  // bit 1 right), and the hold as it started.
+  int handGrab = 0;
+  XrPosef handGrabOffset = identity_pose();
+  float handGrabDistance = 0.0f;
+  float handGrabSize = 0.0f;
+  float pinchHeld[2] = {0.0f, 0.0f}; // seconds each hand has pinched
   int previousButtons = 0;
   int suppressedButtons = 0; // held when placement ended: the game waits for their release
 };
@@ -358,6 +371,7 @@ bool create_instance(App& app) {
   ext.visibilityMask = optional(XR_KHR_VISIBILITY_MASK_EXTENSION_NAME);
   ext.layerDepth = optional(XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME);
   ext.spaceWarp = optional(XR_FB_SPACE_WARP_EXTENSION_NAME);
+  ext.handTracking = optional(HandsView::kExtension);
   ext.anchors = std::ranges::all_of(TableAnchor::kExtensions,
                                     [&](const char* name) { return has_extension(available, name); });
   if (ext.anchors) {
@@ -560,6 +574,7 @@ bool create_actions(App& app) {
   actions.aim = create_action(app, XR_ACTION_TYPE_POSE_INPUT, "aim", "Pointer", hands, 2);
   actions.rightGripPose = create_action(app, XR_ACTION_TYPE_POSE_INPUT, "calibration_grip_pose", "Table calibration",
                                         &actions.rightHand, 1);
+  actions.gripPose = create_action(app, XR_ACTION_TYPE_POSE_INPUT, "controller_pose", "Controllers", hands, 2);
   actions.haptic = create_action(app, XR_ACTION_TYPE_VIBRATION_OUTPUT, "rumble", "Rumble", hands, 2);
 
   const XrActionSuggestedBinding bindings[] = {
@@ -579,6 +594,8 @@ bool create_actions(App& app) {
       {actions.aim, path(app, "/user/hand/left/input/aim/pose")},
       {actions.aim, path(app, "/user/hand/right/input/aim/pose")},
       {actions.rightGripPose, path(app, "/user/hand/right/input/grip/pose")},
+      {actions.gripPose, path(app, "/user/hand/left/input/grip/pose")},
+      {actions.gripPose, path(app, "/user/hand/right/input/grip/pose")},
       {actions.haptic, path(app, "/user/hand/left/output/haptic")},
       {actions.haptic, path(app, "/user/hand/right/output/haptic")},
   };
@@ -603,6 +620,12 @@ bool create_actions(App& app) {
   spaceInfo.subactionPath = actions.rightHand;
   check(app.instance, xrCreateActionSpace(app.session, &spaceInfo, &actions.rightGripPoseSpace),
         "xrCreateActionSpace (right grip)");
+  spaceInfo.action = actions.gripPose;
+  for (int hand = 0; hand < 2; ++hand) {
+    spaceInfo.subactionPath = hand == 0 ? actions.leftHand : actions.rightHand;
+    check(app.instance, xrCreateActionSpace(app.session, &spaceInfo, &actions.grip[hand]),
+          "xrCreateActionSpace (controller)");
+  }
 
   XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
   attach.countActionSets = 1;
@@ -1369,6 +1392,92 @@ void place(App& app, JNIEnv* env, const ControllerState& input, int pressed, flo
   }
 }
 
+// The hands, without controllers, move the game: one pinching hand carries
+// it (turning it with the hand), two pinching hands also resize it, as a
+// photo on a phone. A short pinch first, so a hand passing by does not take
+// it. Kept as placement keeps it (a new anchor, the settings) on letting go.
+void hand_grab(App& app, JNIEnv* env, XrTime time, float dt) {
+  if (!app.handsAvailable || app.calibrating) {
+    app.handGrab = 0;
+    return;
+  }
+  constexpr float kPinchHoldSeconds = 0.15f;
+  int pinching = 0;
+  for (int hand = 0; hand < 2; ++hand) {
+    const HandPinch& pinch = app.hands.pinch(hand);
+    app.pinchHeld[hand] = pinch.pinching ? app.pinchHeld[hand] + dt : 0.0f;
+    // A hand already holding keeps holding; a new one must pinch a moment.
+    if (pinch.pinching && (((app.handGrab >> hand) & 1) != 0 || app.pinchHeld[hand] >= kPinchHoldSeconds)) {
+      pinching |= 1 << hand;
+    }
+  }
+  // The board's model is resized on the board; the screen otherwise (a
+  // minigame stands where the screen does).
+  const bool boardModel = app.stereo.world_visible() && app.table.diorama && !app.stereo.minigame_mode();
+  float& size = boardModel ? app.table.modelScale : app.table.screenWidth;
+  const float minSize = boardModel ? kMinModelScale : kMinScreenWidth;
+  const float maxSize = boardModel ? kMaxModelScale : kMaxScreenWidth;
+  // The hold's frame: the hand upright, or between both hands, facing
+  // across the line joining them.
+  const auto frame = [&](int hands, float& distance) {
+    const XrPosef& left = app.hands.pinch(0).pose;
+    const XrPosef& right = app.hands.pinch(1).pose;
+    if (hands == 3) {
+      const float dx = right.position.x - left.position.x, dz = right.position.z - left.position.z;
+      const float dy = right.position.y - left.position.y;
+      distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+      XrPosef pose;
+      pose.position = {(left.position.x + right.position.x) * 0.5f, (left.position.y + right.position.y) * 0.5f,
+                       (left.position.z + right.position.z) * 0.5f};
+      pose.orientation = yaw_rotation(std::atan2(dx, dz));
+      return pose;
+    }
+    distance = 0.0f;
+    return upright(hands == 1 ? left : right);
+  };
+  for (int hand = 0; hand < 2; ++hand) app.hands.set_grabbing(hand, ((pinching >> hand) & 1) != 0);
+
+  if (pinching != app.handGrab) {
+    if (app.handGrab != 0 && pinching == 0) {
+      // Let go: kept where it stands.
+      LOGI("Hands placed the game: %.2f %.2f %.2f, size %.5f", app.pose.position.x, app.pose.position.y,
+           app.pose.position.z, size);
+      app.handGrab = 0;
+      app.minigameViewerDistance = 0.0f; // measured again from the new place
+      if (!app.placing) {
+        app.table.placed = true;
+        app.table.pose = app.pose;
+        app.table.anchorUuid.clear();
+        if (app.extensions.anchors) app.anchor.place(app.pose, time);
+        app.savedPlaceIgnored = false;
+        save_settings(app);
+        notify_placement(app, env);
+      }
+      return;
+    }
+    // A hold starts, or changes hands: from the game where it is now.
+    if (app.handGrab == 0) LOGI("Hands hold the game");
+    app.handGrab = pinching;
+    const XrPosef start = frame(pinching, app.handGrabDistance);
+    app.handGrabOffset = compose(inverse(start), app.pose);
+    app.handGrabSize = size;
+    app.poseKnown = true;
+    return;
+  }
+  if (app.handGrab == 0) return;
+  float distance = 0.0f;
+  const XrPosef now = frame(app.handGrab, distance);
+  XrPosef offset = app.handGrabOffset;
+  if (app.handGrab == 3 && app.handGrabDistance > 0.02f) {
+    // Resized about the point between the hands.
+    const float wanted = std::clamp(app.handGrabSize * distance / app.handGrabDistance, minSize, maxSize);
+    const float k = wanted / app.handGrabSize;
+    size = wanted;
+    offset.position = {offset.position.x * k, offset.position.y * k, offset.position.z * k};
+  }
+  app.pose = compose(now, offset);
+}
+
 // --- Frame loop ---
 
 // Returns false once the session is over for good (the player quit from the
@@ -1486,10 +1595,20 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   XrPosef leftAim;
   const bool haveLeftAim = focused && app.placing && locate(app.actions.leftAim, app.stage, time, leftAim);
 
+  // The hands: drawn, and moving the game when they pinch.
+  if (app.handsAvailable) {
+    app.hands.track_hands(app.stage, time);
+    if (focused) {
+      hand_grab(app, env, time, dt);
+    } else {
+      app.handGrab = 0;
+    }
+  }
+
   // Where the game stands: the anchor, which follows the real table, unless
   // the player is moving it.
   XrPosef anchored;
-  if (!app.placing && !app.savedPlaceIgnored && app.anchor.locate(time, anchored)) {
+  if (!app.placing && app.handGrab == 0 && !app.savedPlaceIgnored && app.anchor.locate(time, anchored)) {
     app.pose = anchored;
     app.poseKnown = true;
   }
@@ -1670,7 +1789,7 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
                                                                              : modelSettings.next;
   const auto* modelLayer = model ? app.stereo.layer(app.stage, modelChain) : nullptr;
 
-  std::array<const XrCompositionLayerBaseHeader*, 8> layers{};
+  std::array<const XrCompositionLayerBaseHeader*, 10> layers{};
   uint32_t layerCount = 0;
 
   XrCompositionLayerPassthroughFB room{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
@@ -1783,6 +1902,30 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
     layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&help);
   }
 
+  // The controllers and hands, over everything: they are nearer than the
+  // game. Drawn at this frame's display time, not the game's image's.
+  if (app.handsAvailable && frame.shouldRender && focused) {
+    XrView eyes[2]{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
+    XrViewLocateInfo eyesInfo{XR_TYPE_VIEW_LOCATE_INFO};
+    eyesInfo.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    eyesInfo.displayTime = time;
+    eyesInfo.space = app.stage;
+    XrViewState eyesState{XR_TYPE_VIEW_STATE};
+    uint32_t eyeCount = 0;
+    if (XR_SUCCEEDED(xrLocateViews(app.session, &eyesInfo, &eyesState, 2, &eyeCount, eyes)) && eyeCount == 2 &&
+        (eyesState.viewStateFlags & validViews) == validViews) {
+      std::array<ControllerPose, 2> controllers{};
+      for (int hand = 0; hand < 2; ++hand) {
+        controllers[hand].tracked = locate_tracked(app.actions.grip[hand], app.stage, time, controllers[hand].grip);
+        controllers[hand].trigger = hand == 0 ? input.leftTrigger : input.rightTrigger;
+        controllers[hand].squeeze = hand == 0 ? input.leftGrip : input.rightGrip;
+      }
+      if (const auto* handsLayer = app.hands.layer(app.stage, eyes, controllers)) {
+        layers[layerCount++] = handsLayer;
+      }
+    }
+  }
+
   // What the headset is shown, whenever it changes and every 10 s: which
   // layers, and how far the screen and the model stand from the head. On
   // 2026-09-28 the game vanished after Space Setup with nothing in the log
@@ -1856,6 +1999,17 @@ bool set_up(App& app, JNIEnv* env) {
     if (app.extensions.spaceWarp) app.stereo.enable_space_warp(app.instance, app.system, app.session);
   }
   app.stereo.set_quality_cap(quality_cap(app.table.resolution));
+  {
+    // The controllers' layer: sRGB like the eyes', its colors linear.
+    uint32_t formatCount = 0;
+    xrEnumerateSwapchainFormats(app.session, 0, &formatCount, nullptr);
+    std::vector<int64_t> formats(formatCount);
+    xrEnumerateSwapchainFormats(app.session, formatCount, &formatCount, formats.data());
+    const int64_t format = std::ranges::find(formats, static_cast<int64_t>(GL_SRGB8_ALPHA8)) != formats.end()
+                               ? static_cast<int64_t>(GL_SRGB8_ALPHA8)
+                               : static_cast<int64_t>(GL_RGBA8);
+    app.handsAvailable = app.hands.init(app.instance, app.system, app.session, format, app.extensions.handTracking);
+  }
   query_refresh_rates(app);
   if (app.extensions.anchors) {
     app.anchor.init(app.instance, app.session, app.stage);
@@ -1875,6 +2029,8 @@ bool set_up(App& app, JNIEnv* env) {
 
 void tear_down(App& app, JNIEnv* env) {
   app.stereo.destroy(); // GL objects: while the context is current
+  app.hands.destroy();
+  app.handsAvailable = false;
   app.scene.destroy();
   app.anchor.destroy();
   g_setupNeeded.store(false);

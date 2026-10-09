@@ -326,7 +326,7 @@ public final class QuestVr {
             keys,
         })) : (french ? new String[] {
             "Gâchettes droite/gauche : poser le jeu / hauteur de table",
-            "Grip droit (maintenu) : déplacer",
+            "Grip droit (maintenu) ou pincer à la main : déplacer",
             "Stick droit : ↕ taille de l'écran   ↔ tourner",
             "Stick gauche : ↕ hauteur   ↔ taille du plateau",
             "Clic stick gauche : plateau 3D — " + (model ? "oui" : "non"),
@@ -337,7 +337,7 @@ public final class QuestVr {
             "B, \u2261 ou clic stick droit : terminer",
         } : new String[] {
             "Right/left trigger: place game / adjust table height",
-            "Right grip (hold): move",
+            "Right grip (hold) or pinch by hand: move",
             "Right stick: ↕ screen size   ↔ turn",
             "Left stick: ↕ height   ↔ board size",
             "Left stick click: 3D board — " + (model ? "yes" : "no"),
