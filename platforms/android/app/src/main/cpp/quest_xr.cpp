@@ -45,6 +45,7 @@
 #include <vector>
 
 #include <sys/system_properties.h>
+#include <unistd.h>
 
 using namespace quest;
 
@@ -201,6 +202,7 @@ struct Extensions {
   bool layerDepth = false;     // the model's depth to the compositor (StereoView::enable_depth_layer)
   bool spaceWarp = false;      // Application SpaceWarp (StereoView::enable_space_warp)
   bool handTracking = false;   // XR_EXT_hand_tracking: the hands drawn, and pinching
+  bool threadSettings = false; // XR_KHR_android_thread_settings: the game's threads named to the runtime
 };
 
 struct App {
@@ -296,6 +298,12 @@ PerfMetrics g_perf;
 // The spatial data permission (QuestVr): -1 not known yet, 0 refused, 1 granted.
 std::atomic_int g_scenePermission = -1;
 
+// The game's thread (PartyBoardQuest_GameThread), named to the runtime by
+// the XR thread: 0 none yet, -1 done.
+std::atomic_int g_gameThread = 0;
+std::atomic_int g_gameThreadId = 0;
+void name_threads(App& app, bool sessionStart);
+
 // The table set-up the game waits for (PartyBoardQuest_TableSetupHold, the
 // game thread) and the XR thread runs. Needed: no calibrated table yet, and
 // not put off (B) this session. Open: the calibration panel is up.
@@ -372,6 +380,7 @@ bool create_instance(App& app) {
   ext.layerDepth = optional(XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME);
   ext.spaceWarp = optional(XR_FB_SPACE_WARP_EXTENSION_NAME);
   ext.handTracking = optional(HandsView::kExtension);
+  ext.threadSettings = optional(XR_KHR_ANDROID_THREAD_SETTINGS_EXTENSION_NAME);
   ext.anchors = std::ranges::all_of(TableAnchor::kExtensions,
                                     [&](const char* name) { return has_extension(available, name); });
   if (ext.anchors) {
@@ -1503,6 +1512,9 @@ bool poll_events(App& app, JNIEnv* env) {
         app.running = check(app.instance, xrBeginSession(app.session, &begin), "xrBeginSession");
         if (app.running) {
           request_performance(app, true);
+          name_threads(app, true);
+          // The game's thread again for this session.
+          if (g_gameThreadId > 0) g_gameThread.store(g_gameThreadId);
           // Back from another immersive app (Space Setup, opened by the table
           // calibration, on 2026-09-28): the headset had paused the room's
           // view, and the game came back over black. Start it again.
@@ -1557,8 +1569,37 @@ bool poll_events(App& app, JNIEnv* env) {
   return true;
 }
 
+// The threads the frame depends on, named to the runtime so it keeps them on
+// the fast cores and schedules them first: this one submits the frames
+// (renderer main), the game's runs the simulation and records its draws
+// (application main). Minigames ran at 44 to 60 images a second for 72 with
+// the GPU at its lowest clock (2026-10-06): the CPU side counts there too.
+void name_threads(App& app, bool sessionStart) {
+  if (!app.extensions.threadSettings) return;
+  static auto setThread =
+      proc<PFN_xrSetAndroidApplicationThreadKHR>(app.instance, "xrSetAndroidApplicationThreadKHR");
+  if (setThread == nullptr) return;
+  if (sessionStart) {
+    check(app.instance,
+          setThread(app.session, XR_ANDROID_THREAD_TYPE_RENDERER_MAIN_KHR, static_cast<uint32_t>(gettid())),
+          "xrSetAndroidApplicationThreadKHR (XR thread)");
+  }
+  int game = g_gameThread.load();
+  const int tid = game;
+  if (game > 0 && g_gameThread.compare_exchange_strong(game, -1)) {
+    game = tid;
+    if (check(app.instance,
+              setThread(app.session, XR_ANDROID_THREAD_TYPE_APPLICATION_MAIN_KHR, static_cast<uint32_t>(game)),
+              "xrSetAndroidApplicationThreadKHR (game thread)")) {
+      LOGI("Threads named to the runtime: XR thread %d (renderer), game thread %d (application)",
+           static_cast<int>(gettid()), game);
+    }
+  }
+}
+
 void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   request_performance(app); // debug.partyboard.gpu_level, every 2 s
+  name_threads(app, false);
   XrFrameState frame{XR_TYPE_FRAME_STATE};
   if (!check(app.instance, xrWaitFrame(app.session, nullptr, &frame), "xrWaitFrame")) {
     return;
@@ -2133,6 +2174,12 @@ __attribute__((visibility("default"))) float PartyBoardQuest_ActiveRefreshRate()
 // through PartyBoard_QuestHoldOverlay): true while it should wait for the
 // table's calibration. The first call opens the panel, which the XR thread
 // shows on its next frame.
+// The game's thread, from that thread (quest_stereo.cpp): named to the runtime.
+__attribute__((visibility("default"))) void PartyBoardQuest_GameThread(int tid) {
+  g_gameThreadId = tid;
+  g_gameThread.store(tid);
+}
+
 __attribute__((visibility("default"))) bool PartyBoardQuest_TableSetupHold() {
   if (g_setupOpen.load()) {
     return true;

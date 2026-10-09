@@ -1021,9 +1021,15 @@ bool StereoView::game_frame(StereoFrame& out) {
     }
     pose_matrix(free->windowPose, 1.0f, out.world);
   } else {
+    // On the table, each eye draws only the box around what the game offered
+    // to draw last frame (set_scene_bounds), with a margin: a board or a
+    // minigame fills part of the view, and the rest of the eyes' pixels were
+    // cleared, multisampled, resolved, copied and composited for nothing.
+    // The pixels kept are as dense as before, so the image is as sharp.
+    if (!mapped) crop_eyes(*free);
     for (int eye = 0; eye < 2; ++eye) {
       view_matrix(mViews[eye].pose, out.eyeView[eye]);
-      projection_matrix(mViews[eye].fov, out.eyeProj[eye]);
+      projection_matrix(free->views[eye].fov, out.eyeProj[eye]);
     }
     // Open, the window only places the camera's view in the room.
     if (mapped) {
@@ -1132,6 +1138,8 @@ bool StereoView::late_latch(uint64_t tag, float correction[2][16]) {
   // Each eye: the projection the frame was recorded with, P V_old, becomes
   // P' V_new: correction = P' V_new V_old^-1 P^-1.
   for (int eye = 0; eye < 2; ++eye) {
+    // The field of view it was drawn with (cropped eyes: narrowed).
+    fresh[eye].fov = old[eye].fov;
     float pOld[16], pNew[16], vNew[16], vOldInverse[16], pOldInverse[16], m[16];
     projection_matrix(old[eye].fov, pOld);
     projection_matrix(fresh[eye].fov, pNew);
@@ -1420,6 +1428,128 @@ void StereoView::write_snapshot(GLuint texture, GLint x, GLint y, GLsizei width,
     std::fclose(file);
     LOGI("Stereo: snapshot %s (%dx%d)", path.c_str(), width, height);
   }
+}
+
+void StereoView::set_scene_bounds(const float* low, const float* high) {
+  std::lock_guard lock{mMutex};
+  mBoundsValid = low != nullptr && high != nullptr;
+  if (mBoundsValid) {
+    for (int axis = 0; axis < 3; ++axis) {
+      mBoundsLow[axis] = low[axis];
+      mBoundsHigh[axis] = high[axis];
+    }
+    mBoundsAt = std::chrono::steady_clock::now();
+  }
+}
+
+// Under mMutex, from game_frame(): each eye's field of view narrowed to the
+// scene's box as that eye sees it, and the slot's drawn size by as much.
+void StereoView::crop_eyes(Slot& slot) {
+  const auto now = std::chrono::steady_clock::now();
+  if (now - mCropReadAt >= std::chrono::seconds(2)) {
+    mCropReadAt = now;
+    char value[PROP_VALUE_MAX]{};
+    __system_property_get("debug.partyboard.crop", value);
+    const bool wanted = value[0] != '0';
+    if (wanted != mCropEnabled) LOGI("Stereo: cropped eyes %s (debug.partyboard.crop)", wanted ? "on" : "off");
+    mCropEnabled = wanted;
+  }
+  if (mCropLogAt == std::chrono::steady_clock::time_point{}) mCropLogAt = now;
+  if (now - mCropLogAt >= std::chrono::seconds(5)) {
+    if (mCropLeases > 0) {
+      LOGI("Stereo crop: %u of %u images cropped, the eyes drew %.0f%% of their full fields' pixels",
+           mCropFrames, mCropLeases, mCropFull > 0.0 ? 100.0 * mCropDrawn / mCropFull : 100.0);
+    }
+    mCropLogAt = now;
+    mCropFrames = mCropLeases = 0;
+    mCropDrawn = mCropFull = 0.0;
+  }
+  ++mCropLeases;
+  const double full = static_cast<double>(slot.renderWidth) * slot.renderHeight;
+  mCropFull += full;
+  // A stale box (a scene that stopped offering objects), the lenses' mask
+  // (drawn in the full fields' pixels), or turned off: the full fields.
+  const bool usable = mCropEnabled && mBoundsValid && now - mBoundsAt < std::chrono::milliseconds(300) &&
+                      mHiddenRects[0].empty() && mHiddenRects[1].empty();
+  if (!usable) {
+    mCropDrawn += full;
+    return;
+  }
+  constexpr float kMarginMeters = 0.04f; // a step or a jump past last frame's box
+  constexpr float kMarginPart = 0.06f;   // of the cropped field, each side
+  XrFovf fovs[2]{};
+  for (int eye = 0; eye < 2; ++eye) {
+    const XrFovf& whole = mViews[eye].fov;
+    const XrPosef toEye = inverse(mViews[eye].pose);
+    float left = 1e9f, right = -1e9f, down = 1e9f, up = -1e9f;
+    for (int corner = 0; corner < 8; ++corner) {
+      const XrVector3f room{(corner & 1) ? mBoundsHigh[0] + kMarginMeters : mBoundsLow[0] - kMarginMeters,
+                            (corner & 2) ? mBoundsHigh[1] + kMarginMeters : mBoundsLow[1] - kMarginMeters,
+                            (corner & 4) ? mBoundsHigh[2] + kMarginMeters : mBoundsLow[2] - kMarginMeters};
+      const XrVector3f c = add(toEye.position, rotate(toEye.orientation, room));
+      const float depth = -c.z;
+      if (depth < 0.05f) {
+        mCropDrawn += full; // the box reaches the eye: all of its view
+        return;
+      }
+      left = std::min(left, c.x / depth);
+      right = std::max(right, c.x / depth);
+      down = std::min(down, c.y / depth);
+      up = std::max(up, c.y / depth);
+    }
+    const float spanX = right - left, spanY = up - down;
+    left -= spanX * kMarginPart;
+    right += spanX * kMarginPart;
+    down -= spanY * kMarginPart;
+    up += spanY * kMarginPart;
+    const float wl = std::tan(whole.angleLeft), wr = std::tan(whole.angleRight);
+    const float wd = std::tan(whole.angleDown), wu = std::tan(whole.angleUp);
+    left = std::clamp(left, wl, wr);
+    right = std::clamp(right, wl, wr);
+    down = std::clamp(down, wd, wu);
+    up = std::clamp(up, wd, wu);
+    fovs[eye] = whole;
+    if (right - left > 0.02f && up - down > 0.02f) {
+      fovs[eye] = {std::atan(left), std::atan(right), std::atan(up), std::atan(down)};
+    } else {
+      // Out of this eye's view: a sliver at its center.
+      fovs[eye] = {-0.01f, 0.01f, 0.01f, -0.01f};
+    }
+  }
+  // One drawn size for both eyes (Aurora draws them side by side alike): the
+  // larger of the two crops, at the full fields' pixel density.
+  float partX = 0.0f, partY = 0.0f;
+  for (int eye = 0; eye < 2; ++eye) {
+    const XrFovf& whole = mViews[eye].fov;
+    partX = std::max(partX, (std::tan(fovs[eye].angleRight) - std::tan(fovs[eye].angleLeft)) /
+                                (std::tan(whole.angleRight) - std::tan(whole.angleLeft)));
+    partY = std::max(partY, (std::tan(fovs[eye].angleUp) - std::tan(fovs[eye].angleDown)) /
+                                (std::tan(whole.angleUp) - std::tan(whole.angleDown)));
+  }
+  if (partX > 0.95f && partY > 0.95f) {
+    mCropDrawn += full; // nearly all of it anyway
+    return;
+  }
+  slot.renderWidth = std::max(64u, static_cast<uint32_t>(std::ceil(slot.renderWidth * partX / 8.0f)) * 8u);
+  slot.renderHeight = std::max(64u, static_cast<uint32_t>(std::ceil(slot.renderHeight * partY / 8.0f)) * 8u);
+  // The smaller crop widened to that size, about its center, so both eyes'
+  // pixels stay square and as dense.
+  for (int eye = 0; eye < 2; ++eye) {
+    const XrFovf& whole = mViews[eye].fov;
+    const float wx = std::tan(whole.angleRight) - std::tan(whole.angleLeft);
+    const float wy = std::tan(whole.angleUp) - std::tan(whole.angleDown);
+    float l = std::tan(fovs[eye].angleLeft), r = std::tan(fovs[eye].angleRight);
+    float d = std::tan(fovs[eye].angleDown), u = std::tan(fovs[eye].angleUp);
+    const float cx = (l + r) * 0.5f, cy = (d + u) * 0.5f;
+    const float hx = wx * partX * 0.5f, hy = wy * partY * 0.5f;
+    l = cx - hx;
+    r = cx + hx;
+    d = cy - hy;
+    u = cy + hy;
+    slot.views[eye].fov = {std::atan(l), std::atan(r), std::atan(u), std::atan(d)};
+  }
+  ++mCropFrames;
+  mCropDrawn += static_cast<double>(slot.renderWidth) * slot.renderHeight;
 }
 
 bool StereoView::minigame_mode() const {
@@ -2301,6 +2431,10 @@ __attribute__((visibility("default"))) uint32_t PartyBoardQuest_StereoHiddenArea
 __attribute__((visibility("default"))) void PartyBoardQuest_StereoHudCrop(float x, float y, float width,
                                                                           float height) {
   if (quest::StereoView* view = quest::g_stereoView) view->set_hud_crop(x, y, width, height);
+}
+
+__attribute__((visibility("default"))) void PartyBoardQuest_StereoSceneBounds(const float* low, const float* high) {
+  if (quest::StereoView* view = quest::g_stereoView) view->set_scene_bounds(low, high);
 }
 
 __attribute__((visibility("default"))) uint32_t PartyBoardQuest_StereoGeneration(void) {

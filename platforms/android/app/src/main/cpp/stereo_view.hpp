@@ -152,6 +152,9 @@ public:
   // Game thread, each frame: the part of the interface to show (fractions of
   // the TV's screen: a split screen's own part), whole by default.
   void set_hud_crop(float x, float y, float width, float height);
+  // Game thread, each frame: the room-space box around what the game offered
+  // to draw (null: none). The next images' fields of view are narrowed to it.
+  void set_scene_bounds(const float* low, const float* high);
   // XR thread: that part, as {x, y, width, height}.
   std::array<float, 4> hud_crop() const;
   XrPosef window_shown_pose() const { return mShownWindowPose; }
@@ -249,6 +252,7 @@ public:
 private:
 
   void release_slot(Slot& slot);
+  void crop_eyes(Slot& slot); // game_frame(), under mMutex
   Slot* newest_completed(int64_t displayNs); // Caller holds mMutex.
 
   EGLDisplay mDisplay = EGL_NO_DISPLAY;
@@ -447,6 +451,16 @@ private:
   void write_snapshot(GLuint texture, GLint x, GLint y, GLsizei width, GLsizei height, const char* name, uint64_t tag);
   std::atomic<bool> mHudLost{false}; // written by present(), outside the lock
   std::array<float, 4> mHudCrop{0.0f, 0.0f, 1.0f, 1.0f}; // set_hud_crop
+  // Cropped eyes (set_scene_bounds): the box, when it came, and how much of
+  // the full fields the eyes drew (pixels), for the log.
+  std::array<float, 3> mBoundsLow{}, mBoundsHigh{};
+  bool mBoundsValid = false;
+  std::chrono::steady_clock::time_point mBoundsAt{};
+  bool mCropEnabled = true; // debug.partyboard.crop
+  std::chrono::steady_clock::time_point mCropReadAt{};
+  double mCropDrawn = 0.0, mCropFull = 0.0;
+  uint32_t mCropFrames = 0, mCropLeases = 0;
+  std::chrono::steady_clock::time_point mCropLogAt{};
 
   // The last image shown, resubmitted until the game draws the next one.
   uint64_t mPresentedTag = 0;

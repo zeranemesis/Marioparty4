@@ -46,6 +46,7 @@ extern "C" {
 #include <dlfcn.h>
 #include <android/log.h>
 #include <sys/system_properties.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -79,6 +80,7 @@ using CancelledFn = void (*)(uint32_t image, uint64_t tag);
 using ReleaseImagesFn = void (*)(void **buffers, uint32_t count);
 using ScreenHiddenFn = bool (*)();
 using HudCropFn = void (*)(float x, float y, float width, float height);
+using SceneBoundsFn = void (*)(const float *low, const float *high);
 using TableSetupHoldFn = bool (*)();
 using HiddenAreaFn = uint32_t (*)(uint32_t eye, float *rects, uint32_t capacity, uint32_t *version);
 using FoveationAvailableFn = void (*)(bool available);
@@ -96,6 +98,7 @@ struct Quest {
     WorldOnlyFn worldOnly = nullptr;
     ScreenHiddenFn screenHidden = nullptr; // optional: an older library has none
     HudCropFn hudCrop = nullptr;           // optional: the interface's part to show
+    SceneBoundsFn sceneBounds = nullptr;   // optional: what the eyes need to draw (cropped eyes)
     TableSetupHoldFn tableSetupHold = nullptr; // optional
     HiddenAreaFn hiddenArea = nullptr;         // optional: every pixel drawn
     FoveationAvailableFn foveationAvailable = nullptr; // optional: no automatic foveation
@@ -121,6 +124,17 @@ bool sWindow = false;
 float sSceneScale = 1.0f;
 float sSceneCenter[3]{};
 float sEyeClip[2][16]{};
+// The game camera's view space -> the room, this camera's (begin_eyes), and
+// the room-space box around every object offered for drawing this frame
+// (ObjectVisible), before culling: the headset narrows the eyes' fields of
+// view to it, next frame (StereoView: cropped eyes). An object entering the
+// view widens it at once, as it is counted even when culled.
+float sViewToRoom[4][4]{};
+float sBoundsLow[3]{INFINITY, INFINITY, INFINITY};
+float sBoundsHigh[3]{-INFINITY, -INFINITY, -INFINITY};
+// Larger objects (meters, in the room) are left out: a sea or a sky around
+// the table would make the box the whole view.
+constexpr float kBoundsMaxRadius = 1.5f;
 // Backdrops (see PartyBoard_StereoBackdrop): the eyes in the game camera's view
 // space, and the scene's size in game units.
 float sEyeInView[2][3]{};
@@ -264,10 +278,16 @@ bool find_quest()
             sQuest.cancelled = reinterpret_cast<CancelledFn>(dlsym(lib, "PartyBoardQuest_StereoCancelled"));
             sQuest.screenHidden = reinterpret_cast<ScreenHiddenFn>(dlsym(lib, "PartyBoardQuest_StereoScreenHidden"));
             sQuest.hudCrop = reinterpret_cast<HudCropFn>(dlsym(lib, "PartyBoardQuest_StereoHudCrop"));
+            sQuest.sceneBounds = reinterpret_cast<SceneBoundsFn>(dlsym(lib, "PartyBoardQuest_StereoSceneBounds"));
             sQuest.tableSetupHold = reinterpret_cast<TableSetupHoldFn>(dlsym(lib, "PartyBoardQuest_TableSetupHold"));
             sQuest.hiddenArea = reinterpret_cast<HiddenAreaFn>(dlsym(lib, "PartyBoardQuest_StereoHiddenArea"));
             sQuest.foveationAvailable =
                 reinterpret_cast<FoveationAvailableFn>(dlsym(lib, "PartyBoardQuest_StereoFoveationAvailable"));
+            // This thread, the game's, named to the headset's runtime as the
+            // application's main thread (optional: an older library has none).
+            if (auto gameThread = reinterpret_cast<void (*)(int)>(dlsym(lib, "PartyBoardQuest_GameThread"))) {
+                gameThread(static_cast<int>(gettid()));
+            }
             // The head's pose again once a frame is recorded (optional: an
             // older library has none). Aurora calls it on this thread.
             AuroraStereoSetLateLatch(
@@ -569,6 +589,10 @@ extern "C" void PartyBoard_StereoBeginCamera(s16 cameraNo)
     }
     if (sActive) {
         sGamePerf.begin();
+        for (int axis = 0; axis < 3; ++axis) {
+            sBoundsLow[axis] = INFINITY;
+            sBoundsHigh[axis] = -INFINITY;
+        }
     }
 }
 
@@ -749,6 +773,7 @@ static void begin_eyes(const Mat4& world)
         std::memcpy(clip[eye], eyeClip.m, sizeof(clip[eye]));
     }
     std::memcpy(sEyeClip, clip, sizeof(sEyeClip));
+    std::memcpy(sViewToRoom, world.m, sizeof(sViewToRoom));
     AuroraStereoSetEyeSize(sFrame.eyeWidth, sFrame.eyeHeight);
     AuroraStereoSetWindow(framed);
     AuroraStereoSetCoverAlpha(sWindow && !framed);
@@ -783,6 +808,12 @@ extern "C" void PartyBoard_StereoEndCamera(void)
             AuroraStereoEnd();
             if (!sSecondary) {
                 sGamePerf.end(static_cast<int>(omCurrentOvlGet()));
+                // What this frame offered to draw, for the next one's eyes
+                // (none through a window: the window is the frame).
+                if (sQuest.sceneBounds != nullptr) {
+                    const bool any = !sWindow && sBoundsLow[0] <= sBoundsHigh[0];
+                    sQuest.sceneBounds(any ? sBoundsLow : nullptr, any ? sBoundsHigh : nullptr);
+                }
             }
         } else if (!sSecondary) {
             sQuest.cancelled(sFrame.image, sFrame.tag);
@@ -1025,8 +1056,26 @@ extern "C" void PartyBoard_StereoObjectEnd(void)
     AuroraStereoSetSortKey(-1.0f);
 }
 
+// An object offered for drawing, its bounding sphere in the game camera's
+// view space: into the frame's box in the room (sBoundsLow/High).
+static void add_to_bounds(float x, float y, float z, float radius)
+{
+    if (!sActive || !sCameraViewSet || sWindow || !std::isfinite(radius)) return;
+    const auto &m = sViewToRoom;
+    const float scale = std::sqrt(m[0][0] * m[0][0] + m[1][0] * m[1][0] + m[2][0] * m[2][0]);
+    const float r = radius * scale;
+    if (!(r < kBoundsMaxRadius)) return;
+    for (int axis = 0; axis < 3; ++axis) {
+        const float c = m[axis][0] * x + m[axis][1] * y + m[axis][2] * z + m[axis][3];
+        if (!std::isfinite(c)) return;
+        sBoundsLow[axis] = (std::min)(sBoundsLow[axis], c - r);
+        sBoundsHigh[axis] = (std::max)(sBoundsHigh[axis], c + r);
+    }
+}
+
 extern "C" BOOL PartyBoard_StereoObjectVisible(float x, float y, float z, float radius)
 {
+    add_to_bounds(x, y, z, radius);
     // From the camera's place (a minigame), nothing is culled: it took most of
     // Three Throw's balls away (snapshots with and without, 2026-10-06), and
     // a minigame has the GPU to spare.
@@ -1061,6 +1110,7 @@ extern "C" BOOL PartyBoard_StereoObjectVisible(float x, float y, float z, float 
 
 extern "C" BOOL PartyBoard_StereoSphereVisible(float x, float y, float z, float radius)
 {
+    add_to_bounds(x, y, z, radius);
     if (!sActive || !sCameraViewSet || sWindow) return TRUE; // a minigame: nothing culled (ObjectVisible)
     const float center[3]{x, y, z};
     return partyboard::quest::sphere_visible(sEyeClip, center, radius) ? TRUE : FALSE;
