@@ -63,6 +63,35 @@ public final class OnlineService extends Service {
     private volatile boolean cancelHash;
     private boolean foreground;
     private volatile Intent pendingGame;
+    // The nickname this device plays under, announced to nearby lobby screens.
+    volatile String nickname = "";
+    Nearby nearby;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        nearby = new Nearby(this, this::nearbyAnnounce, this::refresh);
+    }
+
+    // A host announces its lobby on the Wi-Fi while seats are free (Nearby).
+    private String nearbyAnnounce() {
+        Session s = session;
+        if (s == null || !s.host || s.invite == null) {
+            return null;
+        }
+        Lobby lobby = s.lobby;
+        if (lobby != null && (lobby.phase() != Lobby.Phase.WAITING || lobby.occupied() >= s.maxPlayers())) {
+            return null;
+        }
+        if (lobby == null && s.bridge != null) {
+            return null;
+        }
+        try {
+            return Nearby.payload(nickname, lobby == null ? 1 : lobby.occupied(), s.maxPlayers(), s.invite.encode());
+        } catch (IOException e) {
+            return null;
+        }
+    }
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -77,6 +106,9 @@ public final class OnlineService extends Service {
     @Override
     public void onDestroy() {
         cancelHash = true;
+        if (nearby != null) {
+            nearby.close();
+        }
         Session s = session;
         session = null;
         if (s != null) {
@@ -152,6 +184,7 @@ public final class OnlineService extends Service {
             setStatus(e.getMessage());
             return;
         }
+        this.nickname = profile.name;
         startOngoing();
         final Session[] holder = new Session[1];
         Session.Listener listener = new Session.Listener() {

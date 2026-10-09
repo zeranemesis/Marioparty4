@@ -64,6 +64,9 @@ public final class LobbyActivity extends Activity implements OnlineService.Obser
     private TextView status;
     private TextView footer;
     private LinearLayout players;
+    private LinearLayout nearbyCard;
+    private LinearLayout nearbyList;
+    private boolean resumed;
     private Button choose;
     private Button host;
     private Button join;
@@ -313,6 +316,14 @@ public final class LobbyActivity extends Activity implements OnlineService.Obser
         choose = button(Msg.s("Choisir", "Choose"), ACCENT, v -> pickDisc());
         discRow.addView(choose);
         identity.addView(discRow);
+
+        // Lobbies on this Wi-Fi (Nearby): joined without the invitation's text,
+        // which a headset makes hard to type.
+        nearbyCard = card(root);
+        nearbyCard.addView(text(Msg.s("Parties à proximité (même Wi-Fi)", "Nearby games (same Wi-Fi)"), 13, MUTED, false));
+        nearbyList = new LinearLayout(this);
+        nearbyList.setOrientation(LinearLayout.VERTICAL);
+        nearbyCard.addView(nearbyList);
 
         LinearLayout session = card(root);
         session.addView(text(Msg.s("Joueurs", "Players"), 13, MUTED, false));
@@ -578,6 +589,8 @@ public final class LobbyActivity extends Activity implements OnlineService.Obser
         play.setText(s != null && !s.host ? Msg.s("L'hôte lance la partie", "The host starts the game")
             : Msg.s("Lancer pour tout le monde", "Start for everyone"));
 
+        refreshNearby(idle, hashing, disc != null);
+
         players.removeAllViews();
         String localName = lobby != null && lobby.local() != null ? lobby.local().name : nickname.getText().toString();
         boolean localMatch = lobby != null && lobby.seatAgrees(lobby.localSeat());
@@ -646,6 +659,45 @@ public final class LobbyActivity extends Activity implements OnlineService.Obser
             + route);
     }
 
+    private void refreshNearby(boolean idle, boolean hashing, boolean discReady) {
+        Nearby nearby = service.nearby;
+        if (nearby != null) {
+            nearby.setListening(resumed && idle);
+        }
+        nearbyCard.setVisibility(idle ? View.VISIBLE : View.GONE);
+        nearbyList.removeAllViews();
+        if (!idle || nearby == null) {
+            return;
+        }
+        java.util.List<Nearby.Found> found = nearby.found();
+        if (found.isEmpty()) {
+            TextView none = text(Msg.s("Aucune partie trouvée. Créez un salon sur l'un des appareils : il apparaîtra ici sur les autres.",
+                "No game found. Create a lobby on one of the devices: it shows up here on the others."), 13, MUTED, false);
+            none.setPadding(0, dp(6), 0, 0);
+            nearbyList.addView(none);
+            return;
+        }
+        for (Nearby.Found f : found) {
+            LinearLayout r = row();
+            r.setPadding(0, dp(8), 0, dp(4));
+            LinearLayout left = new LinearLayout(this);
+            left.setOrientation(LinearLayout.VERTICAL);
+            left.addView(text(f.name, 16, TEXT, true));
+            left.addView(text(f.players + "/" + f.maxPlayers + Msg.s(" joueurs", " players"), 13, MUTED, false));
+            r.addView(left, weighted(1, 8));
+            Button joinThis = button(Msg.s("Rejoindre", "Join"), ACCENT, v -> {
+                invitation.setText(f.invitation);
+                begin(false);
+            });
+            enable(joinThis, discReady && !hashing && !f.full());
+            r.addView(joinThis);
+            nearbyList.addView(r);
+        }
+        if (!discReady) {
+            nearbyList.addView(text(Msg.s("Choisissez d'abord votre disque.", "Choose your disc first."), 13, MUTED, false));
+        }
+    }
+
     private void addPlayer(String name, String role, String disc, String ping, int discColor) {
         LinearLayout r = row();
         r.setPadding(0, dp(8), 0, dp(8));
@@ -670,6 +722,7 @@ public final class LobbyActivity extends Activity implements OnlineService.Obser
     @Override
     protected void onResume() {
         super.onResume();
+        resumed = true;
         if (service != null) {
             service.activityVisible(this);
             refresh();
@@ -678,8 +731,12 @@ public final class LobbyActivity extends Activity implements OnlineService.Obser
 
     @Override
     protected void onPause() {
+        resumed = false;
         if (service != null) {
             service.activityHidden(this);
+            if (service.nearby != null) {
+                service.nearby.setListening(false);
+            }
         }
         super.onPause();
     }
