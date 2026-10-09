@@ -143,10 +143,47 @@ bool board_scene(OMOVL scene)
     return scene >= DLL_w01Dll && scene <= DLL_w06Dll;
 }
 
-// The scenes drawn as a model on the table: the boards and the minigames.
+// The menus before a board, 3D rooms with their own cameras: seen in 3D from
+// their camera's point of view like a minigame (asked for 2026-10-09). Their
+// sprites (cursors, panels, text) are the interface over the screen.
+// `adb shell setprop debug.partyboard.menus3d 0` keeps them flat, read again
+// every 2 s.
+bool menu_scene(OMOVL scene)
+{
+    const bool menu = scene == DLL_modeseldll || scene == DLL_mentDll || scene == DLL_mgmodedll
+        || scene == DLL_option || scene == DLL_present || scene == DLL_selmenuDLL;
+    if (!menu) return false;
+#if defined(__ANDROID__)
+    static bool enabled = true;
+    static auto readAt = std::chrono::steady_clock::time_point {};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - readAt >= std::chrono::seconds(2)) {
+        readAt = now;
+        char value[PROP_VALUE_MAX] = {};
+        __system_property_get("debug.partyboard.menus3d", value);
+        const bool wanted = value[0] != '0';
+        if (wanted != enabled) {
+            __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Menus %s (debug.partyboard.menus3d)",
+                wanted ? "in 3D" : "flat");
+        }
+        enabled = wanted;
+    }
+    return enabled;
+#else
+    return true;
+#endif
+}
+
+bool minigame_scene(OMOVL scene)
+{
+    return scene >= DLL_m401Dll && scene <= DLL_m463Dll;
+}
+
+// The scenes drawn in 3D: the boards on the table; the minigames and the
+// menus from their camera's point of view (or on the table too).
 bool spatial_scene(OMOVL scene)
 {
-    return board_scene(scene) || (scene >= DLL_m401Dll && scene <= DLL_m463Dll);
+    return board_scene(scene) || minigame_scene(scene) || menu_scene(scene);
 }
 
 // The scene's floor, measured from its geometry during its first frames, is
@@ -484,9 +521,7 @@ extern "C" void PartyBoard_StereoBeginCamera(s16 cameraNo)
     }
     const OMOVL scene = omCurrentOvlGet();
     const bool spatialScene = spatial_scene(scene);
-    // Selection rooms and title scenes combine several cameras and projections;
-    // preserve their original composition until each has a dedicated MR layout.
-    // A minigame with several cameras (layers, or a split screen) shows its
+    // A menu or a minigame with several cameras (layers, or a split screen) shows its
     // first one in 3D, with the layers over it (every minigame in 3D, asked
     // for 2026-10-06).
     int cameras = 0;
@@ -594,8 +629,9 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
             }
         }
     }
-    // Minigames have very different coordinate scales: fit their initial camera once.
-    const bool minigame = scene >= DLL_m401Dll && scene <= DLL_m463Dll;
+    // Minigames and menus have very different coordinate scales: put on the
+    // table, fit their initial camera once.
+    const bool minigame = minigame_scene(scene) || menu_scene(scene);
     if (minigame && !window && !sSceneFitted) {
         const auto& camera = Hu3DCamera[cameraNo];
         const float dx = camera.pos.x - camera.target.x;
