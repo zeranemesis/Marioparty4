@@ -1,0 +1,156 @@
+diff --git a/lib/dolphin/pad/pad.cpp b/lib/dolphin/pad/pad.cpp
+index 56656aa..5393bbd 100644
+--- a/lib/dolphin/pad/pad.cpp
++++ b/lib/dolphin/pad/pad.cpp
+@@ -440,6 +440,11 @@ BOOL PADInit() {
+   // four controllers, so party mode and the minigame modes started with four
+   // human players and nobody to play three of them.
+   g_keyboardBindings[0].m_mappingsSet = true;
++#elif defined(__SWITCH__)
++  // The Switch has no keyboard. A port is connected when a controller is on
++  // it (one per Npad, player N on port N), so the game counts its human
++  // players from the controllers actually there, as on a GameCube.
++  std::ranges::for_each(g_keyboardBindings, [](auto& state) { state.m_mappingsSet = false; });
+ #else
+   std::ranges::for_each(g_keyboardBindings, [](auto& state) { state.m_mappingsSet = true; });
+ #endif
+diff --git a/lib/gfx/common.cpp b/lib/gfx/common.cpp
+index 3f86df1..23e2b6f 100644
+--- a/lib/gfx/common.cpp
++++ b/lib/gfx/common.cpp
+@@ -835,7 +835,14 @@ PipelineRef pipeline_ref(const rmlui::PipelineConfig& config) {
+ 
+ void initialize() {
+   g_frameIndex = 0;
+-  render_worker::initialize();
++  // Dawn's OpenGL backends keep their EGL context current on the thread that
++  // created the device; another thread cannot make it current
++  // (EGL_BAD_ACCESS, device lost). As for the pipeline cache's worker, the
++  // render worker stays off there and its work runs on the calling thread.
++  if (webgpu::g_backendType != wgpu::BackendType::OpenGL &&
++      webgpu::g_backendType != wgpu::BackendType::OpenGLES) {
++    render_worker::initialize();
++  }
+   // render_worker::set_event_pump([] {
+   //   if (g_instance) {
+   //     g_instance.ProcessEvents();
+diff --git a/lib/gfx/render_worker.cpp b/lib/gfx/render_worker.cpp
+index 5da8808..48041a1 100644
+--- a/lib/gfx/render_worker.cpp
++++ b/lib/gfx/render_worker.cpp
+@@ -267,7 +267,11 @@ void synchronize() {
+   sync->cv.wait(lock, [&] { return sync->complete; });
+ }
+ 
+-bool is_worker_thread() noexcept { return g_workerThreadId == std::this_thread::get_id(); }
++// Without a worker (the OpenGL backends, see gfx::initialize) its work runs on
++// the calling thread, which then is the render worker.
++bool is_worker_thread() noexcept {
++  return !g_running.load(std::memory_order_acquire) || g_workerThreadId == std::this_thread::get_id();
++}
+ 
+ bool is_idle() noexcept { return g_pendingItems.load(std::memory_order_acquire) == 0; }
+ 
+diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
+index 7fb3e4e..b3f53c4 100644
+--- a/lib/webgpu/gpu.cpp
++++ b/lib/webgpu/gpu.cpp
+@@ -25,6 +25,13 @@
+ #if defined(__ANDROID__)
+ #include <sys/system_properties.h>
+ #endif
++#if defined(__SWITCH__)
++#include <EGL/egl.h>
++#include <dawn/native/OpenGLBackend.h>
++
++// libnx (switch.h is not included: its integer typedefs clash with Dolphin's).
++extern "C" struct NWindow* nwindowGetDefault(void);
++#endif
+ 
+ namespace aurora::gx {
+ void clear_copy_texture_cache() noexcept;
+@@ -694,7 +701,39 @@ static void flush_released_surfaces() {
+   g_device.Tick();
+ }
+ 
++#if defined(__SWITCH__)
++// Dawn cannot load libEGL on libnx: it is handed switch-mesa's display and
++// loader instead (RequestAdapterOptionsGetGLProc).
++static EGLDisplay switch_egl_display() {
++  static const EGLDisplay display = [] {
++    EGLDisplay d = eglGetDisplay(EGL_DEFAULT_DISPLAY);
++    if (d != EGL_NO_DISPLAY && eglInitialize(d, nullptr, nullptr) == EGL_FALSE) {
++      Log.error("eglInitialize failed: {:#x}", eglGetError());
++      d = EGL_NO_DISPLAY;
++    }
++    return d;
++  }();
++  return display;
++}
++#endif
++
+ static bool create_surface() {
++#if defined(__SWITCH__)
++  // The console has one window, libnx's default NWindow, and WebGPU no
++  // surface source for it: Dawn's OpenGL ES backend presents to it through
++  // EGL (cmake/PatchDawnForSwitch.cmake adds this entry point).
++  release_surface();
++  flush_released_surfaces();
++  g_surface = wgpu::Surface::Acquire(
++      dawn::native::opengl::CreateSurfaceFromEGLNativeWindow(g_instance.Get(), nwindowGetDefault()));
++  if (!g_surface) {
++    Log.error("Failed to create surface");
++    return false;
++  }
++  g_surfaceGeneration = window::surface_generation();
++  Log.info("Created surface generation {}", g_surfaceGeneration);
++  return true;
++#else
+   SDL_Window* window = window::get_sdl_window();
+   if (window == nullptr) {
+     Log.error("Failed to create surface: no window");
+@@ -719,6 +758,7 @@ static bool create_surface() {
+   g_surfaceGeneration = window::surface_generation();
+   Log.info("Created surface generation {}", g_surfaceGeneration);
+   return true;
++#endif
+ }
+ 
+ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -756,11 +796,21 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+     }
+   }
+   {
+-    const wgpu::RequestAdapterOptions options{
++    // Dawn only offers its OpenGL and OpenGL ES backends at the Compatibility
++    // feature level: asking for Core finds no adapter.
++    const bool glBackend = backend == wgpu::BackendType::OpenGL || backend == wgpu::BackendType::OpenGLES;
++    wgpu::RequestAdapterOptions options{
++        .featureLevel = glBackend ? wgpu::FeatureLevel::Compatibility : wgpu::FeatureLevel::Core,
+         .powerPreference = wgpu::PowerPreference::HighPerformance,
+         .backendType = backend,
+         .compatibleSurface = g_surface,
+     };
++#if defined(__SWITCH__)
++    dawn::native::opengl::RequestAdapterOptionsGetGLProc glProc;
++    glProc.getProc = reinterpret_cast<dawn::native::opengl::EGLGetProcProc>(eglGetProcAddress);
++    glProc.display = switch_egl_display();
++    options.nextInChain = &glProc;
++#endif
+     const auto future = g_instance.RequestAdapter(
+         &options, wgpu::CallbackMode::WaitAnyOnly,
+         [](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, wgpu::StringView message) {
+diff --git a/lib/window.cpp b/lib/window.cpp
+index 9ad7953..a62efa8 100644
+--- a/lib/window.cpp
++++ b/lib/window.cpp
+@@ -282,7 +282,9 @@ bool create_window(AuroraBackend backend) {
+ #ifdef DAWN_ENABLE_BACKEND_OPENGL
+   case BACKEND_OPENGL:
+   case BACKEND_OPENGLES:
++#if !defined(__SWITCH__) // On the Switch, Dawn owns EGL on the NWindow; SDL keeps out.
+     flags |= SDL_WINDOW_OPENGL;
++#endif
+     break;
+ #endif
+ #endif

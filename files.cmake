@@ -104,6 +104,7 @@ set(PORT_FILES
         src/port/imgui.cpp
         src/port/io.cpp
         src/port/iso_validate.cpp
+        src/port/launch_args.cpp
         src/port/mem_diagnostics.cpp
         src/port/mods.cpp
         src/port/mods_test.inc

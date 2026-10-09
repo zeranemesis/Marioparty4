@@ -10,7 +10,26 @@ on:
       - "CMakePresets.json"
       - "cmake/**"
       - "platforms/switch/**"
+      - "patches/aurora-*.patch"
+      - "patches/musyx-*.patch"
+      - "files.cmake"
+      - "src/**"
+      - "include/**"
+      - "res/**"
       - "extern/aurora"
+  pull_request:
+    paths:
+      - ".github/workflows/switch-native.yml"
+      - "CMakeLists.txt"
+      - "CMakePresets.json"
+      - "cmake/**"
+      - "platforms/switch/**"
+      - "patches/aurora-*.patch"
+      - "patches/musyx-*.patch"
+      - "files.cmake"
+      - "src/**"
+      - "include/**"
+      - "res/**"
   workflow_dispatch:
 
 concurrency:
@@ -64,10 +83,14 @@ jobs:
       - name: Build NRO
         run: cmake --build build/switch-libnx-bootstrap --target partyboard_switch_nro --parallel 2
 
+      - name: Build launcher NRO
+        run: cmake --build build/switch-libnx-bootstrap --target partyboard_switch_launcher_nro --parallel 2
+
       - name: Inspect output
         run: |
           ls -lh build/switch-libnx-bootstrap/platforms/switch/partyboard-switch-probe.*
           file build/switch-libnx-bootstrap/platforms/switch/partyboard-switch-probe.elf || true
+          ls -lh build/switch-libnx-bootstrap/platforms/switch/launcher/partyboard-launcher.*
 
       - name: Upload NRO
         uses: actions/upload-artifact@v4
@@ -78,8 +101,105 @@ jobs:
             build/switch-libnx-bootstrap/platforms/switch/partyboard-switch-probe.elf
           if-no-files-found: error
 
+      - name: Upload launcher NRO
+        uses: actions/upload-artifact@v4
+        with:
+          name: partyboard-switch-launcher
+          path: |
+            build/switch-libnx-bootstrap/platforms/switch/launcher/partyboard-launcher.nro
+            build/switch-libnx-bootstrap/platforms/switch/launcher/partyboard-launcher.elf
+          if-no-files-found: error
+
+  launcher-host:
+    name: Launcher tests and screenshots
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libegl-dev libgles-dev libegl-mesa0 libgl1-mesa-dri \
+            libfreetype-dev libpng-dev zlib1g-dev libbz2-dev libzstd-dev
+
+      - name: Build
+        run: |
+          cmake -S platforms/switch/launcher -B build/launcher-host -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build/launcher-host --parallel 2
+
+      - name: Unit tests
+        run: ctest --test-dir build/launcher-host --output-on-failure
+
+      - name: Render screenshots
+        run: platforms/switch/launcher/tools/render-previews.sh build/launcher-host build/launcher-screens
+
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: partyboard-switch-launcher-screens
+          path: build/launcher-screens/*.png
+          if-no-files-found: error
+
+  nodlite:
+    name: nodlite tests (and against nod)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build zlib1g-dev libbz2-dev libzstd-dev liblzma-dev
+
+      - name: Build
+        run: |
+          cmake -S platforms/switch/nodlite -B build/nodlite -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build/nodlite --parallel 2
+
+      - name: Unit tests
+        run: ctest --test-dir build/nodlite --output-on-failure
+
+      # The same suite linked against the real nod (built with cargo), so
+      # nodlite keeps nod's behaviour, not just its own.
+      - name: Tests against nod
+        run: platforms/switch/nodlite/tools/check-against-nod.sh
+
+  sdl3-probe:
+    name: SDL3 libnx probe
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkita64:20260219
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Prepare container git ownership
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Configure SDL3 probe
+        run: cmake --preset switch-libnx-sdl3-probe
+
+      - name: Build SDL3 and the probe NRO
+        run: cmake --build build/switch-libnx-sdl3-probe --target partyboard_switch_sdl3_nro --parallel 2
+
+      - name: Upload SDL3 probe
+        uses: actions/upload-artifact@v4
+        with:
+          name: partyboard-switch-sdl3-probe
+          path: |
+            build/switch-libnx-sdl3-probe/platforms/switch/partyboard-switch-sdl3-probe.nro
+            build/switch-libnx-sdl3-probe/platforms/switch/partyboard-switch-sdl3-probe.elf
+          if-no-files-found: error
+
   dawn-probe:
-    name: Dawn OpenGLES probe
+    name: Dawn, Aurora and game
     runs-on: ubuntu-latest
     continue-on-error: true
     container:
@@ -91,9 +211,11 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Apply PartyBoard Aurora patches
+      - name: Apply PartyBoard Aurora and MusyX patches
         shell: bash
         run: |
+          git -C extern/musyx apply --check ../../patches/musyx-partyboard.patch
+          git -C extern/musyx apply ../../patches/musyx-partyboard.patch
           git -C extern/aurora apply --check ../../patches/aurora-partyboard.patch
           git -C extern/aurora apply ../../patches/aurora-partyboard.patch
           git -C extern/aurora apply --check ../../patches/aurora-render-fixes.patch
@@ -110,15 +232,24 @@ jobs:
           git -C extern/aurora apply ../../patches/aurora-android-surface-generation.patch
           git -C extern/aurora apply --check ../../patches/aurora-quest-quality.patch
           git -C extern/aurora apply ../../patches/aurora-quest-quality.patch
+          git -C extern/aurora apply --check ../../patches/aurora-switch.patch
+          git -C extern/aurora apply ../../patches/aurora-switch.patch
 
       - name: Prepare container git ownership
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Configure Dawn probe
-        run: cmake --preset switch-libnx-dawn-probe
+      # One build directory: the Aurora probe and the game reuse the Dawn build.
+      - name: Configure Dawn, Aurora and game
+        run: cmake --preset switch-libnx-game
 
       - name: Build Dawn probe NRO
-        run: cmake --build build/switch-libnx-dawn-probe --target partyboard_switch_dawn_nro --parallel 2
+        run: cmake --build build/switch-libnx-game --target partyboard_switch_dawn_nro --parallel 2
+
+      - name: Build Aurora probe NRO
+        run: cmake --build build/switch-libnx-game --target partyboard_switch_aurora_nro --parallel 2
+
+      - name: Build the game NRO
+        run: cmake --build build/switch-libnx-game --target partyboard_switch_game_nro --parallel 2
 
       - name: Upload Dawn probe
         if: success()
@@ -126,6 +257,71 @@ jobs:
         with:
           name: partyboard-switch-dawn-probe
           path: |
-            build/switch-libnx-dawn-probe/platforms/switch/partyboard-switch-dawn-probe.nro
-            build/switch-libnx-dawn-probe/platforms/switch/partyboard-switch-dawn-probe.elf
+            build/switch-libnx-game/platforms/switch/partyboard-switch-dawn-probe.nro
+            build/switch-libnx-game/platforms/switch/partyboard-switch-dawn-probe.elf
           if-no-files-found: error
+
+      - name: Upload Aurora probe
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: partyboard-switch-aurora-probe
+          path: |
+            build/switch-libnx-game/platforms/switch/partyboard-switch-aurora-probe.nro
+            build/switch-libnx-game/platforms/switch/partyboard-switch-aurora-probe.elf
+          if-no-files-found: error
+
+      - name: Upload the game
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: partyboard-switch-game
+          path: build/switch-libnx-game/platforms/switch/partyboard.nro
+          if-no-files-found: error
+
+  # The Switch renders through Dawn's OpenGL ES backend at the Compatibility
+  # feature level. The same Aurora probe, built for Linux, runs that
+  # configuration on Mesa (llvmpipe) under Xvfb, with Vulkan (lavapipe) as the
+  # reference: no Aurora error, 300 frames each, and a screenshot of both.
+  aurora-host:
+    name: Aurora on OpenGL ES (Mesa)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Apply PartyBoard Aurora patches
+        shell: bash
+        run: |
+          for patch in aurora-partyboard aurora-render-fixes aurora-android-surface-deadlock \
+                       aurora-mobile-one-local-player aurora-render-worker-idle aurora-quest-stereo \
+                       aurora-android-surface-generation aurora-quest-quality aurora-switch; do
+            git -C extern/aurora apply --check "../../patches/$patch.patch"
+            git -C extern/aurora apply "../../patches/$patch.patch"
+          done
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libx11-dev libxext-dev xvfb imagemagick \
+            libegl-dev libgles-dev libegl-mesa0 libgl1-mesa-dri mesa-vulkan-drivers \
+            zlib1g-dev libpng-dev libfreetype-dev libzstd-dev
+
+      - name: Build
+        run: |
+          cmake -S platforms/switch/aurora/host -B build/aurora-host -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build/aurora-host --target aurora_probe --parallel 4
+
+      - name: Run on OpenGL ES and Vulkan
+        run: platforms/switch/aurora/host/run-probe.sh build/aurora-host build/aurora-probe-shots
+
+      - name: Upload screenshots and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: partyboard-aurora-probe-host
+          path: build/aurora-probe-shots/
+          if-no-files-found: warn
