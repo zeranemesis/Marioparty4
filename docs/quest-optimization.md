@@ -441,6 +441,17 @@ Base au plateau Toad, 72 Hz, 100 % (build 210) : 72/72 images neuves, 0 ratee, 0
 - Sondes coupees par defaut (`debug.partyboard.probes 1` pour les remettre) : horodatages GPU des passes (`gpu_timing 1` aussi, au demarrage), barriere de fin de copie (`Copy GPU`), statistiques par type de dessin (`Stereo kinds`).
 - Decodage GX sur un fil a lui (`debug.partyboard.gx_thread 1` au demarrage, **coupe par defaut**) : le fil du jeu ne fait qu'ecrire ses commandes, un autre coeur les decode dans l'ordre, comme le GPU de la GameCube lisait sa FIFO ; ce qui change l'etat hors FIFO (copies EFB, crochets stereo, TLUT) passe dans le meme ordre (`fifo::ordered`), et la fin de l'image ou `GXDrawDone` attendent le decodeur. La ligne `GX decode: X ms a frame` dit ce que le decodage coute au fil du jeu (aujourd'hui) ou au sien, et l'attente du jeu : c'est le gain possible. Phase `gx-thread` (redemarrage).
 
+## Bilan du 09/10 (builds 229 a 231)
+
+Mesures par scene : `python tools/quest_scene_report.py build/quest-session-*/logcat-*.txt` (images/s hors chargement, saccades, resolution, dessins, enregistrement, temps GPU, frequence et charge du GPU).
+
+- Mini-jeux (sessions du 06 et du 09, vue camera) : une fois lances, presque tous tiennent 70-72 images/s pour 72 ; les chiffres a 43-44 venaient de fenetres de 5 s coupees par le chargement. GPU charge a 70-90 %, souvent a 456 MHz (niveau 2) malgre la demande de boost : le systeme choisit la frequence. Revers-a-Bomb : ~175 dessins par oeil mais 9-11 ms de GPU : les pixels coutent dans un mini-jeu vu en grand, pas les dessins comme au plateau.
+- Pipelines : 4772 precompiles au demarrage (11 s), le reste se construit a la premiere rencontre et le cache les garde. Les pics de dessins abandonnes (jusqu'a 15 000 en 5 s, objets absents une fraction de seconde) venaient des scenes nouvelles en 3D (menus, build 229) ; ils disparaissent une fois vus. Attendre le pipeline figerait l'image : non retenu.
+- Copie de l'image (Three Throw, Mario Medley) : la passe d'apres la derniere copie est deja sautee quand l'ecran plat est cache ; reste le monde dessine en 3840x2160 pour etre copie en 640x480. Piste : une image plate plus petite quand l'ecran est cache (recreer la cible de rendu, non fait).
+- Tout sur la table par defaut (build 230, cle `scene_view`) : menus, plateaux et mini-jeux ; le tri des objets hors champ revient aux mini-jeux.
+- Yeux cadres sur la scene (build 231, `debug.partyboard.crop 0` pour couper) : le jeu envoie chaque image la boite (piece) des objets qu'il propose au dessin, comptes avant le tri hors champ ; le casque reduit le champ de chaque oeil a cette boite avec une marge, a densite de pixels egale. Ligne `Stereo crop` : part des pixels dessines. A verifier : objets coupes au bord du cadre (particules, grands decors ; objets de plus de 1,5 m ignores).
+- Fils nommes au systeme (build 231, `XR_KHR_android_thread_settings`) : fil XR en rendu principal, fil du jeu en application principale.
+
 ## Sources Meta du plan
 
 - [OVR Metrics Tool](https://developers.meta.com/horizon/documentation/native/android/ts-ovrmetricstool/)
