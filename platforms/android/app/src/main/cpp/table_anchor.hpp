@@ -29,9 +29,11 @@ struct TableSettings {
   //   0 in 3D in the room from the game camera's point of view, as on TV
   //     but without a frame (StereoView::set_window, open);
   //   1 the same through a window where the screen stands (framed);
-  //   2 on the table like a board.
-  // A new key: the former follow_camera turned a floating model, now gone.
-  int minigameView = 0;
+  //   2 on the table like a board, the default: everything on the table
+  //     (asked for 2026-10-09).
+  // The menus before a board too. A new key (scene_view): the former
+  // minigame_view defaulted to the camera's point of view.
+  int minigameView = 2;
   std::string anchorUuid;       // hex; empty without an anchor
 
   bool load(const std::string& path);

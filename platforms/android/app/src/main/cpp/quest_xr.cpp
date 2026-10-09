@@ -1916,7 +1916,9 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
         (eyesState.viewStateFlags & validViews) == validViews) {
       std::array<ControllerPose, 2> controllers{};
       for (int hand = 0; hand < 2; ++hand) {
-        controllers[hand].tracked = locate_tracked(app.actions.grip[hand], app.stage, time, controllers[hand].grip);
+        // Valid is enough: tracked only, they vanished whenever the
+        // headset's cameras lost them for a moment.
+        controllers[hand].tracked = locate(app.actions.grip[hand], app.stage, time, controllers[hand].grip);
         controllers[hand].trigger = hand == 0 ? input.leftTrigger : input.rightTrigger;
         controllers[hand].squeeze = hand == 0 ? input.leftGrip : input.rightGrip;
       }

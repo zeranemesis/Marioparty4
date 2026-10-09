@@ -320,9 +320,12 @@ void HandsView::track_hands(XrSpace base, XrTime time) {
   }
 }
 
-// A Touch controller, roughly: in the grip pose's frame, +Y over the back of
-// the hand, -Z ahead through the fist. The handle in the fist, the face with
-// the stick over the thumb, the trigger under the index.
+// A Touch controller, roughly: in the grip pose's frame (OpenXR), -Z runs up
+// the handle (the rod held in the fist), +Y over the thumb. The handle is
+// centered on the grip; the face caps its top, turned halfway between the
+// handle's axis and +Y (held, it faces up while the handle leans forward);
+// the trigger under it, where the index rests. The first version had the
+// face tilted the other way and the handle behind the hand (2026-10-09).
 void HandsView::add_controller(int hand, const ControllerPose& controller) {
   (void)hand;
   const std::array<float, 4> body{0.018f, 0.018f, 0.022f, 1.0f};
@@ -334,13 +337,13 @@ void HandsView::add_controller(int hand, const ControllerPose& controller) {
     mParts.push_back({compose(controller.grip, local), size, color});
   };
   const XrQuaternionf none{0.0f, 0.0f, 0.0f, 1.0f};
-  part({0.0f, -0.008f, 0.025f}, turn_x(-0.25f), {0.017f, 0.021f, 0.052f}, mix(body, lit, controller.squeeze * 0.6f));
-  const XrQuaternionf faceTurn = turn_x(0.45f);
-  const XrVector3f faceAt{0.0f, 0.016f, -0.035f};
-  part(faceAt, faceTurn, {0.033f, 0.011f, 0.034f}, face);
-  const XrVector3f up = rotate(faceTurn, {0.0f, 0.011f, 0.0f});
+  part({0.0f, -0.002f, 0.008f}, none, {0.017f, 0.02f, 0.05f}, mix(body, lit, controller.squeeze * 0.6f));
+  const XrQuaternionf faceTurn = turn_x(-0.75f);
+  const XrVector3f faceAt{0.0f, 0.01f, -0.05f};
+  part(faceAt, faceTurn, {0.034f, 0.012f, 0.036f}, face);
+  const XrVector3f up = rotate(faceTurn, {0.0f, 0.012f, 0.0f});
   part(add(faceAt, up), faceTurn, {0.008f, 0.005f, 0.008f}, stick);
-  part({0.0f, -0.014f, -0.045f}, turn_x(0.5f), {0.007f, 0.012f, 0.011f}, mix(body, lit, controller.trigger));
+  part({0.0f, -0.024f, -0.042f}, faceTurn, {0.008f, 0.01f, 0.014f}, mix(body, lit, controller.trigger));
 }
 
 // A tracked hand: its joints and bones, a light translucent glove.
