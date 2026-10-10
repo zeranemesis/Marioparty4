@@ -1942,6 +1942,25 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
       XrPosef inFront = identity_pose();
       inFront.position.z = kWindowHudInFrontMeters;
       hudPose = compose(windowPose, inFront);
+    } else if (app.stereo.minigame_mode()) {
+      // A menu or a minigame on the table: its interface (a menu's list, a
+      // minigame's scores) just behind the scene, at eye level, nearer than
+      // a board's: it was far (2026-10-10). `debug.partyboard.hud_distance`
+      // (meters behind the table's center), read every 2 s.
+      static float behind = 0.25f;
+      static auto behindReadAt = std::chrono::steady_clock::time_point{};
+      if (const auto now = std::chrono::steady_clock::now(); now - behindReadAt >= std::chrono::seconds(2)) {
+        behindReadAt = now;
+        char value[PROP_VALUE_MAX] = {};
+        __system_property_get("debug.partyboard.hud_distance", value);
+        const float v = value[0] != 0 ? std::strtof(value, nullptr) : 0.25f;
+        behind = v > -0.5f && v < 3.0f ? v : 0.25f;
+      }
+      hudSize = {0.5f, 0.375f};
+      XrPosef local = identity_pose();
+      const float eyeY = std::isfinite(app.screenEye.y) ? app.screenEye.y - app.pose.position.y : 0.4f;
+      local.position = {0.0f, std::max(0.15f, eyeY - 0.05f), -behind};
+      hudPose = compose(app.pose, local);
     } else {
       hudPose = hud_pose(app.pose, app.table.modelScale, hudSize, &app.screenEye);
     }

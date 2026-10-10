@@ -196,36 +196,51 @@ bool menu_scene(OMOVL scene)
 #endif
 }
 
-// The size of a minigame or a menu on the table, times its camera's fit:
-// a menu's room surrounded the player, filled both eyes and cost 10 ms of
-// GPU an image for 61 draws (2026-10-10); at 0.15, chosen in the headset, it
-// stands on the table as a model (6 ms). Read every 2 s, to settle them by eye:
-// `adb shell setprop debug.partyboard.menu_size 0.4`, `minigame_size`.
+// The size of a minigame or a menu on the table, times its camera's fit.
+// Each menu has its own: its camera's fit says little of its room's size.
+// The minigame menu's room surrounded the player, filled both eyes and cost
+// 10 ms of GPU an image for 61 draws (2026-10-10); at 0.15, chosen in the
+// headset, it stands on the table as a model (6 ms); the mode selection was
+// too small at that size. Read every 2 s, to settle them by eye:
+// `adb shell setprop debug.partyboard.size_74 0.5` (the scene's number, as
+// "Scene N" in the log), `menu_size` and `minigame_size` for the others.
 float table_size(OMOVL scene)
 {
-    static float menuSize = 0.15f, minigameSize = 1.0f;
+    if (board_scene(scene)) return 1.0f;
+    const bool menu = menu_scene(scene);
+    static OMOVL readScene = DLL_NONE;
+    static float size = 1.0f;
 #if defined(__ANDROID__)
     static auto readAt = std::chrono::steady_clock::time_point {};
     const auto now = std::chrono::steady_clock::now();
-    if (now - readAt >= std::chrono::seconds(2)) {
+    if (scene != readScene || now - readAt >= std::chrono::seconds(2)) {
+        readScene = scene;
         readAt = now;
         const auto read = [](const char *name, float fallback) {
             char value[PROP_VALUE_MAX] = {};
             __system_property_get(name, value);
-            const float v = value[0] != '\0' ? std::strtof(value, nullptr) : fallback;
-            return v > 0.05f && v < 4.0f ? v : fallback;
+            const float v = value[0] != 0 ? std::strtof(value, nullptr) : fallback;
+            return v > 0.02f && v < 4.0f ? v : fallback;
         };
-        const float menu = read("debug.partyboard.menu_size", 0.15f);
-        const float minigame = read("debug.partyboard.minigame_size", 1.0f);
-        if (menu != menuSize || minigame != minigameSize) {
-            __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Table sizes: menus %.2f, minigames %.2f",
-                menu, minigame);
+        // Settled in the headset: the minigame menu, the mode selection.
+        float fallback = menu ? 0.5f : 1.0f;
+        if (scene == DLL_mgmodedll) fallback = 0.15f;
+        if (scene == DLL_modeseldll) fallback = 0.5f;
+        fallback = read(menu ? "debug.partyboard.menu_size" : "debug.partyboard.minigame_size", fallback);
+        char name[48];
+        std::snprintf(name, sizeof(name), "debug.partyboard.size_%d", static_cast<int>(scene));
+        const float chosen = read(name, fallback);
+        if (chosen != size) {
+            __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Scene %d on the table at %.2f of its fit",
+                static_cast<int>(scene), chosen);
         }
-        menuSize = menu;
-        minigameSize = minigame;
+        size = chosen;
     }
+    return size;
+#else
+    (void)menu;
+    return 1.0f;
 #endif
-    return board_scene(scene) ? 1.0f : menu_scene(scene) ? menuSize : minigameSize;
 }
 
 bool minigame_scene(OMOVL scene)
