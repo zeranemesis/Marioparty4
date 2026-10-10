@@ -172,6 +172,14 @@
    gfx::finish();
    auto imguiDrawData = imgui::freeze();
  
+@@ -335,6 +340,7 @@ void end_frame() noexcept {
+     } else if (!screenHidden) {
+       Log.info("Skipping present; window not presentable");
+     }
++    gfx::stereo::frame_timestamps_finish(encoder); // the probes' other passes
+     const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Redraw command buffer"};
+     const auto buffer = encoder.Finish(&cmdBufDescriptor);
+     {
 --- a/lib/dolphin/gx/GXAurora.cpp
 +++ b/lib/dolphin/gx/GXAurora.cpp
 @@ -35,7 +35,7 @@ void GXInsertDebugMarker(const char* label) {
@@ -1015,7 +1023,7 @@
        auto draw = leftDraws[sequence[p++]];
        draw.instanceCount = 2;
        push_gx(draw);
-@@ -1460,16 +1615,23 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+@@ -1460,16 +1615,24 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
      stereo::begin_access(passInfo.stereoImage, passInfo.stereoTag, passInfo.stereoHasWorld, passInfo.stereoHud);
    }
    const auto label = fmt::format("Render pass {}", passIndex);
@@ -1027,19 +1035,20 @@
        .colorAttachmentCount = attachments.size(),
        .colorAttachments = attachments.data(),
        .depthStencilAttachment = depthStencilAttachmentPtr,
-+      .timestampWrites = eyesPass || hudPass ? stereo::pass_timestamps(hudPass) : nullptr,
++      .timestampWrites = eyesPass || hudPass ? stereo::pass_timestamps(hudPass)
++                                             : stereo::other_pass_timestamps(passInfo.resolveTarget != nullptr),
    };
  
    auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
    render_pass(pass, frame, passInfo);
    pass.End();
-+  if (renderPassDescriptor.timestampWrites != nullptr) {
++  if (renderPassDescriptor.timestampWrites != nullptr && (eyesPass || hudPass)) {
 +    stereo::pass_timestamps_resolve(cmd, hudPass);
 +  }
  
    if (passInfo.captureDepthSnapshot) {
      depth_peek::encode_frame_snapshot(cmd, passInfo.copySourceDepthView, passInfo.targetSize, passInfo.msaaSamples);
-@@ -1539,6 +1701,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
+@@ -1539,6 +1702,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
    // Bind static bind group for the whole pass
    pass.SetBindGroup(0, g_staticBindGroup);
    pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
@@ -1047,7 +1056,7 @@
  
    for (const auto& cmd : passInfo.commands) {
  #ifdef AURORA_GFX_DEBUG_GROUPS
-@@ -1580,6 +1743,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
+@@ -1580,6 +1744,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
        switch (draw.type) {
        case ShaderType::Clear:
          clear::render(draw.clear, pass, passInfo.targetSize);
@@ -1055,7 +1064,7 @@
          break;
        case ShaderType::GX:
          gx::render(draw.gx, pass);
-@@ -1587,6 +1751,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
+@@ -1587,6 +1752,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
  #ifdef AURORA_ENABLE_RMLUI
        case ShaderType::Rml:
          rmlui::render(draw.rml, pass);
@@ -1063,7 +1072,7 @@
          break;
  #endif
        }
-@@ -1692,6 +1857,10 @@ std::pair<ByteBuffer, Range> map_uniform(size_t length) {
+@@ -1692,6 +1858,10 @@ std::pair<ByteBuffer, Range> map_uniform(size_t length) {
    const auto range = map(current_frame_packet().uniforms, length, g_cachedLimits.minUniformBufferOffsetAlignment);
    return {ByteBuffer{current_frame_packet().uniforms.data() + range.offset, range.size}, range};
  }
@@ -2234,7 +2243,7 @@
    g_image = -1;
  #endif
  }
-@@ -622,8 +1179,128 @@ void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept
+@@ -622,8 +1179,255 @@ void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept
  #endif
  }
  
@@ -2281,6 +2290,105 @@
 +}
 +} // namespace
 +#endif
++
++#if defined(__ANDROID__)
++namespace {
++// The frame's other render passes, timed (probes): where the GPU goes besides
++// the eyes and the interface. In Three Throw the game's GPU time was some
++// 4 ms over its eyes' and HUD passes, unaccounted for (2026-10-10).
++constexpr uint32_t kOtherPasses = 30;
++struct FrameTimer {
++  std::atomic<int> state{0}; // 0 free, 1 encoding, 2 encoded, 3 mapping
++  wgpu::QuerySet queries;
++  wgpu::Buffer resolve, readback;
++  std::array<wgpu::PassTimestampWrites, kOtherPasses> writes{};
++  std::array<bool, kOtherPasses> copy{};
++  uint32_t used = 0;
++};
++std::array<FrameTimer, 6> g_frameTimers;
++int g_frameTimer = -1;
++std::mutex g_frameStatsMutex;
++double g_copyMs = 0, g_otherMs = 0;
++uint32_t g_copyPasses = 0, g_otherPasses = 0, g_frameSamples = 0;
++std::chrono::steady_clock::time_point g_frameStatsAt = std::chrono::steady_clock::now();
++
++void record_frame_times(double copyMs, uint32_t copies, double otherMs, uint32_t others) {
++  std::lock_guard lock{g_frameStatsMutex};
++  g_copyMs += copyMs;
++  g_otherMs += otherMs;
++  g_copyPasses += copies;
++  g_otherPasses += others;
++  ++g_frameSamples;
++  const auto now = std::chrono::steady_clock::now();
++  if (now - g_frameStatsAt < std::chrono::seconds(5) || g_frameSamples == 0) return;
++  Log.info("Frame GPU: EFB copy passes {:.2f} ms a frame ({:.1f} passes), other game passes {:.2f} ms ({:.1f} passes), "
++           "{} frames",
++           g_copyMs / g_frameSamples, static_cast<double>(g_copyPasses) / g_frameSamples, g_otherMs / g_frameSamples,
++           static_cast<double>(g_otherPasses) / g_frameSamples, g_frameSamples);
++  g_copyMs = g_otherMs = 0;
++  g_copyPasses = g_otherPasses = g_frameSamples = 0;
++  g_frameStatsAt = now;
++}
++} // namespace
++#endif
++
++const wgpu::PassTimestampWrites* other_pass_timestamps(bool copy) noexcept {
++#if defined(__ANDROID__)
++  if (!webgpu::g_timestampsEnabled || !g_switches.probes) return nullptr;
++  if (g_frameTimer < 0) {
++    for (size_t i = 0; i < g_frameTimers.size(); ++i) {
++      if (g_frameTimers[i].state.load() == 0) {
++        g_frameTimer = static_cast<int>(i);
++        break;
++      }
++    }
++    if (g_frameTimer < 0) return nullptr;
++    auto& timer = g_frameTimers[g_frameTimer];
++    if (!timer.queries) {
++      const wgpu::QuerySetDescriptor queryDesc{
++          .label = "Frame pass timestamps", .type = wgpu::QueryType::Timestamp, .count = kOtherPasses * 2};
++      timer.queries = webgpu::g_device.CreateQuerySet(&queryDesc);
++      const wgpu::BufferDescriptor resolveDesc{.label = "Frame timestamps resolve",
++                                               .usage = wgpu::BufferUsage::QueryResolve | wgpu::BufferUsage::CopySrc,
++                                               .size = kOtherPasses * 16};
++      timer.resolve = webgpu::g_device.CreateBuffer(&resolveDesc);
++      const wgpu::BufferDescriptor readbackDesc{.label = "Frame timestamps readback",
++                                                .usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst,
++                                                .size = kOtherPasses * 16};
++      timer.readback = webgpu::g_device.CreateBuffer(&readbackDesc);
++      for (uint32_t i = 0; i < kOtherPasses; ++i) {
++        timer.writes[i] = {.querySet = timer.queries, .beginningOfPassWriteIndex = 2 * i, .endOfPassWriteIndex = 2 * i + 1};
++      }
++    }
++    timer.state = 1;
++    timer.used = 0;
++  }
++  auto& timer = g_frameTimers[g_frameTimer];
++  if (timer.used >= kOtherPasses) return nullptr;
++  timer.copy[timer.used] = copy;
++  return &timer.writes[timer.used++];
++#else
++  (void)copy;
++  return nullptr;
++#endif
++}
++
++void frame_timestamps_finish(wgpu::CommandEncoder& cmd) noexcept {
++#if defined(__ANDROID__)
++  if (g_frameTimer < 0) return;
++  auto& timer = g_frameTimers[g_frameTimer];
++  g_frameTimer = -1;
++  if (timer.used == 0) {
++    timer.state = 0;
++    return;
++  }
++  cmd.ResolveQuerySet(timer.queries, 0, timer.used * 2, timer.resolve, 0);
++  cmd.CopyBufferToBuffer(timer.resolve, 0, timer.readback, 0, timer.used * 16);
++  timer.state = 2;
++#else
++  (void)cmd;
++#endif
++}
 +
 +const wgpu::PassTimestampWrites* pass_timestamps(bool hud) noexcept {
 +#if defined(__ANDROID__)
@@ -2360,10 +2468,38 @@
 +                            });
 +  }
 +  g_encodingTimer = -1;
++  for (auto& frame : g_frameTimers) {
++    if (frame.state.load() != 2) continue;
++    frame.state = 3;
++    FrameTimer* const self = &frame;
++    const uint64_t bytes = frame.used * 16;
++    frame.readback.MapAsync(wgpu::MapMode::Read, 0, bytes, wgpu::CallbackMode::AllowSpontaneous,
++                            [self, bytes](wgpu::MapAsyncStatus status, wgpu::StringView) {
++                              double copyMs = 0, otherMs = 0;
++                              uint32_t copies = 0, others = 0;
++                              if (status == wgpu::MapAsyncStatus::Success) {
++                                const auto* data = static_cast<const uint64_t*>(self->readback.GetConstMappedRange(0, bytes));
++                                for (uint32_t i = 0; data != nullptr && i < self->used; ++i) {
++                                  if (data[2 * i + 1] <= data[2 * i]) continue;
++                                  const double ms = (data[2 * i + 1] - data[2 * i]) / 1e6;
++                                  if (self->copy[i]) {
++                                    copyMs += ms;
++                                    ++copies;
++                                  } else {
++                                    otherMs += ms;
++                                    ++others;
++                                  }
++                                }
++                                self->readback.Unmap();
++                              }
++                              record_frame_times(copyMs, copies, otherMs, others);
++                              self->state = 0;
++                            });
++  }
    for (const auto& accessed : g_accessed) {
      Image target;
      {
-@@ -658,7 +1335,8 @@ void after_submit() noexcept {
+@@ -658,7 +1462,8 @@ void after_submit() noexcept {
      const int eyesFd = end_access(target.memory, target.texture);
      const int fd = accessed.hud ? merge_fences(eyesFd, end_access(target.hudMemory, target.hudTexture)) : eyesFd;
      if (g_callback != nullptr) {
@@ -2373,7 +2509,7 @@
      } else if (fd >= 0) {
        close(fd);
      }
-@@ -676,6 +1354,7 @@ bool AuroraStereoRegisterImages(void* const* eyeBuffers, void* const* hudBuffers
+@@ -676,6 +1481,7 @@ bool AuroraStereoRegisterImages(void* const* eyeBuffers, void* const* hudBuffers
                                  uint32_t height, uint32_t hudWidth, uint32_t hudHeight,
                                  AuroraStereoCallback callback, void* user) {
  #if defined(__ANDROID__)
@@ -2381,7 +2517,7 @@
    if (!webgpu::g_device) {
      return false;
    }
-@@ -750,21 +1429,25 @@ bool AuroraStereoRegisterImages(void* const* eyeBuffers, void* const* hudBuffers
+@@ -750,21 +1556,25 @@ bool AuroraStereoRegisterImages(void* const* eyeBuffers, void* const* hudBuffers
  void AuroraStereoBegin(uint32_t image, const float clip[2][16], uint64_t frameTag) {
  #if defined(__ANDROID__)
    // GX queues draws in its FIFO. Consume the preceding camera's commands
@@ -2422,7 +2558,7 @@
  #else
    (void)image;
    (void)clip;
-@@ -776,9 +1459,10 @@ void AuroraStereoEnd(void) {
+@@ -776,9 +1586,10 @@ void AuroraStereoEnd(void) {
  #if defined(__ANDROID__)
    // Closing recording before draining loses deferred display-list draws:
    // they would only be decoded at aurora_end_frame, after g_recording is off.
@@ -2436,7 +2572,7 @@
  #endif
  }
  
-@@ -786,8 +1470,12 @@ bool AuroraStereoActive(void) { return recording(); }
+@@ -786,8 +1597,12 @@ bool AuroraStereoActive(void) { return recording(); }
  
  void AuroraStereoSetEyeSize(uint32_t width, uint32_t height) {
  #if defined(__ANDROID__)
@@ -2451,7 +2587,7 @@
  #else
    (void)width;
    (void)height;
-@@ -796,12 +1484,50 @@ void AuroraStereoSetEyeSize(uint32_t width, uint32_t height) {
+@@ -796,12 +1611,50 @@ void AuroraStereoSetEyeSize(uint32_t width, uint32_t height) {
  
  void AuroraStereoSetHud(bool draw) {
  #if defined(__ANDROID__)
@@ -2503,7 +2639,7 @@
  void AuroraStereoHideScreen(bool hidden) {
  #if defined(__ANDROID__)
    g_screenHidden.store(hidden, std::memory_order_relaxed);
-@@ -813,30 +1539,91 @@ void AuroraStereoHideScreen(bool hidden) {
+@@ -813,30 +1666,91 @@ void AuroraStereoHideScreen(bool hidden) {
  extern "C" void AuroraStereoSetSortKey(float key) {
  #if defined(__ANDROID__)
    using namespace aurora::gfx::stereo;
@@ -2605,7 +2741,7 @@
  #else
    (void)uncut;
  #endif
-@@ -845,8 +1632,7 @@ extern "C" void AuroraStereoSetUncut(bool uncut) {
+@@ -845,8 +1759,7 @@ extern "C" void AuroraStereoSetUncut(bool uncut) {
  extern "C" void AuroraStereoWorldOnly(bool enabled) {
  #if defined(__ANDROID__)
    // The FIFO is deferred: process camera draws before changing the scope.
@@ -2617,7 +2753,7 @@
  #endif
 --- a/lib/gfx/stereo.hpp
 +++ b/lib/gfx/stereo.hpp
-@@ -58,6 +58,11 @@ void instanced_failed(const std::string& message) noexcept;
+@@ -58,6 +58,15 @@ void instanced_failed(const std::string& message) noexcept;
  // On the render thread: the image is about to be drawn (render pass encode),
  // and the frame using it was just submitted (aurora.cpp).
  void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept;
@@ -2626,10 +2762,14 @@
 +// then, once the pass ended, their resolve into a readback buffer.
 +const wgpu::PassTimestampWrites* pass_timestamps(bool hud) noexcept;
 +void pass_timestamps_resolve(wgpu::CommandEncoder& cmd, bool hud) noexcept;
++// Every other render pass of the frame timed too (probes): EFB copies apart.
++// Resolved once by frame_timestamps_finish, before the frame's encoder ends.
++const wgpu::PassTimestampWrites* other_pass_timestamps(bool copy) noexcept;
++void frame_timestamps_finish(wgpu::CommandEncoder& cmd) noexcept;
  void after_submit() noexcept;
  
  // What common.cpp turns into a render pass: the eyes' (hud null), or the
-@@ -86,8 +91,23 @@ struct PassDesc {
+@@ -86,8 +95,23 @@ struct PassDesc {
    // sortOpaque sends the sortable runs front to back.
    const std::vector<DrawOrder>* order = nullptr;
    bool sortOpaque = false;

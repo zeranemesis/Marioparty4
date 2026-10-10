@@ -1192,7 +1192,10 @@ extern "C" BOOL PartyBoard_StereoBackdrop(float x, float y, float z, float radiu
         // slope went with the scenery (8.6 times the camera's distance,
         // 2026-10-10), nor Paratrooper Plunge's or Manta Rings'. Per scene:
         // `debug.partyboard.scenery_<scene>`, overriding `open_scenery`.
-        const bool course = sScene == DLL_m401Dll || sScene == DLL_m406Dll || sScene == DLL_m408Dll;
+        // Three Throw too: through its baskets' nets the room showed where its
+        // stands had been left out, as holes in the baskets (2026-10-10).
+        const bool course = sScene == DLL_m401Dll || sScene == DLL_m406Dll || sScene == DLL_m408Dll
+            || sScene == DLL_m410Dll;
         static float factor = 3.0f;
         static OMOVL factorScene = DLL_NONE;
 #if defined(__ANDROID__)
