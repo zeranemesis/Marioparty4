@@ -292,7 +292,7 @@ int main() {
     minigame.set_hitches_need_gpu(true);
     calm.sequence = 720;
     assert(minigame.update(calm, 60, 0, 3) == 1.0f && minigame.last_decision() == D2::Kept);
-    quest::QualitySample busy{721, 120, 7, 2, 1, 0}; // 7 ms of 8.3: busy
+    quest::QualitySample busy{721, 120, 7.6f, 2, 1, 0}; // 7.6 ms of 8.3: busy
     assert(minigame.update(busy, 60, 0, 3) == 0.95f && minigame.last_decision() == D2::Lowered);
 
     // Paced images missing their display frame (72 Hz): the requests stay

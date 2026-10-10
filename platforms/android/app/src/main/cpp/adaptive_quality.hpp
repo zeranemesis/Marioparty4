@@ -115,7 +115,11 @@ public:
     // the eyes' pass at 7 ms of 13.9; each lowering was undone only in part
     // and the eyes sank to 70 to 80%, blurred for nothing (2026-10-10). A
     // board keeps them: there fewer pixels did end its hitches.
-    const bool gpuBusy = !mHitchesNeedGpu || !gpuKnown || gpu >= 0.75f * budget;
+    // 90%, not 75%: the GPU then ran at its lowest clock (456 of 640 MHz) and
+    // the runtime raises it only for a GPU that is really loaded; lowered at
+    // 75%, Toad's Quick Draw and Paratrooper Plunge sat at 80%, blurred,
+    // while the GPU had a third of its clock to spare (2026-10-10).
+    const bool gpuBusy = !mHitchesNeedGpu || !gpuKnown || gpu >= 0.9f * budget;
     const bool pressure = ((hitching || missing) && gpuBusy) || (gpuKnown ? (gpu >= 0.9f * budget ||
         (sample.latePercent > 1 && gpu >= 0.85f * budget) || (stalled && !cpuBound)) : (congested && !cpuBound));
     // Fewer pixels only help a frame limited by its pixels. The headset's
