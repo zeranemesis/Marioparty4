@@ -285,6 +285,15 @@ int main() {
     edge.set_cap(1.0f);
     for (unsigned i = 700; i < 710; ++i) { calm.sequence = i; edge.update(calm, 60, 0, 1); }
     assert(edge.scale() == 1.0f && edge.last_decision() == D2::Kept);
+    // A minigame: hitches with the GPU far from busy are the game's own, and
+    // fewer pixels would only blur it (Booksquirm, 2026-10-10).
+    quest::AdaptiveQuality minigame;
+    minigame.set_cap(1.0f);
+    minigame.set_hitches_need_gpu(true);
+    calm.sequence = 720;
+    assert(minigame.update(calm, 60, 0, 3) == 1.0f && minigame.last_decision() == D2::Kept);
+    quest::QualitySample busy{721, 120, 7, 2, 1, 0}; // 7 ms of 8.3: busy
+    assert(minigame.update(busy, 60, 0, 3) == 0.95f && minigame.last_decision() == D2::Lowered);
 
     // Paced images missing their display frame (72 Hz): the requests stay
     // regular, so only the missed count shows the pressure.
