@@ -19,6 +19,7 @@
 #include <android/hardware_buffer.h>
 
 #include <array>
+#include <unordered_map>
 #include <string>
 #include <atomic>
 #include <cstdint>
@@ -155,6 +156,9 @@ public:
   // Game thread, each frame: the room-space box around what the game offered
   // to draw (null: none). The next images' fields of view are narrowed to it.
   void set_scene_bounds(const float* low, const float* high);
+  // Game thread, each frame: the game's scene (overlay number). A minigame
+  // starts again at the resolution it last held.
+  void set_scene(int scene);
   // XR thread: that part, as {x, y, width, height}.
   std::array<float, 4> hud_crop() const;
   XrPosef window_shown_pose() const { return mShownWindowPose; }
@@ -454,6 +458,8 @@ private:
   // Cropped eyes (set_scene_bounds): the box, when it came, and how much of
   // the full fields the eyes drew (pixels), for the log.
   std::array<float, 3> mBoundsLow{}, mBoundsHigh{};
+  int mScene = -1;
+  std::unordered_map<int, float> mSceneQuality; // the resolution each minigame last held
   bool mBoundsValid = false;
   std::chrono::steady_clock::time_point mBoundsAt{};
   bool mCropEnabled = true; // debug.partyboard.crop

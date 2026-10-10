@@ -1026,7 +1026,7 @@ bool StereoView::game_frame(StereoFrame& out) {
     // minigame fills part of the view, and the rest of the eyes' pixels were
     // cleared, multisampled, resolved, copied and composited for nothing.
     // The pixels kept are as dense as before, so the image is as sharp.
-    if (!mapped) crop_eyes(*free);
+    if (!mapped || !mWindowFramed) crop_eyes(*free);
     for (int eye = 0; eye < 2; ++eye) {
       view_matrix(mViews[eye].pose, out.eyeView[eye]);
       projection_matrix(free->views[eye].fov, out.eyeProj[eye]);
@@ -1392,7 +1392,13 @@ void StereoView::set_board_mode(bool board) {
     mMinigameQuality = minigame;
     mQuality.set_cap(minigame ? AdaptiveQuality::kMaxCap : mQualityCap);
     mQuality.set_step(minigame ? kMinigameQualityStep : 0.05f);
-    if (minigame) mQuality.start_at(kMinigameStartQuality);
+    if (minigame) {
+      // The resolution this minigame last held, without the seconds of
+      // hitches the controller takes to find it again (Manta Rings: 32 in
+      // its first 5 s, 2026-10-10).
+      const auto known = mSceneQuality.find(mScene);
+      mQuality.start_at(known != mSceneQuality.end() ? known->second : kMinigameStartQuality);
+    }
     mRenderScale = std::min(1.0f, mQuality.scale() / mMaxScale);
     const auto [width, height] = eye_size(mRenderScale);
     if (width > mImageEyeWidth || height > mImageEyeHeight) mResizePending = true;
@@ -1433,6 +1439,15 @@ void StereoView::write_snapshot(GLuint texture, GLint x, GLint y, GLsizei width,
     std::fclose(file);
     LOGI("Stereo: snapshot %s (%dx%d)", path.c_str(), width, height);
   }
+}
+
+void StereoView::set_scene(int scene) {
+  std::lock_guard lock{mMutex};
+  if (scene == mScene) return;
+  // Leaving a minigame: the resolution it held, unless a lowering was still
+  // on trial (the controller's last decision undone or not yet judged).
+  if (mMinigameQuality && mScene >= 0 && !mQuality.holding()) mSceneQuality[mScene] = mQuality.scale();
+  mScene = scene;
 }
 
 void StereoView::set_scene_bounds(const float* low, const float* high) {
@@ -2460,6 +2475,10 @@ __attribute__((visibility("default"))) uint32_t PartyBoardQuest_StereoHiddenArea
 __attribute__((visibility("default"))) void PartyBoardQuest_StereoHudCrop(float x, float y, float width,
                                                                           float height) {
   if (quest::StereoView* view = quest::g_stereoView) view->set_hud_crop(x, y, width, height);
+}
+
+__attribute__((visibility("default"))) void PartyBoardQuest_StereoScene(int scene) {
+  if (quest::StereoView* view = quest::g_stereoView) view->set_scene(scene);
 }
 
 __attribute__((visibility("default"))) void PartyBoardQuest_StereoSceneBounds(const float* low, const float* high) {

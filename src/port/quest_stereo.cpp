@@ -84,6 +84,7 @@ using HudCropFn = void (*)(float x, float y, float width, float height);
 using SceneBoundsFn = void (*)(const float *low, const float *high);
 using InsetFn = void (*)(float x, float y, float width, float height);
 using CameraViewFn = void (*)(bool cameraView);
+using SceneFn = void (*)(int scene);
 using TableSetupHoldFn = bool (*)();
 using HiddenAreaFn = uint32_t (*)(uint32_t eye, float *rects, uint32_t capacity, uint32_t *version);
 using FoveationAvailableFn = void (*)(bool available);
@@ -104,6 +105,7 @@ struct Quest {
     SceneBoundsFn sceneBounds = nullptr;   // optional: what the eyes need to draw (cropped eyes)
     InsetFn inset = nullptr;               // optional: a part of the TV picture shown beside the 3D
     CameraViewFn cameraView = nullptr;     // optional: this scene from its camera's point of view
+    SceneFn scene = nullptr;               // optional: which scene (its own resolution)
     TableSetupHoldFn tableSetupHold = nullptr; // optional
     HiddenAreaFn hiddenArea = nullptr;         // optional: every pixel drawn
     FoveationAvailableFn foveationAvailable = nullptr; // optional: no automatic foveation
@@ -149,6 +151,7 @@ float sBoundsHigh[3]{-INFINITY, -INFINITY, -INFINITY};
 // Larger objects (meters, in the room) are left out: a sea or a sky around
 // the table would make the box the whole view.
 constexpr float kBoundsMaxRadius = 1.5f;
+constexpr float kBoundsMaxRadiusOpen = 15.0f;
 // Backdrops (see PartyBoard_StereoBackdrop): the eyes in the game camera's view
 // space, and the scene's size in game units.
 float sEyeInView[2][3]{};
@@ -399,6 +402,7 @@ bool find_quest()
             sQuest.sceneBounds = reinterpret_cast<SceneBoundsFn>(dlsym(lib, "PartyBoardQuest_StereoSceneBounds"));
             sQuest.inset = reinterpret_cast<InsetFn>(dlsym(lib, "PartyBoardQuest_StereoInset"));
             sQuest.cameraView = reinterpret_cast<CameraViewFn>(dlsym(lib, "PartyBoardQuest_StereoCameraView"));
+            sQuest.scene = reinterpret_cast<SceneFn>(dlsym(lib, "PartyBoardQuest_StereoScene"));
             sQuest.tableSetupHold = reinterpret_cast<TableSetupHoldFn>(dlsym(lib, "PartyBoardQuest_TableSetupHold"));
             sQuest.hiddenArea = reinterpret_cast<HiddenAreaFn>(dlsym(lib, "PartyBoardQuest_StereoHiddenArea"));
             sQuest.foveationAvailable =
@@ -676,6 +680,7 @@ extern "C" void PartyBoard_StereoBeginCamera(s16 cameraNo)
     const OMOVL scene = omCurrentOvlGet();
     const bool spatialScene = spatial_scene(scene);
     if (sQuest.cameraView != nullptr) sQuest.cameraView(camera_view_minigame(scene));
+    if (sQuest.scene != nullptr) sQuest.scene(static_cast<int>(scene));
     // A menu or a minigame with several cameras (layers, or a split screen) shows its
     // first one in 3D, with the layers over it (every minigame in 3D, asked
     // for 2026-10-06).
@@ -1024,7 +1029,7 @@ extern "C" void PartyBoard_StereoEndCamera(void)
                 // What this frame offered to draw, for the next one's eyes
                 // (none through a window: the window is the frame).
                 if (sQuest.sceneBounds != nullptr) {
-                    const bool any = !sWindow && sBoundsLow[0] <= sBoundsHigh[0];
+                    const bool any = (!sWindow || sFrame.window == 2) && sBoundsLow[0] <= sBoundsHigh[0];
                     sQuest.sceneBounds(any ? sBoundsLow : nullptr, any ? sBoundsHigh : nullptr);
                 }
             }
@@ -1295,11 +1300,16 @@ extern "C" void PartyBoard_StereoObjectEnd(void)
 // view space: into the frame's box in the room (sBoundsLow/High).
 static void add_to_bounds(float x, float y, float z, float radius)
 {
-    if (!sActive || !sCameraViewSet || sWindow || !std::isfinite(radius)) return;
+    // On the table, and from the camera's place (open): a minigame's arena
+    // stands in the room there too, the room seen around it once its sky is
+    // left out. Not through a framed window, which is the frame already.
+    if (!sActive || !sCameraViewSet || (sWindow && sFrame.window != 2) || !std::isfinite(radius)) return;
     const auto &m = sViewToRoom;
     const float scale = std::sqrt(m[0][0] * m[0][0] + m[1][0] * m[1][0] + m[2][0] * m[2][0]);
     const float r = radius * scale;
-    if (!(r < kBoundsMaxRadius)) return;
+    // From the camera's place the scene is life-sized around the player: only
+    // what is larger than the room counts as a sky or a sea.
+    if (!(r < (sWindow ? kBoundsMaxRadiusOpen : kBoundsMaxRadius))) return;
     for (int axis = 0; axis < 3; ++axis) {
         const float c = m[axis][0] * x + m[axis][1] * y + m[axis][2] * z + m[axis][3];
         if (!std::isfinite(c)) return;
