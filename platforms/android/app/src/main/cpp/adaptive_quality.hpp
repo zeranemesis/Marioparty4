@@ -43,6 +43,7 @@ public:
   // eyes' pass under its 13.9 ms, so each trial was undone and the pixels held
   // for 30 s at 120% while it ran at 48 to 59 images a second (2026-10-10).
   void set_step(float step) { mStep = std::clamp(step, 0.01f, 0.25f); }
+  void set_hitches_need_gpu(bool need) { mHitchesNeedGpu = need; }
   // The lowest scale a lowering may reach (0.65 by default, readable). On a
   // board the eyes' pass took 8.7 ms at 65% as at 90%, the images made
   // smaller too (2026-10-04, build 191): its time is in the draws and their
@@ -108,7 +109,14 @@ public:
     // More than 5% of the images missing their display frame: the pacer
     // plans for 2% (frame_pacing.hpp), the rest is the GPU's queue.
     const bool missing = missed * 20ull > requests;
-    const bool pressure = hitching || missing || (gpuKnown ? (gpu >= 0.9f * budget ||
+    // In a minigame (set_hitches_need_gpu), hitches and missed frames only
+    // count while the GPU is busy: in Booksquirm one or two images a second
+    // came late (the game's own spikes, up to 52 ms) with the GPU at 66% and
+    // the eyes' pass at 7 ms of 13.9; each lowering was undone only in part
+    // and the eyes sank to 70 to 80%, blurred for nothing (2026-10-10). A
+    // board keeps them: there fewer pixels did end its hitches.
+    const bool gpuBusy = !mHitchesNeedGpu || !gpuKnown || gpu >= 0.75f * budget;
+    const bool pressure = ((hitching || missing) && gpuBusy) || (gpuKnown ? (gpu >= 0.9f * budget ||
         (sample.latePercent > 1 && gpu >= 0.85f * budget) || (stalled && !cpuBound)) : (congested && !cpuBound));
     // Fewer pixels only help a frame limited by its pixels. The headset's
     // counters cannot tell (they miss the game's Vulkan work): on the Toad
@@ -187,6 +195,7 @@ private:
   };
   float mScale = 1.0f, mCap = 1.25f, mFloor = 0.65f;
   float mStep = 0.05f;
+  bool mHitchesNeedGpu = false;
   uint64_t mSequence = 0;
   unsigned mCalm = 0;
   unsigned mHold = 0;

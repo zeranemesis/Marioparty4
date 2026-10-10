@@ -1392,6 +1392,7 @@ void StereoView::set_board_mode(bool board) {
     mMinigameQuality = minigame;
     mQuality.set_cap(minigame ? AdaptiveQuality::kMaxCap : mQualityCap);
     mQuality.set_step(minigame ? kMinigameQualityStep : 0.05f);
+    mQuality.set_hitches_need_gpu(minigame);
     if (minigame) {
       // The resolution this minigame last held, without the seconds of
       // hitches the controller takes to find it again (Manta Rings: 32 in
