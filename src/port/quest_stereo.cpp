@@ -598,18 +598,46 @@ static int primary_camera()
             return own;
         }
     }
+    // A camera with no part of the screen draws nothing: Long Claw of the
+    // Law's intro camera, shrunk to nothing once the game starts, stayed the
+    // eyes' (its target nearest the player's character) (2026-10-10).
+    const auto shown = [](int camera) {
+        const auto& view = Hu3DCamera[camera];
+        return -1.0f != view.fov && view.viewportW > 1.0f && view.viewportH > 1.0f;
+    };
     int first = -1;
     bool split = false;
     for (int camera = 0; camera < HU3D_CAM_MAX; ++camera) {
-        if (-1.0f == Hu3DCamera[camera].fov) continue;
+        if (!shown(camera)) continue;
         if (first < 0) {
             first = camera;
         } else if (!same_viewport(camera, first)) {
             split = true;
         }
     }
+    if (first < 0) {
+        // None on show (a cut, a wipe): the first active one, as before.
+        for (int camera = 0; camera < HU3D_CAM_MAX && first < 0; ++camera) {
+            if (-1.0f != Hu3DCamera[camera].fov) first = camera;
+        }
+        return first;
+    }
     if (!split) {
         return first;
+    }
+    // A split screen whose cameras each draw one player's character (Long
+    // Claw of the Law: player n's on camera n only): the camera drawing the
+    // local player's, however near another's target stands.
+    const u16 own = CharModelCameraBitGet(GWPlayerCfg[local_player()].character);
+    int ownCamera = -1, ownCount = 0;
+    for (int camera = 0; camera < HU3D_CAM_MAX; ++camera) {
+        if (shown(camera) && (own & (1u << camera)) != 0) {
+            ownCamera = ownCamera < 0 ? camera : ownCamera;
+            ++ownCount;
+        }
+    }
+    if (ownCount == 1) {
+        return ownCamera;
     }
     HuVecF player{};
     if (!CharModelPosGet(GWPlayerCfg[local_player()].character, &player)) {
@@ -622,7 +650,7 @@ static int primary_camera()
     float nearestDistance = INFINITY, chosenDistance = INFINITY;
     for (int camera = 0; camera < HU3D_CAM_MAX; ++camera) {
         const auto& view = Hu3DCamera[camera];
-        if (-1.0f == view.fov) continue;
+        if (!shown(camera)) continue;
         const float dx = view.target.x - player.x;
         const float dy = view.target.y - player.y;
         const float dz = view.target.z - player.z;

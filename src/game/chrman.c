@@ -223,6 +223,14 @@ BOOL CharModelPosGet(s16 charNo, HuVecF *pos)
     *pos = Hu3DData[charWork[charNo].modelId].pos;
     return TRUE;
 }
+
+u16 CharModelCameraBitGet(s16 charNo)
+{
+    if (charNo < 0 || charNo >= CHARNO_MAX || charWork[charNo].modelId == HU3D_MODELID_NONE) {
+        return 0;
+    }
+    return Hu3DData[charWork[charNo].modelId].cameraBit;
+}
 #endif
 
 HU3DMODELID CharModelCreate(s16 charNo, s16 model)

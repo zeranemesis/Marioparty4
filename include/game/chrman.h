@@ -34,6 +34,8 @@ HU3DMODELID CharModelCreate(s16 charNo, s16 model);
 // Where a character's model stands (its Hu3D position), FALSE without one
 // (the headset's minigame camera for the local player, src/port/quest_stereo.cpp).
 BOOL CharModelPosGet(s16 charNo, HuVecF *pos);
+// The cameras that draw a character's model (Hu3DModelCameraSet), 0 without one.
+u16 CharModelCameraBitGet(s16 charNo);
 #endif
 HU3DMOTID CharMotionCreate(s16 charNo, s32 data_num);
 void CharMotionNoSet(s16 charNo, HU3DMOTID motId, s32 motNo);
