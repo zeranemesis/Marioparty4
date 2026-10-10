@@ -29,6 +29,8 @@
 #include <port/test_input.h>
 #include <port/gamepad_priority.hpp>
 
+extern "C" void PartyBoard_QuestToast(const char *title, const char *text, int durationMs);
+
 namespace partyboard::ui {
 namespace {
 
@@ -426,6 +428,10 @@ Insets safe_area_insets(Rml::Context *context) noexcept
 
 void push_toast(Toast toast) noexcept
 {
+    // A headset shows the game's world in 3D and hides this screen, toasts
+    // with it: they go to a panel in the headset too (quest_stereo.cpp).
+    PartyBoard_QuestToast(toast.title.c_str(), toast.content.c_str(),
+        static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(toast.duration).count()));
     sToasts.push_back(std::move(toast));
 }
 

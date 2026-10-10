@@ -824,6 +824,28 @@ extern "C" void PartyBoard_StereoEndCamera(void)
     AuroraStereoWorldOnly(false);
 }
 
+// A toast of the game (ui::push_toast), shown in the headset too: its screen,
+// where toasts are drawn, is hidden while the world is in 3D. On a phone the
+// headset library is not there and nothing happens.
+extern "C" void PartyBoard_QuestToast(const char *title, const char *text, int durationMs)
+{
+#if defined(__ANDROID__)
+    static void (*toast)(const char *, const char *, int) = nullptr;
+    static bool looked = false;
+    if (!looked) {
+        void *lib = dlopen("libpartyboard_quest.so", RTLD_NOW | RTLD_NOLOAD);
+        if (lib == nullptr) return; // not loaded yet: look again next time
+        looked = true;
+        toast = reinterpret_cast<void (*)(const char *, const char *, int)>(dlsym(lib, "PartyBoardQuest_Toast"));
+    }
+    if (toast != nullptr) toast(title != nullptr ? title : "", text != nullptr ? text : "", durationMs);
+#else
+    (void)title;
+    (void)text;
+    (void)durationMs;
+#endif
+}
+
 extern "C" BOOL PartyBoard_StereoActive(void)
 {
     return sActive ? TRUE : FALSE;

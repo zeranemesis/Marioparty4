@@ -199,6 +199,67 @@ public final class QuestVr {
         sHelpHeight = height;
     }
 
+    // A toast of the game (achievement, online session waiting...), drawn on
+    // the headset's notice panel (quest_xr.cpp shows it for the toast's time):
+    // the screen the game draws toasts on is hidden while the world is in 3D.
+    // Called from the XR thread; the surface is the panel's own.
+    private static void drawNotice(Surface surface, int width, int height, String title, String text) {
+        if (surface == null) {
+            return;
+        }
+        Canvas canvas;
+        try {
+            canvas = surface.lockHardwareCanvas();
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            Log.w(TAG, "Notice panel unavailable", e);
+            return;
+        }
+        try {
+            float scale = width / 1024.0f;
+            canvas.drawColor(Color.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR);
+            Paint panel = new Paint(Paint.ANTI_ALIAS_FLAG);
+            panel.setColor(Color.argb(235, 24, 26, 36));
+            canvas.drawRoundRect(new android.graphics.RectF(0, 0, width, height), 28 * scale, 28 * scale, panel);
+            Paint accent = new Paint(Paint.ANTI_ALIAS_FLAG);
+            accent.setColor(Color.rgb(90, 160, 255));
+            canvas.drawRect(28 * scale, 0, width - 28 * scale, 8 * scale, accent);
+
+            Paint heading = new Paint(Paint.ANTI_ALIAS_FLAG);
+            heading.setColor(Color.WHITE);
+            heading.setTextSize(44 * scale);
+            heading.setTypeface(Typeface.DEFAULT_BOLD);
+            float y = 72 * scale;
+            canvas.drawText(title == null ? "" : title, 40 * scale, y, heading);
+
+            Paint body = new Paint(Paint.ANTI_ALIAS_FLAG);
+            body.setColor(Color.rgb(225, 228, 240));
+            body.setTextSize(30 * scale);
+            float maxWidth = width - 80 * scale;
+            y += 50 * scale;
+            // Wrapped by words, as many lines as fit.
+            String[] words = (text == null ? "" : text).split(" ");
+            StringBuilder line = new StringBuilder();
+            for (String word : words) {
+                String tried = line.length() == 0 ? word : line + " " + word;
+                if (body.measureText(tried) > maxWidth && line.length() > 0) {
+                    if (y > height - 20 * scale) {
+                        break;
+                    }
+                    canvas.drawText(line.toString(), 40 * scale, y, body);
+                    y += 40 * scale;
+                    line = new StringBuilder(word);
+                } else {
+                    line = new StringBuilder(tried);
+                }
+            }
+            if (line.length() > 0 && y <= height - 20 * scale) {
+                canvas.drawText(line.toString(), 40 * scale, y, body);
+            }
+        } finally {
+            surface.unlockCanvasAndPost(canvas);
+        }
+    }
+
     private static void onPlacement(boolean placing, int resolution, boolean passthrough, boolean model,
                                     boolean calibrating, boolean calibrationConfirmed, int minigameView,
                                     int sceneState, float tableLength, float tableWidth) {

@@ -112,6 +112,11 @@ constexpr int kHelpWidthPixels = 1024;
 constexpr int kHelpHeightPixels = 640;
 constexpr float kHelpWidthMeters = 0.56f;
 constexpr XrVector3f kHelpPosition{0.0f, -0.22f, -0.9f};
+// The game's toasts: a band above the center of the view.
+constexpr int kNoticeWidthPixels = 1024;
+constexpr int kNoticeHeightPixels = 224;
+constexpr float kNoticeWidthMeters = 0.5f;
+constexpr XrVector3f kNoticePosition{0.0f, 0.2f, -1.0f};
 
 constexpr std::array<int, 3> kResolutions{1080, 1440, 2160};
 
@@ -139,6 +144,7 @@ struct Java {
   jmethodID onSurface = nullptr;
   jmethodID onSurfaceReplaced = nullptr;
   jmethodID onHelpSurface = nullptr;
+  jmethodID drawNotice = nullptr;
   jmethodID onPlacement = nullptr;
   jmethodID onSessionState = nullptr;
   jmethodID onControllers = nullptr;
@@ -225,6 +231,8 @@ struct App {
   SurfaceQuad retiring; // the previous one, kept until Aurora has let go of it
   std::chrono::steady_clock::time_point retireAt;
   SurfaceQuad help;
+  SurfaceQuad notice;            // the game's toasts (PartyBoardQuest_Toast)
+  XrTime noticeUntil = 0;        // shown until then
 
   std::string statePath;
   TableSettings table;
@@ -307,6 +315,13 @@ void name_threads(App& app, bool sessionStart);
 // The table set-up the game waits for (PartyBoardQuest_TableSetupHold, the
 // game thread) and the XR thread runs. Needed: no calibrated table yet, and
 // not put off (B) this session. Open: the calibration panel is up.
+// The game's last toast (PartyBoardQuest_Toast, game thread), for the XR
+// thread to draw and show.
+std::mutex g_noticeMutex;
+std::string g_noticeTitle, g_noticeText;
+int g_noticeMs = 0;
+bool g_noticePending = false;
+
 std::atomic_bool g_setupNeeded = false;
 std::atomic_bool g_setupOpen = false;
 std::atomic_bool g_setupRequested = false;
@@ -1830,7 +1845,7 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
                                                                              : modelSettings.next;
   const auto* modelLayer = model ? app.stereo.layer(app.stage, modelChain) : nullptr;
 
-  std::array<const XrCompositionLayerBaseHeader*, 10> layers{};
+  std::array<const XrCompositionLayerBaseHeader*, 12> layers{};
   uint32_t layerCount = 0;
 
   XrCompositionLayerPassthroughFB room{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
@@ -1926,6 +1941,46 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
             app.stereo.hud_layer(app.stage, hudPose, hudSize, app.extensions.imageLayout ? &modelFlip : nullptr)) {
       layers[layerCount++] = hud;
     }
+  }
+
+  // The game's last toast, drawn when it came (Java), shown for its time.
+  {
+    std::string title, text;
+    int ms = 0;
+    {
+      std::lock_guard lock{g_noticeMutex};
+      if (g_noticePending) {
+        title = g_noticeTitle;
+        text = g_noticeText;
+        ms = g_noticeMs;
+        g_noticePending = false;
+      }
+    }
+    if (ms > 0 && app.notice.surface != nullptr && g_java.drawNotice != nullptr) {
+      jstring jTitle = env->NewStringUTF(title.c_str());
+      jstring jText = env->NewStringUTF(text.c_str());
+      env->CallStaticVoidMethod(g_java.questVr, g_java.drawNotice, app.notice.surface, app.notice.width,
+                                app.notice.height, jTitle, jText);
+      clear_exception(env);
+      env->DeleteLocalRef(jTitle);
+      env->DeleteLocalRef(jText);
+      app.noticeUntil = time + static_cast<XrTime>(std::clamp(ms, 1000, 30000)) * 1'000'000;
+    }
+  }
+  XrCompositionLayerQuad notice{XR_TYPE_COMPOSITION_LAYER_QUAD};
+  XrCompositionLayerImageLayoutFB noticeFlip{XR_TYPE_COMPOSITION_LAYER_IMAGE_LAYOUT_FB};
+  noticeFlip.flags = XR_COMPOSITION_LAYER_IMAGE_LAYOUT_VERTICAL_FLIP_BIT_FB;
+  if (!app.placing && time < app.noticeUntil && app.notice.swapchain != XR_NULL_HANDLE) {
+    notice.next = app.extensions.imageLayout ? &noticeFlip : nullptr;
+    notice.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+    notice.space = app.view;
+    notice.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    notice.subImage.swapchain = app.notice.swapchain;
+    notice.subImage.imageRect = {{0, 0}, {app.notice.width, app.notice.height}};
+    notice.pose = identity_pose();
+    notice.pose.position = kNoticePosition;
+    notice.size = {kNoticeWidthMeters, kNoticeWidthMeters * app.notice.height / app.notice.width};
+    layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&notice);
   }
 
   XrCompositionLayerQuad help{XR_TYPE_COMPOSITION_LAYER_QUAD};
@@ -2024,6 +2079,7 @@ bool set_up(App& app, JNIEnv* env) {
     return false;
   }
   create_surface_quad(app, env, kHelpWidthPixels, kHelpHeightPixels, app.help);
+  create_surface_quad(app, env, kNoticeWidthPixels, kNoticeHeightPixels, app.notice);
   create_passthrough(app);
   g_perf.init(app.instance, app.session, app.extensions.perfMetrics);
   // The eyes' images, at most 130% of the headset's recommended size (a
@@ -2079,7 +2135,7 @@ void tear_down(App& app, JNIEnv* env) {
   g_setupNeeded.store(false);
   g_setupOpen.store(false); // the game does not wait for a session that is gone
   destroy_passthrough(app);
-  for (SurfaceQuad* quad : {&app.screen, &app.next, &app.retiring, &app.help}) {
+  for (SurfaceQuad* quad : {&app.screen, &app.next, &app.retiring, &app.help, &app.notice}) {
     destroy_surface_quad(env, *quad);
   }
   if (app.actions.rightAim != XR_NULL_HANDLE) {
@@ -2174,6 +2230,18 @@ __attribute__((visibility("default"))) float PartyBoardQuest_ActiveRefreshRate()
 // through PartyBoard_QuestHoldOverlay): true while it should wait for the
 // table's calibration. The first call opens the panel, which the XR thread
 // shows on its next frame.
+// A toast of the game (ui::push_toast via quest_stereo.cpp, game thread):
+// shown in the headset for `durationMs`, the screen it is drawn on being
+// hidden while the world is in 3D.
+__attribute__((visibility("default"))) void PartyBoardQuest_Toast(const char* title, const char* text,
+                                                                  int durationMs) {
+  std::lock_guard lock{g_noticeMutex};
+  g_noticeTitle = title != nullptr ? title : "";
+  g_noticeText = text != nullptr ? text : "";
+  g_noticeMs = durationMs;
+  g_noticePending = true;
+}
+
 // The game's thread, from that thread (quest_stereo.cpp): named to the runtime.
 __attribute__((visibility("default"))) void PartyBoardQuest_GameThread(int tid) {
   g_gameThreadId = tid;
@@ -2207,6 +2275,10 @@ JNIEXPORT jboolean JNICALL Java_com_mariopartyrd_partyboard_quest_QuestVr_native
   g_java.onControllers = static_method(env, clazz, "onControllers", "(IFFFFFFFF)V");
   g_java.onExit = static_method(env, clazz, "onExit", "()V");
   g_java.onPlacement = static_method(env, clazz, "onPlacement", "(ZIZZZZIIFF)V");
+  // Optional: the game's toasts in the headset.
+  g_java.drawNotice = env->GetStaticMethodID(
+      clazz, "drawNotice", "(Landroid/view/Surface;IILjava/lang/String;Ljava/lang/String;)V");
+  if (g_java.drawNotice == nullptr) clear_exception(env);
   g_java.requestScenePermission = static_method(env, clazz, "requestScenePermission", "()V");
   for (jmethodID method : {g_java.onSurface, g_java.onSurfaceReplaced, g_java.onHelpSurface, g_java.onPlacement,
                            g_java.onSessionState, g_java.onControllers, g_java.onExit,
