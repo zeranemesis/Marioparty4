@@ -1457,11 +1457,14 @@ void StereoView::crop_eyes(Slot& slot) {
   if (mCropLogAt == std::chrono::steady_clock::time_point{}) mCropLogAt = now;
   if (now - mCropLogAt >= std::chrono::seconds(5)) {
     if (mCropLeases > 0) {
-      LOGI("Stereo crop: %u of %u images cropped, the eyes drew %.0f%% of their full fields' pixels",
-           mCropFrames, mCropLeases, mCropFull > 0.0 ? 100.0 * mCropDrawn / mCropFull : 100.0);
+      LOGI("Stereo crop: %u of %u images cropped, the eyes drew %.0f%% of their full fields' pixels "
+           "(not cropped: %u without a box, %u with the box at an eye, %u nearly whole)",
+           mCropFrames, mCropLeases, mCropFull > 0.0 ? 100.0 * mCropDrawn / mCropFull : 100.0, mCropNoBox,
+           mCropNearEye, mCropWide);
     }
     mCropLogAt = now;
     mCropFrames = mCropLeases = 0;
+    mCropNoBox = mCropNearEye = mCropWide = 0;
     mCropDrawn = mCropFull = 0.0;
   }
   ++mCropLeases;
@@ -1472,6 +1475,7 @@ void StereoView::crop_eyes(Slot& slot) {
   const bool usable = mCropEnabled && mBoundsValid && now - mBoundsAt < std::chrono::milliseconds(300) &&
                       mHiddenRects[0].empty() && mHiddenRects[1].empty();
   if (!usable) {
+    ++mCropNoBox;
     mCropDrawn += full;
     return;
   }
@@ -1489,6 +1493,7 @@ void StereoView::crop_eyes(Slot& slot) {
       const XrVector3f c = add(toEye.position, rotate(toEye.orientation, room));
       const float depth = -c.z;
       if (depth < 0.05f) {
+        ++mCropNearEye;
         mCropDrawn += full; // the box reaches the eye: all of its view
         return;
       }
@@ -1527,6 +1532,7 @@ void StereoView::crop_eyes(Slot& slot) {
                                 (std::tan(whole.angleUp) - std::tan(whole.angleDown)));
   }
   if (partX > 0.95f && partY > 0.95f) {
+    ++mCropWide;
     mCropDrawn += full; // nearly all of it anyway
     return;
   }

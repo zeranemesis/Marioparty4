@@ -320,6 +320,10 @@ void name_threads(App& app, bool sessionStart);
 // thread to draw and show.
 // A part of the TV picture shown beside the 3D (PartyBoardQuest_StereoInset,
 // game thread): x, y, width, height of the 640 x 480 picture, and when it came.
+// The game's scene wants its camera's point of view whatever the player
+// chose (PartyBoardQuest_StereoCameraView, game thread).
+std::atomic_bool g_sceneCameraView = false;
+
 std::mutex g_insetMutex;
 std::array<float, 4> g_inset{};
 std::chrono::steady_clock::time_point g_insetAt{};
@@ -1785,7 +1789,7 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   // it, tilted, misplaced: 2026-10-06), the screen's place as its frame. In
   // 3D in the room by default (preferred to the window, 2026-10-06), or
   // through a window there, which stays put whatever the camera does.
-  const bool windowView = app.table.minigameView != 2 && app.stereo.minigame_mode();
+  const bool windowView = (app.table.minigameView != 2 || g_sceneCameraView.load()) && app.stereo.minigame_mode();
   XrExtent2Df windowSize{};
   const XrPosef windowPose = screen_pose(app, true, windowSize);
   // In 3D, the player stands where the game camera does: their distance to
@@ -2050,7 +2054,19 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
 
   // The controllers and hands, over everything: they are nearer than the
   // game. Drawn at this frame's display time, not the game's image's.
-  if (app.handsAvailable && frame.shouldRender && focused) {
+  // `adb shell setprop debug.partyboard.hands 0` hides them, read every 2 s:
+  // their layer's cost in an A/B.
+  static bool handsShown = true;
+  static auto handsReadAt = std::chrono::steady_clock::time_point{};
+  if (const auto now = std::chrono::steady_clock::now(); now - handsReadAt >= std::chrono::seconds(2)) {
+    handsReadAt = now;
+    char value[PROP_VALUE_MAX] = {};
+    __system_property_get("debug.partyboard.hands", value);
+    const bool wanted = value[0] != '0';
+    if (wanted != handsShown) LOGI("Controllers and hands %s (debug.partyboard.hands)", wanted ? "shown" : "hidden");
+    handsShown = wanted;
+  }
+  if (app.handsAvailable && handsShown && frame.shouldRender && focused) {
     XrView eyes[2]{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
     XrViewLocateInfo eyesInfo{XR_TYPE_VIEW_LOCATE_INFO};
     eyesInfo.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
@@ -2283,6 +2299,13 @@ __attribute__((visibility("default"))) float PartyBoardQuest_ActiveRefreshRate()
 // through PartyBoard_QuestHoldOverlay): true while it should wait for the
 // table's calibration. The first call opens the panel, which the XR thread
 // shows on its next frame.
+// A minigame whose camera follows a long course (quest_stereo.cpp, game
+// thread): seen from its camera's point of view even with the minigames on
+// the table.
+__attribute__((visibility("default"))) void PartyBoardQuest_StereoCameraView(bool cameraView) {
+  g_sceneCameraView.store(cameraView);
+}
+
 // Photo Finish's puzzle (quest_stereo.cpp, game thread): the part of the
 // 640 x 480 TV picture to show beside the 3D; width 0: none.
 __attribute__((visibility("default"))) void PartyBoardQuest_StereoInset(float x, float y, float width,

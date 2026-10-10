@@ -11,7 +11,7 @@ namespace {
 
 // Eye pixels of the layer: what it shows is small and near, so a square of
 // this side per eye, stretched over its narrowed field of view, is enough.
-constexpr uint32_t kEyePixels = 1024;
+constexpr uint32_t kEyePixels = 768;
 constexpr float kNear = 0.03f;
 constexpr float kFar = 6.0f;
 // Thumb and index tips closer than this pinch; apart by more, they let go.
@@ -278,7 +278,12 @@ bool HandsView::create_program() {
 // 2 s while a controller shows, a few times; the drawn shape stays meanwhile
 // and if they never come.
 void HandsView::load_models() {
-  if (mModelProperties == nullptr || mLoadModel == nullptr) return;
+  if (mModelProperties == nullptr || mLoadModel == nullptr) {
+    static bool logged = false;
+    if (!logged) LOGW("Hands: no controller models (XR_FB_render_model unavailable)");
+    logged = true;
+    return;
+  }
   const auto now = std::chrono::steady_clock::now();
   if (now - mModelsTriedAt < std::chrono::seconds(2)) return;
   mModelsTriedAt = now;
@@ -293,13 +298,20 @@ void HandsView::load_models() {
     request.flags = XR_RENDER_MODEL_SUPPORTS_GLTF_2_0_SUBSET_2_BIT_FB;
     XrRenderModelPropertiesFB properties{XR_TYPE_RENDER_MODEL_PROPERTIES_FB};
     properties.next = &request;
-    if (XR_FAILED(mModelProperties(mSession, path, &properties)) || properties.modelKey == XR_NULL_RENDER_MODEL_KEY_FB) {
+    const XrResult got = mModelProperties(mSession, path, &properties);
+    if (XR_FAILED(got) || properties.modelKey == XR_NULL_RENDER_MODEL_KEY_FB) {
+      LOGW("Hands: %s controller model not available yet (%d, key %s)", hand == 0 ? "left" : "right",
+           static_cast<int>(got), properties.modelKey == XR_NULL_RENDER_MODEL_KEY_FB ? "none" : "given");
       continue;
     }
     XrRenderModelLoadInfoFB load{XR_TYPE_RENDER_MODEL_LOAD_INFO_FB};
     load.modelKey = properties.modelKey;
     XrRenderModelBufferFB buffer{XR_TYPE_RENDER_MODEL_BUFFER_FB};
-    if (XR_FAILED(mLoadModel(mSession, &load, &buffer)) || buffer.bufferCountOutput == 0) continue;
+    if (const XrResult sized = mLoadModel(mSession, &load, &buffer); XR_FAILED(sized) || buffer.bufferCountOutput == 0) {
+      LOGW("Hands: %s controller model %s not loaded (%d)", hand == 0 ? "left" : "right", properties.modelName,
+           static_cast<int>(sized));
+      continue;
+    }
     std::vector<uint8_t> bytes(buffer.bufferCountOutput);
     buffer.bufferCapacityInput = static_cast<uint32_t>(bytes.size());
     buffer.buffer = bytes.data();

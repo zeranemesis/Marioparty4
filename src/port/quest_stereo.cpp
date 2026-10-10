@@ -82,6 +82,7 @@ using ScreenHiddenFn = bool (*)();
 using HudCropFn = void (*)(float x, float y, float width, float height);
 using SceneBoundsFn = void (*)(const float *low, const float *high);
 using InsetFn = void (*)(float x, float y, float width, float height);
+using CameraViewFn = void (*)(bool cameraView);
 using TableSetupHoldFn = bool (*)();
 using HiddenAreaFn = uint32_t (*)(uint32_t eye, float *rects, uint32_t capacity, uint32_t *version);
 using FoveationAvailableFn = void (*)(bool available);
@@ -101,6 +102,7 @@ struct Quest {
     HudCropFn hudCrop = nullptr;           // optional: the interface's part to show
     SceneBoundsFn sceneBounds = nullptr;   // optional: what the eyes need to draw (cropped eyes)
     InsetFn inset = nullptr;               // optional: a part of the TV picture shown beside the 3D
+    CameraViewFn cameraView = nullptr;     // optional: this scene from its camera's point of view
     TableSetupHoldFn tableSetupHold = nullptr; // optional
     HiddenAreaFn hiddenArea = nullptr;         // optional: every pixel drawn
     FoveationAvailableFn foveationAvailable = nullptr; // optional: no automatic foveation
@@ -195,17 +197,37 @@ bool minigame_scene(OMOVL scene)
     return scene >= DLL_m401Dll && scene <= DLL_m463Dll;
 }
 
+// Minigames that stay on the TV screen: Mario Medley copies its frame into
+// the pictures it is played with, and in 3D it was broken, unplayable
+// (2026-10-06, 2026-10-10); on the screen it plays.
+bool flat_minigame(OMOVL scene)
+{
+    return scene == DLL_m405Dll;
+}
+
+// Minigames seen from their camera's point of view even when the player put
+// the minigames on the table: a long course the camera follows (Avalanche!,
+// down a mountain; Paratrooper Plunge, from the sky to the ground) has no
+// height that fits a table (2026-10-10).
+bool camera_view_minigame(OMOVL scene)
+{
+    return scene == DLL_m406Dll || scene == DLL_m408Dll;
+}
+
 // The scenes drawn in 3D: the boards on the table; the minigames and the
 // menus from their camera's point of view (or on the table too).
 bool spatial_scene(OMOVL scene)
 {
-    return board_scene(scene) || minigame_scene(scene) || menu_scene(scene);
+    return board_scene(scene) || (minigame_scene(scene) && !flat_minigame(scene)) || menu_scene(scene);
 }
 
 // The scene's floor, measured from its geometry during its first frames, is
 // what stands on the table: the bottom of the lowest large surface (ground,
 // arena floor, the sea around an island), in game units.
 constexpr int kFloorFrames = 20;
+// A minigame's or a menu's scene is fitted on its camera this many frames in.
+constexpr int kFitAfterFrames = 3;
+int sSceneFrames = 0;
 constexpr float kFloorSpan = 0.3f; // of the scene's extent, for a surface to count
 float sFloorY = INFINITY;
 int sFloorFrames = 0;
@@ -282,6 +304,7 @@ bool find_quest()
             sQuest.hudCrop = reinterpret_cast<HudCropFn>(dlsym(lib, "PartyBoardQuest_StereoHudCrop"));
             sQuest.sceneBounds = reinterpret_cast<SceneBoundsFn>(dlsym(lib, "PartyBoardQuest_StereoSceneBounds"));
             sQuest.inset = reinterpret_cast<InsetFn>(dlsym(lib, "PartyBoardQuest_StereoInset"));
+            sQuest.cameraView = reinterpret_cast<CameraViewFn>(dlsym(lib, "PartyBoardQuest_StereoCameraView"));
             sQuest.tableSetupHold = reinterpret_cast<TableSetupHoldFn>(dlsym(lib, "PartyBoardQuest_TableSetupHold"));
             sQuest.hiddenArea = reinterpret_cast<HiddenAreaFn>(dlsym(lib, "PartyBoardQuest_StereoHiddenArea"));
             sQuest.foveationAvailable =
@@ -558,6 +581,7 @@ extern "C" void PartyBoard_StereoBeginCamera(s16 cameraNo)
     }
     const OMOVL scene = omCurrentOvlGet();
     const bool spatialScene = spatial_scene(scene);
+    if (sQuest.cameraView != nullptr) sQuest.cameraView(camera_view_minigame(scene));
     // A menu or a minigame with several cameras (layers, or a split screen) shows its
     // first one in 3D, with the layers over it (every minigame in 3D, asked
     // for 2026-10-06).
@@ -638,7 +662,9 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
         sFloorY = INFINITY;
         sFloorFrames = 0;
         sFloorSettled = false;
+        sSceneFrames = 0;
     }
+    ++sSceneFrames;
     sViewToWorld = inverse_affine(view);
     const bool board = board_scene(scene);
     const bool window = sFrame.window != 0 && !board;
@@ -673,7 +699,10 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
     // Minigames and menus have very different coordinate scales: put on the
     // table, fit their initial camera once.
     const bool minigame = minigame_scene(scene) || menu_scene(scene);
-    if (minigame && !window && !sSceneFitted) {
+    // A few frames in: the first ones can still hold the camera of the
+    // scene before (the minigame menu was fitted 30 000 units away, on the
+    // camera of the minigame it came back from, 2026-10-10).
+    if (minigame && !window && !sSceneFitted && sSceneFrames >= kFitAfterFrames) {
         const auto& camera = Hu3DCamera[cameraNo];
         const float dx = camera.pos.x - camera.target.x;
         const float dy = camera.pos.y - camera.target.y;
@@ -690,6 +719,13 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
                 static_cast<int>(scene), sSceneScale);
 #endif
         }
+    }
+    // On the table and not fitted yet: nothing for the eyes this frame,
+    // rather than the scene at an arbitrary size around the player.
+    if (minigame && !window && !sSceneFitted) {
+        sQuest.cancelled(sFrame.image, sFrame.tag);
+        sActive = false;
+        return;
     }
     Mat4 world{};
     if (window) {
@@ -814,6 +850,30 @@ extern "C" void PartyBoard_StereoEndCamera(void)
 {
     if (sActive && !sSecondary && sCameraViewSet && sSceneFitted && !sFloorSettled && ++sFloorFrames >= kFloorFrames) {
         sFloorSettled = true;
+        // A minigame or a menu whose lowest large surface lies far below what
+        // its camera looks at stood far above the table (2026-10-10: Manta
+        // Rings, the sea bed 12 000 units under the surface where it is
+        // played; Booksquirm, 1 070 under for 1 700 across): what the camera
+        // looks at stands just above the table instead. Boards keep their
+        // measured floor.
+        // Every minigame measured that day but one stood too high: on the
+        // table, the floor is never deeper than a quarter of the scene under
+        // what the camera looks at, nor above it.
+        const float extent = sSceneScale > 0.0f ? 2800.0f / sSceneScale : 0.0f;
+        if (!board_scene(sScene) && extent > 0.0f) {
+            const float lowest = sSceneCenter[1] - 0.25f * extent;
+            const float highest = sSceneCenter[1] - 0.05f * extent;
+            const float measured = sFloorY;
+            if (!std::isfinite(sFloorY) || sFloorY < lowest) sFloorY = lowest;
+            if (sFloorY > highest) sFloorY = highest;
+#if defined(__ANDROID__)
+            if (sFloorY != measured) {
+                __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest",
+                    "Scene %d floor %.1f too far from its camera's target %.1f: %.1f instead",
+                    static_cast<int>(sScene), measured, sSceneCenter[1], sFloorY);
+            }
+#endif
+        }
 #if defined(__ANDROID__)
         __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Scene %d floor: %s %.1f (scene center %.1f)",
             static_cast<int>(sScene), std::isfinite(sFloorY) ? "measured" : "none, keeping", sFloorY,

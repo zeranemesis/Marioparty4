@@ -460,6 +460,9 @@ private:
   std::chrono::steady_clock::time_point mCropReadAt{};
   double mCropDrawn = 0.0, mCropFull = 0.0;
   uint32_t mCropFrames = 0, mCropLeases = 0;
+  // Why images were not cropped: no fresh box (or off), the box around an
+  // eye, nearly the whole field anyway.
+  uint32_t mCropNoBox = 0, mCropNearEye = 0, mCropWide = 0;
   std::chrono::steady_clock::time_point mCropLogAt{};
 
   // The last image shown, resubmitted until the game draws the next one.
