@@ -26,12 +26,14 @@
 extern "C" {
 #include "port/quest_stereo.h"
 #include "port/netplay_runtime.h"
+#include "dolphin/vi.h"
 #include "game/object.h"
 #include "game/board/space.h"
 #include "game/chrman.h"
 #include "game/gamework_data.h"
 }
 #include "port/quest_scene_fit.hpp"
+#include "port/settings.h"
 #include "ui/ui.hpp"
 
 #include <aurora/stereo.h>
@@ -633,6 +635,44 @@ static bool same_viewport(int a, int b)
         && std::abs(first.viewportW - second.viewportW) < 1.0f && std::abs(first.viewportH - second.viewportH) < 1.0f;
 }
 
+// The game's own frame while the headset hides it: unseen, but still drawn
+// where the game copies it into textures (Three Throw's nets, Mario Medley's
+// water and reflections: their world is drawn into that frame too). It was
+// drawn at the headset screen's 3840 x 2160 for copies of 640 x 480 at most:
+// some 4 ms of GPU an image, the eyes' resolution lowered for it, 70% in
+// Three Throw (2026-10-10). Hidden, it is drawn at twice the GameCube's
+// resolution (the setting the online game uses at once); shown again, at the
+// player's. `adb shell setprop debug.partyboard.flat_scale 3` (0: the
+// player's), read every 2 s.
+static void flat_frame_scale(bool hidden)
+{
+    static float applied = -1.0f;
+    float hiddenScale = 2.0f;
+#if defined(__ANDROID__)
+    static float readScale = 2.0f;
+    static auto readAt = std::chrono::steady_clock::time_point {};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - readAt >= std::chrono::seconds(2)) {
+        readAt = now;
+        char value[PROP_VALUE_MAX] = {};
+        __system_property_get("debug.partyboard.flat_scale", value);
+        readScale = (value[0] >= '0' && value[0] <= '9') ? std::strtof(value, nullptr) : 2.0f;
+    }
+    hiddenScale = readScale;
+#endif
+    const float player = PartyBoard_NetplayEnabled()
+        ? 1.0f
+        : static_cast<float>(partyboard::getSettings().game.internalResolutionScale.getValue());
+    const float wanted = hidden && hiddenScale > 0.0f ? hiddenScale : player;
+    if (wanted == applied) return;
+    applied = wanted;
+    VISetFrameBufferScale(wanted);
+#if defined(__ANDROID__)
+    __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Game frame at %s%.1f (%s)",
+        wanted > 0.0f ? "" : "native, ", wanted, hidden ? "hidden by the headset" : "on show");
+#endif
+}
+
 extern "C" void PartyBoard_StereoBeginCamera(s16 cameraNo)
 {
     sActive = false;
@@ -724,7 +764,9 @@ extern "C" void PartyBoard_StereoBeginCamera(s16 cameraNo)
 #endif
     sQuest.screenRequired(screenRequired);
     // The headset shows the model instead of the flat screen: do not present the screen.
-    AuroraStereoHideScreen(!screenRequired && sQuest.screenHidden != nullptr && sQuest.screenHidden());
+    const bool screenHidden = !screenRequired && sQuest.screenHidden != nullptr && sQuest.screenHidden();
+    AuroraStereoHideScreen(screenHidden);
+    flat_frame_scale(screenHidden);
     sQuest.boardMode(!screenRequired && scene >= DLL_w01Dll && scene <= DLL_w06Dll);
     if (screenRequired || !register_images()) {
         return;
