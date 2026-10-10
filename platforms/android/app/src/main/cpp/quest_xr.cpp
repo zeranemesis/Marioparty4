@@ -2175,7 +2175,9 @@ bool set_up(App& app, JNIEnv* env) {
     const int64_t format = std::ranges::find(formats, static_cast<int64_t>(GL_SRGB8_ALPHA8)) != formats.end()
                                ? static_cast<int64_t>(GL_SRGB8_ALPHA8)
                                : static_cast<int64_t>(GL_RGBA8);
-    app.handsAvailable = app.hands.init(app.instance, app.system, app.session, format, app.extensions.handTracking,
+    // The hands are not tracked (taken out 2026-10-10: their drawing and
+    // pinching were not good enough); the controllers are drawn.
+    app.handsAvailable = app.hands.init(app.instance, app.system, app.session, format, false,
                                         app.extensions.renderModels);
   }
   query_refresh_rates(app);

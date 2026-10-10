@@ -89,7 +89,9 @@ private:
   PFN_xrLocateHandJointsEXT mLocateJoints = nullptr;
   std::array<Hand, 2> mHands{};
   std::array<Model, 2> mModels{};
+  PFN_xrEnumerateRenderModelPathsFB mModelPaths = nullptr;
   PFN_xrGetRenderModelPropertiesFB mModelProperties = nullptr;
+  bool mModelPathsListed = false;
   PFN_xrLoadRenderModelFB mLoadModel = nullptr;
   std::chrono::steady_clock::time_point mModelsTriedAt{};
   bool mModelOnAim = false; // debug.partyboard.controller_space aim

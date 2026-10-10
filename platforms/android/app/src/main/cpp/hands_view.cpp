@@ -148,6 +148,7 @@ GLuint compile(GLenum type, const char* source) {
 bool HandsView::init(XrInstance instance, XrSystemId system, XrSession session, int64_t swapchainFormat,
                      bool handTracking, bool renderModels) {
   if (renderModels) {
+    mModelPaths = proc<PFN_xrEnumerateRenderModelPathsFB>(instance, "xrEnumerateRenderModelPathsFB");
     mModelProperties = proc<PFN_xrGetRenderModelPropertiesFB>(instance, "xrGetRenderModelPropertiesFB");
     mLoadModel = proc<PFN_xrLoadRenderModelFB>(instance, "xrLoadRenderModelFB");
   }
@@ -278,7 +279,7 @@ bool HandsView::create_program() {
 // 2 s while a controller shows, a few times; the drawn shape stays meanwhile
 // and if they never come.
 void HandsView::load_models() {
-  if (mModelProperties == nullptr || mLoadModel == nullptr) {
+  if (mModelPaths == nullptr || mModelProperties == nullptr || mLoadModel == nullptr) {
     static bool logged = false;
     if (!logged) LOGW("Hands: no controller models (XR_FB_render_model unavailable)");
     logged = true;
@@ -287,6 +288,16 @@ void HandsView::load_models() {
   const auto now = std::chrono::steady_clock::now();
   if (now - mModelsTriedAt < std::chrono::seconds(2)) return;
   mModelsTriedAt = now;
+  // The runtime answers a model's properties only once the paths were
+  // listed (XR_ERROR_CALL_ORDER_INVALID otherwise, 2026-10-10).
+  if (!mModelPathsListed) {
+    uint32_t count = 0;
+    if (XR_FAILED(mModelPaths(mSession, 0, &count, nullptr))) return;
+    std::vector<XrRenderModelPathInfoFB> paths(count, {XR_TYPE_RENDER_MODEL_PATH_INFO_FB});
+    if (count > 0 && XR_FAILED(mModelPaths(mSession, count, &count, paths.data()))) return;
+    mModelPathsListed = true;
+    LOGI("Hands: %u render model paths", count);
+  }
   static const char* const kPaths[2] = {"/model_fb/controller/left", "/model_fb/controller/right"};
   for (int hand = 0; hand < 2; ++hand) {
     Model& model = mModels[hand];
