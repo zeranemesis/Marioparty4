@@ -1178,7 +1178,13 @@ extern "C" BOOL PartyBoard_StereoBackdrop(float x, float y, float z, float radiu
         factor = course ? 0.0f : 3.0f;
 #endif
         const float distance = sOpenSkyRadius / kOpenSkyPerDistance;
-        const bool scenery = factor > 0.0f && std::isfinite(radius) && radius >= factor * distance;
+        // A ground under the action is kept however large: an object holding
+        // the point the camera looks at, (0, 0, -distance) in its view space
+        // (Domination's field went with the scenery, 6.6 times the camera's
+        // distance, 2026-10-10). Only the scenery away from the action goes.
+        const float tz = z + distance;
+        const bool underAction = x * x + y * y + tz * tz < radius * radius;
+        const bool scenery = factor > 0.0f && std::isfinite(radius) && radius >= factor * distance && !underAction;
 #if defined(__ANDROID__)
         static int loggedScenery = -1;
         if (scenery && loggedScenery != static_cast<int>(sScene)) {
