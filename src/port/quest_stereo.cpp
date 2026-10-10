@@ -254,21 +254,58 @@ bool minigame_scene(OMOVL scene)
     return scene >= DLL_m401Dll && scene <= DLL_m463Dll;
 }
 
-// Minigames that stay on the TV screen: Mario Medley copies its frame into
-// the pictures it is played with, and in 3D it was broken, unplayable
-// (2026-10-06, 2026-10-10); on the screen it plays.
-bool flat_minigame(OMOVL scene)
+// How a minigame shows: from its camera's point of view, as on TV (behind
+// the characters, the camera's framing), or on the TV screen. Not on the
+// table: there the player's head replaced the camera and the TV framing was
+// lost (taken out 2026-10-10, "I am not behind the characters"); menus and
+// boards stay on the table. `adb shell setprop debug.partyboard.view_<scene>
+// camera|screen` (the scene's number, as "Scene N" in the log) overrides one
+// live, read every 2 s.
+enum class SceneView { Camera, Screen };
+
+SceneView minigame_view(OMOVL scene)
 {
-    return scene == DLL_m405Dll;
+    // Mario Medley copies its frame into the pictures it is played with: in
+    // 3D it was broken, unplayable (2026-10-06, 2026-10-10).
+    SceneView view = scene == DLL_m405Dll ? SceneView::Screen : SceneView::Camera;
+#if defined(__ANDROID__)
+    static OMOVL readScene = DLL_NONE;
+    static SceneView chosen = SceneView::Camera;
+    static bool overridden = false;
+    static auto readAt = std::chrono::steady_clock::time_point {};
+    const auto now = std::chrono::steady_clock::now();
+    if (scene != readScene || now - readAt >= std::chrono::seconds(2)) {
+        readAt = now;
+        char name[48];
+        std::snprintf(name, sizeof(name), "debug.partyboard.view_%d", static_cast<int>(scene));
+        char value[PROP_VALUE_MAX] = {};
+        __system_property_get(name, value);
+        const bool was = overridden;
+        const SceneView before = chosen;
+        overridden = true;
+        if (std::strcmp(value, "camera") == 0) chosen = SceneView::Camera;
+        else if (std::strcmp(value, "screen") == 0) chosen = SceneView::Screen;
+        else overridden = false;
+        if (overridden && (scene != readScene || !was || before != chosen)) {
+            __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Scene %d shown %s (%s)",
+                static_cast<int>(scene), value, name);
+        }
+        readScene = scene;
+    }
+    if (overridden) view = chosen;
+#endif
+    return view;
 }
 
-// Minigames seen from their camera's point of view even when the player put
-// the minigames on the table: a long course the camera follows (Avalanche!,
-// down a mountain; Paratrooper Plunge, from the sky to the ground) has no
-// height that fits a table (2026-10-10).
+bool flat_minigame(OMOVL scene)
+{
+    return minigame_scene(scene) && minigame_view(scene) == SceneView::Screen;
+}
+
+// Seen from its camera's point of view even with the minigames on the table.
 bool camera_view_minigame(OMOVL scene)
 {
-    return scene == DLL_m406Dll || scene == DLL_m408Dll;
+    return minigame_scene(scene) && minigame_view(scene) == SceneView::Camera;
 }
 
 // The scenes drawn in 3D: the boards on the table; the minigames and the
