@@ -1308,13 +1308,34 @@ static void add_to_bounds(float x, float y, float z, float radius)
     }
 }
 
+// From the camera's place (a minigame), what lies outside both eyes is culled
+// too: Manta Rings drew everything and ran at 48 to 59 images a second
+// (2026-10-10). Not Three Throw, whose balls it took away (2026-10-06).
+// `debug.partyboard.cull_camera 0`, read every 2 s, turns it off.
+static bool cull_from_camera()
+{
+    if (!sWindow || sFrame.window != 2 || omCurrentOvlGet() == DLL_m410Dll) return false;
+#if defined(__ANDROID__)
+    static bool enabled = true;
+    static auto readAt = std::chrono::steady_clock::time_point {};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - readAt >= std::chrono::seconds(2)) {
+        readAt = now;
+        char value[PROP_VALUE_MAX] = {};
+        __system_property_get("debug.partyboard.cull_camera", value);
+        enabled = value[0] != '0';
+    }
+    return enabled;
+#else
+    return true;
+#endif
+}
+
 extern "C" BOOL PartyBoard_StereoObjectVisible(float x, float y, float z, float radius)
 {
     add_to_bounds(x, y, z, radius);
-    // From the camera's place (a minigame), nothing is culled: it took most of
-    // Three Throw's balls away (snapshots with and without, 2026-10-06), and
-    // a minigame has the GPU to spare.
-    if (!sActive || !sCameraViewSet || !sFloorSettled || sWindow) return TRUE;
+    if (!sActive || !sCameraViewSet) return TRUE;
+    if (sWindow ? !cull_from_camera() : !sFloorSettled) return TRUE;
 #if defined(__ANDROID__)
     static bool enabled = true;
     static uint32_t tested = 0, culled = 0;
@@ -1346,7 +1367,7 @@ extern "C" BOOL PartyBoard_StereoObjectVisible(float x, float y, float z, float 
 extern "C" BOOL PartyBoard_StereoSphereVisible(float x, float y, float z, float radius)
 {
     add_to_bounds(x, y, z, radius);
-    if (!sActive || !sCameraViewSet || sWindow) return TRUE; // a minigame: nothing culled (ObjectVisible)
+    if (!sActive || !sCameraViewSet || (sWindow && !cull_from_camera())) return TRUE;
     const float center[3]{x, y, z};
     return partyboard::quest::sphere_visible(sEyeClip, center, radius) ? TRUE : FALSE;
 }

@@ -38,6 +38,11 @@ public:
     mTrial = {};
   }
   float scale() const { return mScale; }
+  // How far one lowering or raising goes. A minigame seen from its camera's
+  // place is limited by its pixels: 5% less never brought Manta Rings' 15 ms
+  // eyes' pass under its 13.9 ms, so each trial was undone and the pixels held
+  // for 30 s at 120% while it ran at 48 to 59 images a second (2026-10-10).
+  void set_step(float step) { mStep = std::clamp(step, 0.01f, 0.25f); }
   // The lowest scale a lowering may reach (0.65 by default, readable). On a
   // board the eyes' pass took 8.7 ms at 65% as at 90%, the images made
   // smaller too (2026-10-04, build 191): its time is in the draws and their
@@ -145,7 +150,7 @@ public:
       const float slowBefore = hadWindow ? (slow + previousSlow) / 2.0f : static_cast<float>(slow);
       const float missedBefore = hadWindow ? (missed + previousMissed) / 2.0f : static_cast<float>(missed);
       mTrial = {true, mScale, before, 0, 0, slowBefore, 0, missedBefore, 0};
-      mScale = std::max(mFloor, mScale - 0.05f);
+      mScale = std::max(mFloor, mScale - mStep);
       mCalm = 0;
       mRaiseHold = kRaiseHoldWindows;
       mDecision = Decision::Lowered;
@@ -158,7 +163,7 @@ public:
                (!cpuKnown || sample.cpuMs < 0.85f * budget)) {
       if (++mCalm >= 5) {
         const float before = mScale;
-        mScale = std::min(mCap, mScale + 0.05f);
+        mScale = std::min(mCap, mScale + mStep);
         mCalm = 0;
         mDecision = mScale != before ? Decision::Raised : Decision::CalmAtCap;
       }
@@ -181,6 +186,7 @@ private:
     unsigned missedAfter = 0;    // missed display frames, sum of the two judged windows
   };
   float mScale = 1.0f, mCap = 1.25f, mFloor = 0.65f;
+  float mStep = 0.05f;
   uint64_t mSequence = 0;
   unsigned mCalm = 0;
   unsigned mHold = 0;

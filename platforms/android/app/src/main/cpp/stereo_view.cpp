@@ -1226,8 +1226,11 @@ void StereoView::set_quality_cap(float recommendedScale) {
   if (width > mImageEyeWidth || height > mImageEyeHeight || mDesiredHudWidth != mHudPixelsWidth) mResizePending = true;
 }
 
-// A minigame's eyes at its start, of the recommended size (set_board_mode).
-constexpr float kMinigameStartQuality = 1.2f;
+// A minigame's eyes at its start, of the recommended size (set_board_mode):
+// 100%, raised by 10% steps when the GPU has room. At 120% Manta Rings, seen
+// from its camera's place, ran at 48 to 59 images a second (2026-10-10).
+constexpr float kMinigameStartQuality = 1.0f;
+constexpr float kMinigameQualityStep = 0.1f;
 
 // One decision per fresh one-second metric window; do not lower resolution
 // merely because the CPU or the image bridge is late while the GPU has headroom.
@@ -1380,13 +1383,15 @@ void StereoView::set_board_mode(bool board) {
     LOGI("Stereo: a board again, resolution back to %.0f%% of recommended", mBoardQuality * 100.0f);
   }
   mBoardMode = board;
-  // A minigame (lighter than a board): its eyes at 120% from its start, up to
-  // 130% when the GPU has room. Started at 130%, Three Throw (its world drawn
-  // twice, it copies its frame) fell to 60 images a second while the
-  // controller came down to 110% (2026-10-06).
+  // A minigame: its eyes at 100% from its start, up to 130% when the GPU has
+  // room, by 10% steps: limited by its pixels, 5% steps never helped enough.
+  // Started at 130%, Three Throw (its world drawn twice, it copies its frame)
+  // fell to 60 images a second while the controller came down to 110%
+  // (2026-10-06).
   if (const bool minigame = !board && !mScreenRequired; minigame != mMinigameQuality) {
     mMinigameQuality = minigame;
     mQuality.set_cap(minigame ? AdaptiveQuality::kMaxCap : mQualityCap);
+    mQuality.set_step(minigame ? kMinigameQualityStep : 0.05f);
     if (minigame) mQuality.start_at(kMinigameStartQuality);
     mRenderScale = std::min(1.0f, mQuality.scale() / mMaxScale);
     const auto [width, height] = eye_size(mRenderScale);
