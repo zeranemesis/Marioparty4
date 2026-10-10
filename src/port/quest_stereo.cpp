@@ -41,6 +41,7 @@ extern "C" {
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <cstring>
 
 #if defined(__ANDROID__)
@@ -139,6 +140,15 @@ float sSceneTurn = 0.0f;
 // ("the point of view does not follow", 2026-10-10).
 float sFollow[3]{};
 bool sFollowSet = false;
+// A menu keeps the fit of its first showing for the session: back from a
+// minigame its camera was zoomed on its panel, the menu was fitted on that
+// and its room stood around the player (2026-10-10).
+struct SceneFit {
+    float scale;
+    float center[3];
+    float turn;
+};
+std::map<int, SceneFit> sMenuFits;
 float sEyeClip[2][16]{};
 // The game camera's view space -> the room, this camera's (begin_eyes), and
 // the room-space box around every object offered for drawing this frame
@@ -803,6 +813,15 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
     // A few frames in: the first ones can still hold the camera of the
     // scene before (the minigame menu was fitted 30 000 units away, on the
     // camera of the minigame it came back from, 2026-10-10).
+    if (minigame && !window && !sSceneFitted && menu_scene(scene)) {
+        const auto known = sMenuFits.find(static_cast<int>(scene));
+        if (known != sMenuFits.end()) {
+            sSceneScale = known->second.scale;
+            std::memcpy(sSceneCenter, known->second.center, sizeof(sSceneCenter));
+            sSceneTurn = known->second.turn;
+            sSceneFitted = true;
+        }
+    }
     if (minigame && !window && !sSceneFitted && sSceneFrames >= kFitAfterFrames) {
         const auto& camera = Hu3DCamera[cameraNo];
         const float dx = camera.pos.x - camera.target.x;
@@ -822,6 +841,10 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
             const float lookX = camera.target.x - camera.pos.x, lookZ = camera.target.z - camera.pos.z;
             sSceneTurn = lookX * lookX + lookZ * lookZ > 1e-6f ? static_cast<float>(M_PI) - std::atan2(lookX, lookZ) : 0.0f;
             sSceneFitted = true;
+            if (menu_scene(scene)) {
+                sMenuFits[static_cast<int>(scene)] =
+                    SceneFit {sSceneScale, {sSceneCenter[0], sSceneCenter[1], sSceneCenter[2]}, sSceneTurn};
+            }
 #if defined(__ANDROID__)
             __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Stereo scene %d: initial camera fit %.3fx",
                 static_cast<int>(scene), sSceneScale);
@@ -888,7 +911,7 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
         // of half the scene) is taken at once, a move eased over a few frames.
         float center[3]{sSceneCenter[0], sSceneCenter[1], sSceneCenter[2]};
         float floorY = sFloorY;
-        if (!board && sSceneFitted) {
+        if (!board && sSceneFitted && minigame_scene(scene)) {
             const auto& camera = Hu3DCamera[cameraNo];
             const float target[3]{camera.target.x, camera.target.y, camera.target.z};
             if (std::isfinite(target[0]) && std::isfinite(target[1]) && std::isfinite(target[2])) {
@@ -1123,21 +1146,36 @@ extern "C" BOOL PartyBoard_StereoBackdrop(float x, float y, float z, float radiu
         // object this many times larger than the camera's distance to its
         // target. `adb shell setprop debug.partyboard.open_scenery 3` sets the
         // factor live, 0 keeps everything.
+        // Not on a course, whose ground is the course itself: Avalanche!'s
+        // slope went with the scenery (8.6 times the camera's distance,
+        // 2026-10-10), nor Paratrooper Plunge's or Manta Rings'. Per scene:
+        // `debug.partyboard.scenery_<scene>`, overriding `open_scenery`.
+        const bool course = sScene == DLL_m401Dll || sScene == DLL_m406Dll || sScene == DLL_m408Dll;
         static float factor = 3.0f;
+        static OMOVL factorScene = DLL_NONE;
 #if defined(__ANDROID__)
         static auto readAt = std::chrono::steady_clock::time_point {};
         const auto now = std::chrono::steady_clock::now();
-        if (now - readAt >= std::chrono::seconds(2)) {
+        if (sScene != factorScene || now - readAt >= std::chrono::seconds(2)) {
             readAt = now;
-            char value[PROP_VALUE_MAX] = {};
-            __system_property_get("debug.partyboard.open_scenery", value);
-            const float read = value[0] != 0 ? std::strtof(value, nullptr) : 3.0f;
-            if (read != factor) {
+            factorScene = sScene;
+            const auto read = [](const char *name, float fallback) {
+                char value[PROP_VALUE_MAX] = {};
+                __system_property_get(name, value);
+                return (value[0] >= '0' && value[0] <= '9') || value[0] == '.' ? std::strtof(value, nullptr) : fallback;
+            };
+            char name[48];
+            std::snprintf(name, sizeof(name), "debug.partyboard.scenery_%d", static_cast<int>(sScene));
+            const float chosen = read(name, read("debug.partyboard.open_scenery", course ? 0.0f : 3.0f));
+            if (chosen != factor) {
                 __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest",
-                    "Scenery larger than %.1f times the camera's distance left out (debug.partyboard.open_scenery)", read);
+                    "Scene %d: scenery larger than %.1f times the camera's distance left out (0: none)",
+                    static_cast<int>(sScene), chosen);
             }
-            factor = read;
+            factor = chosen;
         }
+#else
+        factor = course ? 0.0f : 3.0f;
 #endif
         const float distance = sOpenSkyRadius / kOpenSkyPerDistance;
         const bool scenery = factor > 0.0f && std::isfinite(radius) && radius >= factor * distance;
