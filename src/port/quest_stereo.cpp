@@ -127,6 +127,9 @@ bool sSceneFitted = false;
 bool sWindow = false;
 float sSceneScale = 1.0f;
 float sSceneCenter[3]{};
+// A minigame or a menu on the table, turned about the vertical so the player
+// sees it from the side its camera looked from when it started (radians).
+float sSceneTurn = 0.0f;
 float sEyeClip[2][16]{};
 // The game camera's view space -> the room, this camera's (begin_eyes), and
 // the room-space box around every object offered for drawing this frame
@@ -658,6 +661,7 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
         sScene = scene;
         sSceneFitted = false;
         sSceneScale = 1.0f;
+        sSceneTurn = 0.0f;
         std::memset(sSceneCenter, 0, sizeof(sSceneCenter));
         sFloorY = INFINITY;
         sFloorFrames = 0;
@@ -713,6 +717,13 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
             sSceneCenter[0] = camera.target.x;
             sSceneCenter[1] = camera.target.y;
             sSceneCenter[2] = camera.target.z;
+            // The table's +Z points at the player: the camera's horizontal
+            // look turned to -Z, the player on the camera's side (on
+            // 2026-10-10 the minigames lay as their world did, seen from
+            // aside or from behind: "the camera no longer takes the
+            // minigame's first point of view").
+            const float lookX = camera.target.x - camera.pos.x, lookZ = camera.target.z - camera.pos.z;
+            sSceneTurn = lookX * lookX + lookZ * lookZ > 1e-6f ? static_cast<float>(M_PI) - std::atan2(lookX, lookZ) : 0.0f;
             sSceneFitted = true;
 #if defined(__ANDROID__)
             __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Stereo scene %d: initial camera fit %.3fx",
@@ -771,12 +782,18 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
         // the table, the game camera cancelled every frame: the tracked
         // headset supplies the viewpoint. A board never moves: sliding or
         // turning it made the player sick.
-        //   sceneWorld = scale * move(-center)
+        //   sceneWorld = scale * turn * move(-center)
+        // (a minigame or a menu turned toward the player, sSceneTurn).
+        const float c = std::cos(sSceneTurn), sn = std::sin(sSceneTurn);
         Mat4 sceneWorld{};
-        for (int r = 0; r < 3; ++r) {
-            sceneWorld.m[r][r] = sSceneScale;
-            sceneWorld.m[r][3] = -sSceneCenter[r] * sSceneScale;
-        }
+        sceneWorld.m[0][0] = c * sSceneScale;
+        sceneWorld.m[0][2] = sn * sSceneScale;
+        sceneWorld.m[1][1] = sSceneScale;
+        sceneWorld.m[2][0] = -sn * sSceneScale;
+        sceneWorld.m[2][2] = c * sSceneScale;
+        sceneWorld.m[0][3] = -(c * sSceneCenter[0] + sn * sSceneCenter[2]) * sSceneScale;
+        sceneWorld.m[1][3] = -sSceneCenter[1] * sSceneScale;
+        sceneWorld.m[2][3] = -(-sn * sSceneCenter[0] + c * sSceneCenter[2]) * sSceneScale;
         sceneWorld.m[3][3] = 1.0f;
         // The measured floor on the table (the table's height is the anchor's).
         if (sFloorSettled && std::isfinite(sFloorY)) {
