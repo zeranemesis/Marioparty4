@@ -131,6 +131,12 @@ float sSceneCenter[3]{};
 // A minigame or a menu on the table, turned about the vertical so the player
 // sees it from the side its camera looked from when it started (radians).
 float sSceneTurn = 0.0f;
+// A minigame or a menu on the table follows what its camera looks at (game
+// world units, smoothed): Manta Rings' camera follows the divers along a
+// course, and on the table the action left the scene's fixed place
+// ("the point of view does not follow", 2026-10-10).
+float sFollow[3]{};
+bool sFollowSet = false;
 float sEyeClip[2][16]{};
 // The game camera's view space -> the room, this camera's (begin_eyes), and
 // the room-space box around every object offered for drawing this frame
@@ -710,6 +716,7 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
         sSceneFitted = false;
         sSceneScale = 1.0f;
         sSceneTurn = 0.0f;
+        sFollowSet = false;
         std::memset(sSceneCenter, 0, sizeof(sSceneCenter));
         sFloorY = INFINITY;
         sFloorFrames = 0;
@@ -834,19 +841,45 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
         // (a minigame or a menu turned toward the player, sSceneTurn).
         const float c = std::cos(sSceneTurn), sn = std::sin(sSceneTurn);
         const float scale = sSceneScale * table_size(scene);
+        // What stands at the table's center: the camera's target followed
+        // (a minigame, a menu), turned the same way throughout; a cut (a jump
+        // of half the scene) is taken at once, a move eased over a few frames.
+        float center[3]{sSceneCenter[0], sSceneCenter[1], sSceneCenter[2]};
+        float floorY = sFloorY;
+        if (!board && sSceneFitted) {
+            const auto& camera = Hu3DCamera[cameraNo];
+            const float target[3]{camera.target.x, camera.target.y, camera.target.z};
+            if (std::isfinite(target[0]) && std::isfinite(target[1]) && std::isfinite(target[2])) {
+                const float extent = 2800.0f / sSceneScale;
+                float jump2 = 0.0f;
+                for (int axis = 0; axis < 3; ++axis) {
+                    const float d = target[axis] - sFollow[axis];
+                    jump2 += d * d;
+                }
+                for (int axis = 0; axis < 3; ++axis) {
+                    sFollow[axis] = !sFollowSet || jump2 > 0.25f * extent * extent
+                        ? target[axis]
+                        : sFollow[axis] + (target[axis] - sFollow[axis]) * 0.12f;
+                }
+                sFollowSet = true;
+                // The floor keeps its height under the target.
+                floorY = sFollow[1] - (sSceneCenter[1] - (std::isfinite(sFloorY) ? sFloorY : sSceneCenter[1]));
+                std::memcpy(center, sFollow, sizeof(center));
+            }
+        }
         Mat4 sceneWorld{};
         sceneWorld.m[0][0] = c * scale;
         sceneWorld.m[0][2] = sn * scale;
         sceneWorld.m[1][1] = scale;
         sceneWorld.m[2][0] = -sn * scale;
         sceneWorld.m[2][2] = c * scale;
-        sceneWorld.m[0][3] = -(c * sSceneCenter[0] + sn * sSceneCenter[2]) * scale;
-        sceneWorld.m[1][3] = -sSceneCenter[1] * scale;
-        sceneWorld.m[2][3] = -(-sn * sSceneCenter[0] + c * sSceneCenter[2]) * scale;
+        sceneWorld.m[0][3] = -(c * center[0] + sn * center[2]) * scale;
+        sceneWorld.m[1][3] = -center[1] * scale;
+        sceneWorld.m[2][3] = -(-sn * center[0] + c * center[2]) * scale;
         sceneWorld.m[3][3] = 1.0f;
         // The measured floor on the table (the table's height is the anchor's).
-        if (sFloorSettled && std::isfinite(sFloorY)) {
-            sceneWorld.m[1][3] = -sFloorY * scale;
+        if (sFloorSettled && std::isfinite(floorY)) {
+            sceneWorld.m[1][3] = -floorY * scale;
         }
         world = multiply(multiply(from_rows(sFrame.world), sceneWorld), inverse_affine(view));
         sSceneExtent = sSceneFitted ? 2800.0f / sSceneScale : 0.0f;

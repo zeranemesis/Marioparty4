@@ -1458,9 +1458,9 @@ void StereoView::crop_eyes(Slot& slot) {
   if (now - mCropLogAt >= std::chrono::seconds(5)) {
     if (mCropLeases > 0) {
       LOGI("Stereo crop: %u of %u images cropped, the eyes drew %.0f%% of their full fields' pixels "
-           "(not cropped: %u without a box, %u with the box at an eye, %u nearly whole)",
+           "(not cropped: %u without a box, %u nearly whole; %u boxes reaching behind an eye)",
            mCropFrames, mCropLeases, mCropFull > 0.0 ? 100.0 * mCropDrawn / mCropFull : 100.0, mCropNoBox,
-           mCropNearEye, mCropWide);
+           mCropWide, mCropNearEye);
     }
     mCropLogAt = now;
     mCropFrames = mCropLeases = 0;
@@ -1485,23 +1485,41 @@ void StereoView::crop_eyes(Slot& slot) {
   for (int eye = 0; eye < 2; ++eye) {
     const XrFovf& whole = mViews[eye].fov;
     const XrPosef toEye = inverse(mViews[eye].pose);
-    float left = 1e9f, right = -1e9f, down = 1e9f, up = -1e9f;
+    // The box's corners in front of the eye, and where its edges cross the
+    // near plane: a box reaching behind the eye (a sea or a floor passing
+    // under the player, Manta Rings 2026-10-10) still leaves out what lies
+    // above or beside it, instead of giving the whole field up.
+    constexpr float kNear = 0.05f;
+    XrVector3f corners[8];
     for (int corner = 0; corner < 8; ++corner) {
       const XrVector3f room{(corner & 1) ? mBoundsHigh[0] + kMarginMeters : mBoundsLow[0] - kMarginMeters,
                             (corner & 2) ? mBoundsHigh[1] + kMarginMeters : mBoundsLow[1] - kMarginMeters,
                             (corner & 4) ? mBoundsHigh[2] + kMarginMeters : mBoundsLow[2] - kMarginMeters};
-      const XrVector3f c = add(toEye.position, rotate(toEye.orientation, room));
+      corners[corner] = add(toEye.position, rotate(toEye.orientation, room));
+    }
+    float left = 1e9f, right = -1e9f, down = 1e9f, up = -1e9f;
+    bool crossed = false;
+    const auto take = [&](const XrVector3f& c) {
       const float depth = -c.z;
-      if (depth < 0.05f) {
-        ++mCropNearEye;
-        mCropDrawn += full; // the box reaches the eye: all of its view
-        return;
-      }
       left = std::min(left, c.x / depth);
       right = std::max(right, c.x / depth);
       down = std::min(down, c.y / depth);
       up = std::max(up, c.y / depth);
+    };
+    for (int corner = 0; corner < 8; ++corner) {
+      const XrVector3f& a = corners[corner];
+      if (-a.z >= kNear) take(a);
+      for (int bit = 1; bit < 8; bit <<= 1) {
+        if ((corner & bit) != 0) continue; // each edge once
+        const XrVector3f& b = corners[corner | bit];
+        const float da = -a.z - kNear, db = -b.z - kNear;
+        if ((da < 0.0f) == (db < 0.0f)) continue;
+        crossed = true;
+        const float t = da / (da - db);
+        take({a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, -kNear});
+      }
     }
+    if (crossed) ++mCropNearEye;
     const float spanX = right - left, spanY = up - down;
     left -= spanX * kMarginPart;
     right += spanX * kMarginPart;
