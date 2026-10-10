@@ -208,6 +208,7 @@ struct Extensions {
   bool layerDepth = false;     // the model's depth to the compositor (StereoView::enable_depth_layer)
   bool spaceWarp = false;      // Application SpaceWarp (StereoView::enable_space_warp)
   bool handTracking = false;   // XR_EXT_hand_tracking: the hands drawn, and pinching
+  bool renderModels = false;   // XR_FB_render_model: the controllers' own models
   bool threadSettings = false; // XR_KHR_android_thread_settings: the game's threads named to the runtime
 };
 
@@ -401,6 +402,7 @@ bool create_instance(App& app) {
   ext.layerDepth = optional(XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME);
   ext.spaceWarp = optional(XR_FB_SPACE_WARP_EXTENSION_NAME);
   ext.handTracking = optional(HandsView::kExtension);
+  ext.renderModels = optional(HandsView::kRenderModelExtension);
   ext.threadSettings = optional(XR_KHR_ANDROID_THREAD_SETTINGS_EXTENSION_NAME);
   ext.anchors = std::ranges::all_of(TableAnchor::kExtensions,
                                     [&](const char* name) { return has_extension(available, name); });
@@ -2063,6 +2065,8 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
         // Valid is enough: tracked only, they vanished whenever the
         // headset's cameras lost them for a moment.
         controllers[hand].tracked = locate(app.actions.grip[hand], app.stage, time, controllers[hand].grip);
+        controllers[hand].aimKnown = locate(hand == 0 ? app.actions.leftAim : app.actions.rightAim, app.stage, time,
+                                            controllers[hand].aim);
         controllers[hand].trigger = hand == 0 ? input.leftTrigger : input.rightTrigger;
         controllers[hand].squeeze = hand == 0 ? input.leftGrip : input.rightGrip;
       }
@@ -2155,7 +2159,8 @@ bool set_up(App& app, JNIEnv* env) {
     const int64_t format = std::ranges::find(formats, static_cast<int64_t>(GL_SRGB8_ALPHA8)) != formats.end()
                                ? static_cast<int64_t>(GL_SRGB8_ALPHA8)
                                : static_cast<int64_t>(GL_RGBA8);
-    app.handsAvailable = app.hands.init(app.instance, app.system, app.session, format, app.extensions.handTracking);
+    app.handsAvailable = app.hands.init(app.instance, app.system, app.session, format, app.extensions.handTracking,
+                                        app.extensions.renderModels);
   }
   query_refresh_rates(app);
   if (app.extensions.anchors) {

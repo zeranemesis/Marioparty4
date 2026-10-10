@@ -23,6 +23,9 @@
          while the controllers sleep; the game still plays with the controllers. -->
     <uses-feature android:name="oculus.software.handtracking" android:required="false" />
     <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
+    <!-- The controllers' own 3D models, drawn over the game (hands_view.cpp). -->
+    <uses-feature android:name="com.oculus.feature.RENDER_MODEL" android:required="false" />
+    <uses-permission android:name="com.oculus.permission.RENDER_MODEL" />
 
     <uses-permission android:name="android.permission.VIBRATE" />
     <!-- CubeShelf friends' presence and RetroAchievements go over HTTPS (src/port/http.cpp). -->

@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <cstring>
+#include <string>
+
+#include <sys/system_properties.h>
 
 namespace quest {
 namespace {
@@ -19,17 +22,23 @@ constexpr float kFovMargin = 0.03f;
 
 const char* const kVertexShader = R"(#version 300 es
 layout(location = 0) in vec3 aPosition;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec4 aColor;
 uniform mat4 uViewProj;
 uniform mat4 uModel;
 uniform vec3 uInvScale;
+uniform float uMesh;
 out vec3 vNormal;
 out vec3 vWorld;
+out vec4 vColor;
 invariant gl_Position;
 void main() {
   vec4 world = uModel * vec4(aPosition, 1.0);
   vWorld = world.xyz;
-  // The unit sphere's normal through the ellipsoid's scale and turn.
-  vNormal = mat3(uModel) * (aPosition * uInvScale * uInvScale);
+  // A model's own normals and colors; else the unit sphere's normal through
+  // the ellipsoid's scale and turn.
+  vNormal = uMesh > 0.5 ? mat3(uModel) * aNormal : mat3(uModel) * (aPosition * uInvScale * uInvScale);
+  vColor = uMesh > 0.5 ? aColor : vec4(1.0);
   gl_Position = uViewProj * world;
 }
 )";
@@ -40,15 +49,17 @@ uniform vec4 uColor;
 uniform vec3 uEye;
 in vec3 vNormal;
 in vec3 vWorld;
+in vec4 vColor;
 out vec4 oColor;
 void main() {
   vec3 n = normalize(vNormal);
   vec3 v = normalize(uEye - vWorld);
   vec3 l = normalize(vec3(0.3, 1.0, 0.45));
   float diffuse = 0.45 + 0.55 * max(dot(n, l), 0.0);
-  float rim = pow(1.0 - max(dot(n, v), 0.0), 3.0);
-  vec3 color = uColor.rgb * diffuse + vec3(rim * 0.25);
-  oColor = vec4(color * uColor.a, uColor.a);
+  float rim = pow(1.0 - max(abs(dot(n, v)), 0.0), 3.0);
+  vec4 base = uColor * vColor;
+  vec3 color = base.rgb * diffuse + vec3(rim * 0.25);
+  oColor = vec4(color * base.a, base.a);
 }
 )";
 
@@ -135,7 +146,11 @@ GLuint compile(GLenum type, const char* source) {
 } // namespace
 
 bool HandsView::init(XrInstance instance, XrSystemId system, XrSession session, int64_t swapchainFormat,
-                     bool handTracking) {
+                     bool handTracking, bool renderModels) {
+  if (renderModels) {
+    mModelProperties = proc<PFN_xrGetRenderModelPropertiesFB>(instance, "xrGetRenderModelPropertiesFB");
+    mLoadModel = proc<PFN_xrLoadRenderModelFB>(instance, "xrLoadRenderModelFB");
+  }
   mInstance = instance;
   mSession = session;
   if (!create_program()) return false;
@@ -218,6 +233,12 @@ void HandsView::destroy() {
   if (mIndices) glDeleteBuffers(1, &mIndices);
   if (mVao) glDeleteVertexArrays(1, &mVao);
   if (mProgram) glDeleteProgram(mProgram);
+  for (Model& model : mModels) {
+    if (model.vertices) glDeleteBuffers(1, &model.vertices);
+    if (model.indices) glDeleteBuffers(1, &model.indices);
+    if (model.vao) glDeleteVertexArrays(1, &model.vao);
+    model = {};
+  }
   mFramebuffer = mDepth = mVertices = mIndices = mVao = mProgram = 0;
 }
 
@@ -248,7 +269,79 @@ bool HandsView::create_program() {
   mInvScaleLoc = glGetUniformLocation(mProgram, "uInvScale");
   mColorLoc = glGetUniformLocation(mProgram, "uColor");
   mEyeLoc = glGetUniformLocation(mProgram, "uEye");
+  mMeshLoc = glGetUniformLocation(mProgram, "uMesh");
   return true;
+}
+
+// The controllers' own models (XR_FB_render_model), once the runtime has
+// them: a glTF binary each, read as one mesh (gltf_mesh.cpp). Tried every
+// 2 s while a controller shows, a few times; the drawn shape stays meanwhile
+// and if they never come.
+void HandsView::load_models() {
+  if (mModelProperties == nullptr || mLoadModel == nullptr) return;
+  const auto now = std::chrono::steady_clock::now();
+  if (now - mModelsTriedAt < std::chrono::seconds(2)) return;
+  mModelsTriedAt = now;
+  static const char* const kPaths[2] = {"/model_fb/controller/left", "/model_fb/controller/right"};
+  for (int hand = 0; hand < 2; ++hand) {
+    Model& model = mModels[hand];
+    if (model.loaded || model.attempts >= 10) continue;
+    ++model.attempts;
+    XrPath path = XR_NULL_PATH;
+    if (XR_FAILED(xrStringToPath(mInstance, kPaths[hand], &path))) continue;
+    XrRenderModelCapabilitiesRequestFB request{XR_TYPE_RENDER_MODEL_CAPABILITIES_REQUEST_FB};
+    request.flags = XR_RENDER_MODEL_SUPPORTS_GLTF_2_0_SUBSET_2_BIT_FB;
+    XrRenderModelPropertiesFB properties{XR_TYPE_RENDER_MODEL_PROPERTIES_FB};
+    properties.next = &request;
+    if (XR_FAILED(mModelProperties(mSession, path, &properties)) || properties.modelKey == XR_NULL_RENDER_MODEL_KEY_FB) {
+      continue;
+    }
+    XrRenderModelLoadInfoFB load{XR_TYPE_RENDER_MODEL_LOAD_INFO_FB};
+    load.modelKey = properties.modelKey;
+    XrRenderModelBufferFB buffer{XR_TYPE_RENDER_MODEL_BUFFER_FB};
+    if (XR_FAILED(mLoadModel(mSession, &load, &buffer)) || buffer.bufferCountOutput == 0) continue;
+    std::vector<uint8_t> bytes(buffer.bufferCountOutput);
+    buffer.bufferCapacityInput = static_cast<uint32_t>(bytes.size());
+    buffer.buffer = bytes.data();
+    if (XR_FAILED(mLoadModel(mSession, &load, &buffer))) continue;
+    GltfMesh mesh;
+    std::string error;
+    if (!read_glb(bytes.data(), bytes.size(), mesh, error)) {
+      LOGW("Hands: %s model %s unreadable (%s), the drawn shape stays", hand == 0 ? "left" : "right",
+           properties.modelName, error.c_str());
+      model.attempts = 10;
+      continue;
+    }
+    glGenVertexArrays(1, &model.vao);
+    glBindVertexArray(model.vao);
+    glGenBuffers(1, &model.vertices);
+    glBindBuffer(GL_ARRAY_BUFFER, model.vertices);
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(mesh.vertices.size() * sizeof(float)),
+                 mesh.vertices.data(), GL_STATIC_DRAW);
+    glGenBuffers(1, &model.indices);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, model.indices);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(mesh.indices.size() * sizeof(uint32_t)),
+                 mesh.indices.data(), GL_STATIC_DRAW);
+    constexpr GLsizei stride = GltfMesh::kFloatsPerVertex * sizeof(float);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(3 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(6 * sizeof(float)));
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    model.count = static_cast<GLsizei>(mesh.indices.size());
+    for (int corner = 0; corner < 8; ++corner) {
+      const float x = (corner & 1) ? mesh.high[0] : mesh.low[0];
+      const float y = (corner & 2) ? mesh.high[1] : mesh.low[1];
+      const float z = (corner & 4) ? mesh.high[2] : mesh.low[2];
+      model.radius = std::max(model.radius, std::sqrt(x * x + y * y + z * z));
+    }
+    model.loaded = true;
+    LOGI("Hands: %s controller model %s, %zu vertices, %zu triangles, %.3f m", hand == 0 ? "left" : "right",
+         properties.modelName, mesh.vertex_count(), mesh.indices.size() / 3, model.radius);
+  }
 }
 
 // A unit sphere: every part is one, stretched and turned.
@@ -327,7 +420,24 @@ void HandsView::track_hands(XrSpace base, XrTime time) {
 // the trigger under it, where the index rests. The first version had the
 // face tilted the other way and the handle behind the hand (2026-10-09).
 void HandsView::add_controller(int hand, const ControllerPose& controller) {
-  (void)hand;
+  // The headset's own model when it has given it: in the grip pose's frame,
+  // or the aim pose's (`adb shell setprop debug.partyboard.controller_space
+  // aim`, read every 2 s), which Meta's documents do not settle.
+  if (mModels[hand].loaded) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - mModelSpaceReadAt >= std::chrono::seconds(2)) {
+      mModelSpaceReadAt = now;
+      char value[PROP_VALUE_MAX] = {};
+      __system_property_get("debug.partyboard.controller_space", value);
+      mModelOnAim = std::strcmp(value, "aim") == 0;
+    }
+    const XrPosef& pose = mModelOnAim && controller.aimKnown ? controller.aim : controller.grip;
+    const float r = mModels[hand].radius;
+    const std::array<float, 4> lit{1.0f + controller.trigger * 0.6f, 1.0f + controller.trigger * 0.9f,
+                                   1.0f + controller.trigger * 1.6f, 1.0f};
+    mParts.push_back({pose, {r, r, r}, lit, hand});
+    return;
+  }
   const std::array<float, 4> body{0.018f, 0.018f, 0.022f, 1.0f};
   const std::array<float, 4> face{0.03f, 0.03f, 0.036f, 1.0f};
   const std::array<float, 4> stick{0.006f, 0.006f, 0.007f, 1.0f};
@@ -387,6 +497,7 @@ void HandsView::add_hand(int hand) {
 const XrCompositionLayerBaseHeader* HandsView::layer(XrSpace space, const XrView (&views)[2],
                                                      const std::array<ControllerPose, 2>& controllers) {
   if (mSwapchain == XR_NULL_HANDLE || mProgram == 0) return nullptr;
+  if ((controllers[0].tracked && !mModels[0].loaded) || (controllers[1].tracked && !mModels[1].loaded)) load_models();
   mParts.clear();
   for (int hand = 0; hand < 2; ++hand) {
     // A hand holding its controller is shown as the controller.
@@ -468,6 +579,7 @@ const XrCompositionLayerBaseHeader* HandsView::layer(XrSpace space, const XrView
     glClearDepthf(1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glUseProgram(mProgram);
+    glUniform1f(mMeshLoc, 0.0f);
     glBindVertexArray(mVao);
     glEnable(GL_DEPTH_TEST);
     for (int eye = 0; eye < 2; ++eye) {
@@ -491,6 +603,19 @@ const XrCompositionLayerBaseHeader* HandsView::layer(XrSpace space, const XrView
           glDepthMask(GL_FALSE);
         }
         for (const Part& p : mParts) {
+          if (p.model >= 0) {
+            const Model& m = mModels[p.model];
+            const Mat4 model = pose_matrix(p.pose, {1.0f, 1.0f, 1.0f});
+            glBindVertexArray(m.vao);
+            glUniform1f(mMeshLoc, 1.0f);
+            glUniformMatrix4fv(mModelLoc, 1, GL_FALSE, model.data());
+            glUniform3f(mInvScaleLoc, 1.0f, 1.0f, 1.0f);
+            glUniform4f(mColorLoc, p.color[0], p.color[1], p.color[2], p.color[3]);
+            glDrawElements(GL_TRIANGLES, m.count, GL_UNSIGNED_INT, nullptr);
+            glBindVertexArray(mVao);
+            glUniform1f(mMeshLoc, 0.0f);
+            continue;
+          }
           const Mat4 model = pose_matrix(p.pose, p.size);
           glUniformMatrix4fv(mModelLoc, 1, GL_FALSE, model.data());
           glUniform3f(mInvScaleLoc, 1.0f / p.size.x, 1.0f / p.size.y, 1.0f / p.size.z);
