@@ -1116,7 +1116,40 @@ extern "C" BOOL PartyBoard_StereoBackdrop(float x, float y, float z, float radiu
                 radius * kOpenSkyPerDistance / sOpenSkyRadius);
         }
 #endif
-        return sky ? TRUE : FALSE;
+        if (sky) return TRUE;
+        // The large scenery too (a ground spreading far, a background), so the
+        // room shows around the action (asked for 2026-10-10: "remove the
+        // ground and the background, else I no longer see my table"): an
+        // object this many times larger than the camera's distance to its
+        // target. `adb shell setprop debug.partyboard.open_scenery 3` sets the
+        // factor live, 0 keeps everything.
+        static float factor = 3.0f;
+#if defined(__ANDROID__)
+        static auto readAt = std::chrono::steady_clock::time_point {};
+        const auto now = std::chrono::steady_clock::now();
+        if (now - readAt >= std::chrono::seconds(2)) {
+            readAt = now;
+            char value[PROP_VALUE_MAX] = {};
+            __system_property_get("debug.partyboard.open_scenery", value);
+            const float read = value[0] != 0 ? std::strtof(value, nullptr) : 3.0f;
+            if (read != factor) {
+                __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest",
+                    "Scenery larger than %.1f times the camera's distance left out (debug.partyboard.open_scenery)", read);
+            }
+            factor = read;
+        }
+#endif
+        const float distance = sOpenSkyRadius / kOpenSkyPerDistance;
+        const bool scenery = factor > 0.0f && std::isfinite(radius) && radius >= factor * distance;
+#if defined(__ANDROID__)
+        static int loggedScenery = -1;
+        if (scenery && loggedScenery != static_cast<int>(sScene)) {
+            loggedScenery = static_cast<int>(sScene);
+            __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "Scene %d: scenery left out, %.0f units across "
+                "(%.1f times the camera's distance)", static_cast<int>(sScene), radius, radius / distance);
+        }
+#endif
+        return scenery ? TRUE : FALSE;
     }
     if (!sActive || !sCameraViewSet || !(sSceneExtent > 0.0f) || !std::isfinite(radius)
         || radius < kBackdropExtents * sSceneExtent) {
