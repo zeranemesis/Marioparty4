@@ -81,6 +81,7 @@ using ReleaseImagesFn = void (*)(void **buffers, uint32_t count);
 using ScreenHiddenFn = bool (*)();
 using HudCropFn = void (*)(float x, float y, float width, float height);
 using SceneBoundsFn = void (*)(const float *low, const float *high);
+using InsetFn = void (*)(float x, float y, float width, float height);
 using TableSetupHoldFn = bool (*)();
 using HiddenAreaFn = uint32_t (*)(uint32_t eye, float *rects, uint32_t capacity, uint32_t *version);
 using FoveationAvailableFn = void (*)(bool available);
@@ -99,6 +100,7 @@ struct Quest {
     ScreenHiddenFn screenHidden = nullptr; // optional: an older library has none
     HudCropFn hudCrop = nullptr;           // optional: the interface's part to show
     SceneBoundsFn sceneBounds = nullptr;   // optional: what the eyes need to draw (cropped eyes)
+    InsetFn inset = nullptr;               // optional: a part of the TV picture shown beside the 3D
     TableSetupHoldFn tableSetupHold = nullptr; // optional
     HiddenAreaFn hiddenArea = nullptr;         // optional: every pixel drawn
     FoveationAvailableFn foveationAvailable = nullptr; // optional: no automatic foveation
@@ -279,6 +281,7 @@ bool find_quest()
             sQuest.screenHidden = reinterpret_cast<ScreenHiddenFn>(dlsym(lib, "PartyBoardQuest_StereoScreenHidden"));
             sQuest.hudCrop = reinterpret_cast<HudCropFn>(dlsym(lib, "PartyBoardQuest_StereoHudCrop"));
             sQuest.sceneBounds = reinterpret_cast<SceneBoundsFn>(dlsym(lib, "PartyBoardQuest_StereoSceneBounds"));
+            sQuest.inset = reinterpret_cast<InsetFn>(dlsym(lib, "PartyBoardQuest_StereoInset"));
             sQuest.tableSetupHold = reinterpret_cast<TableSetupHoldFn>(dlsym(lib, "PartyBoardQuest_TableSetupHold"));
             sQuest.hiddenArea = reinterpret_cast<HiddenAreaFn>(dlsym(lib, "PartyBoardQuest_StereoHiddenArea"));
             sQuest.foveationAvailable =
@@ -533,6 +536,20 @@ extern "C" void PartyBoard_StereoBeginCamera(s16 cameraNo)
                 view.viewportH / 480.0f);
         } else {
             sQuest.hudCrop(0.0f, 0.0f, 1.0f, 1.0f);
+        }
+    }
+    // Photo Finish: camera 0 shows the finished picture each player must
+    // rebuild, beside the players' own cameras. The eyes take the player's;
+    // that picture's part of the TV image goes on a panel beside it (asked
+    // for 2026-10-06: "my camera and the finished puzzle's").
+    if (sQuest.inset != nullptr) {
+        const auto& puzzle = Hu3DCamera[0];
+        if (omCurrentOvlGet() == DLL_m411Dll && cameraNo != 0 && -1.0f != puzzle.fov && puzzle.viewportW > 1.0f
+            && puzzle.viewportH > 1.0f) {
+            sQuest.inset(puzzle.viewportX / 640.0f, puzzle.viewportY / 480.0f, puzzle.viewportW / 640.0f,
+                puzzle.viewportH / 480.0f);
+        } else {
+            sQuest.inset(0.0f, 0.0f, 0.0f, 0.0f);
         }
     }
     if (!find_quest()) {

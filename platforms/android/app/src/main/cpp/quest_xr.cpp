@@ -317,6 +317,12 @@ void name_threads(App& app, bool sessionStart);
 // not put off (B) this session. Open: the calibration panel is up.
 // The game's last toast (PartyBoardQuest_Toast, game thread), for the XR
 // thread to draw and show.
+// A part of the TV picture shown beside the 3D (PartyBoardQuest_StereoInset,
+// game thread): x, y, width, height of the 640 x 480 picture, and when it came.
+std::mutex g_insetMutex;
+std::array<float, 4> g_inset{};
+std::chrono::steady_clock::time_point g_insetAt{};
+
 std::mutex g_noticeMutex;
 std::string g_noticeTitle, g_noticeText;
 int g_noticeMs = 0;
@@ -1894,9 +1900,18 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   if (screenShown) {
     layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&screen);
   }
+  // A part of the TV picture beside the 3D (Photo Finish's puzzle): the game
+  // keeps presenting its screen, shown cropped to that part (below).
+  std::array<float, 4> inset{};
+  {
+    std::lock_guard lock{g_insetMutex};
+    if (std::chrono::steady_clock::now() - g_insetAt < std::chrono::milliseconds(500)) inset = g_inset;
+  }
+  const bool insetShown = modelLayer != nullptr && !screenShown && inset[2] > 0.0f && inset[3] > 0.0f;
   // Hidden behind the model: the game stops presenting it (Aurora), a whole
   // frame of GPU work and a surface's worth of bandwidth saved each frame.
-  app.stereo.set_screen_hidden(app.poseKnown && modelLayer != nullptr && !screenShown);
+  app.stereo.set_screen_hidden(app.poseKnown && modelLayer != nullptr && !screenShown && !insetShown);
+  XrCompositionLayerQuad insetQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
 
   // The images come from Aurora like the screen's, so they need the same flip.
   // The interface's screen goes over the model, so it is always seen whole;
@@ -1940,6 +1955,39 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
     if (const auto* hud =
             app.stereo.hud_layer(app.stage, hudPose, hudSize, app.extensions.imageLayout ? &modelFlip : nullptr)) {
       layers[layerCount++] = hud;
+    }
+    // The TV picture's part beside the interface, on its right, 60% as tall.
+    // The game draws its 4:3 picture centered in the screen's 16:9.
+    if (insetShown) {
+      const float picWidth = std::min(static_cast<float>(app.screen.width), app.screen.height * 4.0f / 3.0f);
+      const float picHeight = picWidth * 0.75f;
+      const float offX = (app.screen.width - picWidth) * 0.5f, offY = (app.screen.height - picHeight) * 0.5f;
+      float y = offY + inset[1] * picHeight;
+      const float h = inset[3] * picHeight;
+      // `debug.partyboard.inset_flip 1`: the rows counted from the bottom
+      // instead (unverified on the headset).
+      static bool flipRows = false;
+      static auto flipReadAt = std::chrono::steady_clock::time_point{};
+      if (const auto now = std::chrono::steady_clock::now(); now - flipReadAt >= std::chrono::seconds(2)) {
+        flipReadAt = now;
+        char value[PROP_VALUE_MAX] = {};
+        __system_property_get("debug.partyboard.inset_flip", value);
+        flipRows = value[0] == '1';
+      }
+      if (flipRows) y = app.screen.height - y - h;
+      insetQuad.next = chain;
+      insetQuad.space = app.stage;
+      insetQuad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+      insetQuad.subImage.swapchain = app.screen.swapchain;
+      insetQuad.subImage.imageRect = {{static_cast<int32_t>(offX + inset[0] * picWidth), static_cast<int32_t>(y)},
+                                      {static_cast<int32_t>(inset[2] * picWidth), static_cast<int32_t>(h)}};
+      const float height = hudSize.height * 0.6f;
+      const float width = height * (inset[2] * 4.0f) / (inset[3] * 3.0f);
+      XrPosef beside = identity_pose();
+      beside.position.x = hudSize.width * 0.5f + 0.03f + width * 0.5f;
+      insetQuad.pose = compose(hudPose, beside);
+      insetQuad.size = {width, height};
+      layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&insetQuad);
     }
   }
 
@@ -2230,6 +2278,15 @@ __attribute__((visibility("default"))) float PartyBoardQuest_ActiveRefreshRate()
 // through PartyBoard_QuestHoldOverlay): true while it should wait for the
 // table's calibration. The first call opens the panel, which the XR thread
 // shows on its next frame.
+// Photo Finish's puzzle (quest_stereo.cpp, game thread): the part of the
+// 640 x 480 TV picture to show beside the 3D; width 0: none.
+__attribute__((visibility("default"))) void PartyBoardQuest_StereoInset(float x, float y, float width,
+                                                                        float height) {
+  std::lock_guard lock{g_insetMutex};
+  g_inset = {x, y, width, height};
+  g_insetAt = std::chrono::steady_clock::now();
+}
+
 // A toast of the game (ui::push_toast via quest_stereo.cpp, game thread):
 // shown in the headset for `durationMs`, the screen it is drawn on being
 // hidden while the world is in 3D.
