@@ -1932,7 +1932,7 @@
        .key = g_sortKey,
        .object = g_sortObject,
        // The game draws its opaque objects with the usual alpha blend on
-@@ -397,9 +789,50 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -397,9 +789,59 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
                      config.blendFacDst == GX_BL_INVSRCALPHA)),
    };
    g_statSortable += order.sortable;
@@ -1971,8 +1971,17 @@
 +  // through solid things (a minigame in 3D, 2026-10-06). Opaque draws then
 +  // cover (the blend constant's 1 for alpha), blended ones add theirs over
 +  // what is there.
++  // Some draws cover all the same: a blend that keeps nothing of what is
++  // behind (destination factor zero, a logic copy), and a cut-out (alpha
++  // test) whose kept fragments are solid. Their alpha is the texture's, not
++  // a coverage: Three Throw's baskets and parts of its walls let the room
++  // through (2026-10-10).
++  const bool coverBlend = spatialConfig.blendMode == GX_BM_LOGIC ||
++                          (spatialConfig.blendMode == GX_BM_BLEND &&
++                           (spatialConfig.blendFacDst == GX_BL_ZERO ||
++                            static_cast<bool>(spatialConfig.shaderConfig.alphaCompare)));
 +  if (g_frameCoverAlpha && spatialConfig.colorUpdate) {
-+    if (spatialConfig.blendMode == GX_BM_NONE) {
++    if (spatialConfig.blendMode == GX_BM_NONE || coverBlend) {
 +      spatialConfig.dstAlpha = 255;
 +      draw.dstAlpha = 255;
 +    } else if (spatialConfig.blendMode == GX_BM_BLEND) {
@@ -1983,7 +1992,7 @@
    // An object that reaches both eyes, drawn once per eye when asked: no
    // fragment test, so the GPU keeps rejecting its hidden fragments early.
    const bool crossingPerEye = g_switches.crossingPerEye && inObject && !g_uncut;
-@@ -422,31 +855,61 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
+@@ -422,31 +864,61 @@ bool record_gx_draw(gx::DrawData draw, const gx::PipelineConfig& config, const g
      }
      if (ready) {
        draw.pipeline = instancedRef;
@@ -2054,7 +2063,7 @@
  #else
    return false;
  #endif
-@@ -466,6 +929,7 @@ void end_frame() noexcept {
+@@ -466,6 +938,7 @@ void end_frame() noexcept {
  #if defined(__ANDROID__)
    g_worldMergeable = false;
    g_uncut = false;
@@ -2062,7 +2071,7 @@
    g_recording = false;
    // Even without geometry, clear and submit the leased image. Dropping it
    // leaks a ring slot and leaves the preceding scene visible in the room.
-@@ -482,7 +946,9 @@ void end_frame() noexcept {
+@@ -482,7 +955,9 @@ void end_frame() noexcept {
        g_eyeDraws[1].clear();
        g_eyeInstanced.clear();
    g_eyeOrder.clear();
@@ -2073,7 +2082,7 @@
        return;
      }
      image = g_images[g_image];
-@@ -491,21 +957,60 @@ void end_frame() noexcept {
+@@ -491,21 +966,60 @@ void end_frame() noexcept {
    // Same sample count and formats as the game's frame, so its pipelines draw here too.
    const auto& config = webgpu::g_graphicsConfig;
    const uint32_t samples = stereo_samples();
@@ -2141,7 +2150,7 @@
    const uint32_t eyeStride = g_width / 2;
    PassDesc desc{
        .color = samples > 1 ? g_color.view : image.view,
-@@ -524,8 +1029,37 @@ void end_frame() noexcept {
+@@ -524,8 +1038,37 @@ void end_frame() noexcept {
        .instanced = &g_eyeInstanced,
        .order = &g_eyeOrder,
        .sortOpaque = g_switches.sortOpaque,
@@ -2180,7 +2189,7 @@
    enqueue_pass(desc);
    // The interface, in its own image, when this frame draws it (its image's
    // contents are not kept: a frame that draws it draws all of it): its pass
-@@ -534,11 +1068,11 @@ void end_frame() noexcept {
+@@ -534,11 +1077,11 @@ void end_frame() noexcept {
    static const std::vector<gx::DrawData> noDraws;
    const PassDesc hud{
        .label = "Stereo HUD",
@@ -2195,7 +2204,7 @@
        .hudTop = 0,
        .hudWidth = g_hudWidth,
        .hudHeight = g_hudHeight,
-@@ -546,7 +1080,7 @@ void end_frame() noexcept {
+@@ -546,7 +1089,7 @@ void end_frame() noexcept {
        .eyes = {&noDraws, &noDraws},
        .hud = &g_hudDraws,
    };
@@ -2204,7 +2213,7 @@
      enqueue_pass(hud);
    }
    if (!g_loggedGeometry && hasWorld) {
-@@ -573,6 +1107,27 @@ void end_frame() noexcept {
+@@ -573,6 +1116,27 @@ void end_frame() noexcept {
               recorded != 0 ? g_statSortable * 100 / recorded : 0, g_switches.sortOpaque ? " (sorted)" : "",
               recorded != 0 ? g_statCrossingPerEye * 100 / recorded : 0);
      g_statInstanced = g_statPerEye = g_statSortable = g_statCrossingPerEye = 0;
@@ -2232,7 +2241,7 @@
      statsAt = now;
      statFrames = statWorld = statHud = 0;
      statWorldMax = 0;
-@@ -581,7 +1136,9 @@ void end_frame() noexcept {
+@@ -581,7 +1145,9 @@ void end_frame() noexcept {
    g_eyeDraws[1].clear();
    g_eyeInstanced.clear();
    g_eyeOrder.clear();
@@ -2243,7 +2252,7 @@
    g_image = -1;
  #endif
  }
-@@ -622,8 +1179,255 @@ void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept
+@@ -622,8 +1188,255 @@ void begin_access(int32_t image, uint64_t tag, bool hasWorld, bool hud) noexcept
  #endif
  }
  
@@ -2499,7 +2508,7 @@
    for (const auto& accessed : g_accessed) {
      Image target;
      {
-@@ -658,7 +1462,8 @@ void after_submit() noexcept {
+@@ -658,7 +1471,8 @@ void after_submit() noexcept {
      const int eyesFd = end_access(target.memory, target.texture);
      const int fd = accessed.hud ? merge_fences(eyesFd, end_access(target.hudMemory, target.hudTexture)) : eyesFd;
      if (g_callback != nullptr) {
@@ -2509,7 +2518,7 @@
      } else if (fd >= 0) {
        close(fd);
      }
-@@ -676,6 +1481,7 @@ bool AuroraStereoRegisterImages(void* const* eyeBuffers, void* const* hudBuffers
+@@ -676,6 +1490,7 @@ bool AuroraStereoRegisterImages(void* const* eyeBuffers, void* const* hudBuffers
                                  uint32_t height, uint32_t hudWidth, uint32_t hudHeight,
                                  AuroraStereoCallback callback, void* user) {
  #if defined(__ANDROID__)
@@ -2517,7 +2526,7 @@
    if (!webgpu::g_device) {
      return false;
    }
-@@ -750,21 +1556,25 @@ bool AuroraStereoRegisterImages(void* const* eyeBuffers, void* const* hudBuffers
+@@ -750,21 +1565,25 @@ bool AuroraStereoRegisterImages(void* const* eyeBuffers, void* const* hudBuffers
  void AuroraStereoBegin(uint32_t image, const float clip[2][16], uint64_t frameTag) {
  #if defined(__ANDROID__)
    // GX queues draws in its FIFO. Consume the preceding camera's commands
@@ -2558,7 +2567,7 @@
  #else
    (void)image;
    (void)clip;
-@@ -776,9 +1586,10 @@ void AuroraStereoEnd(void) {
+@@ -776,9 +1595,10 @@ void AuroraStereoEnd(void) {
  #if defined(__ANDROID__)
    // Closing recording before draining loses deferred display-list draws:
    // they would only be decoded at aurora_end_frame, after g_recording is off.
@@ -2572,7 +2581,7 @@
  #endif
  }
  
-@@ -786,8 +1597,12 @@ bool AuroraStereoActive(void) { return recording(); }
+@@ -786,8 +1606,12 @@ bool AuroraStereoActive(void) { return recording(); }
  
  void AuroraStereoSetEyeSize(uint32_t width, uint32_t height) {
  #if defined(__ANDROID__)
@@ -2587,7 +2596,7 @@
  #else
    (void)width;
    (void)height;
-@@ -796,12 +1611,50 @@ void AuroraStereoSetEyeSize(uint32_t width, uint32_t height) {
+@@ -796,12 +1620,50 @@ void AuroraStereoSetEyeSize(uint32_t width, uint32_t height) {
  
  void AuroraStereoSetHud(bool draw) {
  #if defined(__ANDROID__)
@@ -2639,7 +2648,7 @@
  void AuroraStereoHideScreen(bool hidden) {
  #if defined(__ANDROID__)
    g_screenHidden.store(hidden, std::memory_order_relaxed);
-@@ -813,30 +1666,91 @@ void AuroraStereoHideScreen(bool hidden) {
+@@ -813,30 +1675,91 @@ void AuroraStereoHideScreen(bool hidden) {
  extern "C" void AuroraStereoSetSortKey(float key) {
  #if defined(__ANDROID__)
    using namespace aurora::gfx::stereo;
@@ -2741,7 +2750,7 @@
  #else
    (void)uncut;
  #endif
-@@ -845,8 +1759,7 @@ extern "C" void AuroraStereoSetUncut(bool uncut) {
+@@ -845,8 +1768,7 @@ extern "C" void AuroraStereoSetUncut(bool uncut) {
  extern "C" void AuroraStereoWorldOnly(bool enabled) {
  #if defined(__ANDROID__)
    // The FIFO is deferred: process camera draws before changing the scope.
