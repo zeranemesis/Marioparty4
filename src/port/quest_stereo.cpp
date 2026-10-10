@@ -86,6 +86,7 @@ using ScreenHiddenFn = bool (*)();
 using HudCropFn = void (*)(float x, float y, float width, float height);
 using SceneBoundsFn = void (*)(const float *low, const float *high);
 using InsetFn = void (*)(float x, float y, float width, float height);
+using HudFovFn = void (*)(float tanHalfFov);
 using CameraViewFn = void (*)(bool cameraView);
 using SceneFn = void (*)(int scene);
 using TableSetupHoldFn = bool (*)();
@@ -107,6 +108,7 @@ struct Quest {
     HudCropFn hudCrop = nullptr;           // optional: the interface's part to show
     SceneBoundsFn sceneBounds = nullptr;   // optional: what the eyes need to draw (cropped eyes)
     InsetFn inset = nullptr;               // optional: a part of the TV picture shown beside the 3D
+    HudFovFn hudFov = nullptr;             // optional: the open view's camera field, for the interface's size
     CameraViewFn cameraView = nullptr;     // optional: this scene from its camera's point of view
     SceneFn scene = nullptr;               // optional: which scene (its own resolution)
     TableSetupHoldFn tableSetupHold = nullptr; // optional
@@ -413,6 +415,7 @@ bool find_quest()
             sQuest.hudCrop = reinterpret_cast<HudCropFn>(dlsym(lib, "PartyBoardQuest_StereoHudCrop"));
             sQuest.sceneBounds = reinterpret_cast<SceneBoundsFn>(dlsym(lib, "PartyBoardQuest_StereoSceneBounds"));
             sQuest.inset = reinterpret_cast<InsetFn>(dlsym(lib, "PartyBoardQuest_StereoInset"));
+            sQuest.hudFov = reinterpret_cast<HudFovFn>(dlsym(lib, "PartyBoardQuest_StereoHudFov"));
             sQuest.cameraView = reinterpret_cast<CameraViewFn>(dlsym(lib, "PartyBoardQuest_StereoCameraView"));
             sQuest.scene = reinterpret_cast<SceneFn>(dlsym(lib, "PartyBoardQuest_StereoScene"));
             sQuest.tableSetupHold = reinterpret_cast<TableSetupHoldFn>(dlsym(lib, "PartyBoardQuest_TableSetupHold"));
@@ -924,6 +927,15 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
         // height made it a smaller picture, "not zoomed enough", 2026-10-06).
         if (!framed && sFrame.windowDistance > 0.0f) {
             scale = sFrame.windowDistance / distance;
+        }
+        // The interface then spans the camera's field from the player's
+        // place too: what the game marks on it from the 3D (Hu3D3Dto2D, a
+        // cursor on the piece in hand) lands on that thing. As tall as the
+        // screen, it was a smaller picture than the 3D (2026-10-10).
+        if (sQuest.hudFov != nullptr && !sSecondary) {
+            sQuest.hudFov(!framed && sFrame.windowDistance > 0.0f
+                    ? std::tan(camera.fov * 0.5f * static_cast<float>(M_PI) / 180.0f)
+                    : 0.0f);
         }
         Mat4 viewToWindow{};
         for (int axis = 0; axis < 3; ++axis) {

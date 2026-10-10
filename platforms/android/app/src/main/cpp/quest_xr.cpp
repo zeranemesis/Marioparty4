@@ -326,6 +326,9 @@ std::atomic_bool g_sceneCameraView = false;
 
 std::mutex g_insetMutex;
 std::array<float, 4> g_inset{};
+// The open camera view's vertical half field, its tangent (0: none):
+// the interface spans it from the player's place (PartyBoardQuest_StereoHudFov).
+std::atomic<float> g_hudTanHalfFov{0.0f};
 std::chrono::steady_clock::time_point g_insetAt{};
 
 std::mutex g_noticeMutex;
@@ -1938,7 +1941,24 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
       // The interface's part on show (a split screen's own), as tall as the
       // screen: the TV's 640 x 480 has square pixels.
       const auto crop = app.stereo.hud_crop();
-      hudSize = {windowSize.height * (crop[2] * 640.0f) / (crop[3] * 480.0f), windowSize.height};
+      // In 3D from the camera's place, as tall as the camera's field seen
+      // from the player's distance: the game's marks over 3D things (a
+      // cursor on a piece in hand) on them. `debug.partyboard.hud_fov 0`:
+      // as tall as the screen, as before (2026-10-10).
+      static bool hudFov = true;
+      static auto hudFovAt = std::chrono::steady_clock::time_point{};
+      if (const auto now = std::chrono::steady_clock::now(); now - hudFovAt >= std::chrono::seconds(2)) {
+        hudFovAt = now;
+        char value[PROP_VALUE_MAX] = {};
+        __system_property_get("debug.partyboard.hud_fov", value);
+        hudFov = value[0] != '0';
+      }
+      const float tanHalf = g_hudTanHalfFov.load();
+      const float hudHeight = hudFov && app.table.minigameView != 1 && app.minigameViewerDistance > 0.0f &&
+                                      tanHalf > 0.05f && tanHalf < 3.0f
+                                  ? 2.0f * app.minigameViewerDistance * tanHalf
+                                  : windowSize.height;
+      hudSize = {hudHeight * (crop[2] * 640.0f) / (crop[3] * 480.0f), hudHeight};
       XrPosef inFront = identity_pose();
       inFront.position.z = kWindowHudInFrontMeters;
       hudPose = compose(windowPose, inFront);
@@ -2329,6 +2349,10 @@ __attribute__((visibility("default"))) void PartyBoardQuest_StereoCameraView(boo
 
 // Photo Finish's puzzle (quest_stereo.cpp, game thread): the part of the
 // 640 x 480 TV picture to show beside the 3D; width 0: none.
+__attribute__((visibility("default"))) void PartyBoardQuest_StereoHudFov(float tanHalfFov) {
+  g_hudTanHalfFov = std::isfinite(tanHalfFov) ? tanHalfFov : 0.0f;
+}
+
 __attribute__((visibility("default"))) void PartyBoardQuest_StereoInset(float x, float y, float width,
                                                                         float height) {
   std::lock_guard lock{g_insetMutex};
