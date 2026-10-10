@@ -584,6 +584,17 @@ static int local_player()
 // two against two). Each headset of a game played together takes its own.
 static int primary_camera()
 {
+    // Photo Finish: camera 0 only photographs the puzzle's picture into a
+    // corner of the frame (copied to a texture, then covered in black); the
+    // players' views are cameras 1 to 4, one a player. The eyes took camera
+    // 0: the picture's scene and its black cover, the interface cut to that
+    // corner, no puzzle (2026-10-10).
+    if (omCurrentOvlGet() == DLL_m411Dll) {
+        const int own = 1 + local_player();
+        if (own < HU3D_CAM_MAX && -1.0f != Hu3DCamera[own].fov) {
+            return own;
+        }
+    }
     int first = -1;
     bool split = false;
     for (int camera = 0; camera < HU3D_CAM_MAX; ++camera) {
@@ -709,19 +720,11 @@ extern "C" void PartyBoard_StereoBeginCamera(s16 cameraNo)
             sQuest.hudCrop(0.0f, 0.0f, 1.0f, 1.0f);
         }
     }
-    // Photo Finish: camera 0 shows the finished picture each player must
-    // rebuild, beside the players' own cameras. The eyes take the player's;
-    // that picture's part of the TV image goes on a panel beside it (asked
-    // for 2026-10-06: "my camera and the finished puzzle's").
+    // No panel of the TV picture beside the 3D: Photo Finish's camera 0 was
+    // taken for the finished picture (2026-10-06), but its corner of the TV
+    // image is covered in black once photographed, then by player 1's view.
     if (sQuest.inset != nullptr) {
-        const auto& puzzle = Hu3DCamera[0];
-        if (omCurrentOvlGet() == DLL_m411Dll && cameraNo != 0 && -1.0f != puzzle.fov && puzzle.viewportW > 1.0f
-            && puzzle.viewportH > 1.0f) {
-            sQuest.inset(puzzle.viewportX / 640.0f, puzzle.viewportY / 480.0f, puzzle.viewportW / 640.0f,
-                puzzle.viewportH / 480.0f);
-        } else {
-            sQuest.inset(0.0f, 0.0f, 0.0f, 0.0f);
-        }
+        sQuest.inset(0.0f, 0.0f, 0.0f, 0.0f);
     }
     if (!find_quest()) {
         AuroraStereoHideScreen(false);

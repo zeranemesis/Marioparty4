@@ -15,6 +15,9 @@
 #include "game/sprite.h"
 #include "game/wipe.h"
 #include "port/widescreen.h"
+#ifdef TARGET_PC
+#include "port/quest_stereo.h"
+#endif
 
 #include "ext_math.h"
 
@@ -393,6 +396,12 @@ void fn_1_1498(s16 layer)
         GXSetTexCopyDst(320, 240, GX_TF_RGB5A3, GX_FALSE);
         GXCopyTex(lbl_1_bss_0, GX_TRUE);
         DCFlushRange(lbl_1_bss_0, 0x25800); // TODO: sizeof?
+#ifdef TARGET_PC
+        // Meta Quest: this black cover of the photographed corner is drawn
+        // with player 1's camera, for the eyes a black wall around the
+        // puzzle hiding the room. The headset hides the TV frame meanwhile.
+        if (!PartyBoard_StereoActive())
+#endif
         fn_1_1074();
     }
 }
