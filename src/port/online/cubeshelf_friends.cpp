@@ -111,6 +111,17 @@ namespace {
             mesh::ClientOptions options;
             options.nodesFile = mesh_nodes_path().string();
             options.nodeKeyFile = (PartyBoard_ConfigPath / "cubeshelf-mesh-node.key").string();
+            // CubeShelf's CUBESHELF_MESH_ALLOW_PRIVATE, as a file: private IPv4 addresses count as
+            // the Internet. For testing against a network on one home network or an emulator's
+            // host, the only way such a network can form; no real device has this file.
+            std::error_code ec;
+            if (fs::exists(PartyBoard_ConfigPath / "cubeshelf-mesh-allow-private", ec)) {
+                options.routable = [](const mesh::Endpoint &e) {
+                    const auto &a = e.address;
+                    const bool privateV4 = !e.v6 && (a[0] == 10 || (a[0] == 172 && a[1] >= 16 && a[1] <= 31) || (a[0] == 192 && a[1] == 168));
+                    return privateV4 || mesh::is_public(e);
+                };
+            }
             n.client = std::make_unique<mesh::Client>(options);
             // A socket and a proof of work: a few seconds, once per run.
             if (!n.client->start()) {
