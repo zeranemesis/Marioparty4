@@ -1,5 +1,8 @@
 #include "port/online/cubeshelf_friends.hpp"
 #include "port/online/cubeshelf_mesh.hpp"
+#ifdef __ANDROID__
+#include "port/android_bridge.hpp"
+#endif
 
 #include <filesystem>
 
@@ -67,6 +70,35 @@ namespace {
     {
         static auto *instance = new Network;
         return *instance;
+    }
+
+    // Whether this device may do a little work for the network: on Android, an unmetered Wi-Fi
+    // or wired network while charging (PartyBoardActivity.mayHelpCubeShelfNetwork). A computer
+    // running PartyBoard without CubeShelf is plugged in and on its own connection.
+    bool may_help_network()
+    {
+#ifdef __ANDROID__
+        bool allowed = false;
+        android::with_activity("mayHelpCubeShelfNetwork", "()Z", [&](JNIEnv *env, jobject activity, jmethodID method) {
+            allowed = env->CallBooleanMethod(activity, method) == JNI_TRUE;
+        });
+        return allowed;
+#else
+        return true;
+#endif
+    }
+
+    // Friends' records read during the pass, passed on to the nodes that should hold them: at
+    // most every half hour, and only when allowed.
+    void help_network(std::int64_t now)
+    {
+        auto &n = network();
+        static std::int64_t lastHelped = 0;
+        if (!n.client || now - lastHelped < 30 * 60 || !may_help_network()) {
+            return;
+        }
+        lastHelped = now;
+        n.client->republish(now);
     }
 
     mesh::Client *network_client(const Profile &profile)
@@ -267,6 +299,8 @@ namespace {
                 changed = true;
             }
         }
+
+        help_network(unix_now());
 
         std::lock_guard lock(s.mutex);
         if ((sequencesAdvanced || addressesMoved) && s.profile && s.profile->publicKey == profile.publicKey) {

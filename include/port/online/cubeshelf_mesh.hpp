@@ -76,6 +76,8 @@ struct Record {
 };
 std::optional<Record> read_record(const std::uint8_t *data, std::size_t length, std::size_t &used);
 bool record_valid(const Record &record, std::int64_t nowUnix);
+// MeshRecord.WriteTo: the record as it travels.
+Bytes write_record(const Record &record);
 
 // MeshFriends: where a friend's pointer for us is on a given day, and how it opens.
 NodeId pointer_locator(const std::uint8_t pairKey[32], const PublicKey &owner, std::int64_t day);
@@ -151,6 +153,12 @@ public:
 
     // A friend's presence as published on the network, today's or yesterday's. Blocking.
     NetworkRead read_presence(const Profile &me, const PublicKey &friendKey, std::int64_t nowUnix);
+
+    // Passes on the friends' records read since the last call -- pointers and documents, signed
+    // by their authors and unchanged -- to the nodes that should hold them, so a friend whose PC
+    // is off stays findable longer. The one thing a client can do for the network without being
+    // reachable. Blocking. Returns how many stores were accepted.
+    int republish(std::int64_t nowUnix);
 
     // The raw lookup, for tests: every valid record at a locator.
     std::vector<Record> find_value(const NodeId &locator);

@@ -137,6 +137,25 @@ public class PartyBoardActivity extends SDLActivity {
         }
     }
 
+    // Called from the game's friends reader, on its own thread: whether this device may do a little
+    // work for the CubeShelf network -- passing on friends' documents it just read. Only on an
+    // unmetered Wi-Fi or wired network, and only while charging: never the data plan, never the battery.
+    public boolean mayHelpCubeShelfNetwork() {
+        try {
+            android.net.ConnectivityManager connectivity = getSystemService(android.net.ConnectivityManager.class);
+            android.net.Network network = connectivity != null ? connectivity.getActiveNetwork() : null;
+            android.net.NetworkCapabilities capabilities = network != null ? connectivity.getNetworkCapabilities(network) : null;
+            boolean unmetered = capabilities != null
+                && (capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+                    || capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET))
+                && capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
+            android.os.BatteryManager battery = getSystemService(android.os.BatteryManager.class);
+            return unmetered && battery != null && battery.isCharging();
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
     // Called from the game (mode 0: get the account and the PC's saves, 1: send this phone's saves).
     // An empty code opens Play services' QR scanner; a pasted CSL1: code is used as it is.
     public boolean startCubeShelfLink(final int mode, final String code, final boolean french) {

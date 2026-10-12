@@ -195,6 +195,12 @@ void live_check(const json &live)
         const auto opened = open_presence(me, friendKey, *read.envelope);
         check(opened && opened->displayName == live["friendName"].get<std::string>(), "and it opens as the friend's presence");
     }
+
+    // What was read goes back to the holders, unchanged: they keep it (or already had it).
+    const int kept = client.republish(live["now"].get<std::int64_t>());
+    std::printf("republished: %d store(s) accepted\n", kept);
+    check(kept >= 2, "the pointer and the document were passed on");
+    check(client.republish(live["now"].get<std::int64_t>()) == 0, "and only once: nothing new was read since");
 }
 
 } // namespace

@@ -745,6 +745,19 @@ bool record_valid(const Record &record, std::int64_t nowUnix)
         && mbedtls_ecdsa_verify(&g.group, digest, sizeof(digest), &q.v, &r.v, &s.v) == 0;
 }
 
+Bytes write_record(const Record &record)
+{
+    Bytes out(record.locator.begin(), record.locator.end());
+    out.push_back(record.kind);
+    append(out, record.signer.data(), record.signer.size());
+    put64(out, record.sequence);
+    put64(out, static_cast<std::uint64_t>(record.expiresUnix));
+    put32(out, static_cast<std::uint32_t>(record.payload.size()));
+    append(out, record.payload.data(), record.payload.size());
+    append(out, record.signature.data(), record.signature.size());
+    return out;
+}
+
 NodeId pointer_locator(const std::uint8_t pairKey[32], const PublicKey &owner, std::int64_t day)
 {
     std::uint8_t ownerHash[32];
@@ -1049,6 +1062,19 @@ struct Client::Impl {
     std::set<Endpoint> seeds;
     std::map<Endpoint, std::int64_t> unreachable;
     std::map<std::string, std::pair<std::int64_t, NodeId>> mainLocators;
+    // Records read since the last republish, newest per place; and the closest nodes that
+    // answered the last lookup.
+    std::map<NodeId, Record> toRepublish;
+    std::vector<Contact> lastClosest;
+
+    void remember(const std::vector<Record> &records)
+    {
+        for (const auto &record : records) {
+            auto it = toRepublish.find(record.locator);
+            if (it == toRepublish.end() || it->second.sequence < record.sequence) toRepublish[record.locator] = record;
+            if (toRepublish.size() > 64) toRepublish.erase(toRepublish.begin());
+        }
+    }
 
     std::uint32_t new_index()
     {
@@ -1607,10 +1633,62 @@ struct Client::Impl {
             }
         }
 
+        lastClosest.clear();
         for (auto &[id, c] : candidates) {
             if (c.request) requests.erase(*c.request);
+            if (c.state == 2) lastClosest.push_back(c.contact);
         }
+        std::sort(lastClosest.begin(), lastClosest.end(), [&](const Contact &a, const Contact &b) { return closer(a.id, b.id, target); });
+        if (lastClosest.size() > std::size_t(kK)) lastClosest.resize(kK);
         return records;
+    }
+
+    // MeshDht.StoreAsync, from a node that is not itself a holder: the record to each of the
+    // closest nodes, in parallel. Returns how many kept it.
+    int store(const Record &record)
+    {
+        lookup(record.locator, false);
+        std::vector<Contact> targets = lastClosest;
+        if (targets.size() > 8) targets.resize(8);
+        const Bytes body = write_record(record);
+        struct Store {
+            Contact contact;
+            std::optional<std::uint32_t> request;
+            bool done = false;
+        };
+        std::vector<Store> stores;
+        for (const auto &c : targets) {
+            stores.push_back(Store { c });
+            connect(c.endpoint);
+        }
+        int accepted = 0;
+        const std::int64_t deadline = now_ms() + 8000;
+        while (now_ms() < deadline && std::any_of(stores.begin(), stores.end(), [](const Store &s) { return !s.done; })) {
+            pump(50);
+            for (auto &st : stores) {
+                if (st.done) continue;
+                if (!st.request) {
+                    Session *s = session_at(st.contact.endpoint);
+                    if (s != nullptr && s->remoteId == st.contact.id) st.request = ask(*s, 0x04, body);
+                    else if (s != nullptr || pending_at(st.contact.endpoint) == nullptr) st.done = true;
+                    continue;
+                }
+                auto &request = requests[*st.request];
+                if (request.failed) {
+                    st.done = true;
+                }
+                else if (request.reply) {
+                    // StoreResult: Stored (0) or Unchanged (1) both mean it is there.
+                    if (request.reply->size() == 1 && (*request.reply)[0] <= 1) ++accepted;
+                    st.done = true;
+                }
+                if (st.done) requests.erase(*st.request);
+            }
+        }
+        for (auto &st : stores) {
+            if (!st.done && st.request) requests.erase(*st.request);
+        }
+        return accepted;
     }
 
     void save_nodes() const
@@ -1733,6 +1811,21 @@ void Client::join()
     s.save_nodes();
 }
 
+int Client::republish(std::int64_t nowUnix)
+{
+    auto &s = *impl_;
+    if (!s.started || s.contacts.empty()) return 0;
+    int accepted = 0;
+    auto records = std::move(s.toRepublish);
+    s.toRepublish.clear();
+    for (const auto &[locator, record] : records) {
+        // As MeshDht.RepublishAsync: only what still has a while to live is worth passing on.
+        if (record.expiresUnix - nowUnix <= 3600 || !record_valid(record, nowUnix)) continue;
+        accepted += s.store(record);
+    }
+    return accepted;
+}
+
 std::vector<Record> Client::find_value(const NodeId &locator)
 {
     return impl_->started ? impl_->lookup(locator, true) : std::vector<Record> {};
@@ -1762,6 +1855,7 @@ NetworkRead Client::read_presence(const Profile &me, const PublicKey &friendKey,
             const auto pointers = s.lookup(pointer, true);
             if (pointers.empty()) continue;
             main = open_pointer(pair, pointer, pointers.front().payload);
+            if (main) s.remember(pointers);
         }
         if (!main) continue;
 
@@ -1773,6 +1867,7 @@ NetworkRead Client::read_presence(const Profile &me, const PublicKey &friendKey,
         // A holder serving an old copy is outvoted by the others.
         const auto best = std::max_element(records.begin(), records.end(), [](const Record &a, const Record &b) { return a.sequence < b.sequence; });
         s.mainLocators[friendText] = { day, *main };
+        s.remember({ *best });
         out.envelope = std::string(best->payload.begin(), best->payload.end());
         out.sequence = best->sequence;
         break;
