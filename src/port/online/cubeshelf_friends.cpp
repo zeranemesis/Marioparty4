@@ -1,4 +1,5 @@
 #include "port/online/cubeshelf_friends.hpp"
+#include "port/online/cubeshelf_mesh.hpp"
 
 #include <filesystem>
 
@@ -47,6 +48,64 @@ namespace {
         int failures = 0;
         std::int64_t nextAttempt = 0;
     };
+
+    fs::path mesh_nodes_path()
+    {
+        return PartyBoard_ConfigPath / "cubeshelf-mesh-nodes.txt";
+    }
+
+    // The CubeShelf network, joined the first time a friend has to be read there. Lives on the
+    // reader thread only.
+    struct Network {
+        std::unique_ptr<mesh::Client> client;
+        bool failed = false;
+        std::int64_t lastMeetingPoint = 0;
+        std::vector<std::string> seeded;
+    };
+
+    Network &network()
+    {
+        static auto *instance = new Network;
+        return *instance;
+    }
+
+    mesh::Client *network_client(const Profile &profile)
+    {
+        auto &n = network();
+        if (n.failed) {
+            return nullptr;
+        }
+        if (!n.client) {
+            mesh::ClientOptions options;
+            options.nodesFile = mesh_nodes_path().string();
+            options.nodeKeyFile = (PartyBoard_ConfigPath / "cubeshelf-mesh-node.key").string();
+            n.client = std::make_unique<mesh::Client>(options);
+            // A socket and a proof of work: a few seconds, once per run.
+            if (!n.client->start()) {
+                n.client.reset();
+                n.failed = true;
+                return nullptr;
+            }
+        }
+        if (n.seeded != profile.meshSeeds) {
+            std::vector<mesh::Endpoint> seeds;
+            for (const auto &text : profile.meshSeeds) {
+                if (auto endpoint = mesh::Endpoint::parse(text)) {
+                    seeds.push_back(*endpoint);
+                }
+            }
+            n.client->add_seeds(seeds);
+            n.seeded = profile.meshSeeds;
+        }
+        // Knowing almost nobody, and allowed to: the meeting point, at most every ten minutes.
+        const std::int64_t now = unix_now();
+        if (profile.meshDiscovery && n.client->known_nodes() < 8 && now - n.lastMeetingPoint >= 10 * 60) {
+            n.lastMeetingPoint = now;
+            n.client->add_seeds(mesh::find_at_meeting_point());
+        }
+        n.client->join();
+        return n.client.get();
+    }
 
     struct Service {
         std::mutex mutex;
@@ -156,11 +215,29 @@ namespace {
                 hadSnapshot = state.snapshot.has_value();
             }
 
-            const auto response = http::get(f.presenceUrl, kUserAgent);
             std::optional<Snapshot> opened;
-            bool reachable = response.status >= 200 && response.status < 300 && response.body.size() <= kMaximumDocumentBytes;
-            if (reachable) {
-                opened = open_presence(profile, key, response.body);
+            bool reachable = false;
+            if (!f.presenceUrl.empty()) {
+                const auto response = http::get(f.presenceUrl, kUserAgent);
+                reachable = response.status >= 200 && response.status < 300 && response.body.size() <= kMaximumDocumentBytes;
+                if (reachable) {
+                    opened = open_presence(profile, key, response.body);
+                }
+            }
+            // No address, or one that gave nothing new: the CubeShelf network, where a friend
+            // who moved there publishes -- an old address is kept forever and may stay frozen.
+            if (!opened || opened->sequence <= f.lastSequence) {
+                if (auto *client = network_client(profile)) {
+                    const auto read = client->read_presence(profile, key, now);
+                    if (read.envelope && read.envelope->size() <= kMaximumDocumentBytes) {
+                        if (auto fromNetwork = open_presence(profile, key, *read.envelope);
+                            fromNetwork && (!opened || fromNetwork->sequence > opened->sequence)) {
+                            opened = std::move(fromNetwork);
+                            reachable = true;
+                        }
+                    }
+                    reachable = reachable || read.reachable;
+                }
             }
 
             std::lock_guard lock(s.mutex);
@@ -262,7 +339,8 @@ void start() noexcept
             s.profile.reset();
         }
     }
-    if (!s.threadStarted && http::available()) {
+    // The reader runs without https too: friends of the CubeShelf network are read there.
+    if (!s.threadStarted) {
         try {
             std::thread(reader_thread).detach();
             s.threadStarted = true;

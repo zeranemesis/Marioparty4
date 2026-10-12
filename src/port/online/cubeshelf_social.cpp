@@ -349,6 +349,8 @@ namespace {
             { "q", encode_base64(profile.publicKey.data(), profile.publicKey.size()) },
             { "at", profile.exportedAtUnix },
             { "friends", std::move(friends) },
+            { "mesh", profile.meshSeeds },
+            { "discovery", profile.meshDiscovery },
         };
     }
 
@@ -398,12 +400,28 @@ namespace {
                 const auto *paused = field(entry, "p");
                 f.paused = paused != nullptr && paused->is_boolean() && paused->get<bool>();
                 PublicKey key;
-                // friends.json is a file a person can edit: the scheme is checked again here.
-                if (!decode_public_key(f.publicKey, key) || !f.presenceUrl.starts_with("https://") || key == profile.publicKey) {
+                // friends.json is a file a person can edit: the scheme is checked again here. No
+                // address at all is a friend of the CubeShelf network, read there.
+                if (!f.presenceUrl.empty() && !f.presenceUrl.starts_with("https://")) {
+                    continue;
+                }
+                if (!decode_public_key(f.publicKey, key) || key == profile.publicKey) {
                     continue;
                 }
                 profile.friends.push_back(std::move(f));
             }
+        }
+
+        // Ways in: addresses only, a few, as text the network code parses again.
+        if (const auto *mesh = field(document, "mesh"); mesh != nullptr && mesh->is_array()) {
+            for (const auto &entry : *mesh) {
+                if (entry.is_string() && entry.get_ref<const std::string &>().size() <= 64 && profile.meshSeeds.size() < 16) {
+                    profile.meshSeeds.push_back(entry.get<std::string>());
+                }
+            }
+        }
+        if (const auto *discovery = field(document, "discovery"); discovery != nullptr && discovery->is_boolean()) {
+            profile.meshDiscovery = discovery->get<bool>();
         }
         error = ImportError::None;
         return profile;
@@ -421,6 +439,11 @@ std::string encode_base64(const std::uint8_t *data, std::size_t length)
     }
     out.resize(needed);
     return out;
+}
+
+bool pair_key(const Profile &me, const PublicKey &peer, std::uint8_t out[32])
+{
+    return derive_pairwise(me, peer, out);
 }
 
 bool decode_public_key(std::string_view base64, PublicKey &out)

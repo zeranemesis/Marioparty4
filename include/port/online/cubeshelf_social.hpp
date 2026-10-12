@@ -24,6 +24,7 @@ using PrivateKey = std::array<std::uint8_t, 32>;
 struct Friend {
     std::string publicKey; // base64, as CubeShelf stores it
     std::string name;
+    // An https address, or empty for a friend who publishes only on the CubeShelf network.
     std::string presenceUrl;
     std::int64_t lastSequence = 0;
     bool paused = false;
@@ -35,6 +36,11 @@ struct Profile {
     PublicKey publicKey {};
     std::vector<Friend> friends;
     std::int64_t exportedAtUnix = 0;
+    // Ways into the CubeShelf network the PC knew when it handed the profile over ("ip:port").
+    std::vector<std::string> meshSeeds;
+    // Whether the PC allows finding other CubeShelf installations without a code (BitTorrent's
+    // meeting point): the person was told what it involves there, and chose.
+    bool meshDiscovery = false;
 };
 
 enum class ImportError {
@@ -93,6 +99,9 @@ std::optional<Snapshot> open_presence(const Profile &me, const PublicKey &author
 Status effective_status(const Snapshot &snapshot, std::int64_t nowUnix) noexcept;
 // PresenceInvite.IsLive && IsFor(us) && the game matches.
 bool invites(const Snapshot &snapshot, const Profile &me, std::string_view gameId, std::int64_t nowUnix);
+
+// PeerIdentity.DeriveSharedKey: the key two friends share, the same on both sides.
+bool pair_key(const Profile &me, const PublicKey &peer, std::uint8_t out[32]);
 
 bool decode_public_key(std::string_view base64, PublicKey &out);
 std::string encode_base64(const std::uint8_t *data, std::size_t length);
