@@ -114,6 +114,9 @@ void ClusterProc(HU3DMODEL *arg0)
     HSFCLUSTER *var_r29;
     HSFOBJECT *temp_r31;
 
+#ifdef TARGET_PC
+    PartyBoard_AnimHsfWritten(arg0->hsf);
+#endif
     for (i = 0; i < 4; i++) {
         temp_r24 = arg0->motIdCluster[i];
         if (temp_r24 != -1) {
@@ -155,6 +158,9 @@ void ClusterMotionExec(HU3DMODEL *arg0)
     HSFTRACK *var_r30;
     HU3DMOTION *var_r23;
 
+#ifdef TARGET_PC
+    PartyBoard_AnimHsfWritten(arg0->hsf);
+#endif
 #ifndef NON_MATCHING
     var_r31 = temp_r27->track;
 #endif

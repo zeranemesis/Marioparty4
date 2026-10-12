@@ -766,6 +766,9 @@ void Hu3DMotionExec(s16 arg0, s16 arg1, float arg2, s32 arg3)
     temp_r27 = &Hu3DData[arg0];
     sp18 = &Hu3DMotion[arg1];
     temp_r29 = temp_r27->hsf;
+#ifdef TARGET_PC
+    PartyBoard_AnimHsfWritten(temp_r29);
+#endif
     sp14 = sp18->hsf;
     temp_r21 = sp14->motion;
     track = temp_r21->track;
@@ -932,6 +935,9 @@ void Hu3DSubMotionExec(s16 arg0)
     temp_r30 = &Hu3DData[arg0];
     temp_r22 = &Hu3DMotion[temp_r30->motIdShift];
     temp_r28 = temp_r30->hsf;
+#ifdef TARGET_PC
+    PartyBoard_AnimHsfWritten(temp_r28);
+#endif
     temp_r21 = temp_r22->hsf;
     motion = temp_r21->motion;
     track = motion->track;

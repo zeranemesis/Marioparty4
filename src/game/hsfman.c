@@ -20,11 +20,121 @@
 
 #ifdef TARGET_PC
 #include <assert.h>
+#include <string.h>
 #include "port/frame_interpolation.h"
 #include "port/quest_stereo.h"
 #include "port/widescreen.h"
 extern bool PartyBoard_IsSimulationTick;
 #define PARTYBOARD_ADVANCE_FRAME PartyBoard_IsSimulationTick
+
+/* Animation cache, PC only.
+ *
+ * Above 60 frames per second the simulation still runs at 60: most rendered
+ * frames carry no tick, and every model's motion, shape, cluster and envelope
+ * (CPU skinning) passes below would recompute exactly what the previous frame
+ * computed - four times per game frame at 240. Those passes are idempotent:
+ * Hu3DMotionExec restarts from the base pose, InitVtxParm from the base
+ * vertices.
+ *
+ * A model's passes are skipped only when all three hold:
+ * - no game logic ran since they last ran (PartyBoard_AnimationEpoch, bumped
+ *   by main.c before any tick, replayed ones included);
+ * - its HU3DMODEL is byte for byte what it was then (ids, clocks, attributes);
+ * - nothing else wrote its HSFDATA since: every pass reports the HSFDATA it
+ *   writes (PartyBoard_AnimHsfWritten), which covers linked models sharing one
+ *   and the overlays that run these passes from their own hooks.
+ * Anything else recomputes, exactly as before.
+ *
+ * Only while frame interpolation is on, i.e. above 60 frames per second
+ * outside netplay: at 60 every rendered frame carries a tick and there is
+ * nothing to skip. The cache lives outside every snapshot and hash.
+ * PARTYBOARD_ANIM_CACHE=0 turns it off for an A/B. */
+u32 PartyBoard_AnimationEpoch = 1;
+
+#define ANIM_HSF_SLOTS 2048 /* power of two, well above HU3D_MODEL_MAX */
+static HSFDATA *sAnimHsfKey[ANIM_HSF_SLOTS];
+static u32 sAnimHsfSeq[ANIM_HSF_SLOTS];
+static u32 sAnimWriteSeq = 0;
+static u32 sAnimCacheEpoch[HU3D_MODEL_MAX];
+static u32 sAnimCacheSeq[HU3D_MODEL_MAX];
+static HU3DMODEL sAnimCacheModel[HU3D_MODEL_MAX];
+
+static BOOL AnimCacheEnabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *value = getenv("PARTYBOARD_ANIM_CACHE");
+        enabled = !(value != NULL && value[0] == '0' && value[1] == '\0');
+    }
+    return enabled && PartyBoard_FrameInterpolationEnabled();
+}
+
+/* Slot for hsf, or NULL when the table is full (then nothing is cached). */
+static u32 *AnimHsfSeq(HSFDATA *hsf, BOOL insert)
+{
+    u32 index = (u32)(((uintptr_t)hsf >> 4) * 2654435761u) & (ANIM_HSF_SLOTS - 1);
+    u32 probe;
+    for (probe = 0; probe < ANIM_HSF_SLOTS; probe++, index = (index + 1) & (ANIM_HSF_SLOTS - 1)) {
+        if (sAnimHsfKey[index] == hsf) {
+            return &sAnimHsfSeq[index];
+        }
+        if (sAnimHsfKey[index] == NULL) {
+            if (!insert) {
+                return NULL;
+            }
+            sAnimHsfKey[index] = hsf;
+            sAnimHsfSeq[index] = 0;
+            return &sAnimHsfSeq[index];
+        }
+    }
+    return NULL;
+}
+
+void PartyBoard_AnimHsfWritten(HSFDATA *hsf)
+{
+    u32 *seq;
+    if (hsf == NULL) {
+        return;
+    }
+    if (++sAnimWriteSeq == 0) {
+        /* Wrapped: forget everything rather than mistake an old stamp. */
+        memset(sAnimHsfKey, 0, sizeof(sAnimHsfKey));
+        memset(sAnimCacheEpoch, 0, sizeof(sAnimCacheEpoch));
+        sAnimWriteSeq = 1;
+    }
+    seq = AnimHsfSeq(hsf, TRUE);
+    if (seq == NULL) {
+        /* Full: start over. Every cached model misses once. */
+        memset(sAnimHsfKey, 0, sizeof(sAnimHsfKey));
+        memset(sAnimCacheEpoch, 0, sizeof(sAnimCacheEpoch));
+        seq = AnimHsfSeq(hsf, TRUE);
+    }
+    *seq = sAnimWriteSeq;
+}
+
+static BOOL AnimCacheHit(s16 model)
+{
+    const u32 *seq;
+    if (!AnimCacheEnabled() || sAnimCacheEpoch[model] != PartyBoard_AnimationEpoch) {
+        return FALSE;
+    }
+    seq = AnimHsfSeq(Hu3DData[model].hsf, FALSE);
+    return seq != NULL && *seq == sAnimCacheSeq[model]
+        && memcmp(&sAnimCacheModel[model], &Hu3DData[model], sizeof(HU3DMODEL)) == 0;
+}
+
+static void AnimCacheStore(s16 model)
+{
+    const u32 *seq = AnimHsfSeq(Hu3DData[model].hsf, FALSE);
+    if (seq == NULL) {
+        /* No pass wrote it (all of them were off): nothing to remember. */
+        sAnimCacheEpoch[model] = 0;
+        return;
+    }
+    sAnimCacheEpoch[model] = PartyBoard_AnimationEpoch;
+    sAnimCacheSeq[model] = *seq;
+    memcpy(&sAnimCacheModel[model], &Hu3DData[model], sizeof(HU3DMODEL));
+}
 #else
 #define PARTYBOARD_ADVANCE_FRAME TRUE
 #endif
@@ -286,6 +396,14 @@ void Hu3DExec(void) {
                                     if (((data->attr & HU3D_ATTR_MOT_EXEC) == 0 && (data->attr & HU3D_ATTR_MOT_SLOW) == 0) || ((data->attr & HU3D_ATTR_MOT_SLOW) != 0 && (data->tick & 1) != 0)) {
                                         var_r25 = 0;
                                         data->motAttr &= ~HU3D_MOTATTR;
+#ifdef TARGET_PC
+                                        if (AnimCacheHit(i)) {
+                                            /* Same model, no logic since: the passes would
+                                             * rewrite the same joints and vertices. */
+                                            data->attr |= 0x800;
+                                            goto anim_cache_done;
+                                        }
+#endif
                                         if (data->motId != -1) {
                                             Hu3DMotionExec(i, data->motId, data->motWork.time, 0);
                                         }
@@ -324,8 +442,16 @@ void Hu3DExec(void) {
                                         if (var_r25 != 0) {
                                             GXInvalidateVtxCache();
                                         }
+#ifdef TARGET_PC
+                                        /* Stored before 0x800 is set, as the next frame's
+                                         * check will see the model: Hu3DPreProc clears it. */
+                                        AnimCacheStore(i);
+#endif
                                         data->attr |= 0x800;
                                     }
+#ifdef TARGET_PC
+                                    anim_cache_done:;
+#endif
                                     if (syncF && (data->attr & HU3D_ATTR_HOOKFUNC) != 0) {
                                         GXWaitDrawDone();
                                         syncF = FALSE;
