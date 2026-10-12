@@ -33,7 +33,11 @@
           "value": true
         },
         "PARTY_BOARD_SENTRY_DSN": "$env{SENTRY_DSN}",
-        "PARTY_BOARD_SENTRY_ENVIRONMENT": "production"
+        "PARTY_BOARD_SENTRY_ENVIRONMENT": "production",
+        "PARTYBOARD_EXPERIMENTAL_MUSYX_AUDIO": {
+          "type": "BOOL",
+          "value": true
+        }
       }
     },
     {

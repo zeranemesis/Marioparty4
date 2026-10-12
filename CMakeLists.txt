@@ -61,7 +61,7 @@ endif ()
 
 # Add version information to CI environment variables
 if(DEFINED ENV{GITHUB_ENV})
-    file(APPEND "$ENV{GITHUB_ENV}" "PARTY_BOAD_VERSION=${PARTY_BOARD_WC_DESCRIBE}\n")
+    file(APPEND "$ENV{GITHUB_ENV}" "PARTY_BOARD_VERSION=${PARTY_BOARD_WC_DESCRIBE}\n")
 endif()
 
 message(STATUS "Party Board version set to ${PARTY_BOARD_WC_DESCRIBE}")
