@@ -722,7 +722,7 @@ extern "C" void PartyBoard_LoopMark(int mark)
     if (mark >= 1 && mark <= 6 && lastMark == mark - 1) {
         const double ms = std::chrono::duration<double, std::milli>(now - last).count();
         sum[mark - 1] += ms;
-        max[mark - 1] = std::max(max[mark - 1], ms);
+        max[mark - 1] = (std::max)(max[mark - 1], ms);
     }
     last = now;
     lastMark = mark;
