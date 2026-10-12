@@ -31,9 +31,11 @@ extern "C" {
 
 #include <aurora/stereo.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 
@@ -695,9 +697,21 @@ extern "C" void PartyBoard_StereoObjectBegin(Mtx modelView, const HuVecF *min, c
 // simulation ticks, recording the draws (Hu3DExec, fonts), ending the GX
 // frame (HuSysDoneRender: the eyes' pass is built there), the interface and
 // Aurora's frame end, and the frame limiter's wait.
+//
+// On the desktop the same measure is off unless PARTYBOARD_LOOP_TIMING is set
+// (any value but 0), and the line goes to stderr. Read once: a disabled run
+// pays one branch per mark.
 extern "C" void PartyBoard_LoopMark(int mark)
 {
-#if defined(__ANDROID__)
+#if !defined(__ANDROID__)
+    static const bool enabled = [] {
+        const char *value = std::getenv("PARTYBOARD_LOOP_TIMING");
+        return value != nullptr && *value != '\0' && std::strcmp(value, "0") != 0;
+    }();
+    if (!enabled) {
+        return;
+    }
+#endif
     static const char *const kNames[] = { "slotWait", "simulation", "draw", "doneRender", "uiEnd", "limiter" };
     static std::chrono::steady_clock::time_point last {};
     static int lastMark = -1;
@@ -725,12 +739,13 @@ extern "C" void PartyBoard_LoopMark(int mark)
         length += std::snprintf(text + length, sizeof(text) - length, " %s=%.2f/%.2f", kNames[i], sum[i] / loops, max[i]);
         sum[i] = max[i] = 0;
     }
+#if defined(__ANDROID__)
     __android_log_print(ANDROID_LOG_INFO, "PartyBoardQuest", "%s", text);
+#else
+    std::fprintf(stderr, "%s\n", text);
+#endif
     loops = 0;
     loggedAt = now;
-#else
-    (void)mark;
-#endif
 }
 
 extern "C" bool PartyBoard_DebugFreeze(void)

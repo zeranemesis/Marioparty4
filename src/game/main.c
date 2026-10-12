@@ -36,6 +36,7 @@
 #include <aurora/aurora.h>
 #include <aurora/event.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 const char *__asan_default_options()
 {
@@ -442,6 +443,9 @@ void main(void)
             frame_limiter();
         }
         PartyBoard_LoopMark(6);
+        /* OSReport no longer flushes each line; publish this frame's lines
+         * together. Nothing buffered, nothing written. */
+        fflush(stdout);
 #endif
     }
 

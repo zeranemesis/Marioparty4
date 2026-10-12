@@ -59,8 +59,10 @@ void OSReport(const char *msg, ...)
     // stdout goes nowhere on Android: the game's own reports belong in logcat.
     __android_log_vprint(ANDROID_LOG_DEBUG, "PartyBoard/OS", msg, args);
 #else
+    /* No flush here: the game reports hundreds of lines, and flushing each
+     * one cost a write per line when stdout goes to a file or a pipe. The
+     * main loop flushes once per frame (src/game/main.c). */
     vprintf(msg, args);
-    fflush(stdout);
 #endif
     va_end(args);
 }

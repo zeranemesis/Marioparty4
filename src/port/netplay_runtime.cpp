@@ -286,9 +286,30 @@ std::uint64_t monotonicMs()
         std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
+#ifdef _WIN32
+// The diagnostic file stays open for the whole run. PartyBoard_NetplayTrace
+// writes through here on gameplay ticks; reopening and closing the file for
+// every line cost two file-system calls each, and reading the environment
+// every call cost a lookup even when no file was asked for. Each line is still
+// flushed, so a supervisor tailing the file, or a crash, loses nothing.
+FILE *diagnosticFile()
+{
+    // Copied: a later _putenv_s may move the environment block.
+    static const std::wstring path = [] {
+        const wchar_t *value = _wgetenv(L"PARTYBOARD_NET_DIAGNOSTIC");
+        return std::wstring(value != nullptr ? value : L"");
+    }();
+    static FILE *file = nullptr;
+    if (!path.empty() && file == nullptr) file = _wfopen(path.c_str(), L"ab");
+    return file;
+}
+#endif
+
 void writeDiagnostic(const char *event, bool force = false)
 {
 #ifdef _WIN32
+    FILE *file = diagnosticFile();
+    if (!file) return;
     const auto now = monotonicMs();
     if (force) {
         if (gRuntime.diagnosticEventLines >= 20000) return;
@@ -297,10 +318,6 @@ void writeDiagnostic(const char *event, bool force = false)
         if (gRuntime.lastDiagnosticMs && now - gRuntime.lastDiagnosticMs < 2000) return;
     }
     gRuntime.lastDiagnosticMs = now;
-    const auto *path = _wgetenv(L"PARTYBOARD_NET_DIAGNOSTIC");
-    if (!path || !*path) return;
-    FILE *file = _wfopen(path, L"ab");
-    if (!file) return;
     const auto &local = gRuntime.localHistory[gRuntime.frame % kHistorySize];
     const auto &remote = gRuntime.peerHistory[soleRemoteSeat()][gRuntime.frame % kHistorySize];
     const auto utc = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
@@ -336,7 +353,7 @@ void writeDiagnostic(const char *event, bool force = false)
            could say so because no log carried the turn. Now every line
            does. */
         GWSystem.turn, GWSystem.max_turn, GWSystem.board);
-    std::fclose(file);
+    std::fflush(file);
     if (force) { ++gRuntime.diagnosticEventLines; } else { ++gRuntime.diagnosticLines; }
 #else
     (void)event; (void)force;
@@ -1478,6 +1495,34 @@ void publishCrashState(const StateDigest &stamp)
     PartyBoard_CrashUpdateSimState(&state);
     PartyBoard_CrashHeartbeat();
 }
+// PARTYBOARD_LOOP_TIMING also measures the state capture every lockstep tick
+// pays: average and worst time, and how many fields the hash covered, every
+// 300 ticks on stderr. Off by default; read once.
+struct CaptureTiming {
+    bool enabled = [] {
+        const char *value = std::getenv("PARTYBOARD_LOOP_TIMING");
+        return value != nullptr && *value != '\0' && std::strcmp(value, "0") != 0;
+    }();
+    std::uint32_t samples = 0;
+    double sumMs = 0.0;
+    double maxMs = 0.0;
+    std::size_t maxFields = 0;
+
+    void record(std::chrono::steady_clock::time_point started, std::size_t fields, std::uint32_t frame) {
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+        sumMs += ms;
+        maxMs = (std::max)(maxMs, ms);
+        maxFields = (std::max)(maxFields, fields);
+        if (++samples < 300) return;
+        std::fprintf(stderr, "Netplay state capture: frame %u, avg/max ms %.3f/%.3f, fields max %zu\n",
+            frame, sumMs / samples, maxMs, maxFields);
+        samples = 0;
+        sumMs = maxMs = 0.0;
+        maxFields = 0;
+    }
+};
+CaptureTiming gCaptureTiming;
+
 bool captureCommittedState()
 {
     const auto frame = gRuntime.frame - 1; // AFTER logic F, BEFORE render/counter publication.
@@ -1492,10 +1537,15 @@ bool captureCommittedState()
     StateDigest stamp {frame,
         static_cast<std::uint32_t>(gRuntime.probeContext >= 0 ? gRuntime.probeContext : PartyBoard_NetplayContextId()),
         frand_state_get(), static_cast<std::uint32_t>(rand8_state_get()), GlobalCounter};
-    auto state = captureCanonical(stamp);
+    // Filled in place: the slot keeps its buffers from the frame it held
+    // kDetailHistorySize frames ago, so a gameplay tick allocates nothing here.
+    const auto captureStarted = gCaptureTiming.enabled ? std::chrono::steady_clock::now()
+                                                       : std::chrono::steady_clock::time_point {};
+    auto &state = gRuntime.detailHistory[frame % kDetailHistorySize];
+    captureCanonicalInto(state, stamp);
+    if (gCaptureTiming.enabled) gCaptureTiming.record(captureStarted, state.size(), frame);
     stamp.hash = state.hash;
     stamp.parts = state.parts;
-    gRuntime.detailHistory[frame % kDetailHistorySize] = std::move(state);
     gRuntime.detailFrames[frame % kDetailHistorySize] = frame;
     // Every peer compares our digests against its own, so each stream gets them.
     for (std::uint8_t seat = 0; seat < gRuntime.playerCount; ++seat) {
