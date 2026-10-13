@@ -11,8 +11,20 @@ static bool runCanonicalStateSelfTest()
     const auto enabled = gRuntime.enabled;
     const StateDigest stamp {42, 7, 0x12345678, 0x90123456, 41};
     const auto base = captureCanonical(stamp).hash;
+    bool reuseMatches = true;
+    {
+        // A reused state must hash exactly like a fresh one.
+        const auto fresh = captureCanonical(stamp);
+        auto reused = captureCanonical(StateDigest {7, 1, 2, 3, 4});
+        captureCanonicalInto(reused, stamp);
+        if (reused.hash != fresh.hash || reused.parts != fresh.parts
+            || reused.size() != fresh.size() || reused.runs.size() != fresh.runs.size()) {
+            std::printf("[NET TEST] canonical reuse differs from fresh capture\n");
+            reuseMatches = false;
+        }
+    }
     bool passed = PartyBoard_NetplayFloatWord(0.0f) == PartyBoard_NetplayFloatWord(-0.0f)
-        && PartyBoard_NetplayFloatWord(1.0f) == 0x3f800000u;
+        && PartyBoard_NetplayFloatWord(1.0f) == 0x3f800000u && reuseMatches;
     ++GWPlayer[0].coins;
     passed &= captureCanonical(stamp).hash != base;
     GWPlayer[0] = player;

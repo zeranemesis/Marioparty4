@@ -736,4 +736,12 @@ SHARED_SYM extern HU3DMOTION Hu3DMotion[256];
 SHARED_SYM extern HU3DTEXANIM Hu3DTexAnimData[HU3D_TEXANIM_MAX];
 SHARED_SYM extern HU3DTEXSCROLL Hu3DTexScrData[HU3D_TEXSCROLL_MAX];
 
+#ifdef TARGET_PC
+/* Cached texture binding for minigame draw hooks; see hsfdraw.c. Returns
+ * FALSE for a bitmap format it does not handle, leaving the caller's path. */
+BOOL Hu3DHookTexLoad(const void *owner, const HSFBITMAP *bmp, GXTexWrapMode wrapS, GXTexWrapMode wrapT, GXTexFilter filter,
+    u32 slot);
+void Hu3DHookTexCacheClear(void);
+#endif
+
 #endif

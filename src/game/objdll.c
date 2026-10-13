@@ -1,6 +1,9 @@
 #include "game/object.h"
 #include "game/dvd.h"
 #include "game/memory.h"
+#ifdef TARGET_PC
+#include "game/hu3d.h"
+#endif
 
 #ifndef __MWERKS__
 #include <string.h>
@@ -146,6 +149,10 @@ void omDLLNumEnd(s16 overlay, s16 flag)
 void omDLLEnd(s16 dllno, s16 flag)
 {
 	OSReport("objdll>omDLLEnd %d %d\n", dllno, flag);
+#ifdef TARGET_PC
+	/* Draw hooks of the ending overlay may have cached texture objects. */
+	Hu3DHookTexCacheClear();
+#endif
 	if(flag == 1) {
 		OSReport("objdll>End DLL:%s\n", omDLLinfoTbl[dllno]->name);
 		omDLLUnlink(omDLLinfoTbl[dllno], 1);

@@ -1554,6 +1554,7 @@ bool captureCommittedState()
     const auto captureStarted = gCaptureTiming.enabled ? std::chrono::steady_clock::now()
                                                        : std::chrono::steady_clock::time_point {};
     auto &state = gRuntime.detailHistory[frame % kDetailHistorySize];
+    gRuntime.detailFrames[frame % kDetailHistorySize] = kNoHashFrame; // Slot is being refilled.
     captureCanonicalInto(state, stamp);
     if (gCaptureTiming.enabled) gCaptureTiming.record(captureStarted, state.size(), frame);
     stamp.hash = state.hash;
