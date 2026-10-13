@@ -35,6 +35,12 @@ struct  memory_block {
     uintptr_t retaddr;
 };
 
+#ifdef TARGET_PC
+/* PARTYBOARD_ALLOC_TRACE says whether an allocation came from a simulation
+ * tick or from a rendered frame that carried none: the latter cannot be
+ * reproduced by a peer that rendered a different number of frames. */
+extern bool PartyBoard_IsSimulationTick;
+#endif
 static void *HuMemMemoryAlloc2(void *heap_ptr, size_t size, uintptr_t num, uintptr_t retaddr);
 
 #ifdef TARGET_PC
@@ -223,9 +229,9 @@ static void *HuMemMemoryAlloc2(void *heap_ptr, size_t size, uintptr_t num, uintp
                     if (frame >= traceFirst && frame <= traceLast) {
                         char trace[128];
                         snprintf(trace, sizeof(trace),
-                            "alloc f=%u size=%u block=%d num=%u caller=%08x",
+                            "alloc f=%u size=%u block=%d num=%u caller=%08x simtick=%d",
                             frame, (unsigned)size, (int)block->size,
-                            (unsigned)num, (unsigned)retaddr);
+                            (unsigned)num, (unsigned)retaddr, (int)PartyBoard_IsSimulationTick);
                         PartyBoard_NetplayTrace(trace);
                     }
                 }

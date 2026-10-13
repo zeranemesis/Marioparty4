@@ -34,7 +34,7 @@ function Resolve-RunnerPath([string]$path) {
 
 # Scripts that need a real disc image to do anything. Everything else runs on a
 # machine that has never seen the game, which is what lets CI run them.
-$needsDisc = @('test_netplay_boot')
+$needsDisc = @('test_netplay_boot', 'test_netplay_latency')
 
 # Two scripts need more than a disc path to mean anything, and the knowledge of
 # how to call them already lives in validate_netplay.ps1. Rather than guess,
@@ -66,14 +66,15 @@ $notApplicableExit = @{
     'test_audio_wait'        = 2   # needs a MusyX regression source that is in no commit
     'test_quest_stereo'      = 2   # needs a Quest headset over adb
     'test_quest_stereo_render' = 2 # needs a configured build/android-arm64-quest tree
+    'test_netplay_latency'   = 2   # needs python for tools/netem_relay.py
 }
 
 # Most scripts compile and run their own standalone test with cl.exe and never
-# touch partyboard.exe. Only these three launch it, and only they accept
+# touch partyboard.exe. Only these four launch it, and only they accept
 # -BinaryDirectory - so only they are given it. Passing it to a script that does
 # not take it is an error, and not passing it to one that does means the CI run
 # silently tests the wrong binary, or no binary at all.
-$takesBinaryDirectory = @('test_netplay_boot', 'test_netplay_four', 'test_netplay_pad')
+$takesBinaryDirectory = @('test_netplay_boot', 'test_netplay_four', 'test_netplay_pad', 'test_netplay_latency')
 
 $scripts = @(Get-ChildItem $PSScriptRoot -Filter 'test_*.ps1' | Sort-Object Name)
 if ($scripts.Count -eq 0) { Write-Output 'No test_*.ps1 found.'; exit 2 }

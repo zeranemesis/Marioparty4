@@ -3369,3 +3369,93 @@ Note prise avant la construction, pour que le prochain geste vise le bon endroit
 Trois hypotheses plausibles ont deja ete refutees sur ce defaut ; une sonde mal
 placee en aurait fabrique une quatrieme.
 
+
+## D33 — une image rendue sans tick fait une allocation de jeu : HEAPS à la frame 5899, sur le plateau — 2026-10-13
+
+**Classification : divergent heap allocation timing, detected by the `HEAPS`
+subsystem. Same family as D6 and D23 — game state advanced by a rendered image
+instead of a simulation tick — through a site neither of them names.**
+
+**Statut : cause établie et mesurée ; correctif dans le commit suivant.**
+
+**Niveau de preuve : SCRIPTED**, une seule machine, réseau façonné. Ni HUMAN ni
+REAL-NETWORK.
+
+### La recette de reproduction locale
+
+D23 disait que ce genre de défaut ne pouvait pas apparaître en boucle locale :
+deux processus sur un même PC rendent le même nombre d'images. C'est vrai tant
+que le réseau est parfait. `tools/netem_relay.py` se place entre les deux pairs
+et retarde chaque paquet ; les pairs attendent alors leurs entrées, et un pair
+qui attend **continue de rendre** des images sans tick.
+
+    tools\test_netplay_boot.ps1 -DiscPath <iso> -Walk -DurationSeconds 360 -Relay "80,20,0,0,<graine>"
+
+Marche scriptée habituelle (`--netplay-walk-probe`), plateau `w01Dll` (contexte
+89, `board=0`), entrée sur le plateau à la frame 5145.
+
+### Une variable à la fois
+
+Marche de 300 s, binaire de la fusion des PR 15 à 18 :
+
+| relais | résultat | frames atteintes |
+|---|---|---|
+| 80 ms, gigue 20 ms, 0 % perte, 0 % double | **HEAPS @ 5899** | 5 901 |
+| 0 ms, 3 % de pertes | PASS | 17 573 |
+| 0 ms, 1 % de doubles | PASS | 17 478 |
+
+La perte et la duplication de paquets sont absorbées ; **la latence seule**
+produit la divergence. Le binaire de base (`28b1599`, `/Od`) diverge au même
+endroit avec **les deux mêmes hachages** que la fusion (`/O2`) : ce n'est ni
+l'optimisation ni une PR.
+
+### Ce que la porte de D23 ne fait pas
+
+`PARTYBOARD_HOOK_TICK_GATE=1` (vérifiée d'abord : un pair qui l'a refuse à la
+poignée de main un pair qui ne l'a pas, `hook-gate 1`) :
+
+| graine | porte inactive | porte active |
+|---|---|---|
+| 21 | ANIMATION @ 9382 | HEAPS @ 5899 |
+| 22 | PASS (13 282) | HEAPS @ 5899 |
+| 23 | HEAPS @ 5899 | OBJECTS @ 9426 |
+
+Les hooks de dessin ne sont pas la cause. Hypothèse écartée par la mesure.
+
+### Le champ, puis l'appelant, puis le moment
+
+Rapport de désynchronisation : **2 champs sur 4 750**,
+`HuMemUsedMallocSizeGet(heap 2)` et `HuMemUsedMallocBlockGet(heap 2)` — 3 465
+blocs contre 3 463, 320 octets d'écart, deux blocs de 160. Au moment du
+rapport (frame 5903) les deux recensements sont identiques : ce sont **les
+mêmes allocations, à des frames différentes**.
+
+`PARTYBOARD_ALLOC_TRACE=5870-5903`, enrichi d'un champ `simtick` :
+
+    pair 0  alloc f=5900 size=96 block=160 caller=...aa01 simtick=1
+    pair 0  alloc f=5900 size=96 block=160 caller=...aa01 simtick=1
+    pair 1  alloc f=5899 size=96 block=160 caller=...aa01 simtick=0
+    pair 1  alloc f=5899 size=96 block=160 caller=...aa01 simtick=0
+
+Run qui passe : les deux pairs à `f=5900 simtick=1`. L'appelant,
+`dol.dll+0xdaa01`, résolu par le PDB : **`src/game/hsfmotion.c:1128`**, dans
+`SetObjAttrMotion` — la première fois qu'une piste d'attribut s'applique, elle
+alloue son `HU3DATTRANIM` dans `HEAP_DATA`. `SetObjAttrMotion` est appelée par
+`Hu3DMotionExec`, elle-même appelée par `Hu3DExec` **à chaque image rendue**.
+
+### La chaîne
+
+Un pair qui attend le réseau rend une image sans tick ; `Hu3DExec` y relance les
+passes d'animation ; la première application d'une piste d'attribut alloue ;
+ce pair fait donc l'allocation un tick plus tôt que l'autre, et `HEAPS` diverge.
+Les passes sont idempotentes pour la pose ; elles ne le sont pas pour le tas.
+
+### Ce qui reste ouvert
+
+- ANIMATION @ 9382 et OBJECTS @ 9426 — le second est l'objet de D22, à la même
+  position — apparaissent dans 3 des 6 runs non corrigés qui dépassent 5899, et
+  dans aucun des 20 runs corrigés (commit suivant). Même cause probable, **non
+  tracée** champ par champ.
+- D16 (blocs de 160 octets exactement, rien d'autre ne diffère) a la même
+  signature ; non rejoué.
+- La marche ne dépasse pas environ 13 500 frames : début du plateau seulement.

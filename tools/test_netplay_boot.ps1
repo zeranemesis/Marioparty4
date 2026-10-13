@@ -1,6 +1,16 @@
 param(
     [Parameter(Mandatory=$true)][string]$DiscPath,
     [string]$BinaryDirectory='build/aexp/RelWithDebInfo',
+    # The second peer runs this build instead, e.g. the same tree built with
+    # PARTY_BOARD_WINDOWS_OPTIMIZE_GAME=OFF, to compare two builds in one session.
+    [string]$PeerBinaryDirectory='',
+    # Degraded network between the peers: "delay_ms,jitter_ms,loss_pct,dup_pct,seed".
+    # The client then joins tools/netem_relay.py instead of the host. Still one
+    # machine and SCRIPTED: it shapes the packets, it does not make a real network.
+    [string]$Relay='',
+    # PARTYBOARD_HOOK_TICK_GATE for the second peer only, to check that a
+    # mismatch is refused at the handshake.
+    [string]$PeerHookGate='',
     [string]$OutputDirectory='work/netplay-real-boot',
     [int]$DurationSeconds=30,
     [switch]$Menu,
@@ -38,6 +48,19 @@ $runPath=Join-Path (Resolve-TestPath $OutputDirectory) ([Guid]::NewGuid().ToStri
 New-Item -ItemType Directory -Path $runPath -Force | Out-Null
 $reservation=[Net.Sockets.UdpClient]::new([Net.IPEndPoint]::new([Net.IPAddress]::Loopback,0))
 $port=$reservation.Client.LocalEndPoint.Port
+$joinPort=$port
+$relayProcess=$null
+if ($Relay) {
+    $shape=$Relay.Split(',')
+    if ($shape.Count -ne 5) { throw 'Relay is delay_ms,jitter_ms,loss_pct,dup_pct,seed.' }
+    $relayReservation=[Net.Sockets.UdpClient]::new([Net.IPEndPoint]::new([Net.IPAddress]::Loopback,0))
+    $joinPort=$relayReservation.Client.LocalEndPoint.Port
+    $relayReservation.Dispose()
+    $relayScript=Join-Path $PSScriptRoot 'netem_relay.py'
+    $relayStats=Join-Path $runPath 'relay-stats.json'
+    $relayProcess=Start-Process -PassThru -WindowStyle Hidden python -ArgumentList @('-I',$relayScript,$joinPort,$port,$shape[0],$shape[1],$shape[2],$shape[3],$shape[4],$relayStats)
+    Write-Output "relay: client->$joinPort -> host $port, delay=$($shape[0])ms jitter=$($shape[1])ms loss=$($shape[2])% dup=$($shape[3])% seed=$($shape[4])"
+}
 $reservation.Dispose()
 $testPeers=@()
 $failure=$null
@@ -74,9 +97,11 @@ try {
         $go=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$prefix+'-go')
         $cancel=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$prefix+'-cancel')
         $start=[Diagnostics.ProcessStartInfo]::new()
-        $start.FileName=Join-Path $binaryPath 'partyboard.exe'
-        $start.WorkingDirectory=$binaryPath
-        $transport=if ($side -eq 0) { "--netplay-host $port" } else { "--netplay-join 127.0.0.1:$port" }
+        $sideBinary=if ($side -eq 1 -and $PeerBinaryDirectory) { Resolve-TestPath $PeerBinaryDirectory } else { $binaryPath }
+        $start.FileName=Join-Path $sideBinary 'partyboard.exe'
+        $start.WorkingDirectory=$sideBinary
+        if ($side -eq 1 -and $PeerHookGate -ne '') { $start.EnvironmentVariables['PARTYBOARD_HOOK_TICK_GATE']=$PeerHookGate }
+        $transport=if ($side -eq 0) { "--netplay-host $port" } else { "--netplay-join 127.0.0.1:$joinPort" }
         $start.Arguments="$transport --netplay-full --netplay-loopback --netplay-delay 3"
         if ($Menu) { $start.Arguments+=" --netplay-menu-probe" }
         if ($Walk) { $start.Arguments+=" --netplay-walk-probe" }
@@ -162,6 +187,7 @@ try {
     Write-Output "Compared real checkpoints: $compared"
 } catch { $failure=$_.Exception.Message }
 finally {
+    if ($relayProcess -and -not $relayProcess.HasExited) { Stop-Process -Id $relayProcess.Id -Force }
     foreach ($peer in $testPeers) {
         $peer.Cancel.Set() | Out-Null
         if (-not $peer.Process.HasExited) {
