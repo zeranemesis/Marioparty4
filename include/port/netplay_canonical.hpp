@@ -15,8 +15,10 @@ namespace partyboard::netplay {
 // whose meaning is identical on two machines are hashed. Pointers, addresses,
 // handles, padding, presentation buffers and physical audio state are never
 // exported; structures contribute named fields, never their object layout.
-inline CanonicalState captureCanonical(const StateDigest &stamp) {
-    CanonicalState out;
+// Fills `out` in place. Reusing a retained state keeps its vector capacity, so
+// a tick does not allocate and free two 4096-entry buffers just to hash.
+inline void captureCanonicalInto(const StateDigest &stamp, CanonicalState &out) {
+    out.reset();
     out.names.reserve(4096);
     out.values.reserve(4096);
 #define WORD(value) out.add(#value, static_cast<std::uint32_t>(value))
@@ -173,6 +175,11 @@ inline CanonicalState captureCanonical(const StateDigest &stamp) {
 
     // Sprite logical time is still not covered.
 #undef WORD
+}
+
+inline CanonicalState captureCanonical(const StateDigest &stamp) {
+    CanonicalState out;
+    captureCanonicalInto(stamp, out);
     return out;
 }
 } // namespace partyboard::netplay

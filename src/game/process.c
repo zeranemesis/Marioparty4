@@ -697,6 +697,8 @@ void HuPrcAllUPause(s32 flag)
 
 #ifdef TARGET_PC
 #include "port/netplay_state.h"
+#include <stdint.h>
+#include <stdlib.h>
 
 /* Read-only head of the scheduler list, for canonical exporters that need to
  * find a specific process without keeping a second registry of their own. */
@@ -722,14 +724,84 @@ static s32 HuPrcCanonicalIndex(const Process *target)
     return -2; /* Reachable only from a corrupt or foreign descriptor. */
 }
 
+/* Per-tick lookup table for HuPrcCanonicalIndex: every process of the list
+ * sorted by address, keeping the list position. Five lookups per process used
+ * to walk the list five times; one sort and binary searches give the same
+ * numbers. Equal addresses (a corrupt, looping list) keep the first position,
+ * which is what the linear walk returns. */
+typedef struct {
+    const Process *process;
+    s32 index;
+} HuPrcIndexEntry;
+
+#define HU_PRC_INDEX_CAP 4098
+static HuPrcIndexEntry HuPrcIndexTable[HU_PRC_INDEX_CAP];
+static s32 HuPrcIndexCount = -1; /* -1: list too long, use the linear walk. */
+
+static int HuPrcIndexCompare(const void *a, const void *b)
+{
+    const HuPrcIndexEntry *left = a;
+    const HuPrcIndexEntry *right = b;
+    if (left->process != right->process) {
+        return (uintptr_t)left->process < (uintptr_t)right->process ? -1 : 1;
+    }
+    return left->index < right->index ? -1 : (left->index > right->index);
+}
+
+static void HuPrcIndexBuild(void)
+{
+    Process *process;
+    s32 count = 0;
+    for (process = processtop; process != NULL; process = process->next) {
+        if (count == HU_PRC_INDEX_CAP) {
+            HuPrcIndexCount = -1;
+            return;
+        }
+        HuPrcIndexTable[count].process = process;
+        HuPrcIndexTable[count].index = count;
+        ++count;
+    }
+    qsort(HuPrcIndexTable, count, sizeof(HuPrcIndexTable[0]), HuPrcIndexCompare);
+    HuPrcIndexCount = count;
+}
+
+static s32 HuPrcIndexLookup(const Process *target)
+{
+    s32 low = 0;
+    s32 high = HuPrcIndexCount;
+    if (target == NULL) {
+        return -1;
+    }
+    if (HuPrcIndexCount < 0) {
+        return HuPrcCanonicalIndex(target);
+    }
+    while (low < high) {
+        const s32 mid = low + (high - low) / 2;
+        if ((uintptr_t)HuPrcIndexTable[mid].process < (uintptr_t)target) {
+            low = mid + 1;
+        }
+        else {
+            high = mid;
+        }
+    }
+    if (low < HuPrcIndexCount && HuPrcIndexTable[low].process == target) {
+        return HuPrcIndexTable[low].index;
+    }
+    return -2;
+}
+
 void PartyBoard_NetplayProcessState(PartyBoardNetplayStateSink sink, void *context)
 {
     Process *process;
     s32 index = 0;
 #define WORD(value) sink(context, #value, (uint32_t)(value))
+/* Same label the old WORD(HuPrcCanonicalIndex(x)) produced, so divergence
+ * reports read exactly as before. */
+#define INDEX_WORD(value) sink(context, "HuPrcCanonicalIndex(" #value ")", (uint32_t)HuPrcIndexLookup(value))
+    HuPrcIndexBuild();
     WORD(processcnt);
     WORD(thread_arg);
-    WORD(HuPrcCanonicalIndex(processcur));
+    INDEX_WORD(processcur);
     for (process = processtop; process != NULL; process = process->next, ++index) {
         WORD(index);
         WORD(process->exec);
@@ -737,10 +809,10 @@ void PartyBoard_NetplayProcessState(PartyBoardNetplayStateSink sink, void *conte
         WORD(process->prio);
         WORD(process->sleep_time);
         WORD(process->thread_size);
-        WORD(HuPrcCanonicalIndex(process->parent));
-        WORD(HuPrcCanonicalIndex(process->child));
-        WORD(HuPrcCanonicalIndex(process->next_child));
-        WORD(HuPrcCanonicalIndex(process->first_child));
+        INDEX_WORD(process->parent);
+        INDEX_WORD(process->child);
+        INDEX_WORD(process->next_child);
+        INDEX_WORD(process->first_child);
         /* Pointers are never hashed; only whether the slot is populated. */
         WORD(process->dtor != NULL);
         WORD(process->user_data != NULL);
@@ -750,6 +822,7 @@ void PartyBoard_NetplayProcessState(PartyBoardNetplayStateSink sink, void *conte
         }
     }
     WORD(index);
+#undef INDEX_WORD
 #undef WORD
 }
 #endif

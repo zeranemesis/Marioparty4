@@ -340,8 +340,23 @@ void PartyBoard_NetplayHeapState(PartyBoardNetplayStateSink sink, void *context)
             continue; /* Self-tests run before the arenas exist. */
         }
         WORD(HuMemHeapSizeGet(heap));
-        WORD(HuMemUsedMallocSizeGet(heap));
-        WORD(HuMemUsedMallocBlockGet(heap));
+        {
+            /* One walk for both numbers; labels match the two getters this
+             * replaced so divergence reports read as before. */
+            struct memory_block *start = HuMemHeapPtrGet(heap);
+            struct memory_block *block = start;
+            size_t used_size = 0;
+            s32 used_blocks = 0;
+            do {
+                if (block->flag == 1) {
+                    used_size += block->size;
+                    used_blocks++;
+                }
+                block = block->next;
+            } while (block != start);
+            sink(context, "HuMemUsedMallocSizeGet(heap)", (uint32_t)used_size);
+            sink(context, "HuMemUsedMallocBlockGet(heap)", (uint32_t)(size_t)used_blocks);
+        }
     }
 #undef WORD
 }

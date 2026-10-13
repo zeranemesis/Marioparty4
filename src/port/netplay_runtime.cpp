@@ -1492,10 +1492,11 @@ bool captureCommittedState()
     StateDigest stamp {frame,
         static_cast<std::uint32_t>(gRuntime.probeContext >= 0 ? gRuntime.probeContext : PartyBoard_NetplayContextId()),
         frand_state_get(), static_cast<std::uint32_t>(rand8_state_get()), GlobalCounter};
-    auto state = captureCanonical(stamp);
+    auto &state = gRuntime.detailHistory[frame % kDetailHistorySize];
+    gRuntime.detailFrames[frame % kDetailHistorySize] = kNoHashFrame; // Slot is being refilled.
+    captureCanonicalInto(stamp, state);
     stamp.hash = state.hash;
     stamp.parts = state.parts;
-    gRuntime.detailHistory[frame % kDetailHistorySize] = std::move(state);
     gRuntime.detailFrames[frame % kDetailHistorySize] = frame;
     // Every peer compares our digests against its own, so each stream gets them.
     for (std::uint8_t seat = 0; seat < gRuntime.playerCount; ++seat) {
