@@ -112,6 +112,24 @@ void PartyBoard_AnimHsfWritten(HSFDATA *hsf)
     *seq = sAnimWriteSeq;
 }
 
+/* Netplay: a rendered frame that carried no simulation tick (a peer waiting
+ * for its partner still renders) must not run the motion passes. They are
+ * idempotent for the pose, but the first application of an attribute track
+ * allocates its HU3DATTRANIM in HEAP_DATA (SetObjAttrMotion), so a peer that
+ * rendered one extra frame made that allocation a tick early and HEAPS
+ * diverged. The frame shows the pose of the last tick instead.
+ * PARTYBOARD_RENDER_TICK_ONLY=0 restores the old behaviour, for an A/B. */
+extern bool PartyBoard_NetplayEnabled(void);
+static BOOL RenderPassesBlocked(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *value = getenv("PARTYBOARD_RENDER_TICK_ONLY");
+        enabled = !(value != NULL && value[0] == '0' && value[1] == '\0');
+    }
+    return enabled && !PartyBoard_IsSimulationTick && PartyBoard_NetplayEnabled();
+}
+
 static BOOL AnimCacheHit(s16 model)
 {
     const u32 *seq;
@@ -389,7 +407,11 @@ void Hu3DExec(void) {
                             if ((data->attr & HU3D_ATTR_CAMERA) != 0) {
                                 Hu3DCameraMotionExec(i);
                             } else {
-                                if ((data->attr & HU3D_ATTR_CAMERA_UPDATE) == HU3D_ATTR_CAMERA_UPDATE && data->motId != -1) {
+                                if ((data->attr & HU3D_ATTR_CAMERA_UPDATE) == HU3D_ATTR_CAMERA_UPDATE && data->motId != -1
+#ifdef TARGET_PC
+                                    && !RenderPassesBlocked()
+#endif
+                                    ) {
                                     Hu3DMotionExec(i, data->motId, data->motWork.time, 0);
                                 }
                                 if ((data->attr & (HU3D_ATTR_DISPOFF|HU3D_ATTR_MOTION_OFF)) == 0 && (data->cameraBit & cameraBit) != 0 && data->layerNo == j) {
@@ -397,6 +419,10 @@ void Hu3DExec(void) {
                                         var_r25 = 0;
                                         data->motAttr &= ~HU3D_MOTATTR;
 #ifdef TARGET_PC
+                                        if (RenderPassesBlocked()) {
+                                            data->attr |= 0x800;
+                                            goto anim_cache_done;
+                                        }
                                         if (AnimCacheHit(i)) {
                                             /* Same model, no logic since: the passes would
                                              * rewrite the same joints and vertices. */
