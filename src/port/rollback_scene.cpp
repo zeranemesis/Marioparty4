@@ -11,6 +11,8 @@ extern "C" {
 extern HU3DCAMERA defCamera;
 extern u16 Hu3DCameraExistF;
 }
+#include <algorithm>
+#include <array>
 #include <cstring>
 #include <vector>
 #include <xxhash.h>
@@ -47,10 +49,12 @@ extern "C" bool PartyBoard_RollbackSceneRegions(PartyBoardRollbackRegionSink sin
 namespace {
 using namespace partyboard::rollback;
 struct Header {
-    uint32_t magic = 0x53434e53u, version = 3, total = 0, regions = 0;
+    uint32_t magic = 0x53434e53u, version = 4, total = 0, regions = 0;
     uint32_t pointerSize = sizeof(void *), kind = 0;
     uint64_t checksum = 0, layoutTag = 0;
     uint64_t processes = 0, modules = 0, io = 0;
+    // Bytes stored for each heap region; the rest of its slot is not written.
+    uint64_t heapLive[2] = {0, 0};
 };
 struct HeapRegion { void *address; size_t bytes; };
 using HeapSet = std::array<HeapRegion, 2>;
@@ -96,8 +100,23 @@ struct Builder {
             && PartyBoard_RollbackModuleRegions(add, this));
     }
 };
-uint64_t hash(const uint8_t *bytes, size_t size) {
-    return XXH3_64bits(bytes, size);
+// A heap the allocator tracks is stored only up to its high-water mark: the
+// bytes past it are still zero in every timeline. Untracked heaps (the self-test
+// arenas) are stored whole, as before.
+size_t heapLiveBytes(const HeapRegion &heap) {
+    const size_t high = HuMemHighWaterGet(heap.address);
+    return high ? std::min(high, heap.bytes) : heap.bytes;
+}
+// Heap regions are added first by Builder::build, so region i < heapCount is
+// heap i. Calls visit(address, payloadOffset, liveBytes) for every region.
+template <typename Visit>
+void forEachLive(const SnapshotLayout &layout, const uint64_t *live, size_t heapCount, Visit visit) {
+    size_t offset = 0, index = 0;
+    for (const auto &region : layout.regions()) {
+        visit(region.address, offset, index < heapCount ? static_cast<size_t>(live[index]) : region.size);
+        offset += region.size;
+        ++index;
+    }
 }
 }
 
@@ -124,9 +143,17 @@ static bool saveScene(void *destination, size_t capacity, const HeapSet *heaps, 
     header.processes = HuPrcTopologyGenerationGet();
     header.modules = PartyBoard_RollbackModuleGeneration();
     header.io = lease.epoch;
+    const size_t heapCount = heaps ? heaps->size() : 0;
+    for (size_t index = 0; index < heapCount; ++index)
+        header.heapLive[index] = heapLiveBytes((*heaps)[index]);
     auto *payload = static_cast<uint8_t *>(destination) + sizeof(Header);
-    if (!builder.layout.save(payload, builder.layout.byteSize())) return false;
-    header.checksum = hash(payload, builder.layout.byteSize());
+    uint64_t checksum = 0;
+    forEachLive(builder.layout, header.heapLive, heapCount,
+        [&](const uint8_t *address, size_t offset, size_t bytes) {
+            std::memcpy(payload + offset, address, bytes);
+            checksum = XXH3_64bits_withSeed(payload + offset, bytes, checksum);
+        });
+    header.checksum = checksum;
     std::memcpy(destination, &header, sizeof(header));
     return true;
 }
@@ -150,14 +177,38 @@ static bool loadScene(const void *source, size_t size, const HeapSet *heaps, boo
         || header.kind != (execution ? 2u : heaps ? 1u : 0u) || header.layoutTag != builder.signature
         || header.processes != HuPrcTopologyGenerationGet()
         || header.modules != PartyBoard_RollbackModuleGeneration()) return false;
+    const size_t heapCount = heaps ? heaps->size() : 0;
+    std::array<size_t, 2> liveNow {};
+    for (size_t index = 0; index < 2; ++index) {
+        if (index >= heapCount) {
+            if (header.heapLive[index] != 0) return false;
+            continue;
+        }
+        // The mark only grows, so a stored prefix longer than today's is corrupt.
+        liveNow[index] = heapLiveBytes((*heaps)[index]);
+        if (header.heapLive[index] > liveNow[index]) return false;
+    }
     const auto *payload = static_cast<const uint8_t *>(source) + sizeof(Header);
-    if (header.checksum != hash(payload, builder.layout.byteSize())) return false;
+    uint64_t checksum = 0;
+    forEachLive(builder.layout, header.heapLive, heapCount,
+        [&](const uint8_t *, size_t offset, size_t bytes) {
+            checksum = XXH3_64bits_withSeed(payload + offset, bytes, checksum);
+        });
+    if (header.checksum != checksum) return false;
     // All metadata, lifetimes, ranges and bytes checked before any live write.
-    const bool loaded = builder.layout.load(payload, builder.layout.byteSize());
+    forEachLive(builder.layout, header.heapLive, heapCount,
+        [&](uint8_t *address, size_t offset, size_t bytes) {
+            std::memcpy(address, payload + offset, bytes);
+        });
+    // Bytes a later, discarded timeline used for the first time go back to zero.
+    for (size_t index = 0; index < heapCount; ++index) {
+        auto *base = static_cast<uint8_t *>((*heaps)[index].address);
+        std::memset(base + header.heapLive[index], 0, liveNow[index] - header.heapLive[index]);
+    }
     // Interpolation stores the two most recently rendered transforms outside
     // the logical scene. A rewind must seed that cache from the restored tick.
-    if (loaded && execution) PartyBoard_FrameInterpolationReset();
-    return loaded;
+    if (execution) PartyBoard_FrameInterpolationReset();
+    return true;
 }
 
 extern "C" bool PartyBoard_RollbackSceneSave(void *destination, size_t capacity)
@@ -320,6 +371,62 @@ extern "C" bool PartyBoard_RollbackSceneSelfTest(void)
     } catch (...) { passed = false; }
     OSReport("Native logical scene rollback: %s (%u corrections, %u replayed ticks, %zu bytes). Real view calculations and overlay history; no full scene.\n",
         passed ? "PASS" : "FAIL", corrections, replayed, size);
+    return passed;
+}
+
+extern "C" bool PartyBoard_RollbackHighWaterSelfTest(void)
+{
+    alignas(64) std::array<uint8_t, 65536> systemArena {}, dataArena {};
+    const HeapSet heaps {{{systemArena.data(), systemArena.size()}, {dataArena.data(), dataArena.size()}}};
+    bool passed = true;
+    try {
+        HuMemHeapInit(systemArena.data(), systemArena.size());
+        HuMemHeapInit(dataArena.data(), dataArena.size());
+        HuMemHighWaterTrack(systemArena.data(), systemArena.size());
+        HuMemHighWaterTrack(dataArena.data(), dataArena.size());
+        auto *kept = static_cast<uint8_t *>(HuMemMemoryAlloc(dataArena.data(), 1000, 0));
+        auto *counter = static_cast<uint8_t *>(HuMemMemoryAlloc(systemArena.data(), 64, 0));
+        passed &= kept && counter;
+        if (!passed) throw std::bad_alloc();
+        std::memset(kept, 0x11, 1000);
+        std::memset(counter, 0x44, 64);
+        Builder builder;
+        passed &= builder.build(&heaps);
+        const size_t size = sizeof(Header) + builder.layout.byteSize();
+        std::vector<uint8_t> snapshot(size);
+        passed &= saveScene(snapshot.data(), size, &heaps);
+        const size_t mark = HuMemHighWaterGet(dataArena.data());
+        passed &= mark > 1000 && mark < dataArena.size() / 4;
+        const auto systemBefore = systemArena;
+        const auto dataBefore = dataArena;
+        // A discarded timeline: allocate past the mark and overwrite old data.
+        auto *grown = static_cast<uint8_t *>(HuMemMemoryAlloc(dataArena.data(), 20000, 0));
+        passed &= grown != nullptr;
+        if (grown) std::memset(grown, 0x22, 20000);
+        std::memset(kept, 0x33, 1000);
+        std::memset(counter, 0x55, 64);
+        HuMemMemoryFree(kept, 0);
+        passed &= HuMemHighWaterGet(dataArena.data()) > mark + 20000;
+        passed &= loadScene(snapshot.data(), size, &heaps);
+        passed &= systemArena == systemBefore && dataArena == dataBefore;
+        // The restored allocator hands out the same block as before.
+        passed &= HuMemMemoryAlloc(dataArena.data(), 20000, 0) == grown;
+        passed &= loadScene(snapshot.data(), size, &heaps) && dataArena == dataBefore;
+        // A stored prefix longer than the mark has ever been is refused.
+        auto damaged = snapshot;
+        Header header;
+        std::memcpy(&header, damaged.data(), sizeof(header));
+        header.heapLive[1] = dataArena.size() + 64;
+        std::memcpy(damaged.data(), &header, sizeof(header));
+        passed &= !loadScene(damaged.data(), size, &heaps);
+        damaged = snapshot;
+        damaged[sizeof(Header) + 8] ^= 1; // Inside the stored system heap prefix.
+        passed &= !loadScene(damaged.data(), size, &heaps);
+        passed &= dataArena == dataBefore;
+    } catch (...) { passed = false; }
+    HuMemHighWaterForget(systemArena.data());
+    HuMemHighWaterForget(dataArena.data());
+    OSReport("Rollback heap high-water: %s.\n", passed ? "PASS" : "FAIL");
     return passed;
 }
 

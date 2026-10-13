@@ -38,5 +38,13 @@ s32 HuMemUsedMemoryBlockGet(void *heap_ptr);
 size_t HuMemMemorySizeGet(void *ptr);
 size_t HuMemMemoryAllocSizeGet(size_t size);
 void HuMemHeapDump(void *heap_ptr, s16 status);
+#ifdef TARGET_PC
+/* Rollback copies a tracked heap only up to the furthest byte the allocator
+ * has ever handed out. The heap's memory must be zero when tracking starts. */
+void HuMemHighWaterTrack(void *heap_ptr, size_t size);
+/* Bytes from the heap start that may have been written; 0 when untracked. */
+size_t HuMemHighWaterGet(const void *heap_ptr);
+void HuMemHighWaterForget(void *heap_ptr);
+#endif
 
 #endif

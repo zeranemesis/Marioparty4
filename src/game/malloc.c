@@ -3,6 +3,7 @@
 #include "dolphin/os.h"
 #ifdef TARGET_PC
 #include "port/mem_diagnostics.h"
+#include <stdlib.h>
 #ifdef TARGET_PC
 /* The allocator records its caller so a desync report can name who made an
  * allocation (D30). The intrinsic differs per compiler; TARGET_PC is not a
@@ -31,7 +32,12 @@ void HuMemInitAll(void)
 #ifdef TARGET_PC
         HeapSizeTbl[i] *= 4;
 #endif
+#ifdef TARGET_PC
+        /* Zeroed, so rollback can skip the part of a heap never used. */
+        ptr = calloc(1, HeapSizeTbl[i]);
+#else
         ptr = OSAlloc(HeapSizeTbl[i]);
+#endif
         if(ptr == NULL) {
             OSReport("HuMem> Failed OSAlloc Size:%d\n", HeapSizeTbl[i]);
             return;
@@ -41,6 +47,7 @@ void HuMemInitAll(void)
         /* Bounds for the integrity sweep: a block has to be provably inside
          * its own heap, and the sweep needs to know what to walk. */
         PartyBoard_MemDiagRegisterHeap(i, HeapTbl[i], HeapSizeTbl[i]);
+        HuMemHighWaterTrack(HeapTbl[i], HeapSizeTbl[i]);
 #endif
     }
     free_size = OSCheckHeap(currentHeapHandle);

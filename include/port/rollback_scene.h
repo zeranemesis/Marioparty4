@@ -25,6 +25,9 @@ size_t PartyBoard_RollbackResourcesSize(void);
 bool PartyBoard_RollbackResourcesSave(void *destination, size_t capacity);
 bool PartyBoard_RollbackResourcesLoad(const void *source, size_t size);
 bool PartyBoard_RollbackResourcesSelfTest(void);
+/* Heaps tracked by the allocator are stored up to their high-water mark;
+ * a restore puts back exactly the bytes a full copy would have. */
+bool PartyBoard_RollbackHighWaterSelfTest(void);
 /* Coordinated same-process checkpoint: resources + PAD/game/sequence/clock,
  * suspended coroutine stacks and current Windows overlay .data. Requires a
  * loaded overlay and the scheduler's thread between HuPrcCall invocations.

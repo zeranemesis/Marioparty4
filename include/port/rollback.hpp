@@ -34,6 +34,11 @@ struct Callbacks {
  * audio-device and socket state that cannot safely be rewound. */
 class SnapshotLayout {
 public:
+    struct Region {
+        std::uint8_t *address = nullptr;
+        std::size_t size = 0;
+    };
+
     bool addRegion(void *address, std::size_t size);
     void clear();
     std::size_t byteSize() const { return mByteSize; }
@@ -41,13 +46,9 @@ public:
     bool save(void *destination, std::size_t capacity) const;
     bool load(const void *source, std::size_t size) const;
     std::uint32_t checksum() const;
+    const std::vector<Region> &regions() const { return mRegions; }
 
 private:
-    struct Region {
-        std::uint8_t *address = nullptr;
-        std::size_t size = 0;
-    };
-
     std::vector<Region> mRegions;
     std::size_t mByteSize = 0;
 };
