@@ -335,8 +335,16 @@ public class PartyBoardActivity extends SDLActivity {
         startActivity(restart);
     }
 
+    // The game started in this process: CubeShelfLaunchActivity then leaves its mods alone.
+    private static volatile boolean running;
+
+    static boolean isRunning() {
+        return running;
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        running = true;
         // Saves received from CubeShelf go in before the game opens its memory cards.
         int applied = CubeShelfLink.applyIncoming(getFilesDir());
         if (applied > 0) {
@@ -400,6 +408,7 @@ public class PartyBoardActivity extends SDLActivity {
 
     @Override
     protected void onDestroy() {
+        running = false;
         boolean finishing = isFinishing();
         if (finishing && onlineSession) {
             // Back to the salon, which now says how the session ended.

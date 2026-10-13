@@ -14,4 +14,7 @@
     <exclude domain="file" path="config.json.tmp" />
     <exclude domain="file" path="texture_dumps" />
     <exclude domain="file" path="retroachievements/badges" />
+    <!-- Copies of what CubeShelf installed, sent again on the next start from CubeShelf. -->
+    <exclude domain="file" path="cubeshelf-mods" />
+    <exclude domain="file" path="cubeshelf-ingame" />
 </full-backup-content>

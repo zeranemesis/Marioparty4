@@ -82,6 +82,17 @@
             </intent-filter>
         </activity>
 
+        <!-- Where CubeShelf for Android opens the game: it copies the mods CubeShelf installed,
+             with their progress on screen, then starts PartyBoardActivity
+             (CubeShelfLaunchActivity.java). -->
+        <activity
+            android:name="com.mariopartyrd.partyboard.CubeShelfLaunchActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Material.NoActionBar"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density" />
+
         <!-- The online lobby, the phone's PartyBoardOnline.exe. Its own process,
              so it outlives the game process it restarts with its netplay
              arguments; its own task, so the game and the lobby switch cleanly.

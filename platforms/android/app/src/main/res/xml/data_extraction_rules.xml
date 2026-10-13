@@ -13,6 +13,9 @@
         <exclude domain="file" path="config.json.tmp" />
         <exclude domain="file" path="texture_dumps" />
         <exclude domain="file" path="retroachievements/badges" />
+        <!-- Copies of what CubeShelf installed, sent again on the next start from CubeShelf. -->
+        <exclude domain="file" path="cubeshelf-mods" />
+        <exclude domain="file" path="cubeshelf-ingame" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="file" path="pipeline_cache.db" />
@@ -24,5 +27,8 @@
         <exclude domain="file" path="config.json.tmp" />
         <exclude domain="file" path="texture_dumps" />
         <exclude domain="file" path="retroachievements/badges" />
+        <!-- Copies of what CubeShelf installed, sent again on the next start from CubeShelf. -->
+        <exclude domain="file" path="cubeshelf-mods" />
+        <exclude domain="file" path="cubeshelf-ingame" />
     </device-transfer>
 </data-extraction-rules>
