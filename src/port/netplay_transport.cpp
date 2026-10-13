@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -32,6 +33,9 @@ static_assert(kMaxNetplayPeers == rollback::kMaxPlayers, "netplay peers and roll
 namespace {
 
 constexpr std::size_t kPacketSize = kNetplayPacketSize;
+constexpr std::size_t kHistoryOffset = 152;
+constexpr std::size_t kChecksumOffset = kPacketSize - 4;
+static_assert(kHistoryOffset + kInputHistory * 8 == kChecksumOffset, "packet layout");
 constexpr std::array<std::uint8_t, 4> kMagic { 'P', 'B', 'R', 'B' };
 
 
@@ -60,6 +64,30 @@ std::uint32_t get32(const std::uint8_t *source)
         | (static_cast<std::uint32_t>(source[1]) << 16)
         | (static_cast<std::uint32_t>(source[2]) << 8)
         | static_cast<std::uint32_t>(source[3]);
+}
+
+void putInput(std::uint8_t *destination, const PartyBoardRollbackInput &input)
+{
+    put16(destination, input.buttons);
+    destination[2] = static_cast<std::uint8_t>(input.stickX);
+    destination[3] = static_cast<std::uint8_t>(input.stickY);
+    destination[4] = static_cast<std::uint8_t>(input.substickX);
+    destination[5] = static_cast<std::uint8_t>(input.substickY);
+    destination[6] = input.triggerLeft;
+    destination[7] = input.triggerRight;
+}
+
+PartyBoardRollbackInput getInput(const std::uint8_t *source)
+{
+    PartyBoardRollbackInput input {};
+    input.buttons = get16(source);
+    input.stickX = static_cast<s8>(source[2]);
+    input.stickY = static_cast<s8>(source[3]);
+    input.substickX = static_cast<s8>(source[4]);
+    input.substickY = static_cast<s8>(source[5]);
+    input.triggerLeft = source[6];
+    input.triggerRight = source[7];
+    return input;
 }
 
 std::uint32_t packetHash(const std::uint8_t *bytes, std::size_t size)
@@ -104,7 +132,12 @@ std::array<std::uint8_t, kPacketSize> encode(const InputPacket &packet)
     // 80..83 reserved, must be zero.
     for (std::size_t index = 0; index < kSubsystemCount; ++index)
         put32(bytes.data() + 84 + index * 4, packet.state.parts[index]);
-    put32(bytes.data() + 148, packetHash(bytes.data(), 148));
+    // 148: history count; 149..151 reserved, must be zero.
+    const std::size_t historyCount = std::min<std::size_t>(packet.historyCount, kInputHistory);
+    bytes[148] = static_cast<std::uint8_t>(historyCount);
+    for (std::size_t index = 0; index < historyCount; ++index)
+        putInput(bytes.data() + kHistoryOffset + index * 8, packet.history[index]);
+    put32(bytes.data() + kChecksumOffset, packetHash(bytes.data(), kChecksumOffset));
     return bytes;
 }
 
@@ -113,7 +146,8 @@ bool decode(const std::uint8_t *bytes, std::size_t size, InputPacket &packet)
     if (size != kPacketSize || !std::equal(kMagic.begin(), kMagic.end(), bytes)
         || get16(bytes + 4) != kProtocolVersion || bytes[6] < 1 || bytes[6] > 3
         || get32(bytes + 80) != 0 || get32(bytes + 48) != kStateHashVersion
-        || get32(bytes + 148) != packetHash(bytes, 148)) {
+        || bytes[148] > kInputHistory || bytes[149] != 0 || bytes[150] != 0 || bytes[151] != 0
+        || get32(bytes + kChecksumOffset) != packetHash(bytes, kChecksumOffset)) {
         return false;
     }
     packet.player = bytes[7];
@@ -142,6 +176,10 @@ bool decode(const std::uint8_t *bytes, std::size_t size, InputPacket &packet)
     for (std::size_t index = 0; index < kSubsystemCount; ++index)
         packet.state.parts[index] = get32(bytes + 84 + index * 4);
     packet.captureContext = get32(bytes + 44);
+    packet.historyCount = bytes[148];
+    packet.history = {};
+    for (std::size_t index = 0; index < packet.historyCount; ++index)
+        packet.history[index] = getInput(bytes + kHistoryOffset + index * 8);
     // The author byte indexes seat arrays, so it is bounded here and nowhere else.
     // It said "< 2" -- the single line that made a third player impossible at the
     // wire level, whatever the rest of the stack could do.
@@ -394,6 +432,23 @@ bool UdpTransport::receiveInput(InputPacket &packet)
     return true;
 }
 
+bool UdpTransport::waitReadable(int milliseconds)
+{
+    if (!mImpl || mImpl->socket == kInvalidSocket) return false;
+#if defined(_WIN32)
+    fd_set readable;
+    FD_ZERO(&readable);
+    FD_SET(mImpl->socket, &readable);
+    timeval timeout {0, milliseconds * 1000};
+    return select(0, &readable, nullptr, nullptr, &timeout) > 0;
+#else
+    pollfd entry {};
+    entry.fd = mImpl->socket;
+    entry.events = POLLIN;
+    return ::poll(&entry, 1, milliseconds) > 0;
+#endif
+}
+
 void UdpTransport::close()
 {
     if (!mImpl) return;
@@ -563,7 +618,7 @@ bool runTransportSelfTest()
     if (decode(bytes.data(), bytes.size(), decoded)) return false;
     bytes = encode(codecSample);
     put16(bytes.data() + 4, 3); // Old timeline protocol, otherwise valid checksum.
-    put32(bytes.data() + 148, packetHash(bytes.data(), 148));
+    put32(bytes.data() + kChecksumOffset, packetHash(bytes.data(), kChecksumOffset));
     if (decode(bytes.data(), bytes.size(), decoded)) return false;
 
     for (const auto type : {PacketType::Input, PacketType::Retransmit, PacketType::State}) {
@@ -583,7 +638,7 @@ bool runTransportSelfTest()
     bytes = encode(codecSample);
     bytes[84 + 4 * static_cast<std::size_t>(Subsystem::Board)] ^= 0x40;
     if (decode(bytes.data(), bytes.size(), decoded)) return false;
-    put32(bytes.data() + 148, packetHash(bytes.data(), 148));
+    put32(bytes.data() + kChecksumOffset, packetHash(bytes.data(), kChecksumOffset));
     if (!decode(bytes.data(), bytes.size(), decoded)
         || decoded.state == codecSample.state
         || decoded.state.firstDifferentPart(codecSample.state)
@@ -591,9 +646,27 @@ bool runTransportSelfTest()
     for (const unsigned offset : {5u, 6u, 7u, 48u, 80u}) {
         bytes = encode(codecSample);
         bytes[offset] = 99; // Valid checksum must not authorize an unknown schema/type/player.
-        put32(bytes.data() + 148, packetHash(bytes.data(), 148));
+        put32(bytes.data() + kChecksumOffset, packetHash(bytes.data(), kChecksumOffset));
         if (decode(bytes.data(), bytes.size(), decoded)) return false;
     }
+    // Repeated inputs survive the round trip; a count past the array does not decode.
+    codecSample.historyCount = static_cast<std::uint8_t>(kInputHistory);
+    for (std::size_t index = 0; index < kInputHistory; ++index) {
+        codecSample.history[index].buttons = static_cast<std::uint16_t>(0x0100u + index);
+        codecSample.history[index].stickX = static_cast<s8>(-10 - static_cast<int>(index));
+        codecSample.history[index].triggerRight = static_cast<std::uint8_t>(200 + index);
+    }
+    bytes = encode(codecSample);
+    if (!decode(bytes.data(), bytes.size(), decoded) || decoded.historyCount != kInputHistory) return false;
+    for (std::size_t index = 0; index < kInputHistory; ++index)
+        if (!rollback::inputsEqual(decoded.history[index], codecSample.history[index])) return false;
+    bytes[148] = static_cast<std::uint8_t>(kInputHistory + 1);
+    put32(bytes.data() + kChecksumOffset, packetHash(bytes.data(), kChecksumOffset));
+    if (decode(bytes.data(), bytes.size(), decoded)) return false;
+    bytes = encode(codecSample);
+    bytes[kHistoryOffset + 3] ^= 1; // Repeated inputs are covered by the checksum.
+    if (decode(bytes.data(), bytes.size(), decoded)) return false;
+    codecSample.historyCount = 0;
     bytes = encode(codecSample);
     if (decode(bytes.data(), bytes.size() - 1, decoded)) return false;
     codecSample.state.frame = kNoHashFrame;

@@ -295,8 +295,9 @@ bool Session::reconcile()
     mEarliestMismatch = UINT32_MAX;
     ++mStats.rollbackCount;
     mStats.maximumRollback = std::max(mStats.maximumRollback, distance);
+    // The slot for firstFrame already holds the state just restored.
     for (std::uint32_t frame = firstFrame; frame < mCurrentFrame; ++frame) {
-        if (!captureSnapshot(frame) || !simulate(frame)) {
+        if ((frame != firstFrame && !captureSnapshot(frame)) || !simulate(frame)) {
             mHealthy = false;
             return false;
         }

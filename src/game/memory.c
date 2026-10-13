@@ -81,6 +81,74 @@ static int HuMemFillByte(void)
 }
 #endif
 
+#ifdef TARGET_PC
+/* Grows only, across every timeline a rollback rewinds: a byte past it has
+ * never been written since the heap was zeroed, so a snapshot can leave it
+ * out and a restore can zero it again. */
+static struct {
+    char *base;
+    size_t size;
+    size_t high;
+} HuMemHighWater[8];
+
+void HuMemHighWaterTrack(void *heap_ptr, size_t size)
+{
+    s32 i;
+    for (i = 0; i < 8; i++) {
+        if (HuMemHighWater[i].base == NULL || HuMemHighWater[i].base == heap_ptr) {
+            HuMemHighWater[i].base = heap_ptr;
+            HuMemHighWater[i].size = size;
+            if (HuMemHighWater[i].high < sizeof(struct memory_block)) {
+                HuMemHighWater[i].high = sizeof(struct memory_block);
+            }
+            return;
+        }
+    }
+}
+
+void HuMemHighWaterForget(void *heap_ptr)
+{
+    s32 i;
+    for (i = 0; i < 8; i++) {
+        if (HuMemHighWater[i].base == heap_ptr) {
+            HuMemHighWater[i].base = NULL;
+            HuMemHighWater[i].size = 0;
+            HuMemHighWater[i].high = 0;
+        }
+    }
+}
+
+size_t HuMemHighWaterGet(const void *heap_ptr)
+{
+    s32 i;
+    for (i = 0; i < 8; i++) {
+        if (HuMemHighWater[i].base == heap_ptr) {
+            return HuMemHighWater[i].high;
+        }
+    }
+    return 0;
+}
+
+static void HuMemHighWaterRaise(void *heap_ptr, struct memory_block *block)
+{
+    s32 i;
+    for (i = 0; i < 8; i++) {
+        if (HuMemHighWater[i].base == heap_ptr) {
+            /* The block itself, plus the header of whatever follows it. */
+            size_t end = (size_t)((char *)block - HuMemHighWater[i].base) + (size_t)block->size
+                + sizeof(struct memory_block);
+            if (end > HuMemHighWater[i].size) {
+                end = HuMemHighWater[i].size;
+            }
+            if (end > HuMemHighWater[i].high) {
+                HuMemHighWater[i].high = end;
+            }
+            return;
+        }
+    }
+}
+#endif
+
 void *HuMemHeapInit(void *ptr, size_t size)
 {
     struct memory_block *block = ptr;
@@ -137,6 +205,7 @@ static void *HuMemMemoryAlloc2(void *heap_ptr, size_t size, uintptr_t num, uintp
             block->num = num;
             block->retaddr = retaddr;
 #ifdef TARGET_PC
+            HuMemHighWaterRaise(heap_ptr, block);
             /* Arms the head redzone in the dead bytes between the header and
              * the payload, and records the allocation in the table that lives
              * outside MEM1. No layout change: see docs/humem_layout.md. */
