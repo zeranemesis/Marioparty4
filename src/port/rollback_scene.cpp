@@ -171,7 +171,7 @@ static bool loadScene(const void *source, size_t size, const HeapSet *heaps, boo
         || size != sizeof(Header) + builder.layout.byteSize()) return false;
     Header header;
     std::memcpy(&header, source, sizeof(header));
-    if (header.magic != 0x53434e53u || header.version != 3
+    if (header.magic != 0x53434e53u || header.version != Header {}.version
         || header.total != size || header.regions != builder.layout.regionCount()
         || header.pointerSize != sizeof(void *) || header.io != lease.epoch
         || header.kind != (execution ? 2u : heaps ? 1u : 0u) || header.layoutTag != builder.signature
