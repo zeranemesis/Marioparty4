@@ -383,3 +383,182 @@ index 0d1a5c2..1d80f01 100644
    TRY(SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight"), "Error setting {}: {}", SDL_HINT_ORIENTATIONS,
        SDL_GetError());
    TRY(SDL_InitSubSystem(SDL_INIT_EVENTS | SDL_INIT_VIDEO), "Error initializing SDL: {}", SDL_GetError());
+diff --git a/lib/dolphin/dvd/dvd.cpp b/lib/dolphin/dvd/dvd.cpp
+index 863ecb8..c2b0663 100644
+--- a/lib/dolphin/dvd/dvd.cpp
++++ b/lib/dolphin/dvd/dvd.cpp
+@@ -8,10 +8,15 @@
+ 
+ #include <cstddef>
+ #include <cstdint>
++#include <cstdlib>
+ #include <cstring>
+ #include <limits>
++#include <list>
+ #include <memory>
++#include <mutex>
+ #include <string>
++#include <thread>
++#include <unordered_map>
+ #include <utility>
+ #include <vector>
+ 
+@@ -84,6 +89,108 @@ public:
+   }
+ };
+ 
++// A disc file already read, served from memory.
++class CommandDataMemory final : public CommandDataBase {
++public:
++  std::shared_ptr<const std::vector<uint8_t>> bytes;
++  int64_t position = 0;
++  explicit CommandDataMemory(std::shared_ptr<const std::vector<uint8_t>> data) : bytes(std::move(data)) { }
++
++  int64_t read(uint8_t* buf, size_t len) override {
++    const auto size = static_cast<int64_t>(bytes->size());
++    const int64_t count = std::min<int64_t>(static_cast<int64_t>(len), std::max<int64_t>(size - position, 0));
++    if (count > 0) {
++      std::memcpy(buf, bytes->data() + position, static_cast<size_t>(count));
++      position += count;
++    }
++    return count;
++  }
++
++  int64_t seek(int64_t offset, int32_t whence) override {
++    const int64_t base = whence == 1 ? position : (whence == 2 ? static_cast<int64_t>(bytes->size()) : 0);
++    if (base + offset < 0) {
++      return -1;
++    }
++    position = base + offset;
++    return position;
++  }
++};
++
++// Whole disc files kept after their first read. Scenes load the same archives
++// again and again; with a compressed image (RVZ, WIA, GCZ) each load also
++// decompressed them again. Bounded, least recently opened files leave first.
++// PARTYBOARD_DVD_CACHE_MB sets the budget, 0 turns it off.
++class FileCache {
++public:
++  using Bytes = std::shared_ptr<const std::vector<uint8_t>>;
++
++  bool accepts(u32 length) {
++    const size_t limit = budget();
++    return length > 0 && limit > 0 && length <= std::min<size_t>(limit / 4, 8u << 20);
++  }
++
++  Bytes find(s32 entry) {
++    std::lock_guard lock(mMutex);
++    const auto found = mIndex.find(entry);
++    if (found == mIndex.end()) {
++      return nullptr;
++    }
++    mOrder.splice(mOrder.begin(), mOrder, found->second);
++    return found->second->second;
++  }
++
++  void insert(s32 entry, Bytes bytes) {
++    std::lock_guard lock(mMutex);
++    if (mIndex.find(entry) != mIndex.end()) {
++      return;
++    }
++    mUsed += bytes->size();
++    mOrder.emplace_front(entry, std::move(bytes));
++    mIndex.emplace(entry, mOrder.begin());
++    while (mUsed > budget() && !mOrder.empty()) {
++      mUsed -= mOrder.back().second->size();
++      mIndex.erase(mOrder.back().first);
++      mOrder.pop_back();
++    }
++  }
++
++  void clear() {
++    std::lock_guard lock(mMutex);
++    mOrder.clear();
++    mIndex.clear();
++    mUsed = 0;
++  }
++
++private:
++  static size_t budget() {
++    static const size_t bytes = [] {
++#if defined(__ANDROID__)
++      size_t megabytes = 48;
++#else
++      size_t megabytes = 128;
++#endif
++      if (const char* value = std::getenv("PARTYBOARD_DVD_CACHE_MB"); value != nullptr && *value != '\0') {
++        megabytes = static_cast<size_t>(std::strtoul(value, nullptr, 10));
++      }
++      return megabytes << 20;
++    }();
++    return bytes;
++  }
++
++  std::mutex mMutex;
++  std::list<std::pair<s32, Bytes>> mOrder;
++  std::unordered_map<s32, std::list<std::pair<s32, Bytes>>::iterator> mIndex;
++  size_t mUsed = 0;
++};
++
++FileCache s_fileCache;
++
++// Decompression of RVZ/WIA/GCZ blocks runs on these threads, ahead of reads.
++u32 preloaderThreads() {
++  const unsigned cores = std::thread::hardware_concurrency();
++  return std::clamp<u32>(cores / 2, 1, 4);
++}
++
+ CommandDataNod* s_disc;
+ 
+ void clearState() {
+@@ -95,6 +202,7 @@ void clearState() {
+     delete s_disc;
+     s_disc = nullptr;
+   }
++  s_fileCache.clear();
+   s_fstEntries.clear();
+   s_entryNumToFstIndex.clear();
+   s_baseEntryCount = 0;
+@@ -345,7 +453,7 @@ bool aurora_dvd_open(const char* disc_path) {
+       .close = sdlStreamClose,
+   };
+   const NodDiscOptions options{
+-      .preloader_threads = 1,
++      .preloader_threads = preloaderThreads(),
+   };
+ 
+   NodHandle* discHandle;
+@@ -752,6 +860,8 @@ BOOL DVDFastOpen(s32 entrynum, DVDFileInfo* fileInfo) {
+     }
+ 
+     fileInfo->cb.userData = new CommandDataOverlay(handle);
++  } else if (auto cached = s_fileCache.find(entry.origEntryNum)) {
++    fileInfo->cb.userData = new CommandDataMemory(std::move(cached));
+   } else {
+     NodHandle* handle = nullptr;
+     NodResult result = nod_partition_open_file(s_partition, entry.origEntryNum, &handle);
+@@ -759,7 +869,22 @@ BOOL DVDFastOpen(s32 entrynum, DVDFileInfo* fileInfo) {
+       return FALSE;
+     }
+ 
+-    fileInfo->cb.userData = new CommandDataNod(handle);
++    auto file = std::make_unique<CommandDataNod>(handle);
++    const u32 length = entry.nextOrLength;
++    if (s_fileCache.accepts(length)) {
++      auto bytes = std::make_shared<std::vector<uint8_t>>(length);
++      u32 transferred = 0;
++      if (readFromHandle(file.get(), bytes->data(), static_cast<s32>(length), 0, &transferred)
++              == static_cast<s32>(length)) {
++        s_fileCache.insert(entry.origEntryNum, bytes);
++        fileInfo->cb.userData = new CommandDataMemory(std::move(bytes));
++      } else {
++        file->seek(0, 0);
++        fileInfo->cb.userData = file.release();
++      }
++    } else {
++      fileInfo->cb.userData = file.release();
++    }
+   }
+ 
+   fileInfo->cb.state = DVD_STATE_END;
