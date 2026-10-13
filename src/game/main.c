@@ -36,6 +36,7 @@
 #include <aurora/aurora.h>
 #include <aurora/event.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 const char *__asan_default_options()
 {
@@ -93,6 +94,8 @@ void PartyBoard_RequestRestart(void)
     PartyBoard_IsRunning = FALSE;
 }
 
+extern u32 PartyBoard_AnimationEpoch;
+
 static void PartyBoard_RunGameLogicTick(void)
 {
     PartyBoard_IsSimulationTick = TRUE;
@@ -119,6 +122,7 @@ bool PartyBoard_RollbackRunGameLogicTick(const PartyBoardRollbackInput inputs[4]
      * The other thing Hu3DExec does under the same guard, data->tick++, is
      * deliberately not replayed: it counts drawn models, not simulated ticks,
      * and PartyBoard_NetplayAnimationState does not export it. */
+    PartyBoard_AnimationEpoch++;
     PartyBoard_AnimationAdvance();
     if (!PartyBoard_RollbackApplyPads(inputs, connectedMask)) return false;
     PartyBoard_RunGameLogicTick();
@@ -269,6 +273,11 @@ void main(void)
         Hu3DPreProc();
 #ifdef TARGET_PC
         HuSysVWaitSet(1);
+        if (simulationTicks > 0) {
+            /* Logic may run below: models' cached animation passes are no
+             * longer known to be current (src/game/hsfman.c). */
+            PartyBoard_AnimationEpoch++;
+        }
         for (simulationTickIndex = 0; simulationTickIndex < simulationTicks;
              ++simulationTickIndex) {
             if (simulatedTicks != 0) {
@@ -442,6 +451,9 @@ void main(void)
             frame_limiter();
         }
         PartyBoard_LoopMark(6);
+        /* OSReport no longer flushes each line; publish this frame's lines
+         * together. Nothing buffered, nothing written. */
+        fflush(stdout);
 #endif
     }
 

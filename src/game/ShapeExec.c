@@ -57,6 +57,9 @@ void ShapeProc(HSFDATA *arg0) {
     HSFOBJECT *var_r31;
     s32 i;
 
+#ifdef TARGET_PC
+    PartyBoard_AnimHsfWritten(arg0);
+#endif
     var_r31 = arg0->object;
     for (i = 0; i < arg0->objectNum; i++, var_r31++) {
         if (var_r31->type == 2 && var_r31->mesh.shapeNum != 0) {

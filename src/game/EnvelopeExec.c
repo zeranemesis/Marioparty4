@@ -130,6 +130,9 @@ void EnvelopeProc(HSFDATA *arg0) {
     HSFOBJECT *temp_r29;
     Mtx sp8;
 
+#ifdef TARGET_PC
+    PartyBoard_AnimHsfWritten(arg0);
+#endif
     CurHsf = arg0;
     temp_r31 = CurHsf->matrix;
     MtxTop = temp_r31->data;
@@ -145,6 +148,9 @@ void InitVtxParm(HSFDATA *arg0) {
     HSFOBJECT *var_r31;
     s32 i;
 
+#ifdef TARGET_PC
+    PartyBoard_AnimHsfWritten(arg0);
+#endif
     var_r31 = arg0->object;
     for (i = 0; i < arg0->objectNum; i++, var_r31++) {
         if (var_r31->type == 2) {

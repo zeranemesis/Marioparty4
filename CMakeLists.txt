@@ -297,6 +297,14 @@ if (WIN32)
         target_compile_definitions(dol PRIVATE SKIP_HU_ALLOC)
     endif()
 endif()
+# How the game (dol and every overlay) is compiled with MSVC. OFF restores the
+# old /Od everywhere, for bisecting a behaviour that only an optimised build shows.
+option(PARTY_BOARD_WINDOWS_OPTIMIZE_GAME "Optimise the game code in non-Debug MSVC builds" ON)
+if (PARTY_BOARD_WINDOWS_OPTIMIZE_GAME)
+    set(PARTY_BOARD_MSVC_GAME_OPT "$<IF:$<CONFIG:Debug>,/Od,/O2>" "/fp:precise")
+else ()
+    set(PARTY_BOARD_MSVC_GAME_OPT "/Od")
+endif ()
 if (MSVC)
     target_link_options(dol PRIVATE "/DEF:${CMAKE_SOURCE_DIR}/dol.def")
     # Without this, editing the export list does not relink dol and the
@@ -315,7 +323,13 @@ if (MSVC)
     target_compile_options(dol PRIVATE "/wd4113") # function pointer parameter list mismatch
     # target_compile_options(dol PRIVATE "/Zi")
     #    target_compile_options(dol PRIVATE "/Ob0")
-    target_compile_options(dol PRIVATE "/Od")
+    # Debug stays unoptimised. Every other configuration optimises the game and
+    # the port like the Linux, macOS and Android builds already do with -O2:
+    # /Od used to come after CMake's /O2 and cancel it, so the Windows release
+    # ran the whole game, the software mixer and the netplay hashing without a
+    # single optimisation. /fp:precise is spelled out because netplay compares
+    # hashed floats with the other platforms: no reassociation, no contraction.
+    target_compile_options(dol PRIVATE ${PARTY_BOARD_MSVC_GAME_OPT})
     if(NOT USE_ASAN AND RUNTIME_SANITIZE)
         target_compile_options(dol PRIVATE "/GS")
         target_compile_options(dol PRIVATE "/RTC1")  # incompatible with asan
@@ -323,6 +337,32 @@ if (MSVC)
 else ()
     # target_compile_options(dol PRIVATE "-fvisibility=hidden")
     # target_link_options(dol PRIVATE "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/dol.map")
+    if (NOT APPLE)
+        # libdol is an ELF shared library with every symbol exported for the
+        # overlays. By default a call from one of its functions to another may
+        # be interposed at load time, so it goes through the PLT and cannot be
+        # inlined. Nothing interposes these symbols: let the compiler call them
+        # directly. Exports are unchanged. (Mach-O binds within the image
+        # already.)
+        target_compile_options(dol PRIVATE "-fno-semantic-interposition")
+    endif ()
+    # Link-time optimisation of the game library, opt-in. The decompiled code
+    # puns types freely and the build does not pass -fno-strict-aliasing, so
+    # inlining across files can expose behaviour -O2 alone never showed. Turn
+    # it on to measure, and keep it only with the netplay determinism tests
+    # passing against the other platforms.
+    option(PARTY_BOARD_LTO "Link-time optimisation of dol in non-Debug builds (Linux, macOS)" OFF)
+    if (PARTY_BOARD_LTO)
+        include(CheckIPOSupported)
+        check_ipo_supported(RESULT PARTY_BOARD_IPO_SUPPORTED OUTPUT PARTY_BOARD_IPO_ERROR LANGUAGES C CXX)
+        if (PARTY_BOARD_IPO_SUPPORTED)
+            set_property(TARGET dol PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+            set_property(TARGET dol PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE)
+            set_property(TARGET dol PROPERTY INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL TRUE)
+        else ()
+            message(WARNING "PARTY_BOARD_LTO requested but not supported: ${PARTY_BOARD_IPO_ERROR}")
+        endif ()
+    endif ()
 endif ()
 
 if(ANDROID)
@@ -410,7 +450,7 @@ foreach (dir ${REL_TARGETS})
                 target_compile_options(${dir} PRIVATE "/wd4068") # unknown pragma
                 # target_compile_options(${dir} PRIVATE "/Zi")
                 #                target_compile_options(${dir} PRIVATE "/Ob0")
-                target_compile_options(${dir} PRIVATE "/Od")
+                target_compile_options(${dir} PRIVATE ${PARTY_BOARD_MSVC_GAME_OPT})
                 if(NOT USE_ASAN AND RUNTIME_SANITIZE)
                     target_compile_options(${dir} PRIVATE "/GS")
                     target_compile_options(${dir} PRIVATE "/RTC1")  # incompatible with asan

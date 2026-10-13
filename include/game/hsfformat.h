@@ -524,4 +524,10 @@ typedef struct HsfData_s {
     s16 matrixNum;
 } HSFDATA;
 
+#ifdef TARGET_PC
+/* Every pass that rewrites a model's joints, morphs, clusters or vertices
+ * reports the HSFDATA it wrote (src/game/hsfman.c, animation cache). */
+void PartyBoard_AnimHsfWritten(HSFDATA *hsf);
+#endif
+
 #endif

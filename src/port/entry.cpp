@@ -21,6 +21,23 @@ extern "C" bool PartyBoard_OnlineCheckDisc(void);
 extern "C" bool PartyBoard_OnlineBarrierProbe(void);
 extern "C" bool PartyBoard_ModsRunSelfTest(void);
 
+#if defined(_WIN32)
+// partyboard.exe is a console program. In a console window Windows created for
+// it alone, a click in that window starts a QuickEdit selection, and while the
+// selection is up every write to stdout blocks: the game freezes on its next
+// OSReport until Enter is pressed. Turn QuickEdit off, but only in a console
+// this process owns; a console shared with cmd or PowerShell is left alone.
+static void DisableQuickEditInOwnConsole()
+{
+    DWORD processes[2];
+    if (GetConsoleProcessList(processes, 2) != 1) return;
+    HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode = 0;
+    if (input == INVALID_HANDLE_VALUE || input == nullptr || !GetConsoleMode(input, &mode)) return;
+    SetConsoleMode(input, (mode & ~static_cast<DWORD>(ENABLE_QUICK_EDIT_MODE)) | ENABLE_EXTENDED_FLAGS);
+}
+#endif
+
 int main(int argc, char *argv[])
 {
     // First statement in the process: a fault before this point would leave no
@@ -28,6 +45,9 @@ int main(int argc, char *argv[])
     // session directory and seat come from the launcher's environment; both are
     // refined below once the command line has been parsed.
     PartyBoard_CrashReportInit(nullptr, -1, nullptr);
+#if defined(_WIN32)
+    DisableQuickEditInOwnConsole();
+#endif
 
     if (argc == 2 && std::strcmp(argv[1], "--crash-report-self-test") == 0)
         return PartyBoard_CrashReportRunSelfTest() ? 0 : 1;

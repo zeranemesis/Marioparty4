@@ -22,6 +22,10 @@ env:
 
 jobs:
   build-gc:
+    # Decompilation progress for the upstream project. Its build image is private
+    # to mariopartyrd, so on any fork the job can only fail pulling it and turns
+    # the whole workflow red; it says nothing about the port itself.
+    if: github.repository_owner == 'mariopartyrd'
     container: ghcr.io/mariopartyrd/mp-gc-build:main
 
     runs-on: ubuntu-latest
