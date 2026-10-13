@@ -118,6 +118,8 @@ constexpr int kLastMinigameOverlay = 70;
 constexpr std::uint32_t kRuntimeHookGateFlag = 0x00040000u;
 constexpr std::uint32_t kRuntimeConfigMagicMask = 0xfff80000u;
 constexpr std::size_t kHistorySize = 256;
+// How long a stalled lockstep tick waits on the socket before giving up.
+constexpr int kLateInputWaitMs = 3;
 constexpr std::uint8_t kDefaultInputDelay = 3;
 constexpr std::uint8_t kMaximumInputDelay = 8;
 constexpr std::uint32_t kContextMismatchGraceFrames = 120;
@@ -1146,6 +1148,16 @@ bool sendInput(std::uint32_t frame, const PartyBoardRollbackInput &input, bool r
         PartyBoard_HookTickGateEnabled() != 0);
     outgoing.frandSeed = gRuntime.randomSynchronized ? gRuntime.sessionFrandSeed : 0;
     outgoing.rand8Seed = gRuntime.randomSynchronized ? gRuntime.sessionRand8Seed : 0;
+    // Repeat the previous inputs, so the next packet covers a lost one without
+    // waiting for a retransmit request. They stop at a context change.
+    for (std::uint32_t back = 1; !standalone && back <= kInputHistory && back <= frame; ++back) {
+        const InputSlot *previous = findInput(gRuntime.localHistory, frame - back);
+        if (!previous || previous->captureContext != outgoing.captureContext) break;
+        // The headless drop of frame 200 above must still need the repair path.
+        if (gRuntime.probeContext >= 0 && gRuntime.localPlayer == 0
+            && frame - back == 200 && gRuntime.frame <= 200) break;
+        outgoing.history[outgoing.historyCount++] = previous->input;
+    }
     if (!gRuntime.transport.hasPeer()) return true;
     bool sent = false;
     for (std::uint8_t seat = 0; seat < gRuntime.playerCount; ++seat) {
@@ -1520,6 +1532,40 @@ bool captureCommittedState()
     return checkStateFailure();
 }
 
+// A repeated input from a packet already accepted. Same checks as the input it
+// rode with, except that a frame already played is simply not needed. False
+// only when the session failed.
+bool acceptRepeatedInput(std::uint8_t player, std::uint32_t frame,
+    const PartyBoardRollbackInput &input, std::uint32_t captureContext)
+{
+    if (const auto *accepted = findInput(gRuntime.peerHistory[player], frame)) {
+        if (!rollback::inputsEqual(accepted->input, input)
+            || accepted->captureContext != captureContext) {
+            char reason[192];
+            std::snprintf(reason, sizeof(reason),
+                "PROTOCOL repeated input contradiction input_frame=%u player=%u context=%u/%u",
+                frame, player, accepted->captureContext, captureContext);
+            failSession(reason);
+            return false;
+        }
+        return true;
+    }
+    const bool retainedLateFrame = frame < gRuntime.frame
+        && gRuntime.rollbackSession
+        && frame >= gRuntime.rollbackBaseFrame
+        && gRuntime.frame - frame <= 6;
+    if (frame < gRuntime.frame && !retainedLateFrame) return true;
+    if (frame >= gRuntime.frame && frame - gRuntime.frame >= kHistorySize) return true;
+    InputSlot &slot = gRuntime.peerHistory[player][frame % kHistorySize];
+    slot.frame = frame;
+    slot.input = input;
+    slot.valid = true;
+    slot.captureContext = captureContext;
+    if (gRuntime.rollbackSession && frame >= gRuntime.rollbackBaseFrame)
+        gRuntime.rollbackSession->submitInput(player, frame - gRuntime.rollbackBaseFrame, input);
+    return true;
+}
+
 bool contextCatchupRequired(bool sawMatchingContext, bool sawDifferentContext)
 {
     return sawDifferentContext && !sawMatchingContext;
@@ -1663,6 +1709,10 @@ void receivePendingPackets()
         }
         ++gRuntime.receivedPackets;
         gRuntime.progress.observePeer(monotonicMs());
+        for (std::uint32_t back = 1; back <= packet.historyCount && back <= packet.frame; ++back) {
+            if (!acceptRepeatedInput(packet.player, packet.frame - back,
+                    packet.history[back - 1], packet.captureContext)) return;
+        }
     }
     gRuntime.peerInDifferentContext = contextCatchupRequired(
         sawMatchingContext, sawDifferentContext);
@@ -2645,9 +2695,22 @@ extern "C" bool PartyBoard_NetplayTick(void)
     // players this is the same test written once more; with four it is the whole
     // difference between lockstep and a game that runs ahead of a silent peer.
     std::array<const InputSlot *, partyboard::rollback::kMaxPlayers> peerSlot {};
-    const bool everyPeerReady = collectPeerInputs(runtime, runtime.frame, peerSlot);
+    bool everyPeerReady = collectPeerInputs(runtime, runtime.frame, peerSlot);
     const bool startupFrame = runtime.frame < runtime.inputDelay;
-    const bool frameReady = startupFrame || (localSlot != nullptr && everyPeerReady);
+    bool frameReady = startupFrame || (localSlot != nullptr && everyPeerReady);
+    if (!frameReady && localSlot != nullptr && runtime.transport.waitReadable(kLateInputWaitMs)) {
+        // The peer's input is often only a few milliseconds late. Waiting for
+        // it here keeps this tick instead of losing all of it.
+        receivePendingPackets();
+        if (!runtime.error.empty()) return false;
+        if (runtime.configMismatch) {
+            failSession("Incompatible netplay configuration or random seeds");
+            ++runtime.stalledTicks;
+            return false;
+        }
+        everyPeerReady = collectPeerInputs(runtime, runtime.frame, peerSlot);
+        frameReady = everyPeerReady;
+    }
     if (!frameReady) {
         // Once a packet is lost, retransmit the exact frame the peer is also
         // waiting for. The future-frame packet was already sent on capture.
@@ -3015,6 +3078,7 @@ extern "C" bool PartyBoard_NetplayRuntimeRunSelfTest(void)
     check("process-execution", HuPrcSnapshotExecutionSelfTest());
     check("rollback-scene", PartyBoard_RollbackSceneSelfTest());
     check("rollback-resources", PartyBoard_RollbackResourcesSelfTest());
+    check("rollback-high-water", PartyBoard_RollbackHighWaterSelfTest());
     check("rollback-checkpoint", PartyBoard_RollbackCheckpointSelfTest());
     check("wipe-safety", PartyBoard_RollbackWipeSafetySelfTest());
     check("render-safety", PartyBoard_RollbackRenderSafetySelfTest());

@@ -4,6 +4,7 @@
 #include "port/rollback.h"
 #include "port/netplay_state.hpp"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -13,8 +14,11 @@ namespace partyboard::netplay {
 // v6 separates input/RTX/state packets and carries versioned canonical state.
 // v7 appends one hash per gameplay subsystem, so the first divergent frame also
 // names the subsystem without an extra round trip.
-constexpr std::uint16_t kProtocolVersion = 7;
-constexpr std::size_t kNetplayPacketSize = 152;
+// v8 repeats the sender's previous inputs in every input packet, so one lost
+// packet is covered by the next one instead of a retransmit round trip.
+constexpr std::uint16_t kProtocolVersion = 8;
+constexpr std::size_t kNetplayPacketSize = 212;
+constexpr std::size_t kInputHistory = 7;
 // Four, because the game seats four and rollback.hpp already sizes every input
 // array to kMaxPlayers. A static_assert in the implementation keeps the two
 // numbers married; this one exists so the header does not have to drag the
@@ -35,6 +39,9 @@ struct InputPacket {
     StateDigest state {};
     std::uint32_t hashAckNext = 0; // Exclusive count of equal canonical states.
     std::uint32_t captureContext = 0;
+    // Inputs for frame-1 .. frame-historyCount, from the same capture context.
+    std::uint8_t historyCount = 0;
+    std::array<PartyBoardRollbackInput, kInputHistory> history {};
 };
 
 class UdpTransport {
@@ -69,6 +76,8 @@ public:
     bool sendInput(const InputPacket &packet);
     bool sendInputTo(std::uint8_t player, const InputPacket &packet);
     bool receiveInput(InputPacket &packet);
+    // Waits up to the given time for a packet to arrive; true if one is ready.
+    bool waitReadable(int milliseconds);
     void close();
 
     std::uint16_t localPort() const;
