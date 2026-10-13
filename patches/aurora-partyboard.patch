@@ -223,18 +223,32 @@ index 2d7f795..145a9cf 100644
  }
  
 diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
-index 04a4310..80f7b3a 100644
+index 04a4310..64fc931 100644
 --- a/lib/gfx/pipeline_cache.cpp
 +++ b/lib/gfx/pipeline_cache.cpp
-@@ -16,6 +16,7 @@
+@@ -16,7 +16,9 @@
  #include <filesystem>
  #include <limits>
  #include <mutex>
 +#include <chrono>
  #include <thread>
++#include <vector>
  
  #include <SDL3/SDL_iostream.h>
-@@ -326,6 +327,7 @@ struct AtomicStatRef {
+ #include <absl/container/flat_hash_map.h>
+@@ -65,7 +67,10 @@ constexpr size_t BuildPipelinesPerFrame = 5;
+ #else
+ constexpr size_t BuildPipelinesPerFrame = 1;
+ #endif
+-static std::thread g_pipelineThread;
++// Several compilation threads: CreateShaderModule and CreateRenderPipeline do
++// not take Dawn's device lock, and error scopes are per thread, so each worker
++// builds its own pipelines in parallel.
++static std::vector<std::thread> g_pipelineThreads;
+ static std::atomic_bool g_pipelineThreadEnd = false;
+ static std::condition_variable g_pipelineCv;
+ static absl::flat_hash_map<PipelineRef, CachedPipeline> g_pipelines;
+@@ -326,6 +331,7 @@ struct AtomicStatRef {
      __atomic_store_n(&ref, val, __ATOMIC_RELAXED);
      return val;
    }
@@ -242,7 +256,36 @@ index 04a4310..80f7b3a 100644
  };
  static AtomicStatRef queuedPipelines{g_stats.queuedPipelines};
  static AtomicStatRef createdPipelines{g_stats.createdPipelines};
-@@ -1050,6 +1052,70 @@ void initialize_pipeline_cache() {
+@@ -884,6 +890,11 @@ static void pipeline_worker() {
+       if (g_pipelineThreadEnd) {
+         break;
+       }
++      if (g_priorityPipelines.empty() && g_backgroundPipelines.empty()) {
++        // Another worker took what this one saw left; wait again.
++        hasMore = false;
++        continue;
++      }
+       auto& source = !g_priorityPipelines.empty() ? g_priorityPipelines : g_backgroundPipelines;
+       pending = std::move(source.front());
+       source.pop_front();
+@@ -1037,7 +1048,15 @@ void initialize_pipeline_cache() {
+     g_hasPipelineThread = false;
+   } else {
+     g_hasPipelineThread = true;
+-    g_pipelineThread = std::thread(pipeline_worker);
++    const unsigned cores = (std::max)(1u, std::thread::hardware_concurrency());
++#ifdef __ANDROID__
++    const unsigned workers = std::clamp(cores / 4, 1u, 2u);
++#else
++    const unsigned workers = std::clamp(cores / 2, 1u, 4u);
++#endif
++    for (unsigned i = 0; i < workers; ++i) {
++      g_pipelineThreads.emplace_back(pipeline_worker);
++    }
+   }
+ 
+   const size_t loadedCount = load_pipeline_cache();
+@@ -1050,11 +1069,78 @@ void initialize_pipeline_cache() {
    }
  }
  
@@ -313,6 +356,15 @@ index 04a4310..80f7b3a 100644
  void shutdown_pipeline_cache() {
    if (g_hasPipelineThread) {
      g_pipelineThreadEnd = true;
+     g_pipelineCv.notify_all();
+-    g_pipelineThread.join();
++    for (auto& thread : g_pipelineThreads) {
++      thread.join();
++    }
++    g_pipelineThreads.clear();
+   }
+   g_hasPipelineThread = false;
+ 
 diff --git a/lib/gfx/pipeline_cache.hpp b/lib/gfx/pipeline_cache.hpp
 index 2e87f4c..e2a6bed 100644
 --- a/lib/gfx/pipeline_cache.hpp
