@@ -34,6 +34,9 @@ void *HuMemHeapInit(void *ptr, size_t size) { abort(); return NULL; }
 void *HuMemMemoryAlloc(void *heap, size_t size, uintptr_t retaddr) { abort(); return NULL; }
 void HuMemMemoryFree(void *ptr, uintptr_t retaddr) { abort(); }
 size_t HuMemMemoryAllocSizeGet(size_t size) { abort(); return 0; }
+/* objdll.c drops the draw hooks' cached textures when an overlay ends
+ * (hsfdraw.c); there is no renderer here and nothing was cached. */
+void Hu3DHookTexCacheClear(void) { }
 static unsigned checks;
 #define CHECK(x) do { ++checks; if (!(x)) { printf("FAIL line %d: %s\n", __LINE__, #x); return 1; } } while (0)
 typedef struct RegionAudit { size_t count, bytes; void *first; } RegionAudit;
