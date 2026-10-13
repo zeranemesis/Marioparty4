@@ -17,7 +17,7 @@ namespace partyboard::netplay {
 // exported; structures contribute named fields, never their object layout.
 // Fills `out` in place. Reusing a retained state keeps its vector capacity, so
 // a tick does not allocate and free two 4096-entry buffers just to hash.
-inline void captureCanonicalInto(const StateDigest &stamp, CanonicalState &out) {
+inline void captureCanonicalInto(CanonicalState &out, const StateDigest &stamp) {
     out.reset();
     out.names.reserve(4096);
     out.values.reserve(4096);
@@ -179,7 +179,7 @@ inline void captureCanonicalInto(const StateDigest &stamp, CanonicalState &out) 
 
 inline CanonicalState captureCanonical(const StateDigest &stamp) {
     CanonicalState out;
-    captureCanonicalInto(stamp, out);
+    captureCanonicalInto(out, stamp);
     return out;
 }
 } // namespace partyboard::netplay

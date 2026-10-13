@@ -1494,7 +1494,7 @@ bool captureCommittedState()
         frand_state_get(), static_cast<std::uint32_t>(rand8_state_get()), GlobalCounter};
     auto &state = gRuntime.detailHistory[frame % kDetailHistorySize];
     gRuntime.detailFrames[frame % kDetailHistorySize] = kNoHashFrame; // Slot is being refilled.
-    captureCanonicalInto(stamp, state);
+    captureCanonicalInto(state, stamp);
     stamp.hash = state.hash;
     stamp.parts = state.parts;
     gRuntime.detailFrames[frame % kDetailHistorySize] = frame;

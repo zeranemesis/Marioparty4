@@ -16,7 +16,7 @@ static bool runCanonicalStateSelfTest()
         // A reused state must hash exactly like a fresh one.
         const auto fresh = captureCanonical(stamp);
         auto reused = captureCanonical(StateDigest {7, 1, 2, 3, 4});
-        captureCanonicalInto(stamp, reused);
+        captureCanonicalInto(reused, stamp);
         if (reused.hash != fresh.hash || reused.parts != fresh.parts
             || reused.size() != fresh.size() || reused.runs.size() != fresh.runs.size()) {
             std::printf("[NET TEST] canonical reuse differs from fresh capture\n");
