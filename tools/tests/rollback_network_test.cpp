@@ -128,6 +128,9 @@ static void callbackFailures()
             };
             Session engine({ 1, 12, sizeof(state) }, callbacks);
             if (replay) {
+                // Two frames, so the replay still captures one snapshot: the
+                // restored frame's own slot is reused, not saved again.
+                CHECK(engine.advance());
                 CHECK(engine.advance());
                 PartyBoardRollbackInput corrected {};
                 corrected.buttons = 7;
@@ -138,14 +141,14 @@ static void callbackFailures()
             CHECK(engine.healthy() == (fault == None));
             CHECK(!PartyBoard_RollbackIsResimulating());
             if (fault == None) {
-                CHECK(state == (replay ? 8u : 1u));
+                CHECK(state == (replay ? 16u : 1u));
             } else {
                 const auto stoppedCalls = calls;
                 CHECK(!engine.advance());
                 CHECK(!engine.reconcile());
                 CHECK(!engine.submitInput(0, 0, {}));
                 CHECK(calls == stoppedCalls);
-                CHECK(engine.currentFrame() == (replay ? 1u : 0u));
+                CHECK(engine.currentFrame() == (replay ? 2u : 0u));
                 // Recovery requires an explicit game-state reset, not a retry.
                 state = 0;
                 armed = false;
