@@ -344,6 +344,8 @@ public class PartyBoardActivity extends SDLActivity {
         }
         exportOnlineEnvironment(getIntent());
         exportCubeShelfEnvironment(getIntent());
+        // Mods CubeShelf installed: copied here if they changed, then listed for the game (CubeShelfMods).
+        CubeShelfMods.apply(this, getIntent());
         super.onCreate(savedInstanceState);
         // Meta Quest: the game shows on a virtual screen in the headset instead
         // of this window, and the Touch controllers are its gamepad.
