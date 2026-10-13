@@ -1,6 +1,7 @@
 package com.mariopartyrd.partyboard;
 
 import android.app.ActionBar;
+import android.app.PendingIntent;
 import android.content.ClipData;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
@@ -119,6 +120,96 @@ public class PartyBoardActivity extends SDLActivity {
             }
         } catch (ErrnoException e) {
             Log.w(TAG, "Unable to pass the online session to the game", e);
+        }
+    }
+
+    // ---- CubeShelf for Android: RetroAchievements session in, reports out --------------------
+    // CubeShelf opens the game with its RetroAchievements session and a reply address (a
+    // PendingIntent only this app holds). The session goes where the PC's launcher puts it, the
+    // CUBESHELF_RA_* variables (src/port/retroachievements.cpp: used for the run, never saved).
+    // The game writes its reports to CUBESHELF_INGAME_DIR as on the PC (src/port/ui/cubeshelf.cpp),
+    // here a folder of this app's own; leaving the game sends them back, since CubeShelf cannot
+    // read this app's files (CubeShelf.Android/PhoneAchievements.cs).
+    static final String EXTRA_RA_USER = "cubeshelf_ra_user";
+    static final String EXTRA_RA_TOKEN = "cubeshelf_ra_token";
+    static final String EXTRA_REPLY = "cubeshelf_reply";
+    private static final int MAX_REPORT_BYTES = 128 * 1024;
+    private PendingIntent cubeShelfReply;
+
+    // The same rule as the native side (retroachievements.cpp, plain()).
+    private static boolean plain(String value, int max) {
+        if (value == null || value.isEmpty() || value.length() > max) return false;
+        for (int i = 0; i < value.length(); ++i) {
+            char c = value.charAt(i);
+            if (!(Character.isLetterOrDigit(c) && c < 128) && c != '_' && c != '.' && c != '-') return false;
+        }
+        return true;
+    }
+
+    private File cubeShelfDirectory() {
+        return new File(getFilesDir(), "cubeshelf-ingame");
+    }
+
+    @SuppressWarnings("deprecation")
+    private void exportCubeShelfEnvironment(Intent intent) {
+        cubeShelfReply = null;
+        String user = null;
+        String token = null;
+        if (intent != null) {
+            user = intent.getStringExtra(EXTRA_RA_USER);
+            token = intent.getStringExtra(EXTRA_RA_TOKEN);
+            cubeShelfReply = Build.VERSION.SDK_INT >= 33
+                    ? intent.getParcelableExtra(EXTRA_REPLY, PendingIntent.class)
+                    : intent.getParcelableExtra(EXTRA_REPLY);
+        }
+        try {
+            if (plain(user, 63) && plain(token, 127)) {
+                Os.setenv("CUBESHELF_RA_USER", user, true);
+                Os.setenv("CUBESHELF_RA_TOKEN", token, true);
+            } else {
+                Os.unsetenv("CUBESHELF_RA_USER");
+                Os.unsetenv("CUBESHELF_RA_TOKEN");
+            }
+            File directory = cubeShelfDirectory();
+            if (cubeShelfReply != null && (directory.isDirectory() || directory.mkdirs())) {
+                Os.setenv("CUBESHELF_INGAME_DIR", directory.getAbsolutePath(), true);
+            } else {
+                Os.unsetenv("CUBESHELF_INGAME_DIR");
+            }
+        } catch (ErrnoException e) {
+            Log.w(TAG, "Unable to pass the CubeShelf session to the game", e);
+        }
+    }
+
+    private static String readReport(File file) {
+        if (!file.isFile() || file.length() == 0 || file.length() > MAX_REPORT_BYTES) return null;
+        try {
+            return new String(java.nio.file.Files.readAllBytes(file.toPath()), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (java.io.IOException e) {
+            return null;
+        }
+    }
+
+    // Leaving the game: what it reported goes back to CubeShelf. The session report is taken (the
+    // PC's launcher deletes it as it reads it too); the progress stays, the latest one is resent.
+    private void replyToCubeShelf() {
+        if (cubeShelfReply == null) return;
+        File directory = cubeShelfDirectory();
+        String summary = readReport(new File(directory, "achievements.json"));
+        File sessionFile = new File(directory, "ra-session.json");
+        String session = readReport(sessionFile);
+        if (summary == null && session == null) return;
+        Intent reply = new Intent();
+        if (summary != null) reply.putExtra("achievements", summary);
+        if (session != null) reply.putExtra("session", session);
+        try {
+            cubeShelfReply.send(this, 0, reply);
+            if (session != null && !sessionFile.delete()) {
+                Log.w(TAG, "Could not remove the session report");
+            }
+        } catch (PendingIntent.CanceledException e) {
+            // CubeShelf was uninstalled or its address withdrawn: nobody to tell any more.
+            cubeShelfReply = null;
         }
     }
 
@@ -252,6 +343,7 @@ public class PartyBoardActivity extends SDLActivity {
             Log.i(TAG, "Put " + applied + " save file(s) from CubeShelf in place");
         }
         exportOnlineEnvironment(getIntent());
+        exportCubeShelfEnvironment(getIntent());
         super.onCreate(savedInstanceState);
         // Meta Quest: the game shows on a virtual screen in the headset instead
         // of this window, and the Touch controllers are its gamepad.
@@ -349,6 +441,12 @@ public class PartyBoardActivity extends SDLActivity {
     protected void onResume() {
         super.onResume();
         hideSystemBars();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        replyToCubeShelf();
     }
 
     @Override
