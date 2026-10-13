@@ -105,7 +105,7 @@ struct Builder {
 // arenas) are stored whole, as before.
 size_t heapLiveBytes(const HeapRegion &heap) {
     const size_t high = HuMemHighWaterGet(heap.address);
-    return high ? std::min(high, heap.bytes) : heap.bytes;
+    return high ? (std::min)(high, heap.bytes) : heap.bytes;
 }
 // Heap regions are added first by Builder::build, so region i < heapCount is
 // heap i. Calls visit(address, payloadOffset, liveBytes) for every region.
