@@ -86,7 +86,7 @@ final class CubeShelfMods {
         try {
             sync(context, root(context), new JSONArray(intent.getStringExtra(EXTRA_MODS)), Uri.parse(intent.getStringExtra(EXTRA_MODS_URI)), progress);
             return true;
-        } catch (JSONException | SecurityException | IOException | RuntimeException e) {
+        } catch (JSONException | IOException | RuntimeException e) {
             // What was there stays: better the last mods than a half-copied set.
             Log.w(TAG, "Mods from CubeShelf not applied", e);
             return false;
