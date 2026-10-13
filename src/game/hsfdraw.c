@@ -3619,3 +3619,154 @@ void Hu3DModelObjDraw(HU3DMODELID modelId, char *objName, Mtx mtx)
     drawObj.scale.x = drawObj.scale.y = drawObj.scale.z = 1.0f;
     ObjDraw(&drawObj);
 }
+
+#ifdef TARGET_PC
+#include <xxhash.h>
+
+/* Texture objects for minigame draw hooks that bind an HSF bitmap by hand
+ * (SKY DIVE's stage, m440). The console code builds a GXTexObj on the stack
+ * every frame; on PC a fresh object is a fresh texture id, so the renderer
+ * decoded and uploaded the same pixels again each frame and freed them right
+ * after. Here the object is kept while everything it was built from still
+ * matches, including a hash of the pixels and palette, so a bitmap rewritten
+ * in place or a new model at a reused address is rebuilt exactly as before.
+ * Rendering only: nothing here reaches game state or the netplay hash. */
+typedef struct {
+    const void *owner;
+    const HSFBITMAP *bitmap;
+    const void *data;
+    const void *palData;
+    XXH64_hash_t hash;
+    u32 lastUse;
+    s16 sizeX;
+    s16 sizeY;
+    s16 palSize;
+    u8 dataFmt;
+    u8 pixSize;
+    u8 wrapS;
+    u8 wrapT;
+    u8 slot;
+    u8 used;
+    u8 hasTlut;
+    GXTexObj tex;
+    GXTlutObj tlut;
+} HOOKTEXENTRY;
+
+#define HOOK_TEX_MAX 64
+static HOOKTEXENTRY HookTexCache[HOOK_TEX_MAX];
+static u32 HookTexClock;
+
+static void HookTexRelease(HOOKTEXENTRY *entry)
+{
+    if (!entry->used) {
+        return;
+    }
+    GXDestroyTexObj(&entry->tex);
+    if (entry->hasTlut) {
+        GXDestroyTlutObj(&entry->tlut);
+    }
+    memset(entry, 0, sizeof(*entry));
+}
+
+void Hu3DHookTexCacheClear(void)
+{
+    s32 i;
+    for (i = 0; i < HOOK_TEX_MAX; i++) {
+        HookTexRelease(&HookTexCache[i]);
+    }
+}
+
+static XXH64_hash_t HookTexHash(const HSFBITMAP *bmp, GXTexFmt fmt, BOOL hasTlut)
+{
+    XXH64_hash_t hash = XXH3_64bits(bmp->data, GXGetTexBufferSize(bmp->sizeX, bmp->sizeY, fmt, GX_FALSE, 0));
+    if (hasTlut && bmp->palData && bmp->palSize > 0) {
+        hash = XXH3_64bits_withSeed(bmp->palData, (size_t)bmp->palSize * sizeof(u16), hash);
+    }
+    return hash;
+}
+
+BOOL Hu3DHookTexLoad(const void *owner, const HSFBITMAP *bmp, GXTexWrapMode wrapS, GXTexWrapMode wrapT, GXTexFilter filter,
+    u32 slot)
+{
+    GXTexFmt fmt;
+    GXTlutFmt tlutFmt = GX_TL_RGB565;
+    BOOL hasTlut = FALSE;
+    XXH64_hash_t hash;
+    HOOKTEXENTRY *entry = NULL;
+    HOOKTEXENTRY *victim = &HookTexCache[0];
+    s32 i;
+
+    if (bmp == NULL || bmp->data == NULL || slot >= GX_MAX_TEXMAP) {
+        return FALSE;
+    }
+    switch (bmp->dataFmt) {
+        case 6: fmt = GX_TF_RGBA8; break;
+        case 4: fmt = GX_TF_RGB565; break;
+        case 5: fmt = GX_TF_RGB5A3; break;
+        case 9:
+        case 10:
+            fmt = (GXTexFmt)(bmp->pixSize < 8 ? GX_TF_C4 : GX_TF_C8);
+            tlutFmt = bmp->dataFmt == 9 ? GX_TL_RGB565 : GX_TL_RGB5A3;
+            hasTlut = TRUE;
+            break;
+        default:
+            return FALSE; /* Callers keep their own handling of anything else. */
+    }
+    hash = HookTexHash(bmp, fmt, hasTlut);
+    for (i = 0; i < HOOK_TEX_MAX; i++) {
+        HOOKTEXENTRY *candidate = &HookTexCache[i];
+        if (candidate->used && candidate->owner == owner && candidate->slot == slot) {
+            entry = candidate;
+            break;
+        }
+        if (!victim->used) {
+            continue;
+        }
+        if (!candidate->used || candidate->lastUse < victim->lastUse) {
+            victim = candidate;
+        }
+    }
+    if (entry != NULL
+        && (entry->bitmap != bmp || entry->data != bmp->data || entry->palData != bmp->palData || entry->hash != hash
+            || entry->sizeX != bmp->sizeX || entry->sizeY != bmp->sizeY || entry->palSize != bmp->palSize
+            || entry->dataFmt != bmp->dataFmt || entry->pixSize != bmp->pixSize || entry->wrapS != wrapS
+            || entry->wrapT != wrapT)) {
+        HookTexRelease(entry);
+    }
+    else if (entry == NULL) {
+        entry = victim;
+        HookTexRelease(entry);
+    }
+    if (!entry->used) {
+        entry->owner = owner;
+        entry->bitmap = bmp;
+        entry->data = bmp->data;
+        entry->palData = bmp->palData;
+        entry->hash = hash;
+        entry->sizeX = bmp->sizeX;
+        entry->sizeY = bmp->sizeY;
+        entry->palSize = bmp->palSize;
+        entry->dataFmt = bmp->dataFmt;
+        entry->pixSize = bmp->pixSize;
+        entry->wrapS = wrapS;
+        entry->wrapT = wrapT;
+        entry->slot = slot;
+        entry->hasTlut = hasTlut;
+        entry->used = TRUE;
+        if (hasTlut) {
+            GXInitTlutObj(&entry->tlut, bmp->palData, tlutFmt, bmp->palSize);
+            GXInitTexObjCI(&entry->tex, bmp->data, bmp->sizeX, bmp->sizeY, (GXCITexFmt)fmt, wrapS, wrapT, GX_FALSE, slot);
+        }
+        else {
+            GXInitTexObj(&entry->tex, bmp->data, bmp->sizeX, bmp->sizeY, fmt, wrapS, wrapT, GX_FALSE);
+        }
+    }
+    entry->lastUse = ++HookTexClock;
+    if (hasTlut) {
+        GXLoadTlut(&entry->tlut, slot);
+    }
+    GXInitTexObjLOD(&entry->tex, filter, filter, 0, 0, 0, GX_FALSE, GX_FALSE, GX_ANISO_1);
+    GXLoadTexObj(&entry->tex, (GXTexMapID)slot);
+    return TRUE;
+}
+#endif

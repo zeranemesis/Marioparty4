@@ -1082,6 +1082,11 @@ void fn_1_10830(HU3DMODEL *arg0, HSFBITMAP *arg1, HSFATTRIBUTE *arg2, s16 arg3)
     temp_r28 = arg1->sizeY;
     temp_r27 = (arg2->wrapS == 1) ? 1 : 0;
     temp_r26 = (arg2->wrapT == 1) ? 1 : 0;
+#ifdef TARGET_PC
+    if (Hu3DHookTexLoad(arg2, arg1, temp_r27, temp_r26, (arg0->attr & 0x40) ? GX_NEAR : GX_LINEAR, arg3)) {
+        return;
+    }
+#endif
     switch (arg1->dataFmt) {
         case 6:
             GXInitTexObj(&sp1C, arg1->data, temp_r29, temp_r28, GX_TF_RGBA8, temp_r27, temp_r26, GX_FALSE);

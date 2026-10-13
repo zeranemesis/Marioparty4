@@ -1811,6 +1811,11 @@ void fn_1_7D60(HSFBITMAP *arg0, HSFATTRIBUTE *arg1, s16 arg2)
     temp_r28 = arg0->sizeY;
     var_r27 = (arg1->wrapS == 1) ? GX_REPEAT : GX_CLAMP;
     var_r26 = (arg1->wrapT == 1) ? GX_REPEAT : GX_CLAMP;
+#ifdef TARGET_PC
+    if (Hu3DHookTexLoad(arg1, arg0, var_r27, var_r26, GX_LINEAR, arg2)) {
+        return;
+    }
+#endif
     switch (arg0->dataFmt) {
         case 6:
             GXInitTexObj(&sp1C, arg0->data, temp_r29, temp_r28, GX_TF_RGBA8, var_r27, var_r26, GX_FALSE);
