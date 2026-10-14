@@ -1353,7 +1353,12 @@ extern "C" BOOL PartyBoard_StereoBackdrop(float x, float y, float z, float radiu
     if (sActive && sCameraViewSet && sOpenSkyRadius > 0.0f) {
         // Around the game camera (its view space's origin), whatever the head does.
         const float core = kOpenSkyCore * radius;
-        const bool sky = std::isfinite(radius) && radius >= sOpenSkyRadius && x * x + y * y + z * z < core * core;
+        // Mario Speedwagons' long track pieces hold the camera too as it runs
+        // along them: only far larger objects are its sky (its track went
+        // mid-race at 25 times the camera's distance; its sky is some 90
+        // times, 2026-10-14). Other skies measured down to 47 times.
+        const float skyRadius = sScene == DLL_m443Dll ? sOpenSkyRadius * (60.0f / kOpenSkyPerDistance) : sOpenSkyRadius;
+        const bool sky = std::isfinite(radius) && radius >= skyRadius && x * x + y * y + z * z < core * core;
 #if defined(__ANDROID__)
         static int loggedScene = -1;
         if (sky && loggedScene != static_cast<int>(sScene)) {

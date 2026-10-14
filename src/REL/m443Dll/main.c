@@ -689,6 +689,18 @@ void fn_1_2F54(M443DllUnkStruct *arg0)
             else {
                 espDispOn(arg0->unk_1C[var_r30]);
                 espPosSet(arg0->unk_1C[var_r30], 0.9f * (arg0->unk_08 + lbl_1_data_188[var_r30].x), arg0->unk_0C + lbl_1_data_188[var_r30].y);
+#ifdef TARGET_PC
+                {
+                    // Meta Quest: the race time, centered atop the TV, goes
+                    // atop the local player's part of the split screen (the
+                    // only part the headset shows).
+                    float cropX, cropY, cropW, cropH;
+                    if (PartyBoard_StereoHudCropRect(&cropX, &cropY, &cropW, &cropH)) {
+                        espPosSet(arg0->unk_1C[var_r30], 0.9f * (cropX + 0.5f * cropW + lbl_1_data_188[var_r30].x),
+                            cropY + 36.0f + lbl_1_data_188[var_r30].y);
+                    }
+                }
+#endif
             }
         }
     }
