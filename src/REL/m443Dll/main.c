@@ -346,16 +346,6 @@ void fn_1_1294(omObjData *object)
             lbl_1_bss_64 = MGSeqCreate(1, var_r31->unk_1C, -1, -1);
         }
         MGSeqParamSet(lbl_1_bss_64, 1, var_r31->unk_1C);
-#ifdef TARGET_PC
-        {
-            // Meta Quest: the headset shows only the local player's part of
-            // the split screen; the timer, centered on the TV, goes atop it.
-            float cropX, cropY, cropW, cropH;
-            if (PartyBoard_StereoHudCropRect(&cropX, &cropY, &cropW, &cropH)) {
-                MGSeqPosSet(lbl_1_bss_64, cropX + 0.5f * cropW + 4.0f, cropY + 48.0f);
-            }
-        }
-#endif
     }
     for (var_r30 = 0; var_r30 < 4; var_r30++) {
         if (var_r31->unk_44[var_r30] >= 40000.0f) {

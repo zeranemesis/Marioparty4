@@ -128,6 +128,27 @@ void MGSeqInit(void)
     seqLanguage = GWLanguageGet();
 }
 
+#ifdef TARGET_PC
+BOOL MGSeqSprGrpOwned(s16 group)
+{
+    s32 i, j;
+    if (group < 0) {
+        return FALSE;
+    }
+    for (i = 0; i < 8; i++) {
+        if (seqWorkData[i].stat == 0) {
+            continue;
+        }
+        for (j = 0; j < 16; j++) {
+            if (seqWorkData[i].spr_grp[j] == group) {
+                return TRUE;
+            }
+        }
+    }
+    return FALSE;
+}
+#endif
+
 void MGSeqMain(void)
 {
     SeqInfo *info;

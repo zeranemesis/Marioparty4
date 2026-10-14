@@ -84,6 +84,10 @@ void MGSeqParamSet(s16 id, s16 param1, s16 param2);
 void MGSeqSprKill(SeqWork *work);
 void MGSeqKill(s16 id);
 void MGSeqKillAll(void);
+#ifdef TARGET_PC
+// Whether a running sequence (timer, start, finish, winner...) draws with this sprite group.
+BOOL MGSeqSprGrpOwned(s16 group);
+#endif
 s32 MGSeqDoneCheck(void);
 void MGSeqStub(void);
 void MGSeqPauseInit(void);

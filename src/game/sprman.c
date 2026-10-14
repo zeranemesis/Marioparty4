@@ -12,6 +12,8 @@
 #ifdef TARGET_PC
 #include "port/byteswap.h"
 #include "port/frame_interpolation.h"
+#include "port/quest_stereo.h"
+#include "game/minigame_seq.h"
 #include <string.h>
 #endif
 
@@ -124,6 +126,25 @@ void HuSprBegin(void)
             MTXScale(temp, renderGroup.scale.x, renderGroup.scale.y, 1.0f);
             MTXConcat(HuSprRenderMtx[i], temp, HuSprRenderMtx[i]);
             mtxTransCat(HuSprRenderMtx[i], renderGroup.pos.x, renderGroup.pos.y, 0);
+            {
+                // Meta Quest: a split screen's headset shows only the local
+                // player's part of the interface; the minigame's sequences
+                // (timer, start, finish), laid out for the whole TV, are
+                // fitted into that part, smaller, instead of cut by it.
+                float cropX, cropY, cropW, cropH;
+                if (MGSeqSprGrpOwned(i) && PartyBoard_StereoHudCropRect(&cropX, &cropY, &cropW, &cropH)) {
+                    const float toSprite = HU_DISP_WIDTHF / 640.0f; // the sprites' 576 span the TV's 640
+                    float k = cropW / 640.0f;
+                    Mtx fit;
+                    if (cropH / 480.0f < k) {
+                        k = cropH / 480.0f;
+                    }
+                    MTXScale(fit, k, k, 1.0f);
+                    mtxTransCat(fit, toSprite * cropX + 0.5f * (toSprite * cropW - HU_DISP_WIDTHF * k),
+                        cropY + 0.5f * (cropH - HU_DISP_HEIGHTF * k), 0.0f);
+                    MTXConcat(fit, HuSprRenderMtx[i], HuSprRenderMtx[i]);
+                }
+            }
 #endif
             for(j=0; j<group->capacity; j++) {
                 if(group->members[j] != -1) {
