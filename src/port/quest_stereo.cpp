@@ -732,7 +732,15 @@ static void flat_frame_scale(bool hidden)
     const float player = PartyBoard_NetplayEnabled()
         ? 1.0f
         : static_cast<float>(partyboard::getSettings().game.internalResolutionScale.getValue());
+    // In the headset the same scale hidden or shown: switching it at each
+    // minigame's start and end reallocated the game's frame and its copies,
+    // a flicker as GOOOOOOOAL!! came up (2026-10-14).
+    (void)hidden;
+#if defined(__ANDROID__)
+    const float wanted = hiddenScale > 0.0f && !PartyBoard_NetplayEnabled() ? hiddenScale : player;
+#else
     const float wanted = hidden && hiddenScale > 0.0f ? hiddenScale : player;
+#endif
     if (wanted == applied) return;
     applied = wanted;
     VISetFrameBufferScale(wanted);
@@ -1406,8 +1414,10 @@ extern "C" BOOL PartyBoard_StereoBackdrop(float x, float y, float z, float radiu
         // Three Throw too: through its baskets' nets the room showed where its
         // stands had been left out, as holes in the baskets (2026-10-10).
         // Mario Speedwagons too: half its track's scenery went (2026-10-14).
+        // GOOOOOOOAL!! too: its stadium went, a black void behind the pitch
+        // (2026-10-14).
         const bool course = sScene == DLL_m401Dll || sScene == DLL_m406Dll || sScene == DLL_m408Dll
-            || sScene == DLL_m410Dll || sScene == DLL_m443Dll;
+            || sScene == DLL_m410Dll || sScene == DLL_m423Dll || sScene == DLL_m443Dll;
         static float factor = 3.0f;
         static OMOVL factorScene = DLL_NONE;
 #if defined(__ANDROID__)
