@@ -47,6 +47,25 @@ static class Tests {
     static int checks;
     static void Check(bool value,string name) {checks++;if(!value) throw new Exception(name);}
     static void Reject(Action action,string name) {bool rejected=false;try{action();}catch{rejected=true;}Check(rejected,name);}
+    // A European disc's text depends on the language it is loaded in; the host's
+    // travels in its profile so every seat can load it.
+    static void GameLanguages() {
+        var disc=Wire.Hash(new byte[]{1,2,3});
+        var english=new PlayerInfo("Camille",disc,3);
+        var german=new PlayerInfo("Camille",disc,3,null,1);
+        Check(PlayerInfo.Decode(german.Encode()).Language==1,"the host's language survives the wire");
+        Check(PlayerInfo.Decode(english.Encode()).Language==GameLanguage.English,"no language byte means English");
+        Check(german.Encode().Length==english.Encode().Length+1,"English adds nothing, so a USA disc sends what 0.19.0 sent");
+        var unknown=new System.Collections.Generic.List<byte>(english.Encode()){5}.ToArray();
+        Reject(()=>PlayerInfo.Decode(unknown),"a language past Italian is refused");
+        var zero=new System.Collections.Generic.List<byte>(english.Encode()){0}.ToArray();
+        Reject(()=>PlayerInfo.Decode(zero),"English is never written explicitly");
+        Reject(()=>new PlayerInfo("Camille",disc,3,null,5),"a profile cannot carry an unknown language");
+        Check(GameLanguage.FromArguments(new[]{"--game-language","it"})==4,"the game's language comes from its argument");
+        Check(GameLanguage.FromArguments(new[]{"--game-language","nl"})==GameLanguage.English,"an unknown code falls back to English");
+        Check(GameLanguage.FromArguments(new string[0])==GameLanguage.English,"opened by hand means English");
+        Check(GameLanguage.Code(2)=="fr" && GameLanguage.Code(3)=="es","codes match the game's --lang");
+    }
     static void Codecs() {
         var invite=new Invitation{Address=IPAddress.Parse("8.8.8.8"),Port=32000,Expires=DateTime.UtcNow.AddMinutes(30),Fingerprint=Wire.Random(16),Token=Wire.Random(16),Build=Wire.Random(32)};
         Check(invite.Encode().Length==72,"compact invitation length");var decoded=Invitation.Decode(invite.Encode());Check(decoded.Port==32000 && Wire.Equal(invite.Token,decoded.Token) && Wire.Equal(invite.Fingerprint,decoded.Fingerprint),"invitation round trip");
@@ -948,6 +967,6 @@ static class Tests {
         Check(pairing.Add(remi,0,"remi-0")==null && pairing.Add(remi,1,"remi-1")!=null,"a third guest pairs exactly like the first two");
         Reject(()=>pairing.Add(Wire.Random(16),2,"x"),"a channel index outside 0/1 is refused");
     }
-    public static int Run() {try{StartupOptions();Reports();Codecs();Leases();LobbyRules();Discs();CancelLoading();MeshWiringTest();MeshRouting();ControlOnlyLink();ChannelPairingTest();Tls(0,true,true);for(int mode=0;mode<4;mode++)Tls(mode,mode==0);Console.WriteLine("PASS: "+checks+" checks; host-only lobby start, full disk hash and locks, UDP ping, native loading barrier/cancel, TLS loss before/after commit, authenticated UDP for 4800 native ticks and a real three-peer UDP mesh. No real router/firewall changes.");return 0;}catch(Exception e){Console.Error.WriteLine("FAIL: "+e.ToString());return 1;}}
+    public static int Run() {try{StartupOptions();GameLanguages();Reports();Codecs();Leases();LobbyRules();Discs();CancelLoading();MeshWiringTest();MeshRouting();ControlOnlyLink();ChannelPairingTest();Tls(0,true,true);for(int mode=0;mode<4;mode++)Tls(mode,mode==0);Console.WriteLine("PASS: "+checks+" checks; host-only lobby start, full disk hash and locks, UDP ping, native loading barrier/cancel, TLS loss before/after commit, authenticated UDP for 4800 native ticks and a real three-peer UDP mesh. No real router/firewall changes.");return 0;}catch(Exception e){Console.Error.WriteLine("FAIL: "+e.ToString());return 1;}}
 }
 }

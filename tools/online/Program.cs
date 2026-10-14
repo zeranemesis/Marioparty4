@@ -72,7 +72,7 @@ sealed class Session : IDisposable {
     public void ChangeMods(ModSet mods) {
         var lobby=Lobby;if(lobby==null)throw new IOException("Attendez que le salon soit prêt pour changer les mods.");
         var current=lobby.Local;
-        lobby.Update(new PlayerInfo(current.Name,current.DiscHash,current.DiscLength,mods));
+        lobby.Update(new PlayerInfo(current.Name,current.DiscHash,current.DiscLength,mods,current.Language));
         Report.Write("mods_changed count="+mods.Entries.Length+" ids="+string.Join(",",mods.Entries.Select(m=>m.Id.ToString()).ToArray()));
     }
     public int? PingMs;GameStart gameStart;string modListDirectory;
@@ -396,6 +396,14 @@ sealed class Session : IDisposable {
             args=Host ? "--netplay-host "+HostGamePort : "--netplay-join 127.0.0.1:"+Bridge.LocalPort;
         }
         args=GameStart.OnlineArguments(args);
+        // A European disc loads its text in the language chosen; every seat takes the
+        // host's, or the games would differ from their first tick. The game also
+        // refuses a peer in another language at its handshake.
+        if(disc.Pal) {
+            var hostInfo=Lobby.SeatInfo(0);
+            var language=GameLanguage.Code(hostInfo!=null?hostInfo.Language:Profile.Language);
+            args+=" --lang "+language;Report.Write("game_language="+language);
+        }
         Report.Write("netplay_mode=lockstep input_delay_frames=3");
         // Write the list that was announced, not the one CubeShelf happens to have on
         // disk: the salon launches the game itself, so its copy can be stale, and a
@@ -449,7 +457,7 @@ static class Program {
             } catch(Exception e) {Console.Error.WriteLine(e.Message);return 1;}
         }
         if(args.Length==1 && args[0]=="--verify-disc") {
-            try {using(var disc=DiscFile.Verify(Environment.GetEnvironmentVariable("PARTYBOARD_ONLINE_DISC"),_=>{},CancellationToken.None))Console.WriteLine("PASS: disque USA Rev 1 compatible, SHA-256 complet calculé, verrou de lecture actif.");return 0;}
+            try {using(var disc=DiscFile.Verify(Environment.GetEnvironmentVariable("PARTYBOARD_ONLINE_DISC"),_=>{},CancellationToken.None))Console.WriteLine("PASS: disque "+(disc.Pal?"européen":"USA Rev 1")+" compatible, SHA-256 complet calculé, verrou de lecture actif.");return 0;}
             catch(Exception e){Console.Error.WriteLine(e.Message);return 3;}
         }
         if(args.Length==2 && (args[0]=="--render-ui" || args[0]=="--render-lobby-preview")) {
@@ -458,6 +466,7 @@ static class Program {
             return 0;
         }
         if(args.Length==1 && args[0]=="--diagnose") {try{var r=Route.Detect();Console.WriteLine("Connexion physique détectée. Aucun port ouvert.");return 0;}catch(Exception e){Console.WriteLine(e.Message);return 1;}}
+        GameLanguage.Current=GameLanguage.FromArguments(args);
         Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);
         // --host / --join let a launcher open the companion on a lobby instead of on an empty
         // form. Everything it needs beyond the intent travels in the environment; see Startup.cs.

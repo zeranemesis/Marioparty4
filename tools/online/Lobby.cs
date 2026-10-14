@@ -33,6 +33,8 @@ sealed class DiscFile : IDisposable {
     public string Path {get;private set;}
     public byte[] Hash {get;private set;}
     public long Length {get;private set;}
+    // The European disc: its text depends on the language it is loaded in.
+    public bool Pal {get;private set;}
     DiscFile(string path) {
         Path=System.IO.Path.GetFullPath(path);
         // Keep the verified file open until the session ends. Windows refuses
@@ -51,7 +53,9 @@ sealed class DiscFile : IDisposable {
                     while(!p.WaitForExit(100)) {
                         if(token.IsCancellationRequested || timer.Elapsed.TotalSeconds>30) {p.Kill();token.ThrowIfCancellationRequested();throw new IOException("La lecture du disque a pris trop de temps.");}
                     }
-                    if(p.ExitCode!=0) throw new IOException("Choisissez un disque Mario Party 4 USA, révision 1 (ISO, GCM ou RVZ). Ce fichier n'est pas compatible.");
+                    // 0: USA revision 1, 4: the European disc (partyboard.exe --online-disc-check).
+                    if(p.ExitCode==4) disc.Pal=true;
+                    else if(p.ExitCode!=0) throw new IOException("Choisissez un disque Mario Party 4 USA révision 1 ou européen (ISO, GCM ou RVZ). Ce fichier n'est pas compatible.");
                 }
             }
             using(var sha=SHA256.Create()) {
@@ -68,12 +72,35 @@ sealed class DiscFile : IDisposable {
     public void Dispose(){file.Dispose();}
 }
 
+// The language the game was loaded in, as the game numbers it (OSGetLanguage):
+// a European disc carries five, and every seat of a session must load the same
+// one. The game passes its own with --game-language when it opens this window.
+static class GameLanguage {
+    static readonly string[] Codes={"en","de","fr","es","it"};
+    public const byte English=0, Max=4;
+    // This window's game, English when it was opened by hand.
+    public static byte Current;
+    public static string Code(byte language){return language<=Max?Codes[language]:Codes[English];}
+    public static bool TryParse(string code,out byte language) {
+        language=English;
+        for(byte i=0;i<=Max;i++) if(Codes[i]==code){language=i;return true;}
+        return false;
+    }
+    public static byte FromArguments(string[] args) {
+        for(int i=0;args!=null && i+1<args.Length;i++){byte language;if(args[i]=="--game-language" && TryParse(args[i+1],out language))return language;}
+        return English;
+    }
+}
+
 sealed class PlayerInfo {
     public readonly string Name;public readonly byte[] DiscHash;public readonly long DiscLength;
     public readonly ModSet Mods;
-    public PlayerInfo(string name,byte[] hash=null,long length=0,ModSet mods=null) {
+    // Only the host's counts: it is the language every seat loads (see LoadGame).
+    public readonly byte Language;
+    public PlayerInfo(string name,byte[] hash=null,long length=0,ModSet mods=null,byte language=GameLanguage.English) {
         Name=CleanName(name);if(hash!=null && (hash.Length!=32 || length<=0)) throw new IOException("Information disque incorrecte.");
-        DiscHash=hash==null?null:(byte[])hash.Clone();DiscLength=hash==null?0:length;Mods=mods??ModSet.Empty;
+        if(language>GameLanguage.Max) throw new IOException("Langue de jeu inconnue.");
+        DiscHash=hash==null?null:(byte[])hash.Clone();DiscLength=hash==null?0:length;Mods=mods??ModSet.Empty;Language=language;
     }
     public static string CleanName(string name) {
         name=(name??"").Trim();if(name.Length<1 || name.Length>24 || name.Any(c=>char.IsControl(c) || char.IsSurrogate(c)))
@@ -88,7 +115,11 @@ sealed class PlayerInfo {
         using(var m=new MemoryStream()) using(var w=new BinaryWriter(m)) {
             byte[] name=Encoding.UTF8.GetBytes(Name);w.Write((byte)2);w.Write((byte)name.Length);w.Write(name);w.Write(DiscHash!=null);
             if(DiscHash!=null){w.Write(DiscLength);w.Write(DiscHash);}
-            Mods.Write(w);return m.ToArray();
+            Mods.Write(w);
+            // Appended only when it is not English, so a USA disc announces exactly
+            // the bytes 0.19.0 sends and the two stay compatible.
+            if(Language!=GameLanguage.English)w.Write(Language);
+            return m.ToArray();
         }
     }
     public static PlayerInfo Decode(byte[] data) {
@@ -103,7 +134,9 @@ sealed class PlayerInfo {
                 // believing the other player has none -- loud is the only safe failure
                 // here, because a silent one launches a session that will desync.
                 var mods=ModSet.Read(r);
-                if(r.BaseStream.Position!=data.Length)throw new IOException();return new PlayerInfo(name,hash,length,mods);
+                byte language=GameLanguage.English;
+                if(r.BaseStream.Position==data.Length-1){language=r.ReadByte();if(language==GameLanguage.English || language>GameLanguage.Max)throw new IOException();}
+                if(r.BaseStream.Position!=data.Length)throw new IOException();return new PlayerInfo(name,hash,length,mods,language);
             }
         }catch{throw new IOException("Informations du joueur incompatibles.");}
     }

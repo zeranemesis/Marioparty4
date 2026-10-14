@@ -29,7 +29,7 @@ sealed class MainForm : Form {
         var identity=new FlowLayoutPanel{Dock=DockStyle.Fill};identity.Controls.Add(new Label{Text="Votre pseudo",Width=116,Padding=new Padding(0,8,0,0)});
         nickname=new TextBox{Text="Joueur",Width=230,MaxLength=24,AccessibleName="Votre pseudo",Margin=new Padding(0,5,12,0)};identity.Controls.Add(nickname);root.Controls.Add(identity,0,2);
         var disk=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=2};disk.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,210));disk.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
-        choose=Make("Choisir mon disque",ChooseDisc);disk.Controls.Add(choose,0,0);discLabel=new Label{Text="Mario Party 4 USA, révision 1\nISO, GCM ou RVZ — vérification du fichier complet",Dock=DockStyle.Fill,Padding=new Padding(0,4,0,0)};disk.Controls.Add(discLabel,1,0);root.Controls.Add(disk,0,3);
+        choose=Make("Choisir mon disque",ChooseDisc);disk.Controls.Add(choose,0,0);discLabel=new Label{Text="Mario Party 4 USA révision 1, ou européen\nISO, GCM ou RVZ — vérification du fichier complet",Dock=DockStyle.Fill,Padding=new Padding(0,4,0,0)};disk.Controls.Add(discLabel,1,0);root.Controls.Add(disk,0,3);
         var top=new FlowLayoutPanel{Dock=DockStyle.Fill};
         top.Controls.Add(new Label{Text="Joueurs",Padding=new Padding(0,8,4,0)});
         playerCount=new ComboBox{DropDownStyle=ComboBoxStyle.DropDownList,Width=64,Margin=new Padding(0,3,12,3),AccessibleName="Nombre de joueurs"};
@@ -192,7 +192,7 @@ sealed class MainForm : Form {
     }
     void ChooseDisc(){
         if(session!=null || hashing)return;
-        using(var picker=new OpenFileDialog{Title="Choisir Mario Party 4 USA Rev 1",Filter="Images de disque|*.iso;*.gcm;*.rvz;*.wia;*.gcz;*.ciso|Tous les fichiers|*.*",CheckFileExists=true}){
+        using(var picker=new OpenFileDialog{Title="Choisir Mario Party 4 (USA Rev 1 ou européen)",Filter="Images de disque|*.iso;*.gcm;*.rvz;*.wia;*.gcz;*.ciso|Tous les fichiers|*.*",CheckFileExists=true}){
             if(picker.ShowDialog(this)!=DialogResult.OK)return;
             LoadDisc(picker.FileName,pendingStartupAction?(Action)RunStartupAction:null);
         }
@@ -217,7 +217,7 @@ sealed class MainForm : Form {
         string modsFrom;ModSet opening;
         try {opening=chosenMods??ModSet.FromCubeShelf(GameId,out modsFrom);}
         catch(Exception e){SetStatus(Friendly(e));return;}
-        var profile=new PlayerInfo(nickname.Text,disc.Hash,disc.Length,opening);
+        var profile=new PlayerInfo(nickname.Text,disc.Hash,disc.Length,opening,GameLanguage.Current);
         Session current=null;current=new Session(t=>UI(()=>{if(session==current)SetStatus(t);}),()=>UI(()=>{if(session==current)RefreshLobby();}),t=>UI(()=>{if(session==current){Reset();SetStatus(t);}}),profile,disc);
         session=current;lastReport=current.Report;current.Host=create;RefreshLobby();
         current.Report.Write("role="+(create?"host":"guest")+" connection_requested");
