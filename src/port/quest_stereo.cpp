@@ -606,6 +606,13 @@ static int primary_camera()
     // players' views are cameras 1 to 4, one a player. The eyes took camera
     // 0: the picture's scene and its black cover, the interface cut to that
     // corner, no puzzle (2026-10-10).
+    // GOOOOOOOAL!!: camera 0 films a close-up into a corner for the stadium's
+    // "LIVE" screen, camera 1 the background; the game is camera 2. The
+    // eyes took camera 0 once (its target nearest the player's character):
+    // a close-up of Yoshi instead of the pitch (2026-10-14).
+    if (omCurrentOvlGet() == DLL_m423Dll && -1.0f != Hu3DCamera[2].fov) {
+        return 2;
+    }
     if (omCurrentOvlGet() == DLL_m411Dll) {
         const int own = 1 + local_player();
         if (own < HU3D_CAM_MAX && -1.0f != Hu3DCamera[own].fov) {
