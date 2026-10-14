@@ -186,8 +186,16 @@ static void ApplyLaunchArgs(const partyboard::launch::LaunchArgs& args) {
     using partyboard::launch::LanguageArg;
     auto& settings = partyboard::getSettings();
     if (args.language) {
-        settings.game.language.setOverrideValue(*args.language == LanguageArg::French
-            ? partyboard::GameLanguage::French : partyboard::GameLanguage::English);
+        using partyboard::GameLanguage;
+        GameLanguage language = GameLanguage::English;
+        switch (*args.language) {
+            case LanguageArg::English: language = GameLanguage::English; break;
+            case LanguageArg::French: language = GameLanguage::French; break;
+            case LanguageArg::German: language = GameLanguage::German; break;
+            case LanguageArg::Spanish: language = GameLanguage::Spanish; break;
+            case LanguageArg::Italian: language = GameLanguage::Italian; break;
+        }
+        settings.game.language.setOverrideValue(language);
     }
     if (args.aspect) {
         switch (*args.aspect) {

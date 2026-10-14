@@ -35,6 +35,7 @@ namespace {
 constexpr std::size_t kPacketSize = kNetplayPacketSize;
 constexpr std::size_t kHistoryOffset = 152;
 constexpr std::size_t kChecksumOffset = kPacketSize - 4;
+constexpr std::uint8_t kMaxGameLanguage = 4; // OS_LANGUAGE_ITALIAN
 static_assert(kHistoryOffset + kInputHistory * 8 == kChecksumOffset, "packet layout");
 constexpr std::array<std::uint8_t, 4> kMagic { 'P', 'B', 'R', 'B' };
 
@@ -132,9 +133,10 @@ std::array<std::uint8_t, kPacketSize> encode(const InputPacket &packet)
     // 80..83 reserved, must be zero.
     for (std::size_t index = 0; index < kSubsystemCount; ++index)
         put32(bytes.data() + 84 + index * 4, packet.state.parts[index]);
-    // 148: history count; 149..151 reserved, must be zero.
+    // 148: history count; 149: game language; 150..151 reserved, must be zero.
     const std::size_t historyCount = std::min<std::size_t>(packet.historyCount, kInputHistory);
     bytes[148] = static_cast<std::uint8_t>(historyCount);
+    bytes[149] = packet.language;
     for (std::size_t index = 0; index < historyCount; ++index)
         putInput(bytes.data() + kHistoryOffset + index * 8, packet.history[index]);
     put32(bytes.data() + kChecksumOffset, packetHash(bytes.data(), kChecksumOffset));
@@ -146,7 +148,7 @@ bool decode(const std::uint8_t *bytes, std::size_t size, InputPacket &packet)
     if (size != kPacketSize || !std::equal(kMagic.begin(), kMagic.end(), bytes)
         || get16(bytes + 4) != kProtocolVersion || bytes[6] < 1 || bytes[6] > 3
         || get32(bytes + 80) != 0 || get32(bytes + 48) != kStateHashVersion
-        || bytes[148] > kInputHistory || bytes[149] != 0 || bytes[150] != 0 || bytes[151] != 0
+        || bytes[148] > kInputHistory || bytes[149] > kMaxGameLanguage || bytes[150] != 0 || bytes[151] != 0
         || get32(bytes + kChecksumOffset) != packetHash(bytes, kChecksumOffset)) {
         return false;
     }
@@ -177,6 +179,7 @@ bool decode(const std::uint8_t *bytes, std::size_t size, InputPacket &packet)
         packet.state.parts[index] = get32(bytes + 84 + index * 4);
     packet.captureContext = get32(bytes + 44);
     packet.historyCount = bytes[148];
+    packet.language = bytes[149];
     packet.history = {};
     for (std::size_t index = 0; index < packet.historyCount; ++index)
         packet.history[index] = getInput(bytes + kHistoryOffset + index * 8);
@@ -667,6 +670,17 @@ bool runTransportSelfTest()
     bytes[kHistoryOffset + 3] ^= 1; // Repeated inputs are covered by the checksum.
     if (decode(bytes.data(), bytes.size(), decoded)) return false;
     codecSample.historyCount = 0;
+    // The game language travels; English stays the byte v8 always sent, and a
+    // value past Italian does not decode.
+    bytes = encode(codecSample);
+    if (bytes[149] != 0) return false;
+    codecSample.language = 4;
+    bytes = encode(codecSample);
+    if (!decode(bytes.data(), bytes.size(), decoded) || decoded.language != 4) return false;
+    bytes[149] = static_cast<std::uint8_t>(kMaxGameLanguage + 1);
+    put32(bytes.data() + kChecksumOffset, packetHash(bytes.data(), kChecksumOffset));
+    if (decode(bytes.data(), bytes.size(), decoded)) return false;
+    codecSample.language = 0;
     bytes = encode(codecSample);
     if (decode(bytes.data(), bytes.size() - 1, decoded)) return false;
     codecSample.state.frame = kNoHashFrame;

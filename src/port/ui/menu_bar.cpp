@@ -61,7 +61,10 @@ MenuBar::MenuBar()
 #if defined(_WIN32)
     mTabBar->add_tab("Play Online", [this] {
         const std::string companion = std::string(SDL_GetBasePath()) + "PartyBoardOnline.exe";
-        const char *args[] = { companion.c_str(), nullptr };
+        // The lobby cannot read the game's settings; the host's language is
+        // what every seat of a European-disc session loads.
+        const char *args[] = { companion.c_str(), "--game-language",
+            game_language_code(getSettings().game.language.getValue()), nullptr };
         if (SDL_Process *process = SDL_CreateProcess(args, false)) {
             SDL_DestroyProcess(process);
             PartyBoard_IsRunning = false;

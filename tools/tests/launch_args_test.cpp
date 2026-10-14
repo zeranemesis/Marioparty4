@@ -55,12 +55,21 @@ int main()
     {
         // Unknown values are reported, prefixes do not match longer options,
         // and a key without a value is not an option.
-        const char *argv[] = {"partyboard", "--lang=de", "--aspect=16:10", "--language=fr", "--mod-list"};
+        const char *argv[] = {"partyboard", "--lang=nl", "--aspect=16:10", "--language=fr", "--mod-list"};
         const LaunchArgs args = parse(5, argv);
         check(!args.language, "unknown language rejected");
         check(!args.aspect, "unknown aspect rejected");
         check(args.ignored.size() == 2, "both bad values reported");
         check(args.modList.empty(), "dangling key ignored");
+    }
+    {
+        // The five languages of the European disc, the codes a lobby passes.
+        const char *de[] = {"partyboard", "--lang", "de"};
+        const char *es[] = {"partyboard", "--lang=es"};
+        const char *it[] = {"partyboard", "--lang", "it"};
+        check(parse(3, de).language == LanguageArg::German, "German");
+        check(parse(2, es).language == LanguageArg::Spanish, "Spanish");
+        check(parse(3, it).language == LanguageArg::Italian, "Italian");
     }
     {
         const LaunchArgs none = parse(0, nullptr);

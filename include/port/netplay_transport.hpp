@@ -42,6 +42,10 @@ struct InputPacket {
     // Inputs for frame-1 .. frame-historyCount, from the same capture context.
     std::uint8_t historyCount = 0;
     std::array<PartyBoardRollbackInput, kInputHistory> history {};
+    // The language the game data was loaded in (OSGetLanguage: 0 English to
+    // 4 Italian). A European disc carries five; peers must agree. English is
+    // zero, so a USA disc sends the bytes protocol v8 always sent.
+    std::uint8_t language = 0;
 };
 
 class UdpTransport {

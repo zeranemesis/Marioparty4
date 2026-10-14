@@ -85,7 +85,7 @@ inline std::string ui_translate(std::string_view text)
         {"Online Lobby", "Salon en ligne"}, {"Your Party Board lobby", "Votre salon PartyBoard"}, {"Nickname", "Pseudo"}, {"Player", "Joueur"},
         {"Choose a nickname of 1 to 24 characters, on a single line.", "Choisissez un pseudo de 1 à 24 caractères, sans retour à la ligne."},
         {"The name the other players see in the lobby.", "Le nom que les autres joueurs voient dans le salon."},
-        {"Every player needs the same disc image: Mario Party 4 USA. The whole file is checked before joining.", "Chaque joueur doit avoir la même image disque : Mario Party 4 USA. Le fichier complet est vérifié avant de rejoindre."},
+        {"Every player needs the same disc image: Mario Party 4 USA revision 1, or the European disc in the host's language. The whole file is checked before joining.", "Chaque joueur doit avoir la même image disque : Mario Party 4 USA révision 1, ou le disque européen dans la langue de l'hôte. Le fichier complet est vérifié avant de rejoindre."},
         {"Players", "Joueurs"}, {"How many players the lobby waits for, you included. Only the host chooses.", "Nombre de joueurs attendus dans le salon, vous compris. Seul l’hôte choisit."},
         {"Create a lobby", "Créer un salon"}, {"Create the lobby, then send the invitation to your friends. Only you can start the game.", "Créez le salon, puis envoyez l’invitation à vos amis. Vous seul pourrez lancer le jeu."},
         {"Join a lobby", "Rejoindre un salon"}, {"Invitation", "Invitation"},
