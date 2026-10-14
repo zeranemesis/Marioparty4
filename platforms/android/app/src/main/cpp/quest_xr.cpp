@@ -2077,18 +2077,22 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
       // low when the player sat otherwise since (2026-10-14).
       // `debug.partyboard.hud_height` raises it (meters), read every 2 s.
       static float menuEyeY = NAN;
+      static XrVector3f menuHead{NAN, NAN, NAN};
       static XrTime menuTime = 0;
-      static float raise = 0.0f;
+      static float raise = 0.15f;
       static auto raiseReadAt = std::chrono::steady_clock::time_point{};
       if (const auto now = std::chrono::steady_clock::now(); now - raiseReadAt >= std::chrono::seconds(2)) {
         raiseReadAt = now;
         char value[PROP_VALUE_MAX] = {};
         __system_property_get("debug.partyboard.hud_height", value);
-        const float v = value[0] != 0 ? std::strtof(value, nullptr) : 0.0f;
-        raise = v > -1.0f && v < 1.0f ? v : 0.0f;
+        // 0.15 m up by default: the mode selection's cards and help stood
+        // low, by the keyboard (2026-10-14).
+        const float v = value[0] != 0 ? std::strtof(value, nullptr) : 0.15f;
+        raise = v > -1.0f && v < 1.0f ? v : 0.15f;
       }
       if ((time - menuTime > 500'000'000 || !std::isfinite(menuEyeY)) && haveHead) {
         menuEyeY = head.position.y - app.pose.position.y;
+        menuHead = head.position;
       }
       menuTime = time;
       const float eyeY = std::isfinite(menuEyeY) ? menuEyeY
@@ -2097,21 +2101,40 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
       XrPosef local = identity_pose();
       local.position = {0.0f, std::max(0.15f, eyeY - 0.02f + raise), -behind};
       hudPose = compose(app.pose, local);
-      // A menu's interface where its TV picture stands in the scene, over the
-      // blocks its list names: only with `debug.partyboard.hud_plane 1`. Not
-      // proportioned to the scene on the headset; the screen before the
-      // eyes above was preferred for every menu (2026-10-14).
-      static bool usePlane = false;
+      // The minigame menu (the only one the game sends its TV picture's plane
+      // for): its interface over the blocks its hand points at, in front of
+      // the scene. The TV picture's plane, through what the camera looks at,
+      // seen from the player's head (where it was when the menu came up):
+      // the same plane brought toward the head, smaller alike, so its hand
+      // lies on the blocks from the player's place, not the game camera's
+      // (from there, brought forward, it pointed under them, 2026-10-14).
+      // `debug.partyboard.hud_plane 0`: the screen before the eyes above;
+      // `debug.partyboard.hud_plane_near` the fraction of the way from the
+      // head (0.5 by default).
+      static bool usePlane = true;
+      static float nearFraction = 0.5f;
       static auto planeReadAt = std::chrono::steady_clock::time_point{};
       if (const auto now = std::chrono::steady_clock::now(); now - planeReadAt >= std::chrono::seconds(2)) {
         planeReadAt = now;
         char value[PROP_VALUE_MAX] = {};
         __system_property_get("debug.partyboard.hud_plane", value);
-        usePlane = value[0] == '1';
+        usePlane = value[0] != '0';
+        value[0] = '\0';
+        __system_property_get("debug.partyboard.hud_plane_near", value);
+        const float v = value[0] != 0 ? std::strtof(value, nullptr) : 0.5f;
+        nearFraction = v > 0.1f && v <= 1.0f ? v : 0.5f;
       }
       if (usePlane && planeHeight > 0.02f && planeHeight < 3.0f) {
-        hudPose = plane; // already in the room (STAGE)
+        // plane: in the room (STAGE), through what the camera looks at.
+        hudPose = plane;
         hudSize = {planeHeight * 4.0f / 3.0f, planeHeight};
+        if (std::isfinite(menuHead.x)) {
+          const float k = nearFraction;
+          hudPose.position = {menuHead.x + (plane.position.x - menuHead.x) * k,
+                              menuHead.y + (plane.position.y - menuHead.y) * k,
+                              menuHead.z + (plane.position.z - menuHead.z) * k};
+          hudSize = {hudSize.width * k, hudSize.height * k};
+        }
       }
     } else {
       hudPose = hud_pose(app.pose, app.table.modelScale, hudSize, &app.screenEye);

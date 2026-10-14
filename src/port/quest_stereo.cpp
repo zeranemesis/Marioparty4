@@ -1094,7 +1094,7 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
             float xAxis[3] {up[1] * zAxis[2] - up[2] * zAxis[1], up[2] * zAxis[0] - up[0] * zAxis[2],
                 up[0] * zAxis[1] - up[1] * zAxis[0]};
             const float xLength = std::sqrt(xAxis[0] * xAxis[0] + xAxis[1] * xAxis[1] + xAxis[2] * xAxis[2]);
-            if (menu_scene(scene) && distance > 1e-4f && xLength > 1e-6f && std::isfinite(camera.fov)) {
+            if (scene == DLL_mgmodedll && distance > 1e-4f && xLength > 1e-6f && std::isfinite(camera.fov)) {
                 for (int i = 0; i < 3; ++i) {
                     zAxis[i] /= distance;
                     xAxis[i] /= xLength;
@@ -1136,13 +1136,15 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
                 // behind it in the picture (2026-10-14). The fraction of the
                 // way from the camera: `debug.partyboard.hud_plane_depth`
                 // (0.6 by default; 1: at what the camera looks at).
-                float depth = 0.6f;
+                // At what the camera looks at by default: the headset brings
+                // it toward the player's head instead (quest_xr.cpp).
+                float depth = 1.0f;
 #if defined(__ANDROID__)
                 {
                     char value[PROP_VALUE_MAX] = {};
                     __system_property_get("debug.partyboard.hud_plane_depth", value);
-                    const float v = value[0] != 0 ? std::strtof(value, nullptr) : 0.6f;
-                    depth = v > 0.05f && v <= 1.0f ? v : 0.6f;
+                    const float v = value[0] != 0 ? std::strtof(value, nullptr) : 1.0f;
+                    depth = v > 0.05f && v <= 1.0f ? v : 1.0f;
                 }
 #endif
                 const float pose[7] {eye[0] + (target[0] - eye[0]) * depth, eye[1] + (target[1] - eye[1]) * depth,
