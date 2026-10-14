@@ -1122,8 +1122,25 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
                     q[1] = (zAxis[1] + yAxis[2]) / s;
                     q[2] = 0.25f * s;
                 }
-                const float pose[7] {target[0], target[1], target[2], q[0], q[1], q[2], q[3]};
-                sQuest.hudPlane(pose, 2.0f * distance * std::tan(camera.fov * 0.5f * static_cast<float>(M_PI) / 180.0f));
+                // Brought toward the camera, smaller alike (the same picture
+                // from the camera): before the scene, not through it, where
+                // the scene's nearer parts stood in front of it in depth yet
+                // behind it in the picture (2026-10-14). The fraction of the
+                // way from the camera: `debug.partyboard.hud_plane_depth`
+                // (0.6 by default; 1: at what the camera looks at).
+                float depth = 0.6f;
+#if defined(__ANDROID__)
+                {
+                    char value[PROP_VALUE_MAX] = {};
+                    __system_property_get("debug.partyboard.hud_plane_depth", value);
+                    const float v = value[0] != 0 ? std::strtof(value, nullptr) : 0.6f;
+                    depth = v > 0.05f && v <= 1.0f ? v : 0.6f;
+                }
+#endif
+                const float pose[7] {eye[0] + (target[0] - eye[0]) * depth, eye[1] + (target[1] - eye[1]) * depth,
+                    eye[2] + (target[2] - eye[2]) * depth, q[0], q[1], q[2], q[3]};
+                sQuest.hudPlane(pose,
+                    2.0f * depth * distance * std::tan(camera.fov * 0.5f * static_cast<float>(M_PI) / 180.0f));
             } else {
                 sQuest.hudPlane(nullptr, 0.0f);
             }
