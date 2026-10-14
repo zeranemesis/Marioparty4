@@ -139,7 +139,16 @@ When the game is started from CubeShelf:
 ## Meta Quest
 
 - The game in **stereo 3D**, in **mixed reality**: the board stands on your real
-  table as a model, found by the room scan, and stays where you placed it.
+  table as a model, and stays where you placed it.
+- For table calibration, place the **right controller at the table center** and
+  confirm with **X** on the left controller. The controller's rotation does not
+  matter: the board faces **your headset** when placement is confirmed.
+- A previous room scan can optionally suggest the table's height and board
+  size, but **you do not need to rescan the room or grant spatial data access**.
+  Without table data, the existing/default board size is used. Open manual
+  placement (right stick click) and move the **left stick horizontally** to
+  enlarge or shrink the board. A table-only depth measurement is not yet
+  implemented.
 - **Quality presets** on the Y button (economy, balanced, sharp), and a 3D
   resolution that adapts to keep the headset's frame rate.
 
