@@ -26,9 +26,10 @@ import java.util.Locale;
  * phone, into the OpenXR surface given to SDL in place of the SurfaceView's.
  *
  * Before the first board or minigame, the game waits for a one-time table
- * calibration: the right controller laid at the table's center. The table of
- * the headset's room scan under it (the spatial data permission, asked then)
- * gives the height and the model's size. Clicking the right thumbstick opens
+ * calibration: the right controller laid at the table's center, with the
+ * board facing the player's headset, regardless of controller orientation.
+ * Previously authorized scene data may suggest a size; no full room scan or
+ * new spatial-data permission is required. Clicking the right thumbstick opens
  * manual placement mode: the game can be moved, sized, and its resolution (up
  * to 4K), the room's visibility and the model following the game camera
  * chosen. The headset keeps the place (a spatial anchor) and the choices
@@ -267,15 +268,15 @@ public final class QuestVr {
                     french ? "Table scannée : %.2f × %.2f m, le plateau s'y adaptera."
                            : "Scanned table: %.2f × %.2f m, the board will fit it.", length, width);
             case SCENE_NO_TABLE:
-                return french ? "Aucune table dans le scan de la pièce."
-                              : "No table in the room scan.";
+                return french ? "Aucune table mémorisée : taille réglable au stick gauche."
+                              : "No saved table: adjust board size with the left stick.";
             case SCENE_NO_PERMISSION:
-                return french ? "Autorisez « Données spatiales » pour utiliser le scan de la pièce."
-                              : "Allow \"Spatial data\" to use the room scan.";
+                return french ? "Pas de scan nécessaire : taille réglable au stick gauche."
+                              : "No room scan needed: resize with the left stick.";
             case SCENE_SEARCHING:
-                return french ? "Recherche de la table scannée…" : "Looking for the scanned table…";
+                return french ? "Lecture des tables déjà mémorisées…" : "Reading previously saved tables…";
             case SCENE_CAPTURING:
-                return french ? "Scan de la pièce en cours…" : "Scanning the room…";
+                return french ? "Configuration spatiale en cours…" : "Spatial setup in progress…";
             case SCENE_UNAVAILABLE:
             default:
                 return french ? "Scan de la pièce indisponible : taille du plateau au stick gauche."
@@ -296,31 +297,27 @@ public final class QuestVr {
         boolean french = "fr".equals(Locale.getDefault().getLanguage());
         String title = calibrating ? (french ? "Avant de jouer : votre table" : "Before playing: your table")
                                   : (french ? "Placer le jeu" : "Place the game");
-        boolean canScan = sceneState != SCENE_UNAVAILABLE && sceneState != SCENE_NO_PERMISSION
-            && sceneState != SCENE_CAPTURING;
-        String keys = canScan ? (french ? "A : scanner la pièce   ·   B : plus tard"
-                                        : "A: scan the room   ·   B: later")
-                              : (french ? "B : plus tard" : "B: later");
+        String keys = french ? "B : plus tard" : "B: later";
         String scene = sceneLine(french, sceneState, tableLength, tableWidth);
         String[] lines = calibrating ? (french ? (calibrationConfirmed ? new String[] {
             "Mesure en cours : gardez la manette droite immobile.",
-            "La pose se verrouille après une mesure stable.",
+            "Le casque oriente le plateau vers vous.",
             scene,
             keys,
         } : new String[] {
-            "Posez la manette droite à plat, au milieu de la table.",
-            "Orientez l'avant vers vous, puis appuyez sur X.",
+            "Posez la manette droite au centre de la table.",
+            "Son orientation importe peu : regardez le plateau, puis X.",
             "Gardez-la immobile pendant la mesure.",
             scene,
             keys,
         }) : (calibrationConfirmed ? new String[] {
             "Measuring: keep the right controller still.",
-            "The placement locks after a stable reading.",
+            "The headset orients the board toward you.",
             scene,
             keys,
         } : new String[] {
-            "Lay the right controller flat at the middle of the table.",
-            "Point its front toward you, then press X.",
+            "Lay the right controller at the table center.",
+            "Controller angle does not matter. Face the board, then X.",
             "Keep it still during the measurement.",
             scene,
             keys,
