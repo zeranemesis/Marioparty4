@@ -2057,9 +2057,30 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
         behind = v > -0.5f && v < 3.0f ? v : -0.12f;
       }
       hudSize = {0.5f, 0.375f};
+      // Its center at the eyes' height when the menu comes up, kept while it
+      // shows: from the height measured once (the table's placing), it stood
+      // low when the player sat otherwise since (2026-10-14).
+      // `debug.partyboard.hud_height` raises it (meters), read every 2 s.
+      static float menuEyeY = NAN;
+      static XrTime menuTime = 0;
+      static float raise = 0.0f;
+      static auto raiseReadAt = std::chrono::steady_clock::time_point{};
+      if (const auto now = std::chrono::steady_clock::now(); now - raiseReadAt >= std::chrono::seconds(2)) {
+        raiseReadAt = now;
+        char value[PROP_VALUE_MAX] = {};
+        __system_property_get("debug.partyboard.hud_height", value);
+        const float v = value[0] != 0 ? std::strtof(value, nullptr) : 0.0f;
+        raise = v > -1.0f && v < 1.0f ? v : 0.0f;
+      }
+      if ((time - menuTime > 500'000'000 || !std::isfinite(menuEyeY)) && haveHead) {
+        menuEyeY = head.position.y - app.pose.position.y;
+      }
+      menuTime = time;
+      const float eyeY = std::isfinite(menuEyeY) ? menuEyeY
+                         : std::isfinite(app.screenEye.y) ? app.screenEye.y - app.pose.position.y
+                                                          : 0.4f;
       XrPosef local = identity_pose();
-      const float eyeY = std::isfinite(app.screenEye.y) ? app.screenEye.y - app.pose.position.y : 0.4f;
-      local.position = {0.0f, std::max(0.15f, eyeY - 0.05f), -behind};
+      local.position = {0.0f, std::max(0.15f, eyeY - 0.02f + raise), -behind};
       hudPose = compose(app.pose, local);
     } else {
       hudPose = hud_pose(app.pose, app.table.modelScale, hudSize, &app.screenEye);
