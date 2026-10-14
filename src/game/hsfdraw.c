@@ -379,6 +379,11 @@ static void objMesh(HU3DMODEL *modelP, HSFOBJECT *objPtr) {
             else {
                 dispF = TRUE;
             }
+#ifdef TARGET_PC
+            if (dispF && PartyBoard_StereoActive() && objPtr->name != NULL && PartyBoard_StereoSetPieceHidden(objPtr->name)) {
+                dispF = FALSE;
+            }
+#endif
             if ((constData->attr & HU3D_CONST_DISPOFF) || (objPtr->flags & HU3D_ATTR_CLUSTER_ON)) {
                 dispF = FALSE;
             }

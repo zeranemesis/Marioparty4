@@ -21,6 +21,9 @@ void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view);
 // rank): the minigame tells, each frame, which camera shows `player` (-1:
 // none). The eyes and the interface's part take the local player's.
 void PartyBoard_StereoPlayerCamera(s32 player, s32 camera);
+// A piece of a scene's set the headset leaves out, by its HSF object name:
+// the minigame menu's walls and ceiling (only its curtains and Goomba stay).
+BOOL PartyBoard_StereoSetPieceHidden(const char *name);
 // Whether the current camera draws into the headset; visibility uses both eyes.
 BOOL PartyBoard_StereoActive(void);
 // MR board presentation also remains active after the camera's draw scope.
