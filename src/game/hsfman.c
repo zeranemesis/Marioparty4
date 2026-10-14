@@ -2082,11 +2082,26 @@ void Hu3DFogClear(void) {
     GXSetFog(GX_FOG_NONE, 0.0f, 0.0f, 0.0f, 0.0f, BGColor);
 }
 
+#ifdef TARGET_PC
+// The shadow map's side on PC: the GameCube's 192 texels, spread over a whole
+// arena, made blocky, smeared shadows on today's screens and in the headset
+// (2026-10-14). 480 is the most the frame holds in one pass (no 2x supersample
+// past 240, the game's own rule in Hu3DShadowExec).
+#define SHADOW_PC_SIZE 0x1E0
+#endif
+
 void Hu3DShadowCreate(f32 arg8, f32 arg9, f32 argA) {
+#ifdef TARGET_PC
+    Hu3DShadowData.size = SHADOW_PC_SIZE;
+    if (Hu3DShadowData.buf == 0) {
+        Hu3DShadowData.buf = HuMemDirectMalloc(HEAP_DATA, SHADOW_PC_SIZE * SHADOW_PC_SIZE);
+    }
+#else
     Hu3DShadowData.size = 0xC0;
     if (Hu3DShadowData.buf == 0) {
         Hu3DShadowData.buf = HuMemDirectMalloc(HEAP_DATA, SHADOW_HEAP_SIZE);
     }
+#endif
     Hu3DShadowData.fov = arg8;
     Hu3DShadowData.nnear = arg9;
     Hu3DShadowData.ffar = argA;
@@ -2114,6 +2129,11 @@ void Hu3DShadowTPLvlSet(f32 arg8) {
 }
 
 void Hu3DShadowSizeSet(u16 arg0) {
+#ifdef TARGET_PC
+    if (arg0 < SHADOW_PC_SIZE) {
+        arg0 = SHADOW_PC_SIZE;
+    }
+#endif
     Hu3DShadowData.size = arg0;
     if (Hu3DShadowData.buf != 0) {
         HuMemDirectFree(Hu3DShadowData.buf);
