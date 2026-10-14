@@ -231,7 +231,8 @@ jobs:
             executable = "partyboard.exe"
             supportedDiscs = @(
               "GMPE01_00",
-              "GMPE01_01"
+              "GMPE01_01",
+              "GMPP01_02"
             )
             capabilities = $capabilities
             changes = $changes
