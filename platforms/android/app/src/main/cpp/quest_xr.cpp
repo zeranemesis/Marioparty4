@@ -188,6 +188,13 @@ struct SurfaceQuad {
 struct Passthrough {
   XrPassthroughFB passthrough = XR_NULL_HANDLE;
   XrPassthroughLayerFB layer = XR_NULL_HANDLE;
+  // The real hands over the interface's panel, as on the headset's own
+  // windows: the room seen through an egg around each controller, above the
+  // panel, while that hand is in front of it (XR_FB_triangle_mesh).
+  XrPassthroughLayerFB handLayer = XR_NULL_HANDLE;
+  XrTriangleMeshFB handMesh = XR_NULL_HANDLE;
+  std::array<XrGeometryInstanceFB, 2> hands{XR_NULL_HANDLE, XR_NULL_HANDLE};
+  PFN_xrGeometryInstanceSetTransformFB setTransform = nullptr;
   PFN_xrPassthroughStartFB start = nullptr;
   PFN_xrPassthroughPauseFB pause = nullptr;
 };
@@ -210,6 +217,7 @@ struct Extensions {
   bool handTracking = false;   // XR_EXT_hand_tracking: the hands drawn, and pinching
   bool renderModels = false;   // XR_FB_render_model: the controllers' own models
   bool threadSettings = false; // XR_KHR_android_thread_settings: the game's threads named to the runtime
+  bool triangleMesh = false;   // XR_FB_triangle_mesh: the real hands over the interface's panel
 };
 
 struct App {
@@ -411,6 +419,7 @@ bool create_instance(App& app) {
   ext.handTracking = optional(HandsView::kExtension);
   ext.renderModels = optional(HandsView::kRenderModelExtension);
   ext.threadSettings = optional(XR_KHR_ANDROID_THREAD_SETTINGS_EXTENSION_NAME);
+  ext.triangleMesh = ext.passthrough && optional(XR_FB_TRIANGLE_MESH_EXTENSION_NAME);
   ext.anchors = std::ranges::all_of(TableAnchor::kExtensions,
                                     [&](const char* name) { return has_extension(available, name); });
   if (ext.anchors) {
@@ -713,6 +722,62 @@ void destroy_surface_quad(JNIEnv* env, SurfaceQuad& quad) {
   quad = {};
 }
 
+// The real hands over the interface's panel (Passthrough::handLayer): a
+// projected passthrough layer on a unit sphere, one instance a hand, scaled
+// to an egg around the controller and the hand holding it.
+void create_hand_cutout(App& app, PFN_xrCreatePassthroughLayerFB createLayer) {
+  if (!app.extensions.triangleMesh) return;
+  auto createMesh = proc<PFN_xrCreateTriangleMeshFB>(app.instance, "xrCreateTriangleMeshFB");
+  auto createInstance = proc<PFN_xrCreateGeometryInstanceFB>(app.instance, "xrCreateGeometryInstanceFB");
+  app.passthrough.setTransform =
+      proc<PFN_xrGeometryInstanceSetTransformFB>(app.instance, "xrGeometryInstanceSetTransformFB");
+  if (createMesh == nullptr || createInstance == nullptr || app.passthrough.setTransform == nullptr) return;
+  XrPassthroughLayerCreateInfoFB layerInfo{XR_TYPE_PASSTHROUGH_LAYER_CREATE_INFO_FB};
+  layerInfo.passthrough = app.passthrough.passthrough;
+  layerInfo.purpose = XR_PASSTHROUGH_LAYER_PURPOSE_PROJECTED_FB;
+  layerInfo.flags = XR_PASSTHROUGH_IS_RUNNING_AT_CREATION_BIT_FB;
+  if (!check(app.instance, createLayer(app.session, &layerInfo, &app.passthrough.handLayer),
+             "xrCreatePassthroughLayerFB (hands)")) {
+    return;
+  }
+  constexpr int kRings = 8, kSegments = 12;
+  std::vector<XrVector3f> vertices;
+  std::vector<uint32_t> indices;
+  for (int ring = 0; ring <= kRings; ++ring) {
+    const float theta = 3.14159265f * static_cast<float>(ring) / kRings;
+    for (int segment = 0; segment < kSegments; ++segment) {
+      const float phi = 2.0f * 3.14159265f * static_cast<float>(segment) / kSegments;
+      vertices.push_back({std::sin(theta) * std::cos(phi), std::cos(theta), std::sin(theta) * std::sin(phi)});
+    }
+  }
+  for (int ring = 0; ring < kRings; ++ring) {
+    for (int segment = 0; segment < kSegments; ++segment) {
+      const uint32_t a = ring * kSegments + segment, b = ring * kSegments + (segment + 1) % kSegments;
+      const uint32_t c = a + kSegments, d = b + kSegments;
+      indices.insert(indices.end(), {a, c, b, b, c, d});
+    }
+  }
+  XrTriangleMeshCreateInfoFB meshInfo{XR_TYPE_TRIANGLE_MESH_CREATE_INFO_FB};
+  meshInfo.windingOrder = XR_WINDING_ORDER_UNKNOWN_FB;
+  meshInfo.vertexCount = static_cast<uint32_t>(vertices.size());
+  meshInfo.vertexBuffer = vertices.data();
+  meshInfo.triangleCount = static_cast<uint32_t>(indices.size() / 3);
+  meshInfo.indexBuffer = indices.data();
+  if (!check(app.instance, createMesh(app.session, &meshInfo, &app.passthrough.handMesh), "xrCreateTriangleMeshFB")) {
+    return;
+  }
+  for (auto& hand : app.passthrough.hands) {
+    XrGeometryInstanceCreateInfoFB instanceInfo{XR_TYPE_GEOMETRY_INSTANCE_CREATE_INFO_FB};
+    instanceInfo.layer = app.passthrough.handLayer;
+    instanceInfo.mesh = app.passthrough.handMesh;
+    instanceInfo.baseSpace = app.stage;
+    instanceInfo.pose = identity_pose();
+    instanceInfo.scale = {0.001f, 0.001f, 0.001f};
+    check(app.instance, createInstance(app.session, &instanceInfo, &hand), "xrCreateGeometryInstanceFB");
+  }
+  LOGI("Passthrough: the real hands shown over the interface's panel");
+}
+
 // The room around the game. Paused (not destroyed) when the player turns it
 // off, so the cameras stop costing power.
 void create_passthrough(App& app) {
@@ -737,9 +802,21 @@ void create_passthrough(App& app) {
   layerInfo.purpose = XR_PASSTHROUGH_LAYER_PURPOSE_RECONSTRUCTION_FB;
   layerInfo.flags = XR_PASSTHROUGH_IS_RUNNING_AT_CREATION_BIT_FB;
   check(app.instance, createLayer(app.session, &layerInfo, &app.passthrough.layer), "xrCreatePassthroughLayerFB");
+  create_hand_cutout(app, createLayer);
 }
 
 void destroy_passthrough(App& app) {
+  for (auto hand : app.passthrough.hands) {
+    if (hand != XR_NULL_HANDLE) {
+      proc<PFN_xrDestroyGeometryInstanceFB>(app.instance, "xrDestroyGeometryInstanceFB")(hand);
+    }
+  }
+  if (app.passthrough.handMesh != XR_NULL_HANDLE) {
+    proc<PFN_xrDestroyTriangleMeshFB>(app.instance, "xrDestroyTriangleMeshFB")(app.passthrough.handMesh);
+  }
+  if (app.passthrough.handLayer != XR_NULL_HANDLE) {
+    proc<PFN_xrDestroyPassthroughLayerFB>(app.instance, "xrDestroyPassthroughLayerFB")(app.passthrough.handLayer);
+  }
   if (app.passthrough.layer != XR_NULL_HANDLE) {
     proc<PFN_xrDestroyPassthroughLayerFB>(app.instance, "xrDestroyPassthroughLayerFB")(app.passthrough.layer);
   }
@@ -1967,14 +2044,17 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
       // minigame's scores) just behind the scene, at eye level, nearer than
       // a board's: it was far (2026-10-10). `debug.partyboard.hud_distance`
       // (meters behind the table's center), read every 2 s.
-      static float behind = 0.25f;
+      // In front of the scene's center since 2026-10-14 (the minigame menu's
+      // list before its Goomba; behind it, it slid against the scene as the
+      // head moved).
+      static float behind = -0.12f;
       static auto behindReadAt = std::chrono::steady_clock::time_point{};
       if (const auto now = std::chrono::steady_clock::now(); now - behindReadAt >= std::chrono::seconds(2)) {
         behindReadAt = now;
         char value[PROP_VALUE_MAX] = {};
         __system_property_get("debug.partyboard.hud_distance", value);
-        const float v = value[0] != 0 ? std::strtof(value, nullptr) : 0.25f;
-        behind = v > -0.5f && v < 3.0f ? v : 0.25f;
+        const float v = value[0] != 0 ? std::strtof(value, nullptr) : -0.12f;
+        behind = v > -0.5f && v < 3.0f ? v : -0.12f;
       }
       hudSize = {0.5f, 0.375f};
       XrPosef local = identity_pose();
@@ -1984,15 +2064,17 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
     } else {
       hudPose = hud_pose(app.pose, app.table.modelScale, hudSize, &app.screenEye);
     }
-    // The dark screen behind the interface: only with `debug.partyboard.hud_screen
-    // 1`; the interface floats on the room by default (asked for 2026-10-03).
-    static bool hudScreen = false;
+    // The panel behind the interface, as the headset's own windows: rounded,
+    // dark, the real hands passing in front of it (asked for 2026-10-14;
+    // floating on the room before, 2026-10-03). `debug.partyboard.hud_screen 0`
+    // takes it away.
+    static bool hudScreen = true;
     static auto hudScreenAt = std::chrono::steady_clock::time_point{};
     if (const auto now = std::chrono::steady_clock::now(); now - hudScreenAt >= std::chrono::seconds(2)) {
       hudScreenAt = now;
       char value[PROP_VALUE_MAX] = {};
       __system_property_get("debug.partyboard.hud_screen", value);
-      hudScreen = value[0] == '1';
+      hudScreen = value[0] != '0';
     }
     if (const auto* screen = window || !hudScreen ? nullptr : app.stereo.hud_screen_layer(app.stage, hudPose, hudSize)) {
       layers[layerCount++] = screen;
@@ -2000,6 +2082,36 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
     if (const auto* hud =
             app.stereo.hud_layer(app.stage, hudPose, hudSize, app.extensions.imageLayout ? &modelFlip : nullptr)) {
       layers[layerCount++] = hud;
+      // The real hands over the panel, while in front of it.
+      if (!window && hudScreen && app.table.passthrough && app.passthrough.handLayer != XR_NULL_HANDLE && haveHead) {
+        const XrVector3f normal = rotate(hudPose.orientation, {0.0f, 0.0f, 1.0f});
+        const auto side = [&](const XrVector3f& p) {
+          return (p.x - hudPose.position.x) * normal.x + (p.y - hudPose.position.y) * normal.y +
+                 (p.z - hudPose.position.z) * normal.z;
+        };
+        const bool headInFront = side(head.position) > 0.0f;
+        bool anyShown = false;
+        for (int hand = 0; hand < 2; ++hand) {
+          XrPosef grip;
+          const bool known = locate(app.actions.grip[hand], app.stage, time, grip);
+          const bool shown = known && headInFront && side(grip.position) > -0.03f;
+          XrGeometryInstanceTransformFB transform{XR_TYPE_GEOMETRY_INSTANCE_TRANSFORM_FB};
+          transform.baseSpace = app.stage;
+          transform.time = time;
+          // Around the controller and the hand on it.
+          transform.pose = known ? compose(grip, XrPosef{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, -0.01f, 0.02f}})
+                                 : identity_pose();
+          transform.scale = shown ? XrVector3f{0.075f, 0.085f, 0.11f} : XrVector3f{0.001f, 0.001f, 0.001f};
+          app.passthrough.setTransform(app.passthrough.hands[hand], &transform);
+          anyShown = anyShown || shown;
+        }
+        if (anyShown) {
+          static XrCompositionLayerPassthroughFB handsLayer{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
+          handsLayer.flags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+          handsLayer.layerHandle = app.passthrough.handLayer;
+          layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&handsLayer);
+        }
+      }
     }
     // The TV picture's part beside the interface, on its right, 60% as tall.
     // The game draws its 4:3 picture centered in the screen's 16:9.

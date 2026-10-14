@@ -247,7 +247,9 @@ float table_size(OMOVL scene)
         };
         // Settled in the headset: the minigame menu, the mode selection.
         float fallback = menu ? 0.5f : 1.0f;
-        if (scene == DLL_mgmodedll) fallback = 0.15f;
+        // The minigame menu twice that once its stage was left out, only its
+        // Goomba and blocks on the table (2026-10-14).
+        if (scene == DLL_mgmodedll) fallback = 0.3f;
         if (scene == DLL_modeseldll) fallback = 0.5f;
         fallback = read(menu ? "debug.partyboard.menu_size" : "debug.partyboard.minigame_size", fallback);
         char name[48];

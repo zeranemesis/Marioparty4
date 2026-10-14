@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 #include <cstring>
 #include <thread>
 
@@ -2316,7 +2317,7 @@ const XrCompositionLayerBaseHeader* StereoView::hud_layer(XrSpace space, const X
 // The interface's screen: a static image, a bezel around a dark face, drawn
 // once (GL context current). Without it the interface shows on its own.
 void StereoView::create_hud_screen() {
-  constexpr int kWidth = 256, kHeight = 192; // the interface's 4:3
+  constexpr int kWidth = 512, kHeight = 384; // the interface's 4:3
   XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
   info.createFlags = XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT;
   info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
@@ -2346,26 +2347,40 @@ void StereoView::create_hud_screen() {
     mHudScreenSwapchain = XR_NULL_HANDLE;
     return;
   }
-  // The bezel's width in pixels: kHudBezel of the interface's width on each
-  // side of a quad that is the interface plus its bezel.
-  const auto bezel = static_cast<GLint>(std::lround(kWidth * kHudBezel / (1.0f + 2.0f * kHudBezel)));
+  // As the headset's own windows (asked for 2026-10-14): a rounded panel,
+  // dark and a little translucent, a thin light rim; the interface sits
+  // inside, its corners within the rounding. Premultiplied alpha, sRGB.
+  const float bezel = kWidth * kHudBezel / (1.0f + 2.0f * kHudBezel);
+  const float radius = 1.6f * bezel;
+  std::vector<uint8_t> pixels(static_cast<size_t>(kWidth) * kHeight * 4);
+  for (int y = 0; y < kHeight; ++y) {
+    for (int x = 0; x < kWidth; ++x) {
+      // Distance outside the rounded rectangle (negative inside), in pixels.
+      const float px = std::abs(x + 0.5f - kWidth * 0.5f) - (kWidth * 0.5f - radius);
+      const float py = std::abs(y + 0.5f - kHeight * 0.5f) - (kHeight * 0.5f - radius);
+      const float outside = std::hypot(std::max(px, 0.0f), std::max(py, 0.0f)) + std::min(std::max(px, py), 0.0f) -
+                            radius;
+      const float coverage = std::clamp(0.5f - outside, 0.0f, 1.0f);
+      const float rim = std::clamp(1.0f - std::abs(outside + 1.5f) / 1.5f, 0.0f, 1.0f); // ~2 px inside the edge
+      const float alpha = coverage * (0.9f + 0.1f * rim);
+      const float grey = 0.11f + 0.35f * rim; // sRGB: a dark slate face, a lighter rim
+      uint8_t* out = &pixels[(static_cast<size_t>(y) * kWidth + x) * 4];
+      out[0] = static_cast<uint8_t>(std::lround(255.0f * grey * alpha));
+      out[1] = static_cast<uint8_t>(std::lround(255.0f * (grey + 0.01f) * alpha));
+      out[2] = static_cast<uint8_t>(std::lround(255.0f * (grey + 0.03f) * alpha));
+      out[3] = static_cast<uint8_t>(std::lround(255.0f * alpha));
+    }
+  }
   GLuint framebuffer = 0;
   glGenFramebuffers(1, &framebuffer);
   glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, images[index].image, 0);
   const bool complete = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
   if (complete) {
-    // Linear colors (the image is sRGB), alpha premultiplied: a dark grey
-    // bezel, and a nearly black face that lets a little of the room through.
-    glViewport(0, 0, kWidth, kHeight);
-    glClearColor(0.035f, 0.035f, 0.045f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-    constexpr float kFaceAlpha = 0.88f;
-    glEnable(GL_SCISSOR_TEST);
-    glScissor(bezel, bezel, kWidth - 2 * bezel, kHeight - 2 * bezel);
-    glClearColor(0.003f * kFaceAlpha, 0.004f * kFaceAlpha, 0.008f * kFaceAlpha, kFaceAlpha);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glDisable(GL_SCISSOR_TEST);
+    glBindTexture(GL_TEXTURE_2D, images[index].image);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kWidth, kHeight, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
   }
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   glDeleteFramebuffers(1, &framebuffer);
@@ -2386,7 +2401,7 @@ const XrCompositionLayerBaseHeader* StereoView::hud_screen_layer(XrSpace space, 
   mHudScreenLayer.space = space;
   mHudScreenLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
   mHudScreenLayer.subImage.swapchain = mHudScreenSwapchain;
-  mHudScreenLayer.subImage.imageRect = {{0, 0}, {256, 192}};
+  mHudScreenLayer.subImage.imageRect = {{0, 0}, {512, 384}};
   mHudScreenLayer.pose = pose;
   // The interface's size plus the bezel on each side (the same in both
   // directions, as on a real screen).
