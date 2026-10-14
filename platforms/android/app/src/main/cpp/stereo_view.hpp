@@ -272,6 +272,13 @@ private:
   XrSwapchain mHudScreenSwapchain = XR_NULL_HANDLE;
   // The depth layer (enable_depth_layer) and Application SpaceWarp.
   bool ensure_depth_program();
+  // The eyes' coverage raised (alpha x4, at most 1) where the game drew,
+  // in the open camera view: shadows and decals over nothing let the room
+  // through (boost_coverage).
+  bool ensure_boost_program();
+  void boost_coverage(GLuint image, GLint x, GLint y, GLsizei width, GLsizei height);
+  GLuint mBoostProgram = 0;
+  GLuint mBoostFramebuffer = 0;
   bool plane_corners(float corners[12]);
   void plane_mvp(const XrView& view, float mvp[16]) const;
   bool draw_depth(const Slot& slot);

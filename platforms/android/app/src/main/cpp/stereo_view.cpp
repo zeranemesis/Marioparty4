@@ -419,6 +419,14 @@ void StereoView::destroy() {
     glDeleteProgram(mDepthProgram);
     mDepthProgram = 0;
   }
+  if (mBoostProgram != 0) {
+    glDeleteProgram(mBoostProgram);
+    mBoostProgram = 0;
+  }
+  if (mBoostFramebuffer != 0) {
+    glDeleteFramebuffers(1, &mBoostFramebuffer);
+    mBoostFramebuffer = 0;
+  }
   if (mDepthFbo != 0) {
     glDeleteFramebuffers(1, &mDepthFbo);
     mDepthFbo = 0;
@@ -427,6 +435,73 @@ void StereoView::destroy() {
   mHudShown = false;
   mShown = false;
   mPresentedTag = 0;
+}
+
+bool StereoView::ensure_boost_program() {
+  if (mBoostProgram != 0) return true;
+  const char* vertexSource = R"(#version 300 es
+void main() {
+  vec2 corner = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1));
+  gl_Position = vec4(corner * 2.0 - 1.0, 0.0, 1.0);
+}
+)";
+  const char* fragmentSource = R"(#version 300 es
+precision mediump float;
+layout(location = 0) out vec4 coverage;
+void main() { coverage = vec4(0.0, 0.0, 0.0, 1.0); }
+)";
+  const auto compile = [](GLenum type, const char* source) {
+    const GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &source, nullptr);
+    glCompileShader(shader);
+    return shader;
+  };
+  const GLuint program = glCreateProgram();
+  const GLuint vs = compile(GL_VERTEX_SHADER, vertexSource), fs = compile(GL_FRAGMENT_SHADER, fragmentSource);
+  glAttachShader(program, vs);
+  glAttachShader(program, fs);
+  glLinkProgram(program);
+  glDeleteShader(vs);
+  glDeleteShader(fs);
+  GLint linked = 0;
+  glGetProgramiv(program, GL_LINK_STATUS, &linked);
+  if (!linked) {
+    LOGW("Stereo: coverage boost program failed to link");
+    glDeleteProgram(program);
+    return false;
+  }
+  mBoostProgram = program;
+  glGenFramebuffers(1, &mBoostFramebuffer);
+  return true;
+}
+
+// In the open camera view the eyes' alpha is what covers the room. Blended
+// draws over nothing (Speedwagons' and Three Throw's shadows, decals, edges)
+// left it partial: the room showed through solid things (2026-10-14). Twice
+// alpha += alpha (blend DST_ALPHA, ONE; alpha only): x4, clamped at 1, so
+// what the game covered at a quarter or more is opaque, nothing stays nothing.
+// `debug.partyboard.coverage_boost 0` turns it off.
+void StereoView::boost_coverage(GLuint image, GLint x, GLint y, GLsizei width, GLsizei height) {
+  if (!ensure_boost_program()) return;
+  glBindFramebuffer(GL_FRAMEBUFFER, mBoostFramebuffer);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image, 0);
+  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+    glViewport(x, y, width, height);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
+    glEnable(GL_BLEND);
+    glBlendEquation(GL_FUNC_ADD);
+    glBlendFuncSeparate(GL_ZERO, GL_ONE, GL_DST_ALPHA, GL_ONE);
+    glUseProgram(mBoostProgram);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glUseProgram(0);
+    glDisable(GL_BLEND);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+  }
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 bool StereoView::ensure_depth_program() {
@@ -1750,6 +1825,20 @@ void StereoView::present(Slot* newest, int fence, int64_t doneNs, int64_t finish
         g_gl.copyImage(newest->texture, GL_TEXTURE_2D, 0, static_cast<GLint>(eye * srcStride), srcY, 0,
                        mSwapchainImages[index].image, GL_TEXTURE_2D, 0, static_cast<GLint>(eye * mEyeWidth), y, 0,
                        static_cast<GLsizei>(newest->renderWidth), static_cast<GLsizei>(newest->renderHeight), 1);
+      }
+      static bool boost = true;
+      static auto boostReadAt = std::chrono::steady_clock::time_point{};
+      if (const auto now = std::chrono::steady_clock::now(); now - boostReadAt >= std::chrono::seconds(2)) {
+        boostReadAt = now;
+        char value[PROP_VALUE_MAX] = {};
+        __system_property_get("debug.partyboard.coverage_boost", value);
+        boost = value[0] != '0';
+      }
+      if (boost && mWindowOn && !mWindowFramed) {
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+          boost_coverage(mSwapchainImages[index].image, static_cast<GLint>(eye * mEyeWidth), y,
+                         static_cast<GLsizei>(newest->renderWidth), static_cast<GLsizei>(newest->renderHeight));
+        }
       }
     }
     // The model's depth for the compositor (enable_depth_layer).
