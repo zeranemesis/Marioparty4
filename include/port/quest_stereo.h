@@ -17,6 +17,10 @@ void PartyBoard_StereoBeginCamera(s16 cameraNo);
 void PartyBoard_StereoEndCamera(void);
 // The camera's view matrix, each time Hu3DCameraSet computes it.
 void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view);
+// A split screen whose cameras change hands (Mario Speedwagons sorts them by
+// rank): the minigame tells, each frame, which camera shows `player` (-1:
+// none). The eyes and the interface's part take the local player's.
+void PartyBoard_StereoPlayerCamera(s32 player, s32 camera);
 // Whether the current camera draws into the headset; visibility uses both eyes.
 BOOL PartyBoard_StereoActive(void);
 // MR board presentation also remains active after the camera's draw scope.

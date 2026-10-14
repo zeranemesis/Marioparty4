@@ -585,6 +585,11 @@ static int local_player()
 // active camera over another part of the screen) the one looking nearest to
 // this headset's player, its own view as on its part of the TV (a team's, in
 // two against two). Each headset of a game played together takes its own.
+// Each player's camera as the minigame last told (PartyBoard_StereoPlayerCamera),
+// for the minigame it was told in.
+static int sPlayerCamera[4] = {-1, -1, -1, -1};
+static OMOVL sPlayerCameraScene = static_cast<OMOVL>(-1);
+
 static int primary_camera()
 {
     // Photo Finish: camera 0 only photographs the puzzle's picture into a
@@ -605,6 +610,12 @@ static int primary_camera()
         const auto& view = Hu3DCamera[camera];
         return -1.0f != view.fov && view.viewportW > 1.0f && view.viewportH > 1.0f;
     };
+    if (sPlayerCameraScene == omCurrentOvlGet()) {
+        const int told = sPlayerCamera[local_player()];
+        if (told >= 0 && told < HU3D_CAM_MAX && shown(told)) {
+            return told;
+        }
+    }
     int first = -1;
     bool split = false;
     for (int camera = 0; camera < HU3D_CAM_MAX; ++camera) {
@@ -1170,6 +1181,16 @@ extern "C" void PartyBoard_QuestToast(const char *title, const char *text, int d
     (void)text;
     (void)durationMs;
 #endif
+}
+
+extern "C" void PartyBoard_StereoPlayerCamera(s32 player, s32 camera)
+{
+    if (player < 0 || player >= 4) return;
+    if (sPlayerCameraScene != omCurrentOvlGet()) {
+        sPlayerCameraScene = omCurrentOvlGet();
+        for (int& told : sPlayerCamera) told = -1;
+    }
+    sPlayerCamera[player] = camera;
 }
 
 extern "C" BOOL PartyBoard_StereoActive(void)

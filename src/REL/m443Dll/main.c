@@ -22,6 +22,9 @@
 #endif
 
 #include "REL/m443Dll.h"
+#ifdef TARGET_PC
+#include "port/quest_stereo.h"
+#endif
 
 typedef struct M443DllWork {
     u32 unk_00;
@@ -913,6 +916,15 @@ void fn_1_3770(omObjData *arg0)
                 CZoomM[var_r29] = var_r31->unk_34;
             }
         }
+#ifdef TARGET_PC
+        // Meta Quest: camera entry 1 + n is player n's (fn_1_4148), its
+        // camera handed out by rank above: the headset's eyes and interface
+        // follow the local player's.
+        for (var_r31 = &var_r28[6], var_r30 = 0; var_r30 < 4; var_r30++, var_r31++) {
+            PartyBoard_StereoPlayerCamera(var_r30,
+                (var_r31->unk_00 != 0 && (var_r26 & var_r31->unk_0C) != 0) ? var_r31->unk_38 : -1);
+        }
+#endif
     }
     if (arg0->work[1] == 4) {
         espDispOn(lbl_1_bss_10[0]);
