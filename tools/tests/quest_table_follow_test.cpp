@@ -1,6 +1,7 @@
 // The room scan's tables and the model following the game camera
 // (table_fit.hpp, quest_camera_follow.hpp): plain math, run on a PC.
 #include "../../platforms/android/app/src/main/cpp/table_fit.hpp"
+#include "../../platforms/android/app/src/main/cpp/table_orientation.hpp"
 #include "../../include/port/quest_camera_follow.hpp"
 
 #include <cassert>
@@ -93,6 +94,21 @@ void test_pick_and_scale() {
   assert(near(off * quest::kSceneExtentUnits, 0.95f * 0.4f));
   // Past the edge: the smallest model, never a negative one.
   assert(quest::scale_for_table(dining, 2.0f, 0, 0.00003f, 0.002f) == 0.00003f);
+}
+
+void test_table_facing_from_head() {
+  using quest::table_yaw_from_head;
+  using partyboard::quest::kPi;
+  float yaw = -100.0f;
+  // The controller's position is the origin; the board faces the player's head.
+  assert(table_yaw_from_head(0, 0, 0, 0.6f, 1.1f, yaw));
+  assert(near(yaw, 0.0f)); // +Z is toward a player sitting at the near edge
+  assert(table_yaw_from_head(0, 0, 0.8f, 0, -1.1f, yaw));
+  assert(near(yaw, kPi * 0.5f)); // sitting at the right edge
+  assert(table_yaw_from_head(1, 2, 1, 2, -0.75f, yaw));
+  assert(near(yaw, -0.75f)); // head directly above center: headset yaw fallback
+  assert(!table_yaw_from_head(0, 0, NAN, NAN, NAN, yaw));
+  // All cases are independent of the controller's rotation.
 }
 
 // A GX look-at view from a camera `yaw` around the target, `pitch` down.
@@ -235,6 +251,7 @@ void test_camera_turn() {
 int main() {
   test_table_from_plane();
   test_pick_and_scale();
+  test_table_facing_from_head();
   test_camera_yaw();
   test_follow();
   test_camera_turn();
