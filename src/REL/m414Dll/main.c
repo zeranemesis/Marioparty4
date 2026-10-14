@@ -12,6 +12,9 @@
 
 #ifndef __MWERKS__
 #include "game/hsfex.h"
+#ifdef TARGET_PC
+#include "port/quest_stereo.h"
+#endif
 #endif
 
 typedef struct UnkM414Struct {
@@ -2291,6 +2294,16 @@ void fn_1_8A70(void)
             break;
         }
         MGSeqParamSet(var_r24, 1, var_r27-- / REFRESH_RATE);
+#ifdef TARGET_PC
+        {
+            // Meta Quest: the headset shows only the local player's part of
+            // the split screen; the timer, centered on the TV, goes atop it.
+            float cropX, cropY, cropW, cropH;
+            if (PartyBoard_StereoHudCropRect(&cropX, &cropY, &cropW, &cropH)) {
+                MGSeqPosSet(var_r24, cropX + 0.5f * cropW + 4.0f, cropY + 48.0f);
+            }
+        }
+#endif
         HuPrcVSleep();
     }
     lbl_1_bss_98C = 4;

@@ -588,6 +588,10 @@ static int local_player()
 // Each player's camera as the minigame last told (PartyBoard_StereoPlayerCamera),
 // for the minigame it was told in.
 static int sPlayerCamera[4] = {-1, -1, -1, -1};
+// The part of the TV's 640 x 480 interface the headset shows (a split
+// screen's local player's), as last sent.
+static float sHudCrop[4] = {};
+static bool sHudCropped = false;
 static OMOVL sPlayerCameraScene = static_cast<OMOVL>(-1);
 
 static int primary_camera()
@@ -758,8 +762,14 @@ extern "C" void PartyBoard_StereoBeginCamera(s16 cameraNo)
         if (split && view.viewportW > 1.0f && view.viewportH > 1.0f) {
             sQuest.hudCrop(view.viewportX / 640.0f, view.viewportY / 480.0f, view.viewportW / 640.0f,
                 view.viewportH / 480.0f);
+            sHudCrop[0] = view.viewportX;
+            sHudCrop[1] = view.viewportY;
+            sHudCrop[2] = view.viewportW;
+            sHudCrop[3] = view.viewportH;
+            sHudCropped = true;
         } else {
             sQuest.hudCrop(0.0f, 0.0f, 1.0f, 1.0f);
+            sHudCropped = false;
         }
     }
     // No panel of the TV picture beside the 3D: Photo Finish's camera 0 was
@@ -1213,6 +1223,16 @@ extern "C" BOOL PartyBoard_StereoSetPieceHidden(const char *name)
     return std::strstr(hidden, key) != nullptr ? TRUE : FALSE;
 }
 
+extern "C" BOOL PartyBoard_StereoHudCropRect(float *x, float *y, float *width, float *height)
+{
+    if (!sHudCropped || !find_quest()) return FALSE;
+    *x = sHudCrop[0];
+    *y = sHudCrop[1];
+    *width = sHudCrop[2];
+    *height = sHudCrop[3];
+    return TRUE;
+}
+
 extern "C" void PartyBoard_StereoPlayerCamera(s32 player, s32 camera)
 {
     if (player < 0 || player >= 4) return;
@@ -1288,8 +1308,9 @@ extern "C" BOOL PartyBoard_StereoBackdrop(float x, float y, float z, float radiu
         // `debug.partyboard.scenery_<scene>`, overriding `open_scenery`.
         // Three Throw too: through its baskets' nets the room showed where its
         // stands had been left out, as holes in the baskets (2026-10-10).
+        // Mario Speedwagons too: half its track's scenery went (2026-10-14).
         const bool course = sScene == DLL_m401Dll || sScene == DLL_m406Dll || sScene == DLL_m408Dll
-            || sScene == DLL_m410Dll;
+            || sScene == DLL_m410Dll || sScene == DLL_m443Dll;
         static float factor = 3.0f;
         static OMOVL factorScene = DLL_NONE;
 #if defined(__ANDROID__)
