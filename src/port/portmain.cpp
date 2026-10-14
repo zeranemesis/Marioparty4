@@ -43,6 +43,7 @@
 #include <port/config.hpp>
 #include <port/display_rate.hpp>
 #include <port/dolassets.h>
+#include <port/launch_args.hpp>
 #include <port/main.h>
 #include <port/mods.h>
 #include <port/settings.h>
@@ -174,6 +175,43 @@ void aurora_log_callback(AuroraLogLevel level, const char* module, const char *m
     if (level == LOG_FATAL) {
         fflush(out);
         abort();
+    }
+}
+
+// Arguments from a launcher that cannot set environment variables (the Switch
+// launcher). They go to the Override layer: they hold for this session and
+// never reach the saved config, since the launcher sends them every time.
+static void ApplyLaunchArgs(const partyboard::launch::LaunchArgs& args) {
+    using partyboard::launch::AspectArg;
+    using partyboard::launch::LanguageArg;
+    auto& settings = partyboard::getSettings();
+    if (args.language) {
+        settings.game.language.setOverrideValue(*args.language == LanguageArg::French
+            ? partyboard::GameLanguage::French : partyboard::GameLanguage::English);
+    }
+    if (args.aspect) {
+        switch (*args.aspect) {
+            case AspectArg::Locked43:
+                settings.video.lockAspectRatio.setOverrideValue(true);
+                settings.video.enableAdaptiveWidescreen.setOverrideValue(false);
+                break;
+            case AspectArg::Stretch:
+                settings.video.lockAspectRatio.setOverrideValue(false);
+                settings.video.enableAdaptiveWidescreen.setOverrideValue(false);
+                break;
+            case AspectArg::Wide:
+                settings.video.enableAdaptiveWidescreen.setOverrideValue(true);
+                break;
+        }
+    }
+    if (!args.modList.empty()) {
+        PartyBoard_SetModListPath(args.modList.c_str());
+    }
+    if (!args.launcherPath.empty()) {
+        PartyBoardMainLog.info("Started by the launcher at {}", args.launcherPath);
+    }
+    for (const auto& ignored : args.ignored) {
+        PartyBoardMainLog.warn("Ignoring launch argument with an unknown value: {}", ignored);
     }
 }
 
@@ -598,6 +636,8 @@ extern "C" int port_main(int argc, char* argv[]) {
     PartyBoard_ConfigPath = calculate_config_path();
 
     partyboard::config::LoadFromUserPreferences();
+    partyboard::launch::setCurrent(partyboard::launch::parse(argc, argv));
+    ApplyLaunchArgs(partyboard::launch::current());
     std::string onlineDisc;
 #ifdef _WIN32
     if (PartyBoard_NetplayEnabled()) {
@@ -635,6 +675,18 @@ extern "C" int port_main(int argc, char* argv[]) {
             }
             else {
                 PartyBoardMainLog.warn("PARTYBOARD_DISC_IMAGE does not name a readable file, ignoring it");
+            }
+        }
+        // The same contract as an argument, for launchers that cannot set the
+        // environment. It wins: it is the more deliberate of the two.
+        if (const std::string& arg = partyboard::launch::current().discImage; !arg.empty()) {
+            const std::filesystem::path candidate(std::u8string(reinterpret_cast<const char8_t *>(arg.data()), arg.size()));
+            std::error_code error;
+            if (std::filesystem::is_regular_file(candidate, error)) {
+                launcherDisc = arg;
+            }
+            else {
+                PartyBoardMainLog.warn("--disc-image does not name a readable file, ignoring it");
             }
         }
     }

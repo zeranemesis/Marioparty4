@@ -1,0 +1,65 @@
+diff --git a/src/audio/switch/SDL_switchaudio.c b/src/audio/switch/SDL_switchaudio.c
+index 3719c7e..9d89dd2 100644
+--- a/src/audio/switch/SDL_switchaudio.c
++++ b/src/audio/switch/SDL_switchaudio.c
+@@ -85,6 +85,7 @@ static bool SWITCHAUDIO_OpenDevice(SDL_AudioDevice *device)
+     }
+     SDL_memset(device->hidden->mixbuf, device->silence_value, device->buffer_size);
+     device->hidden->next = 0;
++    device->hidden->queued = 0;
+ 
+     return true;
+ 
+@@ -128,16 +129,25 @@ static bool SWITCHAUDIO_PlayDevice(SDL_AudioDevice *device, const Uint8 *buffer,
+     if (R_FAILED(audoutAppendAudioOutBuffer(b))) {
+         return SDL_SetError("audoutAppendAudioOutBuffer() failed");
+     }
++    device->hidden->queued++;
+     return true;
+ }
+ 
++// SDL plays a buffer, then waits. Only block once every buffer is queued: the
++// slot PlayDevice fills next is then the oldest, and it is free again as soon
++// as AUDOUT releases it.
+ static bool SWITCHAUDIO_WaitDevice(SDL_AudioDevice *device)
+ {
+-    AudioOutBuffer *released = NULL;
+-    u32 released_count = 0;
+-    (void)device;
+-    if (R_FAILED(audoutWaitPlayFinish(&released, &released_count, UINT64_MAX))) {
+-        return SDL_SetError("audoutWaitPlayFinish() failed");
++    while (device->hidden->queued >= NUM_AUDIO_BUFFERS) {
++        AudioOutBuffer *released = NULL;
++        u32 released_count = 0;
++        if (R_FAILED(audoutWaitPlayFinish(&released, &released_count, UINT64_MAX))) {
++            return SDL_SetError("audoutWaitPlayFinish() failed");
++        }
++        device->hidden->queued -= (int)released_count;
++        if (device->hidden->queued < 0) {
++            device->hidden->queued = 0;
++        }
+     }
+     return true;
+ }
+diff --git a/src/audio/switch/SDL_switchaudio.h b/src/audio/switch/SDL_switchaudio.h
+index 185568c..0e91d31 100644
+--- a/src/audio/switch/SDL_switchaudio.h
++++ b/src/audio/switch/SDL_switchaudio.h
+@@ -26,13 +26,16 @@
+ 
+ #include <switch.h>
+ 
+-#define NUM_AUDIO_BUFFERS 2
++// Buffers kept in flight: AUDOUT plays them in order, so while one plays the
++// next ones are already queued and the mixer never leaves the hardware idle.
++#define NUM_AUDIO_BUFFERS 4
+ 
+ struct SDL_PrivateAudioData
+ {
+     Uint8 *mixbuf;                            // buffer SDL fills each iteration
+     AudioOutBuffer buffers[NUM_AUDIO_BUFFERS]; // libnx AUDOUT buffer pool
+     int next;                                  // next pool slot to submit
++    int queued;                                // buffers appended, not yet released
+ };
+ 
+ #endif // SDL_switchaudio_h_

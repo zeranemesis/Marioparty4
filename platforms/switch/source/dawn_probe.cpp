@@ -5,7 +5,6 @@
 #include <EGL/egl.h>
 #include <switch.h>
 
-#include <dawn/dawn_proc.h>
 #include <dawn/native/DawnNative.h>
 #include <dawn/native/OpenGLBackend.h>
 #include <webgpu/webgpu_cpp.h>
@@ -86,8 +85,8 @@ bool runDawnProbe() {
 
     // Native synchronous Dawn avoids TimedWaitAny/SystemEvent. This is
     // intentionally console-friendly: no Unix pipe is needed to discover the
-    // adapter or create the device.
-    dawnProcSetProcs(&dawn::native::GetProcs());
+    // adapter or create the device. The monolithic webgpu_dawn library
+    // implements the wgpu* entry points itself, so no proc table is set.
 
     auto instance = std::make_unique<dawn::native::Instance>();
     instance->SetBackendValidationLevel(dawn::native::BackendValidationLevel::Disabled);

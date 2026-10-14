@@ -94,7 +94,12 @@ std::filesystem::path FromUtf8(std::string_view value) {
     return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(value.data()), value.size()));
 }
 
+std::string sModListOverride;
+
 std::filesystem::path ModListPath() {
+    if (!sModListOverride.empty()) {
+        return FromUtf8(sModListOverride);
+    }
 #ifdef _WIN32
     if (const wchar_t* path = _wgetenv(L"PARTYBOARD_MOD_LIST"); path != nullptr && *path != 0) {
         return std::filesystem::path(path);
@@ -436,5 +441,7 @@ extern "C" int PartyBoard_InitMods(void) {
 }
 
 extern "C" int PartyBoard_GetModRootCount(void) { return s_overlay.rootCount; }
+
+extern "C" void PartyBoard_SetModListPath(const char* path) { sModListOverride = path != nullptr ? path : ""; }
 
 #include "mods_test.inc"
