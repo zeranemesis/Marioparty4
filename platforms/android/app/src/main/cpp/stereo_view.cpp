@@ -480,7 +480,9 @@ void main() { coverage = vec4(0.0, 0.0, 0.0, 1.0); }
 // left it partial: the room showed through solid things (2026-10-14). Twice
 // alpha += alpha (blend DST_ALPHA, ONE; alpha only): x4, clamped at 1, so
 // what the game covered at a quarter or more is opaque, nothing stays nothing.
-// `debug.partyboard.coverage_boost 0` turns it off.
+// Off by default since 2026-10-14: it darkened every edge over the room
+// (the eyes' colours are premultiplied), and the real cause was elsewhere
+// (stereo.cpp: the objects' blends cover). `debug.partyboard.coverage_boost 1`.
 void StereoView::boost_coverage(GLuint image, GLint x, GLint y, GLsizei width, GLsizei height) {
   if (!ensure_boost_program()) return;
   glBindFramebuffer(GL_FRAMEBUFFER, mBoostFramebuffer);
@@ -1826,13 +1828,13 @@ void StereoView::present(Slot* newest, int fence, int64_t doneNs, int64_t finish
                        mSwapchainImages[index].image, GL_TEXTURE_2D, 0, static_cast<GLint>(eye * mEyeWidth), y, 0,
                        static_cast<GLsizei>(newest->renderWidth), static_cast<GLsizei>(newest->renderHeight), 1);
       }
-      static bool boost = true;
+      static bool boost = false;
       static auto boostReadAt = std::chrono::steady_clock::time_point{};
       if (const auto now = std::chrono::steady_clock::now(); now - boostReadAt >= std::chrono::seconds(2)) {
         boostReadAt = now;
         char value[PROP_VALUE_MAX] = {};
         __system_property_get("debug.partyboard.coverage_boost", value);
-        boost = value[0] != '0';
+        boost = value[0] == '1';
       }
       if (boost && mWindowOn && !mWindowFramed) {
         for (uint32_t eye = 0; eye < 2; ++eye) {
