@@ -1183,15 +1183,17 @@ extern "C" void PartyBoard_QuestToast(const char *title, const char *text, int d
 #endif
 }
 
-// The minigame menu's stage (mgmode.bin model 0): its floor and walls
-// ("base"), pillars and ceiling ("tenjo") left out, only the curtains
-// ("maku0", "maku_top", "curtain-sode") and the Goomba kept on the table
-// (asked for 2026-10-14). `adb shell setprop debug.partyboard.menu_hide
-// base,pillar,tenjo` (names, comma separated; "none": all kept), read every 2 s.
+// The minigame menu's set on the table (asked for 2026-10-14): its stage
+// (mgmode.bin model 0: floor and walls "base", "pillar", ceiling "tenjo"),
+// its curtains ("maku0", "maku_top", the side ones "curtain-sode") and its
+// floating balloons ("fusen0" to "fusen3", models 141 to 144) left out; the
+// Goomba, the mode blocks and the sign above stay. `adb shell setprop
+// debug.partyboard.menu_hide base,pillar,...` (names, comma separated;
+// "none": all kept), read every 2 s.
 extern "C" BOOL PartyBoard_StereoSetPieceHidden(const char *name)
 {
     if (omCurrentOvlGet() != DLL_mgmodedll) return FALSE;
-    static char hidden[PROP_VALUE_MAX + 2] = ",base,pillar,tenjo,";
+    static char hidden[PROP_VALUE_MAX + 2] = ",base,pillar,tenjo,curtain-sode,maku0,maku_top,fusen0,fusen1,fusen2,fusen3,";
 #if defined(__ANDROID__)
     static auto readAt = std::chrono::steady_clock::time_point {};
     const auto now = std::chrono::steady_clock::now();
@@ -1202,7 +1204,7 @@ extern "C" BOOL PartyBoard_StereoSetPieceHidden(const char *name)
         if (value[0] != 0) {
             std::snprintf(hidden, sizeof(hidden), ",%s,", value);
         } else {
-            std::snprintf(hidden, sizeof(hidden), ",base,pillar,tenjo,");
+            std::snprintf(hidden, sizeof(hidden), ",base,pillar,tenjo,curtain-sode,maku0,maku_top,fusen0,fusen1,fusen2,fusen3,");
         }
     }
 #endif
