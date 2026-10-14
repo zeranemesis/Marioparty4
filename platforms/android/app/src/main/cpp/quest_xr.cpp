@@ -2097,15 +2097,17 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
       XrPosef local = identity_pose();
       local.position = {0.0f, std::max(0.15f, eyeY - 0.02f + raise), -behind};
       hudPose = compose(app.pose, local);
-      // A menu: where its TV picture stands in the scene, over the blocks its
-      // list names (`debug.partyboard.hud_plane 0`: at the eyes, as above).
-      static bool usePlane = true;
+      // A menu's interface where its TV picture stands in the scene, over the
+      // blocks its list names: only with `debug.partyboard.hud_plane 1`. Not
+      // proportioned to the scene on the headset; the screen before the
+      // eyes above was preferred for every menu (2026-10-14).
+      static bool usePlane = false;
       static auto planeReadAt = std::chrono::steady_clock::time_point{};
       if (const auto now = std::chrono::steady_clock::now(); now - planeReadAt >= std::chrono::seconds(2)) {
         planeReadAt = now;
         char value[PROP_VALUE_MAX] = {};
         __system_property_get("debug.partyboard.hud_plane", value);
-        usePlane = value[0] != '0';
+        usePlane = value[0] == '1';
       }
       if (usePlane && planeHeight > 0.02f && planeHeight < 3.0f) {
         hudPose = plane; // already in the room (STAGE)
