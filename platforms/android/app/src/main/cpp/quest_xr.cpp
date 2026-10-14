@@ -337,6 +337,12 @@ std::array<float, 4> g_inset{};
 // The open camera view's vertical half field, its tangent (0: none):
 // the interface spans it from the player's place (PartyBoardQuest_StereoHudFov).
 std::atomic<float> g_hudTanHalfFov{0.0f};
+// A menu's TV picture plane in the room (PartyBoardQuest_StereoHudPlane): its
+// interface stands there, over the blocks it names.
+std::mutex g_hudPlaneMutex;
+XrPosef g_hudPlanePose{};
+float g_hudPlaneHeight = 0.0f;
+std::chrono::steady_clock::time_point g_hudPlaneAt{};
 std::chrono::steady_clock::time_point g_insetAt{};
 
 std::mutex g_noticeMutex;
@@ -2057,6 +2063,15 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
         behind = v > -0.5f && v < 3.0f ? v : -0.12f;
       }
       hudSize = {0.5f, 0.375f};
+      XrPosef plane{};
+      float planeHeight = 0.0f;
+      {
+        std::lock_guard lock{g_hudPlaneMutex};
+        if (std::chrono::steady_clock::now() - g_hudPlaneAt < std::chrono::milliseconds(500)) {
+          plane = g_hudPlanePose;
+          planeHeight = g_hudPlaneHeight;
+        }
+      }
       // Its center at the eyes' height when the menu comes up, kept while it
       // shows: from the height measured once (the table's placing), it stood
       // low when the player sat otherwise since (2026-10-14).
@@ -2082,6 +2097,20 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
       XrPosef local = identity_pose();
       local.position = {0.0f, std::max(0.15f, eyeY - 0.02f + raise), -behind};
       hudPose = compose(app.pose, local);
+      // A menu: where its TV picture stands in the scene, over the blocks its
+      // list names (`debug.partyboard.hud_plane 0`: at the eyes, as above).
+      static bool usePlane = true;
+      static auto planeReadAt = std::chrono::steady_clock::time_point{};
+      if (const auto now = std::chrono::steady_clock::now(); now - planeReadAt >= std::chrono::seconds(2)) {
+        planeReadAt = now;
+        char value[PROP_VALUE_MAX] = {};
+        __system_property_get("debug.partyboard.hud_plane", value);
+        usePlane = value[0] != '0';
+      }
+      if (usePlane && planeHeight > 0.02f && planeHeight < 3.0f) {
+        hudPose = plane; // already in the room (STAGE)
+        hudSize = {planeHeight * 4.0f / 3.0f, planeHeight};
+      }
     } else {
       hudPose = hud_pose(app.pose, app.table.modelScale, hudSize, &app.screenEye);
     }
@@ -2482,6 +2511,17 @@ __attribute__((visibility("default"))) void PartyBoardQuest_StereoCameraView(boo
 
 // Photo Finish's puzzle (quest_stereo.cpp, game thread): the part of the
 // 640 x 480 TV picture to show beside the 3D; width 0: none.
+__attribute__((visibility("default"))) void PartyBoardQuest_StereoHudPlane(const float* pose, float height) {
+  std::lock_guard lock{g_hudPlaneMutex};
+  if (pose == nullptr || !std::isfinite(height)) {
+    g_hudPlaneHeight = 0.0f;
+    return;
+  }
+  g_hudPlanePose = {{pose[3], pose[4], pose[5], pose[6]}, {pose[0], pose[1], pose[2]}};
+  g_hudPlaneHeight = height;
+  g_hudPlaneAt = std::chrono::steady_clock::now();
+}
+
 __attribute__((visibility("default"))) void PartyBoardQuest_StereoHudFov(float tanHalfFov) {
   g_hudTanHalfFov = std::isfinite(tanHalfFov) ? tanHalfFov : 0.0f;
 }

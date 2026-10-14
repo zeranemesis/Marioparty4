@@ -87,6 +87,7 @@ using HudCropFn = void (*)(float x, float y, float width, float height);
 using SceneBoundsFn = void (*)(const float *low, const float *high);
 using InsetFn = void (*)(float x, float y, float width, float height);
 using HudFovFn = void (*)(float tanHalfFov);
+using HudPlaneFn = void (*)(const float *pose, float height);
 using CameraViewFn = void (*)(bool cameraView);
 using SceneFn = void (*)(int scene);
 using TableSetupHoldFn = bool (*)();
@@ -109,6 +110,7 @@ struct Quest {
     SceneBoundsFn sceneBounds = nullptr;   // optional: what the eyes need to draw (cropped eyes)
     InsetFn inset = nullptr;               // optional: a part of the TV picture shown beside the 3D
     HudFovFn hudFov = nullptr;             // optional: the open view's camera field, for the interface's size
+    HudPlaneFn hudPlane = nullptr;         // optional: a menu's TV picture plane in the room, for its interface
     CameraViewFn cameraView = nullptr;     // optional: this scene from its camera's point of view
     SceneFn scene = nullptr;               // optional: which scene (its own resolution)
     TableSetupHoldFn tableSetupHold = nullptr; // optional
@@ -418,6 +420,7 @@ bool find_quest()
             sQuest.sceneBounds = reinterpret_cast<SceneBoundsFn>(dlsym(lib, "PartyBoardQuest_StereoSceneBounds"));
             sQuest.inset = reinterpret_cast<InsetFn>(dlsym(lib, "PartyBoardQuest_StereoInset"));
             sQuest.hudFov = reinterpret_cast<HudFovFn>(dlsym(lib, "PartyBoardQuest_StereoHudFov"));
+            sQuest.hudPlane = reinterpret_cast<HudPlaneFn>(dlsym(lib, "PartyBoardQuest_StereoHudPlane"));
             sQuest.cameraView = reinterpret_cast<CameraViewFn>(dlsym(lib, "PartyBoardQuest_StereoCameraView"));
             sQuest.scene = reinterpret_cast<SceneFn>(dlsym(lib, "PartyBoardQuest_StereoScene"));
             sQuest.tableSetupHold = reinterpret_cast<TableSetupHoldFn>(dlsym(lib, "PartyBoardQuest_TableSetupHold"));
@@ -1055,6 +1058,69 @@ extern "C" void PartyBoard_StereoCameraView(s32 cameraNo, Mtx view)
             sceneWorld.m[1][3] = -floorY * scale;
         }
         world = multiply(multiply(from_rows(sFrame.world), sceneWorld), inverse_affine(view));
+        // A menu's interface where the TV picture stands in the scene: the
+        // plane through what the camera looks at, facing the camera, as tall
+        // as its field there. Its list then lies over the blocks it names, as
+        // on TV (asked for 2026-10-14: "it must match the block in front").
+        if (sQuest.hudPlane != nullptr && !sSecondary) {
+            const auto& camera = Hu3DCamera[cameraNo];
+            const Mat4 toRoom = multiply(from_rows(sFrame.world), sceneWorld);
+            const auto point = [&](float x, float y, float z, float w, float out[3]) {
+                for (int r = 0; r < 3; ++r) {
+                    out[r] = toRoom.m[r][0] * x + toRoom.m[r][1] * y + toRoom.m[r][2] * z + toRoom.m[r][3] * w;
+                }
+            };
+            float target[3], eye[3], up[3];
+            point(camera.target.x, camera.target.y, camera.target.z, 1.0f, target);
+            point(camera.pos.x, camera.pos.y, camera.pos.z, 1.0f, eye);
+            point(camera.up.x, camera.up.y, camera.up.z, 0.0f, up);
+            float zAxis[3] {eye[0] - target[0], eye[1] - target[1], eye[2] - target[2]};
+            const float distance = std::sqrt(zAxis[0] * zAxis[0] + zAxis[1] * zAxis[1] + zAxis[2] * zAxis[2]);
+            float xAxis[3] {up[1] * zAxis[2] - up[2] * zAxis[1], up[2] * zAxis[0] - up[0] * zAxis[2],
+                up[0] * zAxis[1] - up[1] * zAxis[0]};
+            const float xLength = std::sqrt(xAxis[0] * xAxis[0] + xAxis[1] * xAxis[1] + xAxis[2] * xAxis[2]);
+            if (menu_scene(scene) && distance > 1e-4f && xLength > 1e-6f && std::isfinite(camera.fov)) {
+                for (int i = 0; i < 3; ++i) {
+                    zAxis[i] /= distance;
+                    xAxis[i] /= xLength;
+                }
+                const float yAxis[3] {zAxis[1] * xAxis[2] - zAxis[2] * xAxis[1], zAxis[2] * xAxis[0] - zAxis[0] * xAxis[2],
+                    zAxis[0] * xAxis[1] - zAxis[1] * xAxis[0]};
+                // The rotation's columns x, y, z as a quaternion.
+                const float m00 = xAxis[0], m11 = yAxis[1], m22 = zAxis[2];
+                float q[4];
+                const float trace = m00 + m11 + m22;
+                if (trace > 0.0f) {
+                    const float s = 0.5f / std::sqrt(trace + 1.0f);
+                    q[3] = 0.25f / s;
+                    q[0] = (yAxis[2] - zAxis[1]) * s;
+                    q[1] = (zAxis[0] - xAxis[2]) * s;
+                    q[2] = (xAxis[1] - yAxis[0]) * s;
+                } else if (m00 > m11 && m00 > m22) {
+                    const float s = 2.0f * std::sqrt(1.0f + m00 - m11 - m22);
+                    q[3] = (yAxis[2] - zAxis[1]) / s;
+                    q[0] = 0.25f * s;
+                    q[1] = (yAxis[0] + xAxis[1]) / s;
+                    q[2] = (zAxis[0] + xAxis[2]) / s;
+                } else if (m11 > m22) {
+                    const float s = 2.0f * std::sqrt(1.0f + m11 - m00 - m22);
+                    q[3] = (zAxis[0] - xAxis[2]) / s;
+                    q[0] = (yAxis[0] + xAxis[1]) / s;
+                    q[1] = 0.25f * s;
+                    q[2] = (zAxis[1] + yAxis[2]) / s;
+                } else {
+                    const float s = 2.0f * std::sqrt(1.0f + m22 - m00 - m11);
+                    q[3] = (xAxis[1] - yAxis[0]) / s;
+                    q[0] = (zAxis[0] + xAxis[2]) / s;
+                    q[1] = (zAxis[1] + yAxis[2]) / s;
+                    q[2] = 0.25f * s;
+                }
+                const float pose[7] {target[0], target[1], target[2], q[0], q[1], q[2], q[3]};
+                sQuest.hudPlane(pose, 2.0f * distance * std::tan(camera.fov * 0.5f * static_cast<float>(M_PI) / 180.0f));
+            } else {
+                sQuest.hudPlane(nullptr, 0.0f);
+            }
+        }
         sSceneExtent = sSceneFitted ? 2800.0f / sSceneScale : 0.0f;
         sOpenSkyRadius = 0.0f;
     }
