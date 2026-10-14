@@ -183,15 +183,25 @@ final class Lobby {
         final byte[] discHash;
         final long discLength;
         final ModSet mods;
+        // The game's language (Msg.GAME_LANGUAGES); only the host's counts.
+        final int language;
 
         PlayerInfo(String name, byte[] hash, long length, ModSet mods) throws IOException {
+            this(name, hash, length, mods, 0);
+        }
+
+        PlayerInfo(String name, byte[] hash, long length, ModSet mods, int language) throws IOException {
             this.name = cleanName(name);
             if (hash != null && (hash.length != 32 || length <= 0)) {
                 throw new IOException("invalid disc information");
             }
+            if (language < 0 || language >= Msg.GAME_LANGUAGES.length) {
+                throw new IOException("unknown game language");
+            }
             discHash = hash == null ? null : hash.clone();
             discLength = hash == null ? 0 : length;
             this.mods = mods == null ? ModSet.EMPTY : mods;
+            this.language = language;
         }
 
         static String cleanName(String name) throws IOException {
@@ -229,6 +239,11 @@ final class Lobby {
                 w.write(discHash);
             }
             mods.write(w);
+            // Appended only when it is not English, so a USA disc announces the
+            // bytes 0.19.0 sends (the PC salon does the same).
+            if (language != 0) {
+                w.write(language);
+            }
             return w.toByteArray();
         }
 
@@ -259,10 +274,17 @@ final class Lobby {
                 // announcement carries more than we understand is refused loudly,
                 // never read short into a session that would desync.
                 ModSet mods = ModSet.read(r);
+                int language = 0;
+                if (r.remaining() == 1) {
+                    language = r.get() & 0xff;
+                    if (language == 0 || language >= Msg.GAME_LANGUAGES.length) {
+                        throw new IOException();
+                    }
+                }
                 if (r.hasRemaining()) {
                     throw new IOException();
                 }
-                return new PlayerInfo(name, hash, length, mods);
+                return new PlayerInfo(name, hash, length, mods, language);
             } catch (IOException | RuntimeException e) {
                 throw new IOException(Msg.s("Informations du joueur incompatibles.", "Incompatible player information."));
             }

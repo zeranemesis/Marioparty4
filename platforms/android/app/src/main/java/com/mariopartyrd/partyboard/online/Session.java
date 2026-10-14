@@ -732,6 +732,16 @@ final class Session implements AutoCloseable {
                 transport.add("--netplay-join");
                 transport.add("127.0.0.1:" + bridge.localPort());
             }
+            // A European disc loads its text in the language chosen; every seat
+            // takes the host's (the PC salon does the same), and the game refuses
+            // a peer in another language at its handshake.
+            if (disc.pal) {
+                Lobby.PlayerInfo hostInfo = l.seatInfo(0);
+                String language = Msg.GAME_LANGUAGES[hostInfo != null ? hostInfo.language : profile.language];
+                transport.add("--lang");
+                transport.add(language);
+                report.write("game_language=" + language);
+            }
             report.write("netplay_mode=lockstep input_delay_frames=3");
             launcher.launch(onlineArguments(transport), link.barrier(), disc.path);
             link.waitReady(() -> disposed, launcher::gameAlive, 120_000);

@@ -147,7 +147,8 @@ public final class OnlineService extends Service {
         }
         Lobby.PlayerInfo profile;
         try {
-            profile = new Lobby.PlayerInfo(nickname, disc.hash, disc.length, Lobby.ModSet.EMPTY);
+            profile = new Lobby.PlayerInfo(nickname, disc.hash, disc.length, Lobby.ModSet.EMPTY,
+                Math.max(0, Msg.gameLanguageIndex(Msg.gameLanguage())));
         } catch (IOException e) {
             setStatus(e.getMessage());
             return;
@@ -302,7 +303,8 @@ public final class OnlineService extends Service {
         intent.putExtra("partyboard_argv", argv);
         intent.putExtra(EXTRA_BARRIER, barrier);
         intent.putExtra(EXTRA_DISC, discPath);
-        intent.putExtra(EXTRA_LANGUAGE, Msg.french() ? "fr" : "en");
+        // The game's language, not only the menus': a return to the lobby keeps it.
+        intent.putExtra(EXTRA_LANGUAGE, Msg.gameLanguage());
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
         return intent;
     }
