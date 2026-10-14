@@ -11,6 +11,10 @@ param(
     # PARTYBOARD_HOOK_TICK_GATE for the second peer only, to check that a
     # mismatch is refused at the handshake.
     [string]$PeerHookGate='',
+    # Extra arguments for the host (side 0) and the guest (side 1), e.g.
+    # "--lang de" to check that two languages are refused at the handshake.
+    [string]$HostArguments='',
+    [string]$PeerArguments='',
     [string]$OutputDirectory='work/netplay-real-boot',
     [int]$DurationSeconds=30,
     [switch]$Menu,
@@ -103,6 +107,8 @@ try {
         if ($side -eq 1 -and $PeerHookGate -ne '') { $start.EnvironmentVariables['PARTYBOARD_HOOK_TICK_GATE']=$PeerHookGate }
         $transport=if ($side -eq 0) { "--netplay-host $port" } else { "--netplay-join 127.0.0.1:$joinPort" }
         $start.Arguments="$transport --netplay-full --netplay-loopback --netplay-delay 3"
+        $sideArguments=if ($side -eq 0) { $HostArguments } else { $PeerArguments }
+        if ($sideArguments) { $start.Arguments+=" $sideArguments" }
         if ($Menu) { $start.Arguments+=" --netplay-menu-probe" }
         if ($Walk) { $start.Arguments+=" --netplay-walk-probe" }
         # Each peer records both seats to its own file so the two can be

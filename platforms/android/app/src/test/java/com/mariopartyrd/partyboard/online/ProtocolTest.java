@@ -162,6 +162,61 @@ public class ProtocolTest {
         return new Lobby.PlayerInfo(name, hash, 470366104L, Lobby.ModSet.EMPTY);
     }
 
+    // A European disc's text depends on its language; the host's travels in its
+    // profile, written exactly as the PC salon writes it (Tests.cs GameLanguages).
+    @Test
+    public void hostLanguageTravelsAndEnglishAddsNothing() throws Exception {
+        byte[] hash = new byte[32];
+        Lobby.PlayerInfo english = player("Camille", hash);
+        Lobby.PlayerInfo german = new Lobby.PlayerInfo("Camille", hash, 470366104L, Lobby.ModSet.EMPTY, 1);
+        assertEquals(1, Lobby.PlayerInfo.decode(german.encode()).language);
+        assertEquals(0, Lobby.PlayerInfo.decode(english.encode()).language);
+        assertEquals("English adds nothing: a USA disc sends what 0.19.0 sent",
+            english.encode().length + 1, german.encode().length);
+        byte[] unknown = Arrays.copyOf(english.encode(), english.encode().length + 1);
+        unknown[unknown.length - 1] = 5;
+        try {
+            Lobby.PlayerInfo.decode(unknown);
+            fail("a language past Italian is refused");
+        } catch (IOException expected) {
+        }
+        byte[] zero = Arrays.copyOf(english.encode(), english.encode().length + 1);
+        try {
+            Lobby.PlayerInfo.decode(zero);
+            fail("English is never written explicitly");
+        } catch (IOException expected) {
+        }
+        assertEquals(4, Msg.gameLanguageIndex("it"));
+        assertEquals(-1, Msg.gameLanguageIndex("nl"));
+    }
+
+    // Both discs online play takes, and nothing else, through the plain-image path.
+    @Test
+    public void onlineTakesTheUsaRevisionOneAndTheEuropeanDisc() throws Exception {
+        assertFalse(DiscFile.checkHeader(gameCubeHeader("GMPE01", 1), 0x40));
+        assertTrue(DiscFile.checkHeader(gameCubeHeader("GMPP01", 2), 0x40));
+        for (byte[] other : new byte[][] { gameCubeHeader("GMPE01", 0), gameCubeHeader("GMPP01", 0),
+                 gameCubeHeader("GMPJ01", 0) }) {
+            try {
+                DiscFile.checkHeader(other, 0x40);
+                fail("only USA revision 1 and the European disc version 2");
+            } catch (IOException expected) {
+            }
+        }
+    }
+
+    private static byte[] gameCubeHeader(String id, int version) {
+        byte[] head = new byte[0x40];
+        byte[] ascii = id.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        System.arraycopy(ascii, 0, head, 0, 6);
+        head[7] = (byte) version;
+        head[0x1c] = (byte) 0xC2;
+        head[0x1d] = (byte) 0x33;
+        head[0x1e] = (byte) 0x9F;
+        head[0x1f] = (byte) 0x3D;
+        return head;
+    }
+
     @Test
     public void playerInfoKeepsThePcEncoding() throws Exception {
         byte[] hash = Wire.random(32);

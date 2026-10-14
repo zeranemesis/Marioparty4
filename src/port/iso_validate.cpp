@@ -289,21 +289,28 @@ void log_verification_state(std::string_view path, DiscVerificationState state) 
 }
 }  // namespace partyboard::iso
 
-extern "C" bool PartyBoard_OnlineCheckDisc(void) {
+/* Which disc an online session may use: 1 for USA revision 1, 2 for the
+ * European disc (GMPP01 version 2, PAL data converted at runtime), 0 for any
+ * other. Every player's whole image is then compared by hash, so a session
+ * never mixes the two. */
+extern "C" int PartyBoard_OnlineCheckDisc(void) {
 #ifdef _WIN32
     const auto *path = _wgetenv(L"PARTYBOARD_ONLINE_DISC");
-    if (!path || !*path) return false;
+    if (!path || !*path) return 0;
     const auto utf8 = std::filesystem::path(path).u8string();
     const auto stream = SDL_IOFromFile(reinterpret_cast<const char *>(utf8.c_str()), "rb");
-    if (!stream) return false;
+    if (!stream) return 0;
     partyboard::iso::NodHandleWrapper disc;
     const NodDiscStream input { .user_data = stream, .read_at = partyboard::iso::StreamReadAt,
         .stream_len = partyboard::iso::StreamLength, .close = partyboard::iso::StreamClose };
-    if (nod_disc_open_stream(&input, nullptr, &disc.handle) != NOD_RESULT_OK || !disc.handle) return false;
+    if (nod_disc_open_stream(&input, nullptr, &disc.handle) != NOD_RESULT_OK || !disc.handle) return 0;
     NodDiscHeader header {};
-    return nod_disc_header(disc.handle, &header) == NOD_RESULT_OK
-        && std::string_view(header.game_id, 6) == "GMPE01" && header.disc_version == 1;
+    if (nod_disc_header(disc.handle, &header) != NOD_RESULT_OK) return 0;
+    const std::string_view id(header.game_id, 6);
+    if (id == "GMPE01" && header.disc_version == 1) return 1;
+    if (id == "GMPP01" && header.disc_version == 2) return 2;
+    return 0;
 #else
-    return false;
+    return 0;
 #endif
 }

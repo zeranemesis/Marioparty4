@@ -97,10 +97,11 @@ bool open_android_lobby([[maybe_unused]] const std::string &invitation)
         const auto &state = prelaunch_state();
         const std::string disc = state.configuredDiscCanLaunch ? state.configuredDiscPath
                                                               : getSettings().backend.isoPath.getValue();
-        const bool french = getSettings().game.language.getValue() == GameLanguage::French;
         jstring name = env->NewStringUTF(getSettings().online.nickname.getValue().c_str());
         jstring path = env->NewStringUTF(disc.c_str());
-        jstring language = env->NewStringUTF(french ? "fr" : "en");
+        // The game's language: the lobby shows French for "fr" and English
+        // otherwise, and gives the host's to every seat of a European session.
+        jstring language = env->NewStringUTF(game_language_code(getSettings().game.language.getValue()));
         jstring code = env->NewStringUTF(invitation.c_str());
         opened = env->CallBooleanMethod(activity, open, name, path, language, code) == JNI_TRUE;
         env->DeleteLocalRef(code);
@@ -163,7 +164,7 @@ void OnlineWindow::build(Rml::Element *content)
                                   })
                                   .on_pressed([] { open_iso_picker(); }),
         rightPane, [](Pane &pane) {
-            pane.add_text("Every player needs the same disc image: Mario Party 4 USA. The whole file is checked before joining.");
+            pane.add_text("Every player needs the same disc image: Mario Party 4 USA revision 1, or the European disc in the host's language. The whole file is checked before joining.");
         });
 
     leftPane.register_control(leftPane.add_select_button({

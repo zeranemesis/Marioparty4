@@ -43,6 +43,12 @@ LaunchArgs parse(const std::vector<std::string_view>& args) {
                 out.language = LanguageArg::French;
             else if (value == "en")
                 out.language = LanguageArg::English;
+            else if (value == "de")
+                out.language = LanguageArg::German;
+            else if (value == "es")
+                out.language = LanguageArg::Spanish;
+            else if (value == "it")
+                out.language = LanguageArg::Italian;
             else
                 out.ignored.emplace_back(arg);
         } else if (takeValue(arg, "--aspect", args, i, value)) {

@@ -37,8 +37,8 @@ time.
 
 | Disc | Region | |
 |---|---|---|
-| `GMPE01` rev 0 and rev 1 | USA | supported; rev 1 is the disc used online |
-| `GMPP01` | Europe | supported, in English, French, German, Spanish or Italian; not online yet |
+| `GMPE01` rev 0 and rev 1 | USA | supported; rev 1 online |
+| `GMPP01` | Europe | supported online too, in English, French, German, Spanish or Italian |
 | `GMPJ01` | Japan | recognised, not supported yet |
 
 ISO, RVZ, WIA and GCZ images are accepted. The image is checked by hash before
@@ -102,8 +102,11 @@ Press **F1** (or **Back/Select**) in the game:
 
 ## Online play
 
-- **Two to four players**, each with their own copy of the USA disc, revision 1:
-  every player must run exactly the same game data.
+- **Two to four players**, each with their own copy of the same disc: the USA
+  disc revision 1, or the European disc. Every player runs exactly the same game
+  data, so a session never mixes the two.
+- **With the European disc**, every player plays in the **host's language**,
+  whatever their own setting.
 - **Create a lobby** and share the invitation (it starts with `PB4`), or **join**
   by pasting the one a friend sent. Only the host starts the game.
 - The lobby shows who is in, their disc and their ping; **every disc is checked

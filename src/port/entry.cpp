@@ -17,7 +17,7 @@
 #endif
 
 extern "C" int port_main(int argc, char* argv[]);
-extern "C" bool PartyBoard_OnlineCheckDisc(void);
+extern "C" int PartyBoard_OnlineCheckDisc(void);
 extern "C" bool PartyBoard_OnlineBarrierProbe(void);
 extern "C" bool PartyBoard_ModsRunSelfTest(void);
 
@@ -65,8 +65,12 @@ int main(int argc, char *argv[])
         PartyBoard_CrashReportProvoke(argv[2]);
         return 0; // only reached if the fault somehow did not happen
     }
-    if (argc == 2 && std::strcmp(argv[1], "--online-disc-check") == 0)
-        return PartyBoard_OnlineCheckDisc() ? 0 : 3;
+    // 0: USA revision 1, 4: the European disc, 3: not a disc online play takes.
+    // The lobbies read the exit code; 0 and 3 kept their old meaning.
+    if (argc == 2 && std::strcmp(argv[1], "--online-disc-check") == 0) {
+        const int disc = PartyBoard_OnlineCheckDisc();
+        return disc == 1 ? 0 : disc == 2 ? 4 : 3;
+    }
     if (argc == 2 && std::strcmp(argv[1], "--mods-self-test") == 0)
         return PartyBoard_ModsRunSelfTest() ? 0 : 1;
     if (argc == 2 && std::strcmp(argv[1], "--rollback-self-test") == 0)

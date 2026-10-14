@@ -31,9 +31,14 @@ enum class AspectArg : unsigned char {
     Wide,
 };
 
+// The game's language, the five a European disc carries. An online lobby
+// passes the host's to every seat, so all of them load the same text.
 enum class LanguageArg : unsigned char {
     English,
     French,
+    German,
+    Spanish,
+    Italian,
 };
 
 struct LaunchArgs {

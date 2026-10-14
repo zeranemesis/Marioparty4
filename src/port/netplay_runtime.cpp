@@ -1165,6 +1165,7 @@ bool sendInput(std::uint32_t frame, const PartyBoardRollbackInput &input, bool r
         PartyBoard_HookTickGateEnabled() != 0);
     outgoing.frandSeed = gRuntime.randomSynchronized ? gRuntime.sessionFrandSeed : 0;
     outgoing.rand8Seed = gRuntime.randomSynchronized ? gRuntime.sessionRand8Seed : 0;
+    outgoing.language = OSGetLanguage();
     // Repeat the previous inputs, so the next packet covers a lost one without
     // waiting for a retransmit request. They stop at a context change.
     for (std::uint32_t back = 1; !standalone && back <= kInputHistory && back <= frame; ++back) {
@@ -1660,6 +1661,21 @@ void receivePendingPackets()
                     gRuntime.fullGame ? "full" : "minigame",
                     static_cast<unsigned>(gRuntime.inputDelay),
                     PartyBoard_HookTickGateEnabled(), packet.configSignature);
+            }
+            gRuntime.configMismatch = true;
+            ++gRuntime.rejectedPackets;
+            continue;
+        }
+        // The text, and therefore the state, of a European disc depends on the
+        // language it was loaded in. The lobby gives every seat the host's; a
+        // session that still disagrees stops here, named, instead of diverging
+        // on its first tick.
+        if (packet.language != OSGetLanguage()) {
+            if (!gRuntime.configMismatch) {
+                std::fprintf(stderr,
+                    "Netplay: game language mismatch (local %u, remote %u). "
+                    "Every player must load the host's language.\n",
+                    static_cast<unsigned>(OSGetLanguage()), static_cast<unsigned>(packet.language));
             }
             gRuntime.configMismatch = true;
             ++gRuntime.rejectedPackets;

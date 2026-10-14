@@ -21,12 +21,15 @@ final class DiscFile {
     final String displayName;
     final byte[] hash;
     final long length;
+    // The European disc: its text depends on the language it is loaded in.
+    final boolean pal;
 
-    private DiscFile(String path, String displayName, byte[] hash, long length) {
+    private DiscFile(String path, String displayName, byte[] hash, long length, boolean pal) {
         this.path = path;
         this.displayName = displayName;
         this.hash = hash;
         this.length = length;
+        this.pal = pal;
     }
 
     static InputStream open(Context context, String path) throws IOException {
@@ -63,8 +66,8 @@ final class DiscFile {
 
     private static IOException wrongDisc() {
         return new IOException(Msg.s(
-            "Choisissez un disque Mario Party 4 USA, révision 1 (ISO, GCM, RVZ, WIA ou CISO). Ce fichier n'est pas compatible.",
-            "Choose a Mario Party 4 USA revision 1 disc (ISO, GCM, RVZ, WIA or CISO). This file is not compatible."));
+            "Choisissez un disque Mario Party 4 USA révision 1 ou européen (ISO, GCM, RVZ, WIA ou CISO). Ce fichier n'est pas compatible.",
+            "Choose a Mario Party 4 disc, USA revision 1 or European (ISO, GCM, RVZ, WIA or CISO). This file is not compatible."));
     }
 
     private static int u32be(byte[] b, int p) {
@@ -72,9 +75,10 @@ final class DiscFile {
     }
 
     // The PC checks the header through nod before hashing (partyboard.exe
-    // --online-disc-check): GMPE01, disc version 1. Every container a phone is
-    // likely to hold keeps that header uncompressed at a known offset.
-    static void checkHeader(byte[] head, int n) throws IOException {
+    // --online-disc-check): GMPE01 disc version 1, or the European GMPP01 disc
+    // version 2. Every container a phone is likely to hold keeps that header
+    // uncompressed at a known offset. True for the European disc.
+    static boolean checkHeader(byte[] head, int n) throws IOException {
         int at;
         if (n >= 0x60 && (head[0] == 'R' || head[0] == 'W') && head[1] == (head[0] == 'R' ? 'V' : 'I')
             && head[2] == (head[0] == 'R' ? 'Z' : 'A') && head[3] == 1)
@@ -91,9 +95,13 @@ final class DiscFile {
             throw wrongDisc();
         }
         String id = new String(head, at, 6, StandardCharsets.US_ASCII);
-        if (!id.equals("GMPE01") || head[at + 7] != 1) {
-            throw wrongDisc();
+        if (id.equals("GMPE01") && head[at + 7] == 1) {
+            return false;
         }
+        if (id.equals("GMPP01") && head[at + 7] == 2) {
+            return true;
+        }
+        throw wrongDisc();
     }
 
     static DiscFile verify(Context context, String path, IntConsumer progress, BooleanSupplier cancelled)
@@ -112,6 +120,7 @@ final class DiscFile {
         byte[] buffer = new byte[1 << 20];
         long read = 0;
         int last = -1;
+        boolean pal;
         try (InputStream in = open(context, path)) {
             int headSize = 0;
             byte[] head = new byte[0x8010];
@@ -125,7 +134,7 @@ final class DiscFile {
             if (headSize == 0) {
                 throw new IOException(Msg.s("Ce fichier disque est vide.", "This disc file is empty."));
             }
-            checkHeader(head, headSize);
+            pal = checkHeader(head, headSize);
             sha.update(head, 0, headSize);
             read = headSize;
             int n;
@@ -147,6 +156,6 @@ final class DiscFile {
         if (length > 0 && read != length) {
             throw new IOException(Msg.s("Le disque n'a pas pu être lu entièrement.", "The disc could not be read completely."));
         }
-        return new DiscFile(path, displayName(context, path), sha.digest(), read);
+        return new DiscFile(path, displayName(context, path), sha.digest(), read, pal);
     }
 }

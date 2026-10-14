@@ -25,6 +25,20 @@ enum class GameLanguage : u8 {
     Italian = OS_LANGUAGE_ITALIAN,
 };
 
+// The code --lang reads, and the one handed to the online lobbies so the host
+// can give every seat its language.
+inline const char *game_language_code(GameLanguage language)
+{
+    switch (language) {
+        case GameLanguage::German: return "de";
+        case GameLanguage::French: return "fr";
+        case GameLanguage::Spanish: return "es";
+        case GameLanguage::Italian: return "it";
+        case GameLanguage::English: break;
+    }
+    return "en";
+}
+
 enum class DiscVerificationState : u8 {
     Unknown = 0,
     Success,
