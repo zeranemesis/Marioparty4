@@ -201,7 +201,10 @@ public final class OnlineService extends Service {
                 if (create) {
                     current.create(players);
                     if (session == current) {
-                        setStatus(current.localOnly
+                        setStatus(current.localOnly && current.relayReady
+                            ? Msg.s("Salon créé. Votre box refuse les connexions depuis Internet : vos amis passeront par le relais en ligne. Partagez l'invitation.",
+                                "Lobby created. Your router refuses connections from the Internet: your friends will come through the online relay. Share the invitation.")
+                            : current.localOnly
                             ? Msg.s("Salon créé pour votre Wi-Fi : votre box refuse les connexions depuis Internet, vos amis doivent être sur le même réseau. Partagez l'invitation.",
                                 "Lobby created for your Wi-Fi: your router refuses connections from the Internet, so your friends must be on the same network. Share the invitation.")
                             : Msg.s("Salon créé. Partagez l'invitation avec " + (players > 2 ? "vos amis" : "votre ami") + ". Vous seul pourrez lancer le jeu.",
