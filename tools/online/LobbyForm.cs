@@ -454,9 +454,9 @@ sealed class MainForm : Form {
     // start the game. It removes the typing, not the checks.
     void ApplyStartup(){
         if(startup.Mode==StartupMode.Manual)return;
-        // A launcher's rooms are online: private for friends unless it asked
-        // for a public one.
-        onlineMode.Checked=true;
+        // A launcher's rooms are online -- private for friends unless it asked
+        // for a public one -- or a game on this network when it says so.
+        if(startup.Lan)lanMode.Checked=true;else onlineMode.Checked=true;
         if(startup.Mode==StartupMode.Host && startup.Public)SetPublicBox(true);
         if(startup.Nickname!=null)nickname.Text=startup.Nickname;
         if(startup.Invitation!=null)invitation.Text=startup.Invitation;

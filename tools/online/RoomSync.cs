@@ -74,15 +74,48 @@ static class RoomSync {
     // SHA-256 takes a while, so it is kept per file (path, size, date).
     public static int PrintTags() {
         try {
+            string disc,game;
+            if(!DiscTags(out disc,out game))return 2;
+            string from;var mods=ModSet.FromCubeShelf("GMPE01_00",out from);
+            var status=new Relay.RoomStatus{Mods=mods};
+            Console.WriteLine(new JavaScriptSerializer().Serialize(new Dictionary<string,object>{
+                {"schema",Schema},{"build",Relay.Short(Wire.BuildHash(AppDomain.CurrentDomain.BaseDirectory))},{"disc",disc},{"game",game},
+                {"mods",status.Fields()["mods"]},{"relay",Relay.BaseUrl}}));
+            return 0;
+        } catch(Exception e) {Console.Error.WriteLine("FAIL: "+e.Message);return 1;}
+    }
+
+    // PartyBoardOnline.exe --lan-games, with PARTYBOARD_ONLINE_DISC: the games
+    // on this network a launcher can offer, found as the lobby's own "Parties
+    // en LAN" finds them (LanDiscovery), for the same build and disc. One JSON
+    // line on stdout; nothing leaves the network.
+    public static int PrintLanGames() {
+        try {
+            string disc,game;
+            if(!DiscTags(out disc,out game))return 2;
+            var tag=Enumerable.Range(0,8).Select(i=>Convert.ToByte(disc.Substring(i*2,2),16)).ToArray();
+            var games=LanDiscovery.Find(Wire.BuildHash(AppDomain.CurrentDomain.BaseDirectory),tag,1500);
+            Console.WriteLine(new JavaScriptSerializer().Serialize(new Dictionary<string,object>{
+                {"schema",Schema},{"games",games.Select(g=>new Dictionary<string,object>{
+                    {"name",g.Name},{"lang",g.Language},{"region",g.Region},{"players",g.Players},{"max",g.MaxPlayers},{"invite",g.Invite}}).ToArray()}}));
+            return 0;
+        } catch(Exception e) {Console.Error.WriteLine("FAIL: "+e.Message);return 1;}
+    }
+
+    // The disc's tag (first 8 bytes of its SHA-256, in hex) and game id, kept
+    // per file (path, size, date) since hashing a whole disc takes a while.
+    static bool DiscTags(out string disc,out string game) {
+        disc=game=null;
+        {
             var path=Environment.GetEnvironmentVariable("PARTYBOARD_ONLINE_DISC");
-            if(string.IsNullOrWhiteSpace(path) || !File.Exists(path)){Console.Error.WriteLine("PARTYBOARD_ONLINE_DISC must name the disc.");return 2;}
+            if(string.IsNullOrWhiteSpace(path) || !File.Exists(path)){Console.Error.WriteLine("PARTYBOARD_ONLINE_DISC must name the disc.");return false;}
             var info=new FileInfo(Path.GetFullPath(path));
             var cacheFile=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"PartyBoard","disc-tags.json");
             var key=info.FullName.ToLowerInvariant()+"|"+info.Length+"|"+info.LastWriteTimeUtc.Ticks;
             var json=new JavaScriptSerializer();Dictionary<string,object> cache;
             try{cache=File.Exists(cacheFile)?json.Deserialize<Dictionary<string,object>>(File.ReadAllText(cacheFile)):null;}catch{cache=null;}
             cache=cache??new Dictionary<string,object>();
-            object hit;string disc,game;
+            object hit;
             var entry=cache.TryGetValue(key,out hit)?hit as Dictionary<string,object>:null;
             if(entry!=null && entry.ContainsKey("disc") && entry.ContainsKey("game")){disc=(string)entry["disc"];game=(string)entry["game"];}
             else {
@@ -90,13 +123,8 @@ static class RoomSync {
                 cache[key]=new Dictionary<string,object>{{"disc",disc},{"game",game}};
                 try{Directory.CreateDirectory(Path.GetDirectoryName(cacheFile));File.WriteAllText(cacheFile,json.Serialize(cache),new UTF8Encoding(false));}catch{}
             }
-            string from;var mods=ModSet.FromCubeShelf("GMPE01_00",out from);
-            var status=new Relay.RoomStatus{Mods=mods};
-            Console.WriteLine(json.Serialize(new Dictionary<string,object>{
-                {"schema",Schema},{"build",Relay.Short(Wire.BuildHash(AppDomain.CurrentDomain.BaseDirectory))},{"disc",disc},{"game",game},
-                {"mods",status.Fields()["mods"]},{"relay",Relay.BaseUrl}}));
-            return 0;
-        } catch(Exception e) {Console.Error.WriteLine("FAIL: "+e.Message);return 1;}
+            return true;
+        }
     }
 
     public static void Complete(string directory,Request request,bool ok,string message) {

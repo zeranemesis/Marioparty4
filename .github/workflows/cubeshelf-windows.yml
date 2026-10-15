@@ -214,6 +214,8 @@ jobs:
           # Public rooms (PARTYBOARD_ONLINE_VISIBILITY, --room-tags) and the room's state shared
           # with the launcher (PARTYBOARD_ONLINE_STATE_DIR: room.json and requests/).
           if (Test-Path "tools/online/RoomSync.cs") { $capabilities += "public-rooms"; $capabilities += "room-sync" }
+          # Games on the local network, listed for the launcher (--lan-games, PARTYBOARD_ONLINE_MODE=lan).
+          if (Test-Path "tools/online/Lan.cs") { $capabilities += "lan-games" }
           # The game takes the RetroAchievements session CubeShelf hands over (CUBESHELF_RA_USER /
           # CUBESHELF_RA_TOKEN) and reports logins and progress back. CubeShelf gives its session
           # only to a package that declares this.
