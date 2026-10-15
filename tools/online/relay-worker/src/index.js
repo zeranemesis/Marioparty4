@@ -271,6 +271,12 @@ export class RelayRoom {
       await this.directory().fetch("https://directory/status", { method: "POST", body: JSON.stringify({ room: a.room, ...status }) });
       return;
     }
+    // A guest the host will not take (its seat went to someone else): told at
+    // once, by name, rather than left to time out.
+    if (m && m.type === "refuse" && CONN.test(m.conn || "")) {
+      for (const guest of this.state.getWebSockets(`g:${m.conn}`)) guest.close(4429, "room taken");
+      return;
+    }
     if (m && m.type === "unpublish") {
       await this.directory().fetch("https://directory/remove", { method: "POST", body: JSON.stringify({ room: a.room }) });
       ws.send(JSON.stringify({ type: "unpublished" }));

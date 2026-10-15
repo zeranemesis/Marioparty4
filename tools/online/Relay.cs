@@ -345,7 +345,7 @@ sealed class WebSocketStream : Stream {
                 try{r=socket.ReceiveAsync(new ArraySegment<byte>(chunk),deadline.Token).GetAwaiter().GetResult();}
                 catch(OperationCanceledException){throw new IOException("Le relais ne répond plus.");}
                 catch(WebSocketException e){throw new IOException("Le relais a fermé la connexion.",e);}
-                if(r.MessageType==WebSocketMessageType.Close){Closed=true;binary=false;return null;}
+                if(r.MessageType==WebSocketMessageType.Close){Closed=true;CloseCode=(int?)r.CloseStatus??0;binary=false;return null;}
                 message.Write(chunk,0,r.Count);
                 if(!r.EndOfMessage)continue;
                 binary=r.MessageType==WebSocketMessageType.Binary;
@@ -354,8 +354,10 @@ sealed class WebSocketStream : Stream {
             }
         }
     }
-    // Set once the relay has closed this socket.
+    // Set once the relay has closed this socket, with the code it gave:
+    // 4429 a room that is taken, 4404 a room with no host.
     public bool Closed {get;private set;}
+    public int CloseCode {get;private set;}
     public override int Read(byte[] destination,int at,int count) {
         while(offset>=buffered.Length) {
             if(Closed)return 0;
@@ -446,7 +448,7 @@ static class Relay {
                 if(!n.TryGetValue("conn",out conn) || !(conn is string))continue;
                 // A room that has its player keeps its socket only to stay on the
                 // list; nobody else is let in.
-                if(accepting!=null && !accepting())continue;
+                if(accepting!=null && !accepting()){try{control.SendText("{\"type\":\"refuse\",\"conn\":\""+(string)conn+"\"}");}catch{}continue;}
                 IPAddress address;
                 if(n.TryGetValue("ip",out ip) && IPAddress.TryParse(ip as string,out address) && address.AddressFamily==AddressFamily.InterNetwork)
                     try{allocation.Permit(address);}catch(Exception e){report("relay_permit_failed="+e.GetType().Name);}
@@ -469,7 +471,11 @@ static class Relay {
             pipe.ReadTimeout=10000;
             while(true) {
                 bool binary;var notice=pipe.ReadMessage(out binary);
-                if(pipe.Closed) throw new IOException("Votre ami n'est pas joignable, ni directement ni par le relais en ligne. Vérifiez qu'il a laissé sa fenêtre ouverte.");
+                if(pipe.Closed) {
+                    if(pipe.CloseCode==4429) throw new IOException("Cette room vient d'être prise par un autre joueur. Choisissez-en une autre, ou créez la vôtre.");
+                    if(pipe.CloseCode==4404) throw new IOException("Cette room n'existe plus : son hôte l'a fermée.");
+                    throw new IOException("Votre ami n'est pas joignable, ni directement ni par le relais en ligne. Vérifiez qu'il a laissé sa fenêtre ouverte.");
+                }
                 if(notice==null)continue;
                 Dictionary<string,object> n;try{n=Parse(notice);}catch{continue;}
                 object type,udp;n.TryGetValue("type",out type);

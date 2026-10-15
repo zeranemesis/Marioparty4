@@ -1301,8 +1301,8 @@ static class Tests {
                     Check(listed.Players.SequenceEqual(new[]{name,"Inconnu"}) && listed.Game==(hostDisc.Pal?"GMPP01":"GMPE01") && listed.MaxPlayers==2,"with both pseudos and the game");
                     bool gone=false;try{Relay.PublicInvite(room);}catch(IOException){gone=true;}
                     Check(gone,"and its invitation is no longer handed out");
-                    bool turnedAway=false;try{IPEndPoint ignored;using(Relay.GuestPipe(room,null,out ignored)){}}catch(IOException){turnedAway=true;}
-                    Check(turnedAway,"a third player who kept the invitation is turned away");
+                    string turnedAway=null;try{IPEndPoint ignored;using(Relay.GuestPipe(room,null,out ignored)){}}catch(IOException e){turnedAway=e.Message;}
+                    Check(turnedAway!=null && turnedAway.Contains("prise"),"a third player who kept the invitation is told the room is taken ("+turnedAway+")");
                     Check(failure==null,"no session failure ("+failure+")");
                     guest.Dispose();host.Dispose();
                     Check(SpinWait.SpinUntil(()=>!Relay.PublicRooms(build,guestDisc.Hash).Any(r=>r.Room==room),10000),"the session ends: off the list");
@@ -1320,6 +1320,13 @@ static class Tests {
                     fakeHost.SendText(Relay.PublishRequest(invite,"Hôte",0,false,build,discTag,new Relay.RoomStatus{Players=new List<string>{"Hôte"},Mods=mods}));
                     Check((string)Relay.Parse(fakeHost.ReadMessage(out binary))["type"]=="published","a room with mods is listed");
                     var r1=Relay.PublicRooms(build,discTag).Single(r=>r.Room==gameRoom);
+                    // The host already has its player, the list does not know yet: a late
+                    // guest is refused by the host itself, and told so at once.
+                    var late=Task.Run(()=>{try{IPEndPoint ignored;using(Relay.GuestPipe(gameRoom,null,out ignored)){}return "joined";}catch(IOException e){return e.Message;}});
+                    var incoming=Relay.Parse(fakeHost.ReadMessage(out binary));
+                    Check((string)incoming["type"]=="incoming","the host hears of the late guest");
+                    fakeHost.SendText("{\"type\":\"refuse\",\"conn\":\""+(string)incoming["conn"]+"\"}");
+                    Check(late.Wait(8000) && late.Result.Contains("prise"),"refused by the host, the guest is told the room is taken ("+(late.IsCompleted?late.Result:"no answer")+")");
                     Check(r1.Waiting && r1.Mods.Count==1 && r1.Mods[0].Id==777 && r1.Mods[0].Name=="Mini-jeux+" && r1.Mods[0].Fingerprint=="0909090909090909","its mods are on the list");
                     fakeHost.SendText(Relay.StatusRequest(new Relay.RoomStatus{State="playing",Players=new List<string>{"Hôte","Ami"},Mods=mods}));
                     Relay.PublicRoom r2=null;
