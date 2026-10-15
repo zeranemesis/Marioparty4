@@ -241,7 +241,9 @@ public class RelayTest {
     // loopback socket and the host's own listener.
     @Test
     public void throughARunningRelay() throws Exception {
-        assumeTrue("PARTYBOARD_RELAY not set", Relay.available());
+        // Only when asked: the default relay is the deployed one.
+        String asked = System.getenv("PARTYBOARD_RELAY");
+        assumeTrue("PARTYBOARD_RELAY not set", asked != null && !asked.isEmpty());
         String room = Relay.roomId(Wire.random(16));
         try (ServerSocket hostListener = new ServerSocket(0, 4, Wire.LOOPBACK);
              Relay.RelaySocket control = Relay.connect("/room/" + room + "/host?udp=203.0.113.9:4000")) {

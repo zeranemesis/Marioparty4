@@ -8,6 +8,9 @@
 name = "partyboard-relay"
 main = "src/index.js"
 compatibility_date = "2025-09-01"
+# Served at https://partyboard-relay.<subdomain>.workers.dev; no preview URLs.
+workers_dev = true
+preview_urls = false
 
 [[durable_objects.bindings]]
 name = "ROOMS"

@@ -50,7 +50,7 @@ final class Relay {
 
     // The deployed Worker. PARTYBOARD_RELAY overrides it (the JVM tests); empty
     // turns the relay off, and the lobby behaves as before.
-    static final String DEFAULT_URL = "";
+    static final String DEFAULT_URL = "https://partyboard-relay.zeranemesis.workers.dev";
 
     static String baseUrl() {
         String v = System.getenv("PARTYBOARD_RELAY");
@@ -373,8 +373,16 @@ final class Relay {
             Socket socket = raw;
             if (secure) {
                 SSLSocket ssl = (SSLSocket) ((SSLSocketFactory) SSLSocketFactory.getDefault()).createSocket(raw, host, port, true);
+                // The TLS engine checks the certificate's name during the handshake.
+                // On a desktop JVM, HttpsURLConnection's default verifier refuses
+                // everything (it is only a fallback), so it cannot be the check;
+                // on Android it is the platform's real one and is kept as well.
+                javax.net.ssl.SSLParameters parameters = ssl.getSSLParameters();
+                parameters.setEndpointIdentificationAlgorithm("HTTPS");
+                ssl.setSSLParameters(parameters);
                 ssl.startHandshake();
-                if (!HttpsURLConnection.getDefaultHostnameVerifier().verify(host, ssl.getSession())) {
+                boolean android = "Dalvik".equals(System.getProperty("java.vm.name"));
+                if (android && !HttpsURLConnection.getDefaultHostnameVerifier().verify(host, ssl.getSession())) {
                     ssl.close();
                     throw new IOException("relay: certificate does not match " + host);
                 }

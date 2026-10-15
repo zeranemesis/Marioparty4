@@ -378,7 +378,7 @@ sealed class WebSocketStream : Stream {
 static class Relay {
     // The deployed Worker. PARTYBOARD_RELAY overrides it (tests, a private relay);
     // an empty value turns the relay off.
-    const string DefaultUrl="";
+    const string DefaultUrl="https://partyboard-relay.zeranemesis.workers.dev";
     public static string BaseUrl {get{var v=Environment.GetEnvironmentVariable("PARTYBOARD_RELAY");return (v??DefaultUrl).TrimEnd('/');}}
     public static bool Available {get{return BaseUrl.Length>0;}}
     public static string RoomId(byte[] token) {

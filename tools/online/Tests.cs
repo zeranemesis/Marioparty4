@@ -169,20 +169,29 @@ static class Tests {
     // real game probes playing 4800 native ticks over it. Needs PARTYBOARD_RELAY;
     // without it, it says it did not run rather than pass.
     static void RelayEndToEnd() {
-        if(!Relay.Available) {Console.WriteLine("NOT RUN: relay end to end (set PARTYBOARD_RELAY to a running relay, for example npx wrangler dev).");return;}
-        using(var cert=Wire.Certificate()) using(var server=new MockTurn()) {
+        // Only when asked: the default relay is the deployed one, and a test run
+        // must not reach it unless that is the point.
+        if(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("PARTYBOARD_RELAY"))) {Console.WriteLine("NOT RUN: relay end to end (set PARTYBOARD_RELAY to a running relay, for example npx wrangler dev, or the deployed one with PARTYBOARD_RELAY_LIVE=1).");return;}
+        // PARTYBOARD_RELAY_LIVE=1: the relay's real TURN credentials, Cloudflare's
+        // TURN and STUN, the game datagrams out to the Internet and back.
+        bool live=Environment.GetEnvironmentVariable("PARTYBOARD_RELAY_LIVE")=="1";
+        using(var cert=Wire.Certificate()) using(var server=live?null:new MockTurn()) {
             var invite=new Invitation{Address=IPAddress.Loopback,Port=1,Expires=DateTime.UtcNow.AddMinutes(5),Fingerprint=Wire.Hash(cert.RawData).Take(16).ToArray(),Token=Wire.Random(16),Build=Wire.Random(32)};
             var room=Relay.RoomId(invite.Token);
-            var turn=new TurnClient(server.Endpoint,"alice","secret");turn.Allocate();
+            TurnClient turn;
+            if(live){var access=Relay.TurnCredentials();turn=new TurnClient(access.Item3,access.Item1,access.Item2);}
+            else turn=new TurnClient(server.Endpoint,"alice","secret");
+            turn.Allocate();
+            if(live)Console.WriteLine("Relay: TURN allocation on "+(Gateway.Public(turn.Relayed.Address)?"a public":"a non-public")+" address.");
             var control=Relay.Connect("/room/"+room+"/host?udp="+Uri.EscapeDataString(turn.Relayed.ToString()));
             var hostChannels=new SslStream[2];var hostPipes=new WebSocketStream[2];bool stop=false;
             var notices=Task.Run(()=>Relay.HostNotices(room,control,turn,()=>Volatile.Read(ref stop),pipe=>{
                 byte channel;byte[] id;var ssl=Wire.Server(pipe,cert,invite,invite.Build,out channel,out id);
                 lock(hostChannels){hostChannels[channel]=ssl;hostPipes[channel]=pipe;}
             },m=>Console.Error.WriteLine("relay host: "+m)));
-            var guestNet=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));
-            var self=Relay.PublicAddress(guestNet,server.Endpoint);
-            Check(self=="127.0.0.1","the guest learns its own address by STUN");
+            var guestNet=new UdpClient(new IPEndPoint(live?IPAddress.Any:IPAddress.Loopback,0));
+            var self=Relay.PublicAddress(guestNet,live?null:server.Endpoint);
+            Check(live?self!=null && Gateway.Public(IPAddress.Parse(self)):self=="127.0.0.1","the guest learns its own address by STUN");
             var guestInvite=Invitation.Decode(invite.Encode(),true);var clientId=Wire.Random(16);
             // A room with no host refuses at once, so a guest is not left waiting.
             IPEndPoint none;Reject(()=>Relay.GuestPipe(Relay.RoomId(Wire.Random(16)),self,out none),"a room without its host refuses the guest");
@@ -216,7 +225,7 @@ static class Tests {
                         Check(ho.Result.Contains("PASS: 2400/2400") && co.Result.Contains("PASS: 2400/2400"),"4800 native input ticks through TURN");
                         Check(ho.Result.Contains("equal_states=2400") && co.Result.Contains("equal_states=2400"),"every committed state hash compared through the relay");
                         Check(Volatile.Read(ref ping)>=0,"UDP round trip measured through TURN");
-                        Console.WriteLine("Relay: TLS through the relay's room, game through TURN, 4800 native ticks, ping "+Volatile.Read(ref ping)+" ms.");
+                        Console.WriteLine("Relay"+(live?" (live, Cloudflare)":"")+": TLS through the relay's room, game through TURN, 4800 native ticks, ping "+Volatile.Read(ref ping)+" ms.");
                     } finally {if(!h.HasExited)h.Kill();if(!c.HasExited)c.Kill();hg.Dispose();cg.Dispose();h.Dispose();c.Dispose();}
                     a.Dispose();b.Dispose();try{Task.WaitAll(new[]{at,bt},5000);}catch{}
                 }
