@@ -18,6 +18,7 @@
 #include <fmt/format.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -45,6 +46,38 @@ namespace {
     constexpr auto kReplyTimeout = std::chrono::seconds(12);
     constexpr std::uintmax_t kMaximumStateBytes = 256 * 1024;
     constexpr std::size_t kMaximumFriends = 500;
+    constexpr std::size_t kMaximumRooms = 60;
+    constexpr std::size_t kMaximumRoomPlayers = 4;
+
+    std::string capped(std::string value);
+
+    std::vector<std::string> names_of(const nlohmann::json &object, const char *key)
+    {
+        std::vector<std::string> names;
+        const auto it = object.find(key);
+        if (it == object.end() || !it->is_array()) {
+            return names;
+        }
+        for (const auto &name : *it) {
+            if (name.is_string() && names.size() < kMaximumRoomPlayers) {
+                names.push_back(capped(name.get<std::string>()));
+            }
+        }
+        return names;
+    }
+
+    bool room_id(const std::string &id)
+    {
+        if (id.size() != 32) {
+            return false;
+        }
+        for (const char c : id) {
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+                return false;
+            }
+        }
+        return true;
+    }
     constexpr std::size_t kMaximumString = 400;
 
     // CUBESHELF_INGAME_DIR is UTF-8. A path built from a plain std::string on Windows is read in
@@ -442,6 +475,39 @@ std::optional<State> read_state_unchecked()
             }
         }
     }
+    // Rooms (MainWindow.InGame.cs, ComposeInGameState): absent from an older CubeShelf.
+    state.canHostPublic = flag_of(json, "canHostPublic");
+    if (const auto room = json.find("room"); room != json.end() && room->is_object()) {
+        Room r;
+        r.state = text_of(*room, "state");
+        r.label = text_of(*room, "label");
+        r.isHost = flag_of(*room, "isHost");
+        r.isPublic = flag_of(*room, "public");
+        r.canChangeVisibility = flag_of(*room, "canChangeVisibility");
+        r.players = names_of(*room, "players");
+        r.maxPlayers = std::clamp(room->value("maxPlayers", 2), 2, 4);
+        if (!r.state.empty()) {
+            state.room = std::move(r);
+        }
+    }
+    if (const auto rooms = json.find("rooms"); rooms != json.end() && rooms->is_array()) {
+        for (const auto &entry : *rooms) {
+            if (!entry.is_object() || state.rooms.size() >= kMaximumRooms) {
+                continue;
+            }
+            PublicRoom r;
+            r.id = text_of(entry, "id");
+            r.host = text_of(entry, "host");
+            r.label = text_of(entry, "label");
+            r.players = names_of(entry, "players");
+            r.maxPlayers = std::clamp(entry.value("maxPlayers", 2), 2, 4);
+            r.joinable = flag_of(entry, "joinable");
+            r.modsReady = flag_of(entry, "modsReady");
+            if (room_id(r.id) && !r.host.empty()) {
+                state.rooms.push_back(std::move(r));
+            }
+        }
+    }
     if (const auto friends = json.find("friends"); friends != json.end() && friends->is_array()) {
         for (const auto &entry : *friends) {
             if (!entry.is_object() || state.friends.size() >= kMaximumFriends) {
@@ -641,6 +707,8 @@ void FriendsWindow::build(Rml::Element *content)
                 .on_pressed([this] { act("cancel", "", false); });
         }
     }
+
+    add_rooms(pane, *state);
 
     pane.add_section(state->t("friendsSection", "Friends"));
     if (state->friends.empty()) {
@@ -895,6 +963,61 @@ void FriendsWindow::start_import(std::string source, bool fromFile)
         job->error = fromFile ? online::cubeshelf::import_from_path(source, passphrase) : online::cubeshelf::import_from_text(source, passphrase);
         job->done = true;
     }).detach();
+}
+
+// The player's room, then the public list. Joining or opening a room starts the game again from
+// the companion, so those ask first, like a friend's invitation; making the room public or private
+// and closing it leave this game alone.
+void FriendsWindow::add_rooms(Pane &pane, const State &state)
+{
+    const std::string separator = "  -  ";
+    const auto players = [&](const std::vector<std::string> &names, int max) {
+        std::string line = state.t("players", "Players") + " (" + std::to_string(names.size()) + "/" + std::to_string(max) + ") : ";
+        for (size_t i = 0; i < names.size(); i++) {
+            line += (i ? ", " : "") + names[i];
+        }
+        return line;
+    };
+
+    if (state.room) {
+        const auto &room = *state.room;
+        pane.add_section(state.t("roomSection", "Your room"));
+        pane.add_text(room.label);
+        if (!room.players.empty()) {
+            pane.add_text(players(room.players, room.maxPlayers));
+        }
+        if (mPendingId.empty()) {
+            if (room.canChangeVisibility) {
+                if (room.isPublic) {
+                    pane.add_button(state.t("roomMakePrivate", "Make the room private")).on_pressed([this] { act("room-private", "", false); });
+                }
+                else {
+                    pane.add_button(state.t("roomMakePublic", "Make the room public")).on_pressed([this] { act("room-public", "", false); });
+                }
+            }
+            pane.add_button(state.t("roomClose", "Close the room")).on_pressed([this] { act("room-close", "", false); });
+        }
+    }
+    else if (mPendingId.empty() && state.canHostPublic) {
+        pane.add_button(state.t("hostPublic", "Create a public room")).on_pressed([this] { act("host-public", "", true); });
+    }
+
+    pane.add_section(state.t("roomsSection", "Public rooms"));
+    if (state.rooms.empty()) {
+        pane.add_text(state.t("noRooms", "No public room for your disc right now."));
+    }
+    for (const auto &room : state.rooms) {
+        const std::string line = room.host + separator + room.label + separator + players(room.players, room.maxPlayers);
+        if (mPendingId.empty() && room.joinable && room.modsReady && !state.room) {
+            pane.add_button(line + separator + state.t("roomJoin", "Join")).on_pressed([this, id = room.id] { act("join-room", id, true); });
+        }
+        else if (room.joinable && !room.modsReady) {
+            pane.add_text(line + separator + state.t("roomMissingMods", "missing mods: CubeShelf, Online tab"));
+        }
+        else {
+            pane.add_text(line);
+        }
+    }
 }
 
 void FriendsWindow::act(const std::string &action, const std::string &key, bool closesGame)
