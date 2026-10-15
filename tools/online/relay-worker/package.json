@@ -1,0 +1,12 @@
+{
+  "name": "partyboard-relay",
+  "private": true,
+  "description": "PartyBoard online relay (Cloudflare Worker): lobby rendezvous and TURN credentials.",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.151.0"
+  }
+}

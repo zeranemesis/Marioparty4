@@ -49,6 +49,180 @@ static class Tests {
     static void Reject(Action action,string name) {bool rejected=false;try{action();}catch{rejected=true;}Check(rejected,name);}
     // A European disc's text depends on the language it is loaded in; the host's
     // travels in its profile so every seat can load it.
+    // RFC 5769 2.2, the sample IPv4 response: an independent reference for the
+    // STUN codec, its MESSAGE-INTEGRITY and its FINGERPRINT.
+    static void StunVectors() {
+        var vector=new byte[]{
+            0x01,0x01,0x00,0x3c,0x21,0x12,0xa4,0x42,0xb7,0xe7,0xa7,0x01,0xbc,0x34,0xd6,0x86,0xfa,0x87,0xdf,0xae,
+            0x80,0x22,0x00,0x0b,0x74,0x65,0x73,0x74,0x20,0x76,0x65,0x63,0x74,0x6f,0x72,0x20,
+            0x00,0x20,0x00,0x08,0x00,0x01,0xa1,0x47,0xe1,0x12,0xa6,0x43,
+            0x00,0x08,0x00,0x14,0x2b,0x91,0xf5,0x99,0xfd,0x9e,0x90,0xc3,0x8c,0x74,0x89,0xf9,0x2a,0xf9,0xba,0x53,0xf0,0x6b,0xe7,0xd7,
+            0x80,0x28,0x00,0x04,0xc0,0x7d,0x4c,0x96};
+        var m=Stun.Decode(vector,vector.Length);
+        Check(m!=null && m.Method==Stun.Binding && m.Class==Stun.Success,"RFC 5769 response decodes as a binding success");
+        var mapped=Stun.ReadXorAddress(m.Get(Stun.XorMappedAddress));
+        Check(mapped!=null && mapped.Address.ToString()=="192.0.2.1" && mapped.Port==32853,"RFC 5769 XOR-MAPPED-ADDRESS is 192.0.2.1:32853");
+        Check(Encoding.UTF8.GetString(m.Get(Stun.Software))=="test vector","RFC 5769 SOFTWARE");
+        Check(Stun.Verify(m,Encoding.UTF8.GetBytes("VOkJxbRl1RmTxUk/WvJxBt")),"RFC 5769 MESSAGE-INTEGRITY verifies");
+        Check(!Stun.Verify(m,Encoding.UTF8.GetBytes("wrong")),"a wrong key does not verify");
+        Check(Stun.VerifyFingerprint(m),"RFC 5769 FINGERPRINT verifies");
+        var damaged=(byte[])vector.Clone();damaged[45]^=1;
+        Check(!Stun.Verify(Stun.Decode(damaged,damaged.Length),Encoding.UTF8.GetBytes("VOkJxbRl1RmTxUk/WvJxBt")),"a changed byte breaks MESSAGE-INTEGRITY");
+        // Our own encoding, signed and fingerprinted, reads back the same way.
+        var key=Stun.LongTermKey("user","example.org","pass");
+        var request=Stun.New(Stun.CreatePermission,Stun.Request).Add(Stun.XorPeerAddress,Stun.XorAddress(new IPEndPoint(IPAddress.Parse("198.51.100.7"),4242))).Add(Stun.Username,Encoding.UTF8.GetBytes("user"));
+        var bytes=Stun.Encode(request,key,true);var back=Stun.Decode(bytes,bytes.Length);
+        Check(back.Method==Stun.CreatePermission && back.Class==Stun.Request && Stun.TypeOf(Stun.CreatePermission,Stun.Request)==0x0008,"method and class survive encoding");
+        Check(Stun.Verify(back,key) && Stun.VerifyFingerprint(back),"our signature and fingerprint verify");
+        Check(Stun.ReadXorAddress(back.Get(Stun.XorPeerAddress)).ToString()=="198.51.100.7:4242","XOR-PEER-ADDRESS round trip");
+        Check(Stun.TypeOf(Stun.Allocate,Stun.Error)==0x0113 && Stun.TypeOf(Stun.DataMethod,Stun.Indication)==0x0017,"TURN message types");
+        Check(Relay.RoomId(new byte[16]).Length==32 && Relay.RoomId(new byte[16])!=Relay.RoomId(Wire.Random(16)),"the relay room is a hash of the token");
+    }
+
+    // A loopback TURN server with the subset TurnClient uses, relaying real UDP:
+    // the client's datagrams to a peer socket and back.
+    sealed class MockTurn : IDisposable {
+        public readonly UdpClient Control=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));
+        public readonly UdpClient Relayed=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));
+        readonly byte[] key=Stun.LongTermKey("alice","mock.realm","secret");readonly byte[] nonce=Encoding.ASCII.GetBytes("nonce-1");
+        readonly HashSet<string> permitted=new HashSet<string>();readonly Dictionary<int,IPEndPoint> channels=new Dictionary<int,IPEndPoint>();
+        IPEndPoint client;volatile bool closed;public int Unsigned,ChannelDataSeen,IndicationsSeen;
+        public IPEndPoint Endpoint {get{return (IPEndPoint)Control.Client.LocalEndPoint;}}
+        public MockTurn(){new Thread(ServeControl){IsBackground=true}.Start();new Thread(ServeRelay){IsBackground=true}.Start();}
+        void Reply(Stun.Message request,ushort cls,Action<Stun.Message> fill,bool sign) {
+            var r=new Stun.Message{Type=Stun.TypeOf(request.Method,cls)};Buffer.BlockCopy(request.Transaction,0,r.Transaction,0,12);fill(r);
+            var b=Stun.Encode(r,sign?key:null,true);Control.Send(b,b.Length,client);
+        }
+        void ServeControl() {
+            while(!closed) {
+                byte[] d;IPEndPoint from=null;try{d=Control.Receive(ref from);}catch{return;}
+                client=from;
+                if(d.Length>=4 && d[0]>=0x40 && d[0]<=0x7F) {
+                    int ch=d[0]<<8|d[1],len=d[2]<<8|d[3];IPEndPoint peer;
+                    lock(channels)if(channels.TryGetValue(ch,out peer)){ChannelDataSeen++;Relayed.Send(d.Skip(4).Take(len).ToArray(),len,peer);}
+                    continue;
+                }
+                var m=Stun.Decode(d,d.Length);if(m==null)continue;
+                if(m.Method==Stun.SendMethod && m.Class==Stun.Indication) {
+                    var peer=Stun.ReadXorAddress(m.Get(Stun.XorPeerAddress));
+                    lock(permitted)if(peer!=null && permitted.Contains(peer.Address.ToString())){IndicationsSeen++;var data=m.Get(Stun.Data);Relayed.Send(data,data.Length,peer);}
+                    continue;
+                }
+                if(m.Method==Stun.Binding && m.Class==Stun.Request) {Reply(m,Stun.Success,r=>r.Add(Stun.XorMappedAddress,Stun.XorAddress(from)),false);continue;}
+                if(m.Get(Stun.MessageIntegrity)==null) {
+                    Unsigned++;
+                    Reply(m,Stun.Error,r=>r.Add(Stun.ErrorCode,new byte[]{0,0,4,1}).Add(Stun.Realm,Encoding.UTF8.GetBytes("mock.realm")).Add(Stun.Nonce,nonce),false);continue;
+                }
+                if(!Stun.Verify(m,key)){Reply(m,Stun.Error,r=>r.Add(Stun.ErrorCode,new byte[]{0,0,4,1}).Add(Stun.Realm,Encoding.UTF8.GetBytes("mock.realm")).Add(Stun.Nonce,nonce),false);continue;}
+                if(m.Method==Stun.Allocate)Reply(m,Stun.Success,r=>r.Add(Stun.XorRelayedAddress,Stun.XorAddress((IPEndPoint)Relayed.Client.LocalEndPoint)).Add(Stun.XorMappedAddress,Stun.XorAddress(client)).Add(Stun.Lifetime,Stun.U32(600)),true);
+                else if(m.Method==Stun.CreatePermission){var peer=Stun.ReadXorAddress(m.Get(Stun.XorPeerAddress));lock(permitted)permitted.Add(peer.Address.ToString());Reply(m,Stun.Success,r=>{},true);}
+                else if(m.Method==Stun.ChannelBind){var c=m.Get(Stun.ChannelNumber);var peer=Stun.ReadXorAddress(m.Get(Stun.XorPeerAddress));lock(channels)channels[c[0]<<8|c[1]]=peer;Reply(m,Stun.Success,r=>{},true);}
+                else Reply(m,Stun.Success,r=>{},true);
+            }
+        }
+        void ServeRelay() {
+            while(!closed) {
+                byte[] d;IPEndPoint from=null;try{d=Relayed.Receive(ref from);}catch{return;}
+                bool ok;lock(permitted)ok=permitted.Contains(from.Address.ToString());if(!ok || client==null)continue;
+                int ch=-1;lock(channels)foreach(var c in channels)if(c.Value.Equals(from))ch=c.Key;
+                byte[] frame;
+                if(ch>=0){frame=new byte[4+d.Length];frame[0]=(byte)(ch>>8);frame[1]=(byte)ch;frame[2]=(byte)(d.Length>>8);frame[3]=(byte)d.Length;Buffer.BlockCopy(d,0,frame,4,d.Length);}
+                else frame=Stun.Encode(Stun.New(Stun.DataMethod,Stun.Indication).Add(Stun.XorPeerAddress,Stun.XorAddress(from)).Add(Stun.Data,d));
+                Control.Send(frame,frame.Length,client);
+            }
+        }
+        public void Dispose(){closed=true;Control.Close();Relayed.Close();}
+    }
+
+    static byte[] TakeTurn(TurnClient turn,out IPEndPoint from,int ms=3000) {
+        var timer=Stopwatch.StartNew();from=null;
+        while(timer.ElapsedMilliseconds<ms){try{return turn.Receive(ref from);}catch(SocketException){Thread.Sleep(5);}}
+        return null;
+    }
+    static void TurnRelay() {
+        using(var server=new MockTurn())
+        using(var turn=new TurnClient(server.Endpoint,"alice","secret"))
+        using(var guest=new UdpClient(new IPEndPoint(IPAddress.Loopback,0))) {
+            turn.Allocate();
+            Check(server.Unsigned==1,"the first Allocate is unsigned and gets the challenge");
+            Check(turn.Relayed!=null && turn.Relayed.Equals(server.Relayed.Client.LocalEndPoint),"the relayed address comes from the signed reply");
+            guest.Client.ReceiveTimeout=3000;
+            // Before a permission, the server drops what the guest sends.
+            guest.Send(new byte[]{9},1,turn.Relayed);IPEndPoint from;
+            Check(TakeTurn(turn,out from,300)==null,"no permission, nothing relayed");
+            turn.Permit(IPAddress.Loopback);
+            var hello=Encoding.ASCII.GetBytes("hello host");guest.Send(hello,hello.Length,turn.Relayed);
+            var got=TakeTurn(turn,out from);
+            Check(got!=null && Encoding.ASCII.GetString(got)=="hello host" && from.Equals(guest.Client.LocalEndPoint),"a guest datagram arrives with its address");
+            // The reply leaves as a Send indication, then on a bound channel.
+            for(int i=0;i<40;i++){var b=Encoding.ASCII.GetBytes("reply "+i);turn.Send(b,b.Length,from);IPEndPoint back=null;var r=guest.Receive(ref back);
+                Check(Encoding.ASCII.GetString(r)=="reply "+i && back.Equals(turn.Relayed),"the guest receives the host's reply from the relayed address");Thread.Sleep(10);}
+            Check(server.IndicationsSeen>=1,"the first replies use Send indications");
+            Check(server.ChannelDataSeen>=1,"later replies use the bound channel");
+            guest.Send(hello,hello.Length,turn.Relayed);got=TakeTurn(turn,out from);
+            Check(got!=null && Encoding.ASCII.GetString(got)=="hello host","a channel-bound guest datagram arrives as ChannelData");
+        }
+    }
+    // The whole relay path, as a host behind a box that cannot be opened would use
+    // it: both TLS channels through a running relay (wrangler dev, or the deployed
+    // Worker), the game datagrams through TURN (the loopback MockTurn), and two
+    // real game probes playing 4800 native ticks over it. Needs PARTYBOARD_RELAY;
+    // without it, it says it did not run rather than pass.
+    static void RelayEndToEnd() {
+        if(!Relay.Available) {Console.WriteLine("NOT RUN: relay end to end (set PARTYBOARD_RELAY to a running relay, for example npx wrangler dev).");return;}
+        using(var cert=Wire.Certificate()) using(var server=new MockTurn()) {
+            var invite=new Invitation{Address=IPAddress.Loopback,Port=1,Expires=DateTime.UtcNow.AddMinutes(5),Fingerprint=Wire.Hash(cert.RawData).Take(16).ToArray(),Token=Wire.Random(16),Build=Wire.Random(32)};
+            var room=Relay.RoomId(invite.Token);
+            var turn=new TurnClient(server.Endpoint,"alice","secret");turn.Allocate();
+            var control=Relay.Connect("/room/"+room+"/host?udp="+Uri.EscapeDataString(turn.Relayed.ToString()));
+            var hostChannels=new SslStream[2];var hostPipes=new WebSocketStream[2];bool stop=false;
+            var notices=Task.Run(()=>Relay.HostNotices(room,control,turn,()=>Volatile.Read(ref stop),pipe=>{
+                byte channel;byte[] id;var ssl=Wire.Server(pipe,cert,invite,invite.Build,out channel,out id);
+                lock(hostChannels){hostChannels[channel]=ssl;hostPipes[channel]=pipe;}
+            },m=>Console.Error.WriteLine("relay host: "+m)));
+            var guestNet=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));
+            var self=Relay.PublicAddress(guestNet,server.Endpoint);
+            Check(self=="127.0.0.1","the guest learns its own address by STUN");
+            var guestInvite=Invitation.Decode(invite.Encode(),true);var clientId=Wire.Random(16);
+            // A room with no host refuses at once, so a guest is not left waiting.
+            IPEndPoint none;Reject(()=>Relay.GuestPipe(Relay.RoomId(Wire.Random(16)),self,out none),"a room without its host refuses the guest");
+            IPEndPoint hostUdp;var p0=Relay.GuestPipe(room,self,out hostUdp);var toHost=Wire.Client(p0,guestInvite,invite.Build,0,clientId);
+            IPEndPoint again;var p1=Relay.GuestPipe(room,self,out again);var fromHost=Wire.Client(p1,guestInvite,invite.Build,1,clientId);
+            Check(hostUdp!=null && hostUdp.Equals(turn.Relayed),"the room announces the host's TURN address");
+            Check(SpinWait.SpinUntil(()=>{lock(hostChannels)return hostChannels[0]!=null && hostChannels[1]!=null;},10000),"both TLS channels reach the host through the relay");
+            Volatile.Write(ref stop,true);control.Dispose();notices.Wait(5000);
+            int gamePort;using(var reserve=new UdpClient(new IPEndPoint(IPAddress.Loopback,0))) gamePort=((IPEndPoint)reserve.Client.LocalEndPoint).Port;
+            using(var a=new Bridge(hostPipes[0],hostChannels[0],hostPipes[1],hostChannels[1],0,turn,null,invite.Token,gamePort))
+            using(var b=new Bridge(p1,fromHost,p0,toHost,1,guestNet,hostUdp,invite.Token)) {
+                var diagHost=new Report(Path.GetTempPath());var diagGuest=new Report(Path.GetTempPath());GameStart hg=null,cg=null;Guid hi=Guid.Empty,ci=Guid.Empty;int ping=-1;
+                a.Diagnostic=diagHost.Write;b.Diagnostic=diagGuest.Write;
+                using(var hr=new ManualResetEventSlim()) using(var cr=new ManualResetEventSlim()) {
+                    var profile=new PlayerInfo("Relais",Wire.Hash(new byte[]{1,2,3}),3);
+                    var hl=new Lobby(true,profile,(seat,payload)=>a.SendControl(payload),id=>{hi=id;hg=new GameStart(id);hg.Launch(GameStart.OnlineArguments("--netplay-host "+gamePort)+" --netplay-probe-realtime","barrier-test-only",true,diagHost.NativePath);hr.Set();},id=>{a.CommitGame();hg.Commit(id);},()=>{});
+                    var cl=new Lobby(false,profile,(seat,payload)=>b.SendControl(payload),id=>{ci=id;cg=new GameStart(id);cg.Launch(GameStart.OnlineArguments("--netplay-join 127.0.0.1:"+b.LocalPort)+" --netplay-probe-realtime","barrier-test-only",true,diagGuest.NativePath);cr.Set();},id=>{b.CommitGame();cg.Commit(id);},()=>{});
+                    a.Control=hl.Receive;b.Control=cl.Receive;a.Ping=value=>Interlocked.Exchange(ref ping,value);
+                    var at=a.Run();var bt=b.Run();hl.Announce();cl.Announce();
+                    Check(SpinWait.SpinUntil(()=>hl.CanStart,10000),"lobby metadata through the relay's TLS");
+                    Check(SpinWait.SpinUntil(()=>a.UdpReady && b.UdpReady,10000),"authenticated game UDP through TURN");
+                    hl.Start();Check(hr.Wait(10000) && cr.Wait(10000),"host starts both games through the relay");
+                    hg.WaitReady(CancellationToken.None);cg.WaitReady(CancellationToken.None);
+                    hl.Loaded(hi);cl.Loaded(ci);
+                    var h=hg.Process;var c=cg.Process;
+                    var ho=h.StandardOutput.ReadToEndAsync();var he=h.StandardError.ReadToEndAsync();var co=c.StandardOutput.ReadToEndAsync();var ce=c.StandardError.ReadToEndAsync();
+                    try {
+                        Check(h.WaitForExit(150000) && c.WaitForExit(150000),"relayed game probes finish");
+                        if(h.ExitCode!=0 || c.ExitCode!=0) {Console.Error.WriteLine("HOST "+h.ExitCode+"\n"+ho.Result+he.Result);Console.Error.WriteLine("CLIENT "+c.ExitCode+"\n"+co.Result+ce.Result);}
+                        Check(h.ExitCode==0 && c.ExitCode==0,"relayed game probes exit");
+                        Check(ho.Result.Contains("PASS: 2400/2400") && co.Result.Contains("PASS: 2400/2400"),"4800 native input ticks through TURN");
+                        Check(ho.Result.Contains("equal_states=2400") && co.Result.Contains("equal_states=2400"),"every committed state hash compared through the relay");
+                        Check(Volatile.Read(ref ping)>=0,"UDP round trip measured through TURN");
+                        Console.WriteLine("Relay: TLS through the relay's room, game through TURN, 4800 native ticks, ping "+Volatile.Read(ref ping)+" ms.");
+                    } finally {if(!h.HasExited)h.Kill();if(!c.HasExited)c.Kill();hg.Dispose();cg.Dispose();h.Dispose();c.Dispose();}
+                    a.Dispose();b.Dispose();try{Task.WaitAll(new[]{at,bt},5000);}catch{}
+                }
+            }
+        }
+    }
     static void GameLanguages() {
         var disc=Wire.Hash(new byte[]{1,2,3});
         var english=new PlayerInfo("Camille",disc,3);
@@ -967,6 +1141,8 @@ static class Tests {
         Check(pairing.Add(remi,0,"remi-0")==null && pairing.Add(remi,1,"remi-1")!=null,"a third guest pairs exactly like the first two");
         Reject(()=>pairing.Add(Wire.Random(16),2,"x"),"a channel index outside 0/1 is refused");
     }
-    public static int Run() {try{StartupOptions();GameLanguages();Reports();Codecs();Leases();LobbyRules();Discs();CancelLoading();MeshWiringTest();MeshRouting();ControlOnlyLink();ChannelPairingTest();Tls(0,true,true);for(int mode=0;mode<4;mode++)Tls(mode,mode==0);Console.WriteLine("PASS: "+checks+" checks; host-only lobby start, full disk hash and locks, UDP ping, native loading barrier/cancel, TLS loss before/after commit, authenticated UDP for 4800 native ticks and a real three-peer UDP mesh. No real router/firewall changes.");return 0;}catch(Exception e){Console.Error.WriteLine("FAIL: "+e.ToString());return 1;}}
+    // The relay's own checks alone, quick: PartyBoardOnline.exe --self-test-relay.
+    public static int RunRelay() {try{StunVectors();TurnRelay();RelayEndToEnd();Console.WriteLine("PASS: "+checks+" relay checks; RFC 5769 vector, STUN codec, TURN allocation, permission, Send/Data and channels against a loopback TURN server.");return 0;}catch(Exception e){Console.Error.WriteLine("FAIL: "+e.ToString());return 1;}}
+    public static int Run() {try{StartupOptions();GameLanguages();StunVectors();TurnRelay();Reports();Codecs();Leases();LobbyRules();Discs();CancelLoading();MeshWiringTest();MeshRouting();ControlOnlyLink();ChannelPairingTest();Tls(0,true,true);for(int mode=0;mode<4;mode++)Tls(mode,mode==0);Console.WriteLine("PASS: "+checks+" checks; host-only lobby start, full disk hash and locks, UDP ping, native loading barrier/cancel, TLS loss before/after commit, authenticated UDP for 4800 native ticks and a real three-peer UDP mesh. No real router/firewall changes.");return 0;}catch(Exception e){Console.Error.WriteLine("FAIL: "+e.ToString());return 1;}}
 }
 }

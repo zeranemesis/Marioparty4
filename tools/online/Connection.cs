@@ -52,10 +52,15 @@ static class Wire {
     // "read" or "write", never "mine". The client id says that, and it is generated
     // per guest rather than per connection so the host can pair the two.
     public static SslStream Client(TcpClient tcp,Invitation invite,byte[] build,byte channel=0,byte[] clientId=null) {
+        tcp.NoDelay=true; tcp.ReceiveTimeout=8000; tcp.SendTimeout=8000;
+        return Client(tcp.GetStream(),invite,build,channel,clientId);
+    }
+    // The same handshake over any stream: a TCP connection, or a WebSocket
+    // through the relay (Relay.cs), which then only ever carries ciphertext.
+    public static SslStream Client(Stream transport,Invitation invite,byte[] build,byte channel=0,byte[] clientId=null) {
         if(clientId==null)clientId=new byte[16];
         if(clientId.Length!=16)throw new IOException("Identifiant de connexion incorrect.");
-        tcp.NoDelay=true; tcp.ReceiveTimeout=8000; tcp.SendTimeout=8000;
-        var ssl=new SslStream(tcp.GetStream(),false,(s,c,ch,e)=>c!=null && Equal(Hash(c.GetRawCertData()).Take(invite.Fingerprint.Length).ToArray(),invite.Fingerprint));
+        var ssl=new SslStream(transport,false,(s,c,ch,e)=>c!=null && Equal(Hash(c.GetRawCertData()).Take(invite.Fingerprint.Length).ToArray(),invite.Fingerprint));
         try {
             ssl.ReadTimeout=8000; ssl.WriteTimeout=8000;
             ssl.AuthenticateAsClient("PartyBoard session",null,SslProtocols.Tls12,false);
@@ -71,9 +76,12 @@ static class Wire {
         byte[] ignored;return Server(tcp,cert,invite,build,out channel,out ignored);
     }
     public static SslStream Server(TcpClient tcp,X509Certificate2 cert,Invitation invite,byte[] build,out byte channel,out byte[] clientId) {
-        channel=255;clientId=null;
         tcp.NoDelay=true; tcp.ReceiveTimeout=8000; tcp.SendTimeout=8000;
-        var ssl=new SslStream(tcp.GetStream(),false);
+        return Server(tcp.GetStream(),cert,invite,build,out channel,out clientId);
+    }
+    public static SslStream Server(Stream transport,X509Certificate2 cert,Invitation invite,byte[] build,out byte channel,out byte[] clientId) {
+        channel=255;clientId=null;
+        var ssl=new SslStream(transport,false);
         try {
             ssl.ReadTimeout=8000; ssl.WriteTimeout=8000;
             ssl.AuthenticateAsServer(cert,false,SslProtocols.Tls12,false);
@@ -246,7 +254,10 @@ sealed class ControlChannelException : IOException {
     public ControlChannelException(Exception error):base("La connexion du salon a ete interrompue.",error){}
 }
 sealed class Bridge : IDisposable {
-    readonly TcpClient readTcp,writeTcp; readonly SslStream readSsl,writeSsl; readonly UdpClient udp,network;
+    // The two control channels' transports (TCP connections, or relay WebSockets)
+    // are only ever closed here; the Internet-facing socket is a plain UDP socket
+    // or a TURN allocation (IDatagramSocket, Relay.cs).
+    readonly IDisposable readTcp,writeTcp; readonly SslStream readSsl,writeSsl; readonly UdpClient udp; readonly IDatagramSocket network;
     // Our seat, and the seat of the one player this bridge carries. The remote used
     // to be derived as "the other one", which names nobody once a session has
     // four seats. A mesh is this same bridge instantiated once per peer, each with
@@ -276,7 +287,9 @@ sealed class Bridge : IDisposable {
     long peerPackets;public long PeerPackets {get{return Interlocked.Read(ref peerPackets);}}
     public bool UdpReady {get{long stamp=Interlocked.Read(ref lastUdpPongStamp);return stamp!=0 && Age(stamp)<5000;}}
     public int LocalPort { get {return ((IPEndPoint)udp.Client.LocalEndPoint).Port;} }
-    public Bridge(TcpClient reader,SslStream readStream,TcpClient writer,SslStream writeStream,int player,UdpClient internet,IPEndPoint internetPeer,byte[] token,int hostGamePort=0,int peerPlayer=-1) {
+    public Bridge(IDisposable reader,SslStream readStream,IDisposable writer,SslStream writeStream,int player,UdpClient internet,IPEndPoint internetPeer,byte[] token,int hostGamePort=0,int peerPlayer=-1)
+        :this(reader,readStream,writer,writeStream,player,(IDatagramSocket)new UdpDatagramSocket(internet),internetPeer,token,hostGamePort,peerPlayer) {}
+    public Bridge(IDisposable reader,SslStream readStream,IDisposable writer,SslStream writeStream,int player,IDatagramSocket internet,IPEndPoint internetPeer,byte[] token,int hostGamePort=0,int peerPlayer=-1) {
         if(peerPlayer<0)peerPlayer=player^1;   // the two-player spelling, kept for its callers
         readTcp=reader;readSsl=readStream;writeTcp=writer;writeSsl=writeStream;localPlayer=player;remotePlayer=peerPlayer;network=internet;networkPeer=internetPeer;learnNetworkPeer=internetPeer==null;datagramKey=GameDatagram.Key(token);udp=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));
         if(hostGamePort!=0) {game=new IPEndPoint(IPAddress.Loopback,hostGamePort); udp.Connect(game);}
@@ -317,7 +330,7 @@ sealed class Bridge : IDisposable {
             if(heartbeat!=null)heartbeat.Dispose();toPeer.CompleteAdding();
             // Closing the TCP sockets wakes both TLS workers, without touching
             // the input sockets or triggering the game startup cancellation.
-            readTcp.Close();writeTcp.Close();
+            readTcp.Dispose();writeTcp.Dispose();
         }
         return true;
     }
@@ -378,7 +391,7 @@ sealed class Bridge : IDisposable {
         var send=Worker("udp_pump",()=> {
             // One owner for both UDP sockets, including heartbeat sends. No
             // blocking receive, concurrent UdpClient access or unbounded queue.
-            udp.Client.Blocking=false;network.Client.Blocking=false;
+            udp.Client.Blocking=false;network.NonBlocking();
             long nextHeartbeat=0;
             while(!closed) {
                 long now=Stopwatch.GetTimestamp();Interlocked.Exchange(ref lastPumpStamp,now);
@@ -446,7 +459,7 @@ sealed class Bridge : IDisposable {
             try{await Task.WhenAll(receive,writer);}catch{}
         }
     }); }
-    public void Dispose() {if(Interlocked.Exchange(ref stopping,1)!=0)return;closed=true;if(heartbeat!=null)heartbeat.Dispose();toPeer.CompleteAdding();readTcp.Close();writeTcp.Close();udp.Close();network.Close();readSsl.Dispose();writeSsl.Dispose();}
+    public void Dispose() {if(Interlocked.Exchange(ref stopping,1)!=0)return;closed=true;if(heartbeat!=null)heartbeat.Dispose();toPeer.CompleteAdding();readTcp.Dispose();writeTcp.Dispose();udp.Close();network.Dispose();readSsl.Dispose();writeSsl.Dispose();}
 }
 
 // A mesh needs no relay in the sense Bridge is one -- each peer's game talks

@@ -78,6 +78,13 @@ sealed class Session : IDisposable {
     public int? PingMs;GameStart gameStart;string modListDirectory;
     public readonly Report Report=new Report();System.Threading.Timer diagnosticTimer;
     TcpListener listener;TcpClient peer,peerWrite;X509Certificate2 cert;Gateway mapping,mappingUdp;Firewall firewall;UdpClient internetGame;
+    // The relay (Relay.cs): a TURN allocation for the game datagrams and the room
+    // where guests who cannot reach this box directly arrive. Two players only.
+    TurnClient turn;WebSocketStream relayHost;
+    public bool RelayReady {get;private set;}
+    // One guest's two channels, from either path, gathered by Offer.
+    readonly object admitLock=new object();readonly IDisposable[] admitClosers=new IDisposable[2];readonly SslStream[] admitStreams=new SslStream[2];
+    byte[] admitPairing;bool admitRelay;volatile bool admitted;
     // The mesh's own port mapping, distinct from the pair above: mapping/
     // mappingUdp/firewall/internetGame exist only for the two-player TCP+UDP
     // combo a host offers today. A mesh needs exactly one more UDP mapping,
@@ -126,6 +133,9 @@ sealed class Session : IDisposable {
             // without the invitation changing anything on this side.
             Invite=new Invitation{Address=mapping.Address,Port=mapping.Port,Expires=DateTime.UtcNow.AddMinutes(30),Fingerprint=Wire.Hash(cert.RawData).Take(16).ToArray(),Token=Wire.Random(16),Build=build,MaxPlayers=players,
                 LocalAddress=Gateway.Private(route.Local)?route.Local:IPAddress.Any,LocalPort=Gateway.Private(route.Local)?port:0};
+            // A guest that cannot reach this box -- a CGNAT, no UPnP, or a box that
+            // said yes and still drops -- comes through the relay instead.
+            if(players==2 && Relay.Available) OpenRelay();
             if(players>2) {
                 // Built now, not from the first guest's AttachLobby(): a mesh
                 // salon has to exist, and announce this seat's own mesh
@@ -162,34 +172,63 @@ sealed class Session : IDisposable {
     void Accept() {
         if(maxPlayers>2) {AcceptMesh();return;}
         try {
-            int attempts=0;var rate=Stopwatch.StartNew();var clients=new TcpClient[2];var streams=new SslStream[2];
-            // Which guest these two channels belong to. One salon, one guest for now --
-            // the star that seats three needs a table of these, and the identity to key
-            // it by is exactly what the handshake now carries. Holding it here, unused
-            // beyond pairing, is what makes that table a change of shape rather than a
-            // change of protocol.
-            byte[] pairing=null;
-            while(!disposed) {
+            int attempts=0;var rate=Stopwatch.StartNew();
+            while(!disposed && !admitted) {
                 if(rate.Elapsed.TotalMinutes>=1) {attempts=0;rate.Restart();}
                 if(attempts>=6) {if(cancel.Token.WaitHandle.WaitOne(1000)) return;continue;}
                 var client=listener.AcceptTcpClient();attempts++;
-                SslStream ssl;byte channel;byte[] clientId;
-                try {
-                    ssl=Wire.Server(client,cert,Invite,build,out channel,out clientId);
-                    if(streams[channel]!=null)throw new IOException("Canal déjà connecté.");
-                    // Both channels must come from the same guest. Without this the two
-                    // halves of one bridge could belong to two different machines.
-                    if(pairing!=null && !Wire.Equal(pairing,clientId))throw new IOException("Deux invités différents sur un même salon.");
-                } catch {client.Close();if(!disposed) status("En attente de votre ami…");continue;}
-                pairing=clientId;
-                if(disposed) {client.Close();return;}
-                clients[channel]=client;streams[channel]=ssl;peer=clients[0];peerWrite=clients[1];
-                if(streams[0]==null || streams[1]==null){status("Premier canal sécurisé. Préparation du second…");continue;}
-                listener.Stop();
-                int gamePort;using(var reserve=new UdpClient(new IPEndPoint(IPAddress.Loopback,0))) gamePort=((IPEndPoint)reserve.Client.LocalEndPoint).Port;
-                HostGamePort=gamePort;Bridge=new Bridge(clients[0],streams[0],clients[1],streams[1],0,internetGame,null,Invite.Token,gamePort);internetGame=null;AttachLobby();return;
+                client.NoDelay=true;client.ReceiveTimeout=8000;client.SendTimeout=8000;
+                Offer(client.GetStream(),client,false);
             }
-        } catch {if(!disposed) {failed("L'attente a été interrompue. Recréez une partie.");Dispose();}}
+        } catch {if(!disposed && !admitted) {failed("L'attente a été interrompue. Recréez une partie.");Dispose();}}
+    }
+    // One channel of the guest, over TCP or through the relay. Both channels must
+    // come from the same guest -- otherwise the two halves of one bridge could
+    // belong to two different machines -- and by the same path, so the game
+    // datagrams go where the control did.
+    void Offer(Stream transport,IDisposable closer,bool viaRelay) {
+        SslStream ssl;byte channel;byte[] clientId;
+        try {ssl=Wire.Server(transport,cert,Invite,build,out channel,out clientId);}
+        catch {try{closer.Dispose();}catch{}if(!disposed && !admitted) status("En attente de votre ami…");return;}
+        lock(admitLock) {
+            bool sameGuest=admitPairing==null || (Wire.Equal(admitPairing,clientId) && admitRelay==viaRelay);
+            if(admitted || disposed || admitStreams[channel]!=null || !sameGuest) {ssl.Dispose();try{closer.Dispose();}catch{}return;}
+            admitPairing=clientId;admitRelay=viaRelay;admitClosers[channel]=closer;admitStreams[channel]=ssl;
+            if(!viaRelay){if(channel==0)peer=(TcpClient)closer;else peerWrite=(TcpClient)closer;}
+            if(admitStreams[0]==null || admitStreams[1]==null) {status("Premier canal sécurisé. Préparation du second…");return;}
+            admitted=true;
+        }
+        try{listener.Stop();}catch{}
+        int gamePort;using(var reserve=new UdpClient(new IPEndPoint(IPAddress.Loopback,0))) gamePort=((IPEndPoint)reserve.Client.LocalEndPoint).Port;
+        HostGamePort=gamePort;
+        IDatagramSocket network;
+        lock(this) {
+            // Whichever path is left unused is released now; the room's own
+            // socket too, which never carried a guest's bytes.
+            if(viaRelay){network=turn;turn=null;if(internetGame!=null){internetGame.Close();internetGame=null;}}
+            else{network=new UdpDatagramSocket(internetGame);internetGame=null;if(turn!=null){turn.Dispose();turn=null;}}
+            if(relayHost!=null){relayHost.Dispose();relayHost=null;}
+        }
+        JoinPath=viaRelay?"relay":"direct";
+        Bridge=new Bridge(admitClosers[0],admitStreams[0],admitClosers[1],admitStreams[1],0,network,null,Invite.Token,gamePort);AttachLobby();
+    }
+    // Credentials, a TURN allocation and the room, before the invitation is
+    // shown. Any failure leaves the salon exactly as it was without a relay.
+    void OpenRelay() {
+        TurnClient allocation=null;
+        try {
+            status("Préparation du relais en ligne…");
+            var access=Relay.TurnCredentials();
+            allocation=new TurnClient(access.Item3,access.Item1,access.Item2);allocation.Allocate();
+            var room=Relay.RoomId(Invite.Token);
+            var control=Relay.Connect("/room/"+room+"/host?udp="+Uri.EscapeDataString(allocation.Relayed.ToString()));
+            lock(this){if(disposed){allocation.Dispose();control.Dispose();return;}turn=allocation;relayHost=control;RelayReady=true;}
+            Report.Write("relay=ready");
+            var held=allocation;Task.Run(()=>RelayNotices(room,control,held));
+        } catch(Exception e) {if(allocation!=null)allocation.Dispose();Report.Write("relay=unavailable error="+e.GetType().Name);}
+    }
+    void RelayNotices(string room,WebSocketStream control,TurnClient allocation) {
+        Relay.HostNotices(room,control,allocation,()=>disposed || admitted,pipe=>Offer(pipe,pipe,true),Report.Write);
     }
     // The N-guest loop: keeps accepting until every seat but the host's own is
     // filled, pairing each guest's two channels by the client identifier the
@@ -278,7 +317,16 @@ sealed class Session : IDisposable {
         }
         if(toHost==null) {
             status("Connexion à votre ami…");peer=new TcpClient(AddressFamily.InterNetwork);
-            if(!peer.ConnectAsync(Invite.Address,Invite.Port).Wait(10000)) {peer.Close();throw new IOException("Votre ami n'est pas joignable. Vérifiez qu'il a laissé sa fenêtre ouverte, ou essayez d'inverser les rôles.");}
+            // Only an unreachable host falls through to the relay. A host that
+            // answers and refuses (another version, an expired invitation) says
+            // why, and the relay would only say it again.
+            bool reached=false;
+            try{reached=peer.ConnectAsync(Invite.Address,Invite.Port).Wait(Relay.Available?6000:10000) && peer.Connected;}catch{}
+            if(!reached) {
+                peer.Close();peer=null;
+                if(!Relay.Available || maxPlayers>2) throw new IOException("Votre ami n'est pas joignable. Vérifiez qu'il a laissé sa fenêtre ouverte, ou essayez d'inverser les rôles.");
+                JoinViaRelay(clientId);return;
+            }
             toHost=Wire.Client(peer,Invite,build,0,clientId);target=Invite.Address;targetPort=Invite.Port;JoinPath="internet";
         }
         status("Premier canal sécurisé. Préparation du second…");peerWrite=new TcpClient(AddressFamily.InterNetwork);
@@ -301,6 +349,25 @@ sealed class Session : IDisposable {
                 if(!meshOpened) {meshOpened=true;try{OpenMesh();}catch(Exception e){Report.Write("event=mesh_open_failed error="+e.Message);}}
             };
         }
+    }
+    // Both channels through the relay's room, the game datagrams to the host's
+    // TURN address it announced there.
+    void JoinViaRelay(byte[] clientId) {
+        status("Votre ami passe par le relais en ligne…");
+        var room=Relay.RoomId(Invite.Token);
+        internetGame=new UdpClient(new IPEndPoint(IPAddress.Any,0));
+        var self=Relay.PublicAddress(internetGame);
+        IPEndPoint hostUdp;WebSocketStream first=Relay.GuestPipe(room,self,out hostUdp),second=null;SslStream toHost,fromHost;
+        try {
+            toHost=Wire.Client(first,Invite,build,0,clientId);
+            status("Premier canal sécurisé. Préparation du second…");
+            IPEndPoint again;second=Relay.GuestPipe(room,self,out again);
+            fromHost=Wire.Client(second,Invite,build,1,clientId);
+        } catch {first.Dispose();if(second!=null)second.Dispose();throw;}
+        if(disposed){toHost.Dispose();fromHost.Dispose();throw new OperationCanceledException();}
+        if(hostUdp==null){toHost.Dispose();fromHost.Dispose();throw new IOException("Le relais n'a pas donné l'adresse de jeu de votre ami.");}
+        JoinPath="relay";
+        Bridge=new Bridge(second,fromHost,first,toHost,1,internetGame,hostUdp,Invite.Token);internetGame=null;AttachLobby();
     }
     void AttachLobby() {
         Bridge.Diagnostic=Report.Write;
@@ -432,6 +499,7 @@ sealed class Session : IDisposable {
             if(!disposed)Report.Write("session_closed");
             if(modListDirectory!=null)try{Directory.Delete(modListDirectory,true);}catch{}if(diagnosticTimer!=null)diagnosticTimer.Dispose();
             disposed=true;cancel.Cancel();if(listener!=null) listener.Stop();if(peer!=null) peer.Close();if(peerWrite!=null)peerWrite.Close();
+            if(turn!=null){turn.Dispose();turn=null;}if(relayHost!=null){relayHost.Dispose();relayHost=null;}
             if(gameStart!=null)gameStart.Abort();if(Lobby!=null)Lobby.Close();
             if(Bridge!=null) Bridge.Dispose();if(guestLinks!=null)foreach(var g in guestLinks)if(g!=null)try{g.Dispose();}catch{}
             if(internetGame!=null)internetGame.Close();if(mappingUdp!=null)mappingUdp.Dispose();if(mapping!=null) mapping.Dispose();if(firewall!=null) firewall.Dispose();
@@ -446,6 +514,7 @@ static class Program {
     [STAThread] static int Main(string[] args) {
         if(args.Length==3 && args[0]=="--firewall") {int port,pid;return int.TryParse(args[1],out port)&&int.TryParse(args[2],out pid)?Firewall.Broker(port,pid):2;}
         if(args.Length==1 && args[0]=="--self-test") return Tests.Run();
+        if(args.Length==1 && args[0]=="--self-test-relay") return Tests.RunRelay();
         // Both PCs must hold byte-identical folders or Lobby refuses to start the
         // game. Printing the same hash the handshake uses lets a player check that
         // before a session instead of discovering it as a refusal.
