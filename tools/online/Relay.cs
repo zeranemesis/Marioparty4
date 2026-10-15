@@ -365,6 +365,17 @@ sealed class WebSocketStream : Stream {
         }
         int n=Math.Min(count,buffered.Length-offset);Buffer.BlockCopy(buffered,offset,destination,at,n);offset+=n;return n;
     }
+    // A request of our own to the relay, as text: the room's host socket is
+    // never a pipe, so nothing else writes on it.
+    readonly object sendLock=new object();
+    public void SendText(string text) {
+        var bytes=Encoding.UTF8.GetBytes(text);
+        lock(sendLock) using(var deadline=Deadline(WriteTimeout==Timeout.Infinite?10000:WriteTimeout)) {
+            try{socket.SendAsync(new ArraySegment<byte>(bytes),WebSocketMessageType.Text,true,deadline.Token).GetAwaiter().GetResult();}
+            catch(OperationCanceledException){throw new IOException("Le relais ne répond plus.");}
+            catch(WebSocketException e){throw new IOException("Le relais a fermé la connexion.",e);}
+        }
+    }
     public override void Write(byte[] source,int at,int count) {
         using(var deadline=Deadline(WriteTimeout)) {
             try{socket.SendAsync(new ArraySegment<byte>(source,at,count),WebSocketMessageType.Binary,true,deadline.Token).GetAwaiter().GetResult();}
@@ -386,6 +397,9 @@ static class Relay {
     const string DefaultUrl="https://partyboard-relay.zeranemesis.workers.dev";
     public static string BaseUrl {get{var v=Environment.GetEnvironmentVariable("PARTYBOARD_RELAY");return (v??DefaultUrl).TrimEnd('/');}}
     public static bool Available {get{return BaseUrl.Length>0;}}
+    // Tests against a local relay (wrangler dev has no TURN keys): a loopback
+    // TURN and STUN server instead of Cloudflare's. Set by Tests.cs only.
+    internal static Tuple<string,string,IPEndPoint> TestTurn;internal static IPEndPoint TestStun;
     public static string RoomId(byte[] token) {
         var hash=Wire.Hash(Encoding.ASCII.GetBytes("PBRELAY1").Concat(token).ToArray());
         return BitConverter.ToString(hash,0,16).Replace("-","").ToLowerInvariant();
@@ -420,14 +434,16 @@ static class Relay {
     // Host side. The room tells us when a guest arrives, with the address TURN
     // will see: that address is permitted, then the guest's connection is opened
     // and handed to offer, which takes it like a TCP one.
-    public static void HostNotices(string room,WebSocketStream control,TurnClient allocation,Func<bool> stop,Action<WebSocketStream> offer,Action<string> report) {
+    public static void HostNotices(string room,WebSocketStream control,TurnClient allocation,Func<bool> stop,Action<WebSocketStream> offer,Action<string> report,Action<Dictionary<string,object>> other=null) {
         try {
             while(!stop()) {
                 bool binary;var notice=control.ReadMessage(out binary);
                 if(control.Closed)break;if(notice==null)continue;
                 Dictionary<string,object> n;try{n=Parse(notice);}catch{continue;}
                 object type,conn,ip;
-                if(!n.TryGetValue("type",out type) || (type as string)!="incoming" || !n.TryGetValue("conn",out conn) || !(conn is string))continue;
+                if(!n.TryGetValue("type",out type))continue;
+                if((type as string)!="incoming"){if(other!=null)other(n);continue;}
+                if(!n.TryGetValue("conn",out conn) || !(conn is string))continue;
                 IPAddress address;
                 if(n.TryGetValue("ip",out ip) && IPAddress.TryParse(ip as string,out address) && address.AddressFamily==AddressFamily.InterNetwork)
                     try{allocation.Permit(address);}catch(Exception e){report("relay_permit_failed="+e.GetType().Name);}
@@ -466,7 +482,7 @@ static class Relay {
     // address the guest's WebSocket came from.
     public static string PublicAddress(UdpClient socket,IPEndPoint stunServer=null) {
         try {
-            var server=stunServer??new IPEndPoint(Dns.GetHostAddresses("stun.cloudflare.com").First(a=>a.AddressFamily==AddressFamily.InterNetwork),3478);
+            var server=stunServer??TestStun??new IPEndPoint(Dns.GetHostAddresses("stun.cloudflare.com").First(a=>a.AddressFamily==AddressFamily.InterNetwork),3478);
             var request=Stun.New(Stun.Binding,Stun.Request);var bytes=Stun.Encode(request);
             socket.Client.ReceiveTimeout=1500;
             for(int i=0;i<2;i++) {
@@ -478,6 +494,46 @@ static class Relay {
             }
             return null;
         } catch {return null;} finally {try{socket.Client.ReceiveTimeout=0;}catch{}}
+    }
+
+    // The public list (relay-worker: GET /rooms). Only rooms this player could
+    // start are returned: the same PartyBoard build and the same disc.
+    public sealed class PublicRoom {public string Room,Name,Language,Region;public int Age;}
+    public static string Short(byte[] hash){return BitConverter.ToString(hash,0,8).Replace("-","").ToLowerInvariant();}
+    static string Get(string path) {
+        using(var client=new WebClient()) {
+            client.Headers[HttpRequestHeader.UserAgent]="PartyBoard-Online";client.Encoding=Encoding.UTF8;
+            try{return client.DownloadString(BaseUrl+path);}
+            catch(WebException e) {
+                var r=e.Response as HttpWebResponse;
+                if(r!=null && r.StatusCode==HttpStatusCode.NotFound)throw new IOException("Cette salle n'existe plus : son hôte l'a fermée ou quelqu'un l'a déjà rejointe.",e);
+                if(r!=null && (int)r.StatusCode==429)throw new IOException("Trop de demandes au relais en ligne. Attendez une minute.",e);
+                throw new IOException("Le relais en ligne n'est pas joignable.",e);
+            }
+        }
+    }
+    public static List<PublicRoom> PublicRooms(byte[] build,byte[] disc) {
+        var reply=Parse(Get("/rooms?build="+Short(build)+"&disc="+Short(disc)));
+        var rooms=new List<PublicRoom>();object list;
+        if(!reply.TryGetValue("rooms",out list) || !(list is System.Collections.ArrayList))return rooms;
+        foreach(var item in (System.Collections.ArrayList)list) {
+            var r=item as Dictionary<string,object>;if(r==null)continue;object v;
+            var room=new PublicRoom{Room=r.TryGetValue("room",out v)?v as string:null,Name=r.TryGetValue("name",out v)?v as string:null,
+                Language=r.TryGetValue("lang",out v)?v as string:"en",Region=r.TryGetValue("region",out v)?v as string:"us",Age=r.TryGetValue("age",out v) && v is int?(int)v:0};
+            if(room.Room!=null && room.Room.Length==32 && room.Name!=null)rooms.Add(room);
+        }
+        return rooms;
+    }
+    public static string PublicInvite(string room) {
+        if(room==null || room.Length!=32 || room.Any(c=>!Uri.IsHexDigit(c)))throw new IOException("Salle inconnue.");
+        object invite;
+        if(!Parse(Get("/rooms/"+room)).TryGetValue("invite",out invite) || !(invite is string))throw new IOException("Cette salle n'existe plus.");
+        return (string)invite;
+    }
+    public static string PublishRequest(Invitation invite,string name,byte language,bool pal,byte[] build,byte[] disc) {
+        return new JavaScriptSerializer().Serialize(new Dictionary<string,object>{
+            {"type","publish"},{"invite",invite.ForPublicList().Encode()},{"name",name},{"lang",GameLanguage.Code(language)},
+            {"region",pal?"eu":"us"},{"build",Short(build)},{"disc",Short(disc)}});
     }
 
     public static Dictionary<string,object> Parse(string notice){return new JavaScriptSerializer().Deserialize<Dictionary<string,object>>(notice);}

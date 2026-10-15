@@ -114,6 +114,12 @@ sealed class Invitation {
     // does.
     public int MaxPlayers=2;
     public bool HasLocalPath {get{return LocalPort>0 && LocalAddress!=null && !LocalAddress.Equals(IPAddress.Any) && !LocalAddress.Equals(Address);}}
+    // A public room's invitation: no address at all, so the list it sits on
+    // never says where the host is, and its guests come through the relay.
+    public bool ThroughRelayOnly {get{return Port==0 && Address!=null && Address.Equals(IPAddress.Any) && LocalPort==0;}}
+    public Invitation ForPublicList() {
+        return new Invitation{Address=IPAddress.Any,Port=0,Expires=Expires,Fingerprint=Fingerprint,Token=Token,Build=Build,MaxPlayers=MaxPlayers,LocalAddress=IPAddress.Any,LocalPort=0};
+    }
     public string Encode() {
         if(Fingerprint.Length!=16 || Token.Length!=16)throw new IOException("Invitation incompatible.");
         if(MaxPlayers<2 || MaxPlayers>Lobby.MaxSeats)throw new IOException("Invitation incompatible.");
@@ -150,7 +156,8 @@ sealed class Invitation {
                 // host then announces the same address and port as its local
                 // path, and nothing else is accepted.
                 bool localSalon=Gateway.Private(i.Address) && i.Address.Equals(i.LocalAddress) && i.LocalPort==i.Port;
-                if(i.Port==0 || (!localTest && !Gateway.Public(i.Address) && !localSalon)) throw new FormatException();
+                bool relayOnly=i.ThroughRelayOnly && i.MaxPlayers==2;
+                if(!relayOnly && (i.Port==0 || (!localTest && !Gateway.Public(i.Address) && !localSalon))) throw new FormatException();
                 // The local address is deliberately NOT required to be public -
                 // that is the whole point - but it must be a private address, so
                 // an invitation cannot redirect the first attempt anywhere else.

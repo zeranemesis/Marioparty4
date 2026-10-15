@@ -89,13 +89,16 @@ static class Tests {
         IPEndPoint client;volatile bool closed;public int Unsigned,ChannelDataSeen,IndicationsSeen;
         public IPEndPoint Endpoint {get{return (IPEndPoint)Control.Client.LocalEndPoint;}}
         public MockTurn(){new Thread(ServeControl){IsBackground=true}.Start();new Thread(ServeRelay){IsBackground=true}.Start();}
-        void Reply(Stun.Message request,ushort cls,Action<Stun.Message> fill,bool sign) {
+        void Reply(Stun.Message request,ushort cls,Action<Stun.Message> fill,bool sign,IPEndPoint to=null) {
             var r=new Stun.Message{Type=Stun.TypeOf(request.Method,cls)};Buffer.BlockCopy(request.Transaction,0,r.Transaction,0,12);fill(r);
-            var b=Stun.Encode(r,sign?key:null,true);Control.Send(b,b.Length,client);
+            var b=Stun.Encode(r,sign?key:null,true);Control.Send(b,b.Length,to??client);
         }
         void ServeControl() {
             while(!closed) {
                 byte[] d;IPEndPoint from=null;try{d=Control.Receive(ref from);}catch{return;}
+                // A Binding is STUN only (a guest learning its address): answered
+                // where it came from, and it does not make that sender the client.
+                if(d.Length>=20 && d[0]<0x40){var b=Stun.Decode(d,d.Length);if(b!=null && b.Method==Stun.Binding && b.Class==Stun.Request){Reply(b,Stun.Success,x=>x.Add(Stun.XorMappedAddress,Stun.XorAddress(from)),false,from);continue;}}
                 client=from;
                 if(d.Length>=4 && d[0]>=0x40 && d[0]<=0x7F) {
                     int ch=d[0]<<8|d[1],len=d[2]<<8|d[3];IPEndPoint peer;
@@ -230,6 +233,44 @@ static class Tests {
                     a.Dispose();b.Dispose();try{Task.WaitAll(new[]{at,bt},5000);}catch{}
                 }
             }
+        }
+    }
+    // A public room's invitation: on a list anyone can read, so it carries no
+    // address -- the host's public one, its local one, nor a port -- and still
+    // everything the TLS and the relay room need.
+    static void PublicInvitations() {
+        var full=new Invitation{Address=IPAddress.Parse("203.0.113.7"),Port=40123,Expires=DateTime.UtcNow.AddMinutes(30),Fingerprint=Wire.Random(16),Token=Wire.Random(16),MaxPlayers=2,
+            LocalAddress=IPAddress.Parse("192.168.1.20"),LocalPort=40123};
+        var listed=full.ForPublicList();var text=listed.Encode();
+        Check(text.Length==72 && text.StartsWith("PB4."),"a public invitation is an ordinary PB4 code, 72 characters");
+        var back=Invitation.Decode(text);
+        Check(back.ThroughRelayOnly && !back.HasLocalPath,"it decodes as relay only, with no local path");
+        Check(back.Address.Equals(IPAddress.Any) && back.Port==0 && back.LocalAddress.Equals(IPAddress.Any) && back.LocalPort==0,"no address of the host survives in it");
+        Check(Wire.Equal(back.Token,full.Token) && Wire.Equal(back.Fingerprint,full.Fingerprint),"token and pinned fingerprint are kept");
+        Check(Relay.RoomId(back.Token)==Relay.RoomId(full.Token),"it names the same relay room");
+        Check(!Invitation.Decode(full.Encode(),true).ThroughRelayOnly,"a friend's invitation is not relay only");
+        var mesh=new Invitation{Address=IPAddress.Any,Port=0,Expires=DateTime.UtcNow.AddMinutes(30),Fingerprint=Wire.Random(16),Token=Wire.Random(16),MaxPlayers=3,LocalAddress=IPAddress.Any,LocalPort=0};
+        bool refused=false;try{Invitation.Decode(mesh.Encode());}catch(IOException){refused=true;}
+        Check(refused,"no address and three players is refused: the relay carries one guest");
+        var request=Relay.Parse(Relay.PublishRequest(full,"Hôte",1,true,Wire.Random(32),Wire.Random(32)));
+        Check((string)request["invite"]==text && !((string)request["invite"]).Contains("203.0.113.7"),"the publish request sends the address-free copy");
+        Check((string)request["lang"]=="de" && (string)request["region"]=="eu" && ((string)request["build"]).Length==16 && ((string)request["disc"]).Length==16,"language, region, build and disc tags");
+    }
+    // LAN discovery on its own port, through loopback: a host answers a
+    // question with its game only when build and disc match, and only while
+    // it says it has a seat.
+    static void LanBeacon() {
+        var build=Wire.Random(32);var disc=Wire.Random(32);bool open=true;int port=47475;
+        var invite=new Invitation{Address=IPAddress.Parse("192.168.1.20"),Port=40000,Expires=DateTime.UtcNow.AddMinutes(30),Fingerprint=Wire.Random(16),Token=Wire.Random(16),MaxPlayers=2,LocalAddress=IPAddress.Parse("192.168.1.20"),LocalPort=40000}.Encode();
+        using(var beacon=new LanDiscovery.Beacon(build,disc,()=>open?new LanDiscovery.Game{Name="Hôte LAN",Language="fr",Region="eu",Players=1,MaxPlayers=2,Invite=invite}:null,port)) {
+            // The answer comes from 127.0.0.1, and the invitation names a LAN
+            // address: allowed only because loopback is this same PC.
+            var found=LanDiscovery.Find(build,disc,800,port);
+            Check(found.Count==1 && found[0].Name=="Hôte LAN" && found[0].Language=="fr" && found[0].Region=="eu" && found[0].Invite==invite,"a LAN game is found with its pseudo, language, disc and invitation");
+            Check(LanDiscovery.Find(build,Wire.Random(32),500,port).Count==0,"another disc gets no answer");
+            Check(LanDiscovery.Find(Wire.Random(32),disc,500,port).Count==0,"another build gets no answer");
+            open=false;
+            Check(LanDiscovery.Find(build,disc,500,port).Count==0,"a full game stops answering");
         }
     }
     static void GameLanguages() {
@@ -1159,6 +1200,122 @@ static class Tests {
     // `minutes`, so TURN's refresh of allocation, permission and channel runs.
     // PartyBoardOnline.exe --relay-session-test <minutes>, with PARTYBOARD_RELAY
     // and PARTYBOARD_TEST_DISC (a disc image online play accepts).
+    // A public room, end to end against a relay (PARTYBOARD_RELAY: wrangler dev,
+    // or the deployed Worker): the host publishes, a stranger finds it in the
+    // list filtered by build and disc, takes its address-free invitation, comes
+    // in through the relay, and the room leaves the list. Also what the Worker
+    // must refuse: an invitation that carries an address, and a second "host"
+    // for a room that is held. PartyBoardOnline.exe --public-room-test, with
+    // PARTYBOARD_RELAY and PARTYBOARD_TEST_DISC.
+    public static int RunPublicRoom() {
+        try {
+            var discPath=Environment.GetEnvironmentVariable("PARTYBOARD_TEST_DISC");
+            if(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("PARTYBOARD_RELAY")) || string.IsNullOrEmpty(discPath)) {
+                Console.WriteLine("NOT RUN: set PARTYBOARD_RELAY and PARTYBOARD_TEST_DISC.");return 2;
+            }
+            Environment.SetEnvironmentVariable("PARTYBOARD_ONLINE_RELAY_ONLY","1");
+            string failure=null;Action<string> fail=m=>{if(failure==null)failure=m;};
+            var build=Wire.BuildHash(AppDomain.CurrentDomain.BaseDirectory);
+            // A local relay has no TURN keys: a loopback TURN and STUN stand in,
+            // unless PARTYBOARD_RELAY_LIVE=1 asks for Cloudflare's.
+            bool live=Environment.GetEnvironmentVariable("PARTYBOARD_RELAY_LIVE")=="1";
+            using(var turnServer=live?null:new MockTurn()) {
+            if(!live){Relay.TestTurn=Tuple.Create("alice","secret",turnServer.Endpoint);Relay.TestStun=turnServer.Endpoint;}
+            using(var hostDisc=DiscFile.Verify(discPath,_=>{},CancellationToken.None))
+            using(var guestDisc=DiscFile.Verify(discPath,_=>{},CancellationToken.None)) {
+                string name="Salle test "+Wire.Random(2)[0];
+                var host=new Session(s=>Console.WriteLine("host: "+s),()=>{},fail,new PlayerInfo(name,hostDisc.Hash,hostDisc.Length,null,2),hostDisc);
+                var guest=new Session(s=>Console.WriteLine("guest: "+s),()=>{},fail,new PlayerInfo("Inconnu",guestDisc.Hash,guestDisc.Length),guestDisc);
+                try {
+                    host.Create(2);
+                    Check(host.RelayReady && host.CanBePublic,"a waiting two-player salon with its relay room can be public");
+                    var room=Relay.RoomId(host.Invite.Token);
+                    Check(!Relay.PublicRooms(build,hostDisc.Hash).Any(r=>r.Room==room),"not listed before the host asks");
+                    // Someone who read the room off the list cannot take the host's place.
+                    using(var thief=Relay.Connect("/room/"+room+"/host?udp=192.0.2.1:9")) {
+                        thief.ReadTimeout=5000;bool binary;thief.ReadMessage(out binary);
+                        Check(thief.Closed,"a second host without the room's key is turned away");
+                    }
+                    host.SetPublic(true);
+                    Check(SpinWait.SpinUntil(()=>host.Public==PublicState.Listed,10000),"the relay listed the room ("+host.Public+")");
+                    var rooms=Relay.PublicRooms(build,guestDisc.Hash);var mine=rooms.FirstOrDefault(r=>r.Room==room);
+                    Check(mine!=null,"a stranger with the same disc and build sees it");
+                    Check(mine.Name==name && mine.Language=="fr" && mine.Region==(hostDisc.Pal?"eu":"us"),"with the host's pseudo, game language and disc region");
+                    Check(!Relay.PublicRooms(build,Wire.Random(32)).Any(r=>r.Room==room),"another disc does not see it");
+                    Check(!Relay.PublicRooms(Wire.Random(32),guestDisc.Hash).Any(r=>r.Room==room),"another PartyBoard build does not see it");
+                    var invite=Relay.PublicInvite(room);var decoded=Invitation.Decode(invite);
+                    Check(decoded.ThroughRelayOnly && decoded.Address.Equals(IPAddress.Any) && decoded.LocalPort==0,"the listed invitation carries no address");
+                    host.SetPublic(false);
+                    Check(SpinWait.SpinUntil(()=>host.Public==PublicState.Private && !Relay.PublicRooms(build,guestDisc.Hash).Any(r=>r.Room==room),10000),"private again: off the list");
+                    host.SetPublic(true);
+                    Check(SpinWait.SpinUntil(()=>host.Public==PublicState.Listed,10000),"public again");
+                    guest.Join(invite);
+                    Check(SpinWait.SpinUntil(()=>host.Bridge!=null,15000),"the host admitted the stranger");
+                    Check(host.JoinPath=="relay" && guest.JoinPath=="relay","both sides went through the relay");
+                    Check(SpinWait.SpinUntil(()=>host.Lobby!=null && host.Lobby.CanStart,15000),"the salon can start");
+                    Check(SpinWait.SpinUntil(()=>host.Bridge.UdpReady && guest.Bridge.UdpReady,15000),"game UDP through TURN, both directions");
+                    Check(SpinWait.SpinUntil(()=>!Relay.PublicRooms(build,guestDisc.Hash).Any(r=>r.Room==room),10000),"a full room leaves the list");
+                    bool gone=false;try{Relay.PublicInvite(room);}catch(IOException){gone=true;}
+                    Check(gone,"and its invitation is no longer handed out");
+                    Check(failure==null,"no session failure ("+failure+")");
+                } finally {try{guest.Dispose();}catch{}try{host.Dispose();}catch{}}
+            }
+            }
+            // The Worker's own guard: an invitation with an address is refused,
+            // whatever a modified client sends.
+            var token=Wire.Random(16);var other=Relay.RoomId(token);
+            using(var fake=Relay.Connect("/room/"+other+"/host?udp=192.0.2.1:9&key="+BitConverter.ToString(Wire.Random(16)).Replace("-","").ToLowerInvariant())) {
+                var leaky=new Invitation{Address=IPAddress.Parse("203.0.113.7"),Port=4000,Expires=DateTime.UtcNow.AddMinutes(30),Fingerprint=Wire.Random(16),Token=token,MaxPlayers=2,LocalAddress=IPAddress.Any,LocalPort=0};
+                var request=new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(new Dictionary<string,object>{{"type","publish"},{"invite",leaky.Encode()},{"name","x"},{"lang","en"},{"region","us"},{"build",Relay.Short(build)},{"disc",Relay.Short(Wire.Random(32))}});
+                fake.SendText(request);fake.ReadTimeout=5000;bool binary;var answer=Relay.Parse(fake.ReadMessage(out binary));
+                Check((string)answer["type"]=="publish-refused" && (string)answer["reason"]=="address","the relay refuses to list an invitation that carries an address");
+                var foreign=new Invitation{Address=IPAddress.Any,Port=0,Expires=DateTime.UtcNow.AddMinutes(30),Fingerprint=Wire.Random(16),Token=Wire.Random(16),MaxPlayers=2,LocalAddress=IPAddress.Any,LocalPort=0};
+                fake.SendText(Relay.PublishRequest(foreign,"x",0,false,build,Wire.Random(32)));answer=Relay.Parse(fake.ReadMessage(out binary));
+                Check((string)answer["type"]=="publish-refused" && (string)answer["reason"]=="room","and one for another room");
+            }
+            Console.WriteLine("PASS: "+checks+" checks; public room listed, filtered by disc and build, joined through the relay by its address-free invitation, delisted when full; leaky and foreign invitations and a second host refused.");
+            return 0;
+        } catch(Exception e) {Console.Error.WriteLine("FAIL: "+e.Message);return 1;}
+    }
+    // A LAN game with the real lobby code: the host in LAN mode (no box, no
+    // relay, firewall untouched for the test), a player who finds it by
+    // discovery alone and joins straight across the network.
+    // PartyBoardOnline.exe --lan-test, with PARTYBOARD_TEST_DISC.
+    public static int RunLan() {
+        try {
+            var discPath=Environment.GetEnvironmentVariable("PARTYBOARD_TEST_DISC");
+            if(string.IsNullOrEmpty(discPath)){Console.WriteLine("NOT RUN: set PARTYBOARD_TEST_DISC.");return 2;}
+            Environment.SetEnvironmentVariable("PARTYBOARD_ONLINE_NO_SYSTEM_CHANGES","1");
+            // Proof that nothing goes online: the relay points nowhere.
+            Environment.SetEnvironmentVariable("PARTYBOARD_RELAY","http://192.0.2.1:9");
+            string failure=null;Action<string> fail=m=>{if(failure==null)failure=m;};
+            var build=Wire.BuildHash(AppDomain.CurrentDomain.BaseDirectory);
+            using(var hostDisc=DiscFile.Verify(discPath,_=>{},CancellationToken.None))
+            using(var guestDisc=DiscFile.Verify(discPath,_=>{},CancellationToken.None)) {
+                var host=new Session(s=>Console.WriteLine("host: "+s),()=>{},fail,new PlayerInfo("Salon LAN",hostDisc.Hash,hostDisc.Length,null,2),hostDisc){Lan=true};
+                var guest=new Session(s=>Console.WriteLine("guest: "+s),()=>{},fail,new PlayerInfo("Voisin",guestDisc.Hash,guestDisc.Length),guestDisc){Lan=true};
+                try {
+                    host.Create(2);
+                    Check(!host.RelayReady,"a LAN game opens no relay room");
+                    Check(host.LocalOnly,"and asks nothing of the box");
+                    Check(Gateway.Private(host.Invite.Address) && host.Invite.Address.Equals(host.Invite.LocalAddress),"its invitation names this network only");
+                    var found=LanDiscovery.Find(build,guestDisc.Hash,2000);
+                    var game=found.FirstOrDefault(g=>g.Invite==host.Invite.Encode());
+                    Check(game!=null,"the neighbour finds it by discovery ("+found.Count+" games, "+host.LanAnswers+" answers)");
+                    Check(game.Name=="Salon LAN" && game.Language=="fr" && game.Players==1 && game.MaxPlayers==2,"with the host's pseudo, language and seats");
+                    guest.Join(game.Invite);
+                    Check(SpinWait.SpinUntil(()=>host.Bridge!=null,15000),"the host admitted the neighbour");
+                    Check(guest.JoinPath=="lan","the guest came straight across the network");
+                    Check(SpinWait.SpinUntil(()=>host.Lobby!=null && host.Lobby.CanStart,15000),"the salon can start");
+                    Check(SpinWait.SpinUntil(()=>host.Bridge.UdpReady && guest.Bridge.UdpReady,15000),"game UDP on the LAN, both directions");
+                    Check(!LanDiscovery.Find(build,guestDisc.Hash,1500).Any(g=>g.Invite==host.Invite.Encode()),"a full game is no longer listed");
+                    Check(failure==null,"no session failure ("+failure+")");
+                } finally {try{guest.Dispose();}catch{}try{host.Dispose();}catch{}}
+            }
+            Console.WriteLine("PASS: "+checks+" checks; LAN game found by discovery, joined directly, no relay and no box, delisted when full.");
+            return 0;
+        } catch(Exception e) {Console.Error.WriteLine("FAIL: "+e.Message);return 1;}
+    }
     public static int RunRelaySession(int minutes) {
         try {
             var discPath=Environment.GetEnvironmentVariable("PARTYBOARD_TEST_DISC");
@@ -1197,6 +1354,6 @@ static class Tests {
             }
         } catch(Exception e) {Console.Error.WriteLine("FAIL: "+e.Message);return 1;}
     }
-    public static int Run() {try{StartupOptions();GameLanguages();StunVectors();TurnRelay();Reports();Codecs();Leases();LobbyRules();Discs();CancelLoading();MeshWiringTest();MeshRouting();ControlOnlyLink();ChannelPairingTest();Tls(0,true,true);for(int mode=0;mode<4;mode++)Tls(mode,mode==0);Console.WriteLine("PASS: "+checks+" checks; host-only lobby start, full disk hash and locks, UDP ping, native loading barrier/cancel, TLS loss before/after commit, authenticated UDP for 4800 native ticks and a real three-peer UDP mesh. No real router/firewall changes.");return 0;}catch(Exception e){Console.Error.WriteLine("FAIL: "+e.ToString());return 1;}}
+    public static int Run() {try{StartupOptions();GameLanguages();PublicInvitations();LanBeacon();StunVectors();TurnRelay();Reports();Codecs();Leases();LobbyRules();Discs();CancelLoading();MeshWiringTest();MeshRouting();ControlOnlyLink();ChannelPairingTest();Tls(0,true,true);for(int mode=0;mode<4;mode++)Tls(mode,mode==0);Console.WriteLine("PASS: "+checks+" checks; host-only lobby start, full disk hash and locks, UDP ping, native loading barrier/cancel, TLS loss before/after commit, authenticated UDP for 4800 native ticks and a real three-peer UDP mesh. No real router/firewall changes.");return 0;}catch(Exception e){Console.Error.WriteLine("FAIL: "+e.ToString());return 1;}}
 }
 }

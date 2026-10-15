@@ -16,12 +16,12 @@ namespace PartyBoardOnline {
 sealed class Firewall : IDisposable {
     EventWaitHandle stop;
     static string Name(int pid,int port,string suffix) {return "Local\\PartyBoardOnline-"+pid+"-"+port+suffix;}
-    public static Firewall Open(int port) {
+    public static Firewall Open(int port,bool lan=false) {
         int pid=Process.GetCurrentProcess().Id;
         var result=new Firewall{stop=new EventWaitHandle(false,EventResetMode.ManualReset,Name(pid,port,"-stop"))};
         try {
             using(var ready=new EventWaitHandle(false,EventResetMode.ManualReset,Name(pid,port,"-ready"))) {
-                var info=new ProcessStartInfo(Application.ExecutablePath,"--firewall "+port+" "+pid){UseShellExecute=true,Verb="runas",WindowStyle=ProcessWindowStyle.Hidden};
+                var info=new ProcessStartInfo(Application.ExecutablePath,"--firewall "+port+" "+pid+(lan?" lan":"")){UseShellExecute=true,Verb="runas",WindowStyle=ProcessWindowStyle.Hidden};
                 using(var p=Process.Start(info)) {
                     if(!ready.WaitOne(15000)) throw new IOException("Windows n'a pas autorisé la connexion. Réessayez et acceptez sa demande d'autorisation.");
                     if(p.HasExited) throw new IOException("Windows n'a pas pu préparer la connexion.");
@@ -30,7 +30,7 @@ sealed class Firewall : IDisposable {
             return result;
         } catch {result.Dispose();throw;}
     }
-    public static int Broker(int port,int pid) {
+    public static int Broker(int port,int pid,bool lan=false) {
         if(port<1024 || port>65535 || pid<=0) return 2;
         string ruleName="PartyBoard temporary "+pid+" "+port;dynamic policy=null;bool tcpAdded=false,udpAdded=false;
         try {
@@ -47,7 +47,7 @@ sealed class Firewall : IDisposable {
                     policy.Rules.Add(rule);tcpAdded=true;
                     dynamic datagram=Activator.CreateInstance(Type.GetTypeFromProgID("HNetCfg.FWRule"));
                     datagram.Name=ruleName+" UDP";datagram.Description="PartyBoard : commandes de jeu authentifiées, règle supprimée à la fermeture.";
-                    datagram.ApplicationName=Application.ExecutablePath;datagram.Protocol=17;datagram.LocalPorts=port.ToString();
+                    datagram.ApplicationName=Application.ExecutablePath;datagram.Protocol=17;datagram.LocalPorts=lan?port+","+LanDiscovery.Port:port.ToString();
                     datagram.Direction=1;datagram.Action=1;datagram.Enabled=true;datagram.Profiles=7;
                     policy.Rules.Add(datagram);udpAdded=true;ready.Set();
                     var timer=Stopwatch.StartNew();
@@ -59,6 +59,8 @@ sealed class Firewall : IDisposable {
     }
     public void Dispose() {if(stop!=null) {stop.Set();stop.Dispose();stop=null;}}
 }
+
+enum PublicState {Private,Pending,Listed}
 
 sealed class Session : IDisposable {
     public Invitation Invite; public Bridge Bridge; public bool Host;
@@ -82,9 +84,39 @@ sealed class Session : IDisposable {
     // where guests who cannot reach this box directly arrive. Two players only.
     TurnClient turn;WebSocketStream relayHost;
     public bool RelayReady {get;private set;}
+    // On the public list (relay-worker's directory) or not. Only a two-player
+    // salon with its relay room open can be public; the room leaves the list by
+    // itself once a guest is admitted, since the room's socket closes then.
+    public PublicState Public {get;private set;}
+    // Counts the relay's answers, so the window can follow one it did not ask for.
+    public int PublicNotices {get;private set;}
+    public bool CanBePublic {get{return Host && maxPlayers==2 && RelayReady && relayHost!=null && !admitted && !disposed;}}
+    public void SetPublic(bool on) {
+        WebSocketStream control;lock(this) control=relayHost;
+        if(!CanBePublic || control==null) throw new IOException("Seul un salon à 2 joueurs, encore en attente, peut être public.");
+        var profile=Profile;
+        control.SendText(on?Relay.PublishRequest(Invite,profile.Name,profile.Language,disc!=null && disc.Pal,build,profile.DiscHash):"{\"type\":\"unpublish\"}");
+        Public=on?PublicState.Pending:PublicState.Private;connected();
+    }
+    void PublicNotice(Dictionary<string,object> notice) {
+        object type,reason;notice.TryGetValue("type",out type);notice.TryGetValue("reason",out reason);
+        switch(type as string) {
+            case "published": Public=PublicState.Listed;Report.Write("public=listed");status("Salle publique : tous les joueurs qui ont le même disque la voient dans « Salles publiques ».");break;
+            case "unpublished": Public=PublicState.Private;Report.Write("public=private");status("La salle n'est plus publique. Tes amis peuvent toujours la rejoindre avec l'invitation.");break;
+            case "publish-refused": Public=PublicState.Private;Report.Write("public=refused reason="+(reason as string));status((reason as string)=="full"?"La liste des salles publiques est pleine pour l'instant. Réessayez dans quelques minutes.":"Le relais a refusé de rendre la salle publique. Recréez-la et réessayez.");break;
+            default: return;
+        }
+        PublicNotices++;connected();
+    }
     // Test only: the host behaves as if its box refused, without touching the
     // router or the Windows firewall, and the guest goes straight to the relay.
     static bool RelayOnly {get{return Environment.GetEnvironmentVariable("PARTYBOARD_ONLINE_RELAY_ONLY")=="1";}}
+    // Test only: neither the Windows firewall nor the router is touched.
+    static bool NoSystemChanges {get{return RelayOnly || Environment.GetEnvironmentVariable("PARTYBOARD_ONLINE_NO_SYSTEM_CHANGES")=="1";}}
+    // On this network only: no box, no relay, nothing leaves the house. The
+    // salon is found through LanDiscovery instead of an invitation.
+    public bool Lan {get;set;}LanDiscovery.Beacon beacon;
+    public int LanAnswers {get{var b=beacon;return b==null?0:b.Answered;}}
     // The allocation a relayed session's game runs on, for diagnostics.
     TurnClient relayAllocation;
     public int RelayRefreshes {get{var a=relayAllocation;return a==null?0:a.Refreshes;}}
@@ -128,11 +160,13 @@ sealed class Session : IDisposable {
         int port=((IPEndPoint)listener.LocalEndpoint).Port;
         try {
             if(players==2) internetGame=new UdpClient(new IPEndPoint(route.Local,port));
-            status("Autorisez PartyBoard si Windows vous le demande…"); firewall=RelayOnly?null:Firewall.Open(port);
+            status("Autorisez PartyBoard si Windows vous le demande…"); firewall=NoSystemChanges?null:Firewall.Open(port,Lan);
             if(disposed) throw new OperationCanceledException();
-            status(NetworkSettings.Port==0?"Préparation automatique de votre box…":"Préparation du port fixe "+port+"…"); mapping=RelayOnly?Gateway.LocalFor(route,port,false):Gateway.OpenFor(route,port,port,false);
+            bool boxed=!RelayOnly && !Lan;
+            if(boxed)status(NetworkSettings.Port==0?"Préparation automatique de votre box…":"Préparation du port fixe "+port+"…");
+            mapping=boxed?Gateway.OpenFor(route,port,port,false):Gateway.LocalFor(route,port,false);
             if(players==2) {
-                mappingUdp=RelayOnly?Gateway.LocalFor(route,port,true):Gateway.OpenFor(route,port,mapping.Port,true);
+                mappingUdp=boxed?Gateway.OpenFor(route,port,mapping.Port,true):Gateway.LocalFor(route,port,true);
                 if(mappingUdp.Port!=mapping.Port || !mappingUdp.Address.Equals(mapping.Address))throw new IOException("La box n'a pas pu réserver le même accès rapide pour le jeu. Inversez les rôles et réessayez.");
             }
             if(disposed) throw new OperationCanceledException();
@@ -143,7 +177,11 @@ sealed class Session : IDisposable {
                 LocalAddress=Gateway.Private(route.Local)?route.Local:IPAddress.Any,LocalPort=Gateway.Private(route.Local)?port:0};
             // A guest that cannot reach this box -- a CGNAT, no UPnP, or a box that
             // said yes and still drops -- comes through the relay instead.
-            if(players==2 && Relay.Available) OpenRelay();
+            if(players==2 && Relay.Available && !Lan) OpenRelay();
+            if(Lan) {
+                try{beacon=new LanDiscovery.Beacon(build,disc.Hash,DescribeForLan);}
+                catch(SocketException e){throw new IOException("Le port "+LanDiscovery.Port+" de recherche des parties LAN est occupé ("+e.SocketErrorCode+"). Fermez l'autre programme qui l'utilise, puis réessayez.",e);}
+            }
             if(players>2) {
                 // Built now, not from the first guest's AttachLobby(): a mesh
                 // salon has to exist, and announce this seat's own mesh
@@ -216,27 +254,40 @@ sealed class Session : IDisposable {
             if(viaRelay){network=turn;relayAllocation=turn;turn=null;if(internetGame!=null){internetGame.Close();internetGame=null;}}
             else{network=new UdpDatagramSocket(internetGame);internetGame=null;if(turn!=null){turn.Dispose();turn=null;}}
             if(relayHost!=null){relayHost.Dispose();relayHost=null;}
+            Public=PublicState.Private;PublicNotices++;
         }
         JoinPath=viaRelay?"relay":"direct";
         Bridge=new Bridge(admitClosers[0],admitStreams[0],admitClosers[1],admitStreams[1],0,network,null,Invite.Token,gamePort);AttachLobby();
     }
     // Credentials, a TURN allocation and the room, before the invitation is
     // shown. Any failure leaves the salon exactly as it was without a relay.
+    // What a LAN question is answered with, while there is still a seat.
+    LanDiscovery.Game DescribeForLan() {
+        if(disposed || Invite==null)return null;
+        int occupied;
+        if(maxPlayers==2){if(admitted)return null;occupied=1;}
+        else{var lobby=Lobby;if(lobby==null || lobby.Phase!=LobbyPhase.Waiting || lobby.Occupied>=maxPlayers)return null;occupied=lobby.Occupied;}
+        var profile=Profile;
+        return new LanDiscovery.Game{Name=profile.Name,Language=GameLanguage.Code(profile.Language),Region=disc!=null && disc.Pal?"eu":"us",Players=occupied,MaxPlayers=maxPlayers,Invite=Invite.Encode()};
+    }
     void OpenRelay() {
         TurnClient allocation=null;
         try {
             status("Préparation du relais en ligne…");
-            var access=Relay.TurnCredentials();
+            var access=Relay.TestTurn??Relay.TurnCredentials();
             allocation=new TurnClient(access.Item3,access.Item1,access.Item2);allocation.Allocate();
             var room=Relay.RoomId(Invite.Token);
-            var control=Relay.Connect("/room/"+room+"/host?udp="+Uri.EscapeDataString(allocation.Relayed.ToString()));
+            // The key keeps the room ours: a guest knows the room from the
+            // invitation, and a public room's invitation is on the list.
+            var key=BitConverter.ToString(Wire.Random(16)).Replace("-","").ToLowerInvariant();
+            var control=Relay.Connect("/room/"+room+"/host?udp="+Uri.EscapeDataString(allocation.Relayed.ToString())+"&key="+key);
             lock(this){if(disposed){allocation.Dispose();control.Dispose();return;}turn=allocation;relayHost=control;RelayReady=true;}
             Report.Write("relay=ready");
             var held=allocation;Task.Run(()=>RelayNotices(room,control,held));
         } catch(Exception e) {if(allocation!=null)allocation.Dispose();Report.Write("relay=unavailable error="+e.GetType().Name);}
     }
     void RelayNotices(string room,WebSocketStream control,TurnClient allocation) {
-        Relay.HostNotices(room,control,allocation,()=>disposed || admitted,pipe=>Offer(pipe,pipe,true),Report.Write);
+        Relay.HostNotices(room,control,allocation,()=>disposed || admitted,pipe=>Offer(pipe,pipe,true),Report.Write,PublicNotice);
     }
     // The N-guest loop: keeps accepting until every seat but the host's own is
     // filled, pairing each guest's two channels by the client identifier the
@@ -305,6 +356,32 @@ sealed class Session : IDisposable {
         // pair them and seat us. Random rather than derived from anything: it only has
         // to be unique among the guests of one salon.
         var clientId=Wire.Random(16);
+        // A LAN game's invitation names this network only: no relay behind it.
+        bool lanGame=Gateway.Private(Invite.Address) && Invite.Address.Equals(Invite.LocalAddress) && Invite.Port==Invite.LocalPort;
+        if(lanGame) {
+            status("Connexion à la partie sur votre réseau…");peer=new TcpClient(AddressFamily.InterNetwork);
+            bool reachedLan=false;try{reachedLan=peer.ConnectAsync(Invite.Address,Invite.Port).Wait(5000) && peer.Connected;}catch{}
+            if(!reachedLan){peer.Close();peer=null;throw new IOException("Cette partie n'est plus joignable sur votre réseau. Vérifiez que l'hôte a laissé sa fenêtre ouverte, puis actualisez la liste.");}
+            var lanHost=Wire.Client(peer,Invite,build,0,clientId);JoinPath="lan";
+            status("Premier canal sécurisé. Préparation du second…");peerWrite=new TcpClient(AddressFamily.InterNetwork);
+            if(!peerWrite.ConnectAsync(Invite.Address,Invite.Port).Wait(10000)){peerWrite.Close();lanHost.Dispose();throw new IOException("Le second canal n'a pas pu être créé.");}
+            var lanFrom=Wire.Client(peerWrite,Invite,build,1,clientId);if(disposed){lanHost.Dispose();lanFrom.Dispose();throw new OperationCanceledException();}
+            internetGame=new UdpClient(new IPEndPoint(IPAddress.Any,0));
+            Bridge=new Bridge(peerWrite,lanFrom,peer,lanHost,1,internetGame,new IPEndPoint(Invite.Address,Invite.Port),Invite.Token);internetGame=null;AttachLobby();
+            if(maxPlayers>2) {
+                var baseReceive=Bridge.Control;bool meshOpened=false;
+                Bridge.Control=packet=>{
+                    baseReceive(packet);
+                    if(!meshOpened) {meshOpened=true;try{OpenMesh();}catch(Exception e){Report.Write("event=mesh_open_failed error="+e.Message);}}
+                };
+            }
+            return;
+        }
+        // A public room's invitation has no address: the relay is the only way in.
+        if(Invite.ThroughRelayOnly) {
+            if(!Relay.Available)throw new IOException("Les salles publiques passent par le relais en ligne, qui est désactivé sur ce PC.");
+            JoinViaRelay(clientId);return;
+        }
         if(RelayOnly && Relay.Available && maxPlayers==2) {JoinViaRelay(clientId);return;}
         // Try the host's own network first. Two seconds, because an address that
         // is not on this network refuses or times out fast, and the public
@@ -362,7 +439,7 @@ sealed class Session : IDisposable {
     // Both channels through the relay's room, the game datagrams to the host's
     // TURN address it announced there.
     void JoinViaRelay(byte[] clientId) {
-        status("Votre ami passe par le relais en ligne…");
+        status(Invite.ThroughRelayOnly?"Connexion à la salle publique par le relais en ligne…":"Votre ami passe par le relais en ligne…");
         var room=Relay.RoomId(Invite.Token);
         internetGame=new UdpClient(new IPEndPoint(IPAddress.Any,0));
         var self=Relay.PublicAddress(internetGame);
@@ -412,9 +489,10 @@ sealed class Session : IDisposable {
         catch(SocketException) {if(NetworkSettings.MeshPort==0)throw;throw new IOException("Le port fixe "+NetworkSettings.MeshPort+" (jeu à 3 ou 4) est déjà utilisé par un autre programme. Choisissez un autre port fixe.");}
         int port=((IPEndPoint)socket.Client.LocalEndPoint).Port;
         try {
-            meshFirewall=Firewall.Open(port);
+            bool lanMesh=Lan || (Invite!=null && Gateway.Private(Invite.Address));
+            meshFirewall=NoSystemChanges?null:Firewall.Open(port);
             if(disposed)throw new OperationCanceledException();
-            meshMapping=Gateway.OpenFor(route,port,port,true);
+            meshMapping=lanMesh || NoSystemChanges?Gateway.LocalFor(route,port,true):Gateway.OpenFor(route,port,port,true);
             if(disposed)throw new OperationCanceledException();
             meshRelay=new MeshRelay(Lobby.LocalSeat,Invite.Token,socket){Diagnostic=Report.Write};
             var wiring=new MeshWiring(meshRelay,Lobby.LocalSeat);
@@ -509,6 +587,7 @@ sealed class Session : IDisposable {
             if(modListDirectory!=null)try{Directory.Delete(modListDirectory,true);}catch{}if(diagnosticTimer!=null)diagnosticTimer.Dispose();
             disposed=true;cancel.Cancel();if(listener!=null) listener.Stop();if(peer!=null) peer.Close();if(peerWrite!=null)peerWrite.Close();
             if(turn!=null){turn.Dispose();turn=null;}if(relayHost!=null){relayHost.Dispose();relayHost=null;}
+            if(beacon!=null){beacon.Dispose();beacon=null;}
             if(gameStart!=null)gameStart.Abort();if(Lobby!=null)Lobby.Close();
             if(Bridge!=null) Bridge.Dispose();if(guestLinks!=null)foreach(var g in guestLinks)if(g!=null)try{g.Dispose();}catch{}
             if(internetGame!=null)internetGame.Close();if(mappingUdp!=null)mappingUdp.Dispose();if(mapping!=null) mapping.Dispose();if(firewall!=null) firewall.Dispose();
@@ -521,9 +600,11 @@ sealed class Session : IDisposable {
 
 static class Program {
     [STAThread] static int Main(string[] args) {
-        if(args.Length==3 && args[0]=="--firewall") {int port,pid;return int.TryParse(args[1],out port)&&int.TryParse(args[2],out pid)?Firewall.Broker(port,pid):2;}
+        if((args.Length==3 || (args.Length==4 && args[3]=="lan")) && args[0]=="--firewall") {int port,pid;return int.TryParse(args[1],out port)&&int.TryParse(args[2],out pid)?Firewall.Broker(port,pid,args.Length==4):2;}
         if(args.Length==1 && args[0]=="--self-test") return Tests.Run();
         if(args.Length==1 && args[0]=="--self-test-relay") return Tests.RunRelay();
+        if(args.Length==1 && args[0]=="--public-room-test") return Tests.RunPublicRoom();
+        if(args.Length==1 && args[0]=="--lan-test") return Tests.RunLan();
         int relayMinutes;if(args.Length==2 && args[0]=="--relay-session-test" && int.TryParse(args[1],out relayMinutes)) return Tests.RunRelaySession(relayMinutes);
         // Both PCs must hold byte-identical folders or Lobby refuses to start the
         // game. Printing the same hash the handshake uses lets a player check that

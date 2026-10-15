@@ -16,10 +16,19 @@ preview_urls = false
 name = "ROOMS"
 class_name = "RelayRoom"
 
+[[durable_objects.bindings]]
+name = "DIRECTORY"
+class_name = "RoomDirectory"
+
 # SQLite-backed Durable Objects are the ones the Workers free plan offers.
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RelayRoom"]
+
+# The public room list.
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["RoomDirectory"]
 
 # Per address: TURN credentials, and new rooms. A lobby asks for one of each per
 # salon; these only stop someone scripting the relay.
@@ -32,3 +41,9 @@ simple = { limit = 10, period = 60 }
 name = "ROOM_LIMIT"
 namespace_id = "41002"
 simple = { limit = 20, period = 60 }
+
+# Reading the public list: a lobby refreshes it every few seconds at most.
+[[ratelimits]]
+name = "LIST_LIMIT"
+namespace_id = "41003"
+simple = { limit = 60, period = 60 }

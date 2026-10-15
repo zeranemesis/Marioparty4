@@ -1,6 +1,7 @@
 ﻿using System;
 using System.IO;
 using System.Linq;
+using System.Collections.Generic;
 using System.Net;
 using System.Diagnostics;
 using System.Drawing;
@@ -11,7 +12,14 @@ using System.Windows.Forms;
 namespace PartyBoardOnline {
 sealed class MainForm : Form {
     Label status,discLabel,footer;TextBox invitation,nickname;ListView players;ComboBox playerCount;FlowLayoutPanel missingMods;
-    Button host,join,copy,play,cancel,choose,paste,update,mods;Session session;DiscFile disc;
+    Button host,join,copy,play,cancel,choose,paste,update,mods,browse;Session session;DiscFile disc;
+    // Two ways to play. On this network (LAN): nothing goes through Internet,
+    // the game is found in a list of the network's games. Online: a room,
+    // private (friends come by invitation from CubeShelf's friend list) or
+    // public (on the relay's list, for every player with the same disc).
+    RadioButton onlineMode,lanMode;ComboBox visibility;bool settingPublic;int publicNoticesSeen;
+    bool Lan {get{return lanMode.Checked;}}
+    bool PublicWanted {get{return !Lan && visibility.SelectedIndex==1;}}
     // Mods chosen in this window before any salon exists; null means CubeShelf's own list.
     ModSet chosenMods;
     readonly CancellationTokenSource fileCancel=new CancellationTokenSource();bool closing,hashing;
@@ -19,7 +27,7 @@ sealed class MainForm : Form {
     public MainForm():this(Startup.Manual) {}
     public MainForm(Startup requested) {
         startup=requested??Startup.Manual;
-        Text="PartyBoard — Salon en ligne v"+UpdateService.CurrentVersion;ClientSize=new Size(840,760);MinimumSize=new Size(800,790);
+        Text="PartyBoard — Salon en ligne v"+UpdateService.CurrentVersion;ClientSize=new Size(980,760);MinimumSize=new Size(940,790);
         StartPosition=FormStartPosition.CenterScreen;Font=new Font("Segoe UI",11);BackColor=Color.FromArgb(245,247,252);
         var root=new TableLayoutPanel{Dock=DockStyle.Fill,Padding=new Padding(24),ColumnCount=1,RowCount=11};
         foreach(int height in new[]{48,35,46,67,47,65,47,145})root.RowStyles.Add(new RowStyle(SizeType.Absolute,height));
@@ -27,19 +35,31 @@ sealed class MainForm : Form {
         root.Controls.Add(new Label{Text="Votre salon PartyBoard",Font=new Font("Segoe UI",23,FontStyle.Bold),AutoSize=true},0,0);
         root.Controls.Add(new Label{Text="Choisissez votre pseudo et votre disque. L'hôte lancera le jeu pour tous.",Dock=DockStyle.Fill},0,1);
         var identity=new FlowLayoutPanel{Dock=DockStyle.Fill};identity.Controls.Add(new Label{Text="Votre pseudo",Width=116,Padding=new Padding(0,8,0,0)});
-        nickname=new TextBox{Text="Joueur",Width=230,MaxLength=24,AccessibleName="Votre pseudo",Margin=new Padding(0,5,12,0)};identity.Controls.Add(nickname);root.Controls.Add(identity,0,2);
+        nickname=new TextBox{Text="Joueur",Width=230,MaxLength=24,AccessibleName="Votre pseudo",Margin=new Padding(0,5,12,0)};identity.Controls.Add(nickname);
+        identity.Controls.Add(new Label{Text="Mode",AutoSize=true,Padding=new Padding(0,8,8,0),Margin=new Padding(36,0,0,0)});
+        onlineMode=new RadioButton{Text="En ligne",AutoSize=true,Checked=true,Margin=new Padding(0,8,12,0),AccessibleName="Mode en ligne"};
+        lanMode=new RadioButton{Text="Réseau local (LAN)",AutoSize=true,Margin=new Padding(0,8,12,0),AccessibleName="Mode réseau local"};
+        onlineMode.CheckedChanged+=(s,e)=>ModeChanged();identity.Controls.Add(onlineMode);identity.Controls.Add(lanMode);
+        root.Controls.Add(identity,0,2);
         var disk=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=2};disk.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,210));disk.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
         choose=Make("Choisir mon disque",ChooseDisc);disk.Controls.Add(choose,0,0);discLabel=new Label{Text="Mario Party 4 USA révision 1, ou européen\nISO, GCM ou RVZ — vérification du fichier complet",Dock=DockStyle.Fill,Padding=new Padding(0,4,0,0)};disk.Controls.Add(discLabel,1,0);root.Controls.Add(disk,0,3);
         var top=new FlowLayoutPanel{Dock=DockStyle.Fill};
         top.Controls.Add(new Label{Text="Joueurs",Padding=new Padding(0,8,4,0)});
         playerCount=new ComboBox{DropDownStyle=ComboBoxStyle.DropDownList,Width=64,Margin=new Padding(0,3,12,3),AccessibleName="Nombre de joueurs"};
         playerCount.Items.AddRange(new object[]{"2","3","4"});playerCount.SelectedIndex=0;
-        playerCount.SelectedIndexChanged+=(s,e)=>UpdateFooter();top.Controls.Add(playerCount);
-        host=Make("Créer un salon",()=>Begin(true,"",SelectedPlayers()));join=Make("Rejoindre",()=>Begin(false,invitation.Text));top.Controls.Add(host);top.Controls.Add(join);
-        mods=Make("Mods…",ChooseMods);mods.MinimumSize=new Size(110,38);top.Controls.Add(mods);root.Controls.Add(top,0,4);
+        playerCount.SelectedIndexChanged+=(s,e)=>{UpdateFooter();RefreshControls();};top.Controls.Add(playerCount);
+        host=Make("Créer une room",()=>Begin(true,"",SelectedPlayers()));top.Controls.Add(host);
+        visibility=new ComboBox{DropDownStyle=ComboBoxStyle.DropDownList,Width=190,Margin=new Padding(0,6,12,3),AccessibleName="Visibilité de la room"};
+        visibility.Items.AddRange(new object[]{"Privée (amis invités)","Publique"});visibility.SelectedIndex=0;
+        visibility.SelectedIndexChanged+=(s,e)=>PublicChanged();top.Controls.Add(visibility);
+        browse=Make("Rooms publiques…",Browse);browse.MinimumSize=new Size(190,38);top.Controls.Add(browse);
+        mods=Make("Mods…",ChooseMods);mods.MinimumSize=new Size(110,38);top.Controls.Add(mods);
+        root.Controls.Add(top,0,4);
         invitation=new TextBox{Dock=DockStyle.Fill,Multiline=true,ScrollBars=ScrollBars.Vertical,Font=new Font("Segoe UI",10),AccessibleName="Invitation du salon",MaxLength=220};root.Controls.Add(invitation,0,5);
-        var actions=new FlowLayoutPanel{Dock=DockStyle.Fill};copy=Make("Copier l'invitation",()=>{Clipboard.SetText(invitation.Text);SetStatus("Invitation copiée. Envoyez-la à votre ami ; gardez cette fenêtre ouverte.");});
-        paste=Make("Coller l'invitation",()=>{if(session==null)invitation.Text=Clipboard.GetText();});actions.Controls.Add(copy);actions.Controls.Add(paste);root.Controls.Add(actions,0,6);
+        var actions=new FlowLayoutPanel{Dock=DockStyle.Fill};copy=Make("Copier le code",()=>{Clipboard.SetText(invitation.Text);SetStatus("Code copié. Envoyez-le à votre ami ; gardez cette fenêtre ouverte.");});
+        // Without CubeShelf, a friend's invitation still travels as a code.
+        join=Make("Rejoindre avec un code",()=>{if(session!=null)return;var text=invitation.Text.Trim();if(text.Length==0){text=(Clipboard.GetText()??"").Trim();invitation.Text=text;}if(text.Length==0){SetStatus("Collez le code d'invitation de votre ami, puis cliquez à nouveau.");return;}Begin(false,text);});
+        paste=join;actions.Controls.Add(copy);actions.Controls.Add(join);root.Controls.Add(actions,0,6);
         var playersRow=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=2};
         // Absolute, not percent, so the mods panel takes a fixed slice and the
         // player list keeps essentially the width it always had -- a percent
@@ -103,14 +123,96 @@ sealed class MainForm : Form {
     void UpdateFooter(){if(footer!=null)footer.Text=SelectedPlayers()+" joueurs · Même fichier disque requis · Ping : aller-retour entre les PC";}
     void UI(Action action){if(!closing && !IsDisposed){if(InvokeRequired){try{BeginInvoke(action);}catch(InvalidOperationException){}}else action();}}
     void SetStatus(string text){UI(()=>status.Text=text);}
-    void RefreshControls(){bool idle=session==null;host.Enabled=join.Enabled=idle && disc!=null && !hashing;choose.Enabled=nickname.Enabled=idle && !hashing;paste.Enabled=idle;playerCount.Enabled=idle;cancel.Enabled=!idle;invitation.ReadOnly=!idle;
+    void RefreshControls(){bool idle=session==null;host.Enabled=join.Enabled=idle && disc!=null && !hashing;choose.Enabled=nickname.Enabled=idle && !hashing;playerCount.Enabled=idle;cancel.Enabled=!idle;invitation.ReadOnly=!idle;
+        onlineMode.Enabled=lanMode.Enabled=idle;
+        // LAN: no code at all, the list is the way in.
+        invitation.Visible=copy.Visible=join.Visible=!Lan;visibility.Visible=!Lan;
+        // The fixed port is for the box, which a LAN game never asks.
+        if(network!=null)network.Visible=!Lan;
         // Two players: unchanged, Bridge appears the instant the one guest
         // connects. Above two, Bridge stays null for the whole session -- the
         // salon's own seat count is what says whether there is still room to
         // invite someone else.
         copy.Enabled=session!=null && session.Invite!=null && session.Host && (session.Lobby==null?session.Bridge==null:session.Lobby.Occupied<session.MaxPlayers);
         play.Enabled=session?.Lobby?.CanStart==true;
-        mods.Enabled=!hashing && (idle || session.Lobby?.Phase==LobbyPhase.Waiting);}
+        mods.Enabled=!hashing && (idle || session.Lobby?.Phase==LobbyPhase.Waiting);
+        browse.Enabled=idle && disc!=null && !hashing && (Lan || Relay.Available);
+        // Before a room: a choice for the next one. During: the room itself,
+        // for as long as it waits for its guest. Public needs the relay and
+        // two players; anything else stays private.
+        visibility.Enabled=Relay.Available && (idle?SelectedPlayers()==2:session.CanBePublic && session.Public!=PublicState.Pending);
+        if(!idle && session.PublicNotices!=publicNoticesSeen){publicNoticesSeen=session.PublicNotices;SetPublicBox(session.Public==PublicState.Listed);}
+        if(idle)publicNoticesSeen=0;
+        if(idle && SelectedPlayers()!=2 && visibility.SelectedIndex==1)SetPublicBox(false);}
+    void SetPublicBox(bool on){settingPublic=true;try{visibility.SelectedIndex=on?1:0;}finally{settingPublic=false;}}
+    void ModeChanged(){
+        if(session!=null)return;
+        host.Text=Lan?"Créer une partie LAN":"Créer une room";browse.Text=Lan?"Parties en LAN…":"Rooms publiques…";
+        Text=(Lan?"PartyBoard — Réseau local v":"PartyBoard — Salon en ligne v")+UpdateService.CurrentVersion;
+        RefreshControls();
+        if(disc!=null)SetStatus(Lan?"Réseau local : créez une partie, ou trouvez celle d'un joueur de votre réseau dans « Parties en LAN ». Rien ne passe par Internet.":"En ligne : créez une room privée pour vos amis ou une room publique, ou rejoignez une room publique.");
+    }
+    void PublicChanged(){
+        if(settingPublic)return;var current=session;
+        if(current==null){SetStatus(PublicWanted?"La prochaine room sera publique : tous les joueurs qui ont le même disque la verront. Tes amis peuvent toujours être invités.":"La prochaine room sera privée : seuls les amis que tu invites depuis CubeShelf pourront entrer.");return;}
+        bool on=visibility.SelectedIndex==1;
+        Task.Run(()=>{try{current.SetPublic(on);}catch(Exception e){UI(()=>{if(session==current){SetPublicBox(current.Public!=PublicState.Private);SetStatus(Friendly(e));}});}});
+    }
+    // A row of the list: who hosts, in which language, which disc, and how to get in.
+    sealed class Listed {public string Name,Language,Region,Last,Key;public Func<string> Invite;}
+    void Browse(){
+        if(session!=null || disc==null || hashing)return;
+        var build=Wire.BuildHash(AppDomain.CurrentDomain.BaseDirectory);var discHash=disc.Hash;
+        if(Lan) BrowseList("Parties en LAN","Parties sur le réseau local","Joueurs",()=>LanDiscovery.Find(build,discHash).Select(g=>new Listed{Name=g.Name,Language=g.Language,Region=g.Region,Last=g.Players+"/"+g.MaxPlayers,Key=g.Invite,Invite=()=>g.Invite}).ToList(),
+            n=>n==0?"Aucune partie sur votre réseau pour votre disque. Créez-en une, ou actualisez.":n+" partie"+(n>1?"s":"")+" sur votre réseau. Double-cliquez pour rejoindre.","Connexion à la partie sur votre réseau…");
+        else BrowseList("Rooms publiques","Rooms publiques","Ouverte depuis",()=>Relay.PublicRooms(build,discHash).Select(r=>new Listed{Name=r.Name,Language=r.Language,Region=r.Region,Last=Since(r.Age),Key=r.Room,Invite=()=>Relay.PublicInvite(r.Room)}).ToList(),
+            n=>n==0?"Aucune room publique pour votre disque en ce moment. Créez-en une !":n+" room"+(n>1?"s":"")+" pour votre disque. Double-cliquez pour rejoindre.","Connexion à la room publique…");
+    }
+    // The games this player could join: the same disc and the same PartyBoard,
+    // since anything else would be refused at the door.
+    void BrowseList(string title,string listName,string lastColumn,Func<List<Listed>> source,Func<int,string> summary,string joining){
+        if(session!=null || disc==null || hashing)return;
+        using(var dialog=new Form{Text=title,ClientSize=new Size(640,420),StartPosition=FormStartPosition.CenterParent,Font=Font,MinimizeBox=false,MaximizeBox=false,FormBorderStyle=FormBorderStyle.FixedDialog}){
+            var layout=new TableLayoutPanel{Dock=DockStyle.Fill,Padding=new Padding(16),RowCount=3,ColumnCount=1};
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute,30));layout.RowStyles.Add(new RowStyle(SizeType.Percent,100));layout.RowStyles.Add(new RowStyle(SizeType.Absolute,50));
+            var note=new Label{Dock=DockStyle.Fill,Text="Chargement…"};layout.Controls.Add(note,0,0);
+            var list=new ListView{Dock=DockStyle.Fill,View=View.Details,FullRowSelect=true,MultiSelect=false,HideSelection=false,AccessibleName=listName};
+            list.Columns.Add("Hôte",230);list.Columns.Add("Langue du jeu",130);list.Columns.Add("Disque",110);list.Columns.Add(lastColumn,120);layout.Controls.Add(list,0,1);
+            var buttons=new FlowLayoutPanel{Dock=DockStyle.Fill,FlowDirection=FlowDirection.RightToLeft};
+            var enter=new Button{Text="Rejoindre",AutoSize=true,Enabled=false};var close=new Button{Text="Fermer",AutoSize=true,DialogResult=DialogResult.Cancel};var refresh=new Button{Text="Actualiser",AutoSize=true};
+            buttons.Controls.Add(close);buttons.Controls.Add(enter);buttons.Controls.Add(refresh);layout.Controls.Add(buttons,0,2);
+            dialog.Controls.Add(layout);dialog.CancelButton=close;
+            Listed chosen=null;var rows=new List<Listed>();
+            Action load=null;load=()=>{
+                refresh.Enabled=false;note.Text="Chargement…";
+                Task.Run(()=>{
+                    try{
+                        var found=source();
+                        if(dialog.IsDisposed)return;
+                        dialog.BeginInvoke((Action)(()=>{
+                            list.BeginUpdate();list.Items.Clear();rows=found;
+                            foreach(var r in found)list.Items.Add(new ListViewItem(new[]{r.Name,LanguageName(r.Language),r.Region=="eu"?"Européen":"USA",r.Last}){Tag=r});
+                            list.EndUpdate();refresh.Enabled=true;
+                            note.Text=summary(found.Count);
+                            enter.Enabled=list.SelectedItems.Count>0;
+                        }));
+                    }catch(Exception e){if(!dialog.IsDisposed)try{dialog.BeginInvoke((Action)(()=>{note.Text=Friendly(e);refresh.Enabled=true;}));}catch(InvalidOperationException){}}
+                });
+            };
+            Action pick=()=>{if(list.SelectedItems.Count==0)return;chosen=list.SelectedItems[0].Tag as Listed;dialog.DialogResult=DialogResult.OK;};
+            refresh.Click+=(s,e)=>load();enter.Click+=(s,e)=>pick();list.DoubleClick+=(s,e)=>pick();
+            list.SelectedIndexChanged+=(s,e)=>enter.Enabled=list.SelectedItems.Count>0;
+            dialog.Shown+=(s,e)=>load();
+            if(dialog.ShowDialog(this)!=DialogResult.OK || chosen==null)return;
+            SetStatus(joining);
+            Task.Run(()=>{
+                try{var invite=chosen.Invite();UI(()=>{if(session==null){invitation.Text="";Begin(false,invite);}});}
+                catch(Exception e){SetStatus(Friendly(e));}
+            });
+        }
+    }
+    static string LanguageName(string code){switch(code){case "fr":return "Français";case "de":return "Deutsch";case "es":return "Español";case "it":return "Italiano";default:return "English";}}
+    static string Since(int seconds){return seconds<60?"à l'instant":seconds<3600?(seconds/60)+" min":(seconds/3600)+" h";}
     void RefreshLobby(){UI(()=>{
         if(players==null)return;RefreshControls();players.BeginUpdate();players.Items.Clear();
         var lobby=session?.Lobby;var local=lobby?.Local??session?.Profile;
@@ -205,7 +307,7 @@ sealed class MainForm : Form {
         Task.Run(()=>{try{
             var verified=DiscFile.Verify(path,p=>UI(()=>discLabel.Text=Path.GetFileName(path)+"\nVérification SHA-256 : "+p+" %"),fileCancel.Token);
             if(closing){verified.Dispose();return;}
-            UI(()=>{disc=verified;hashing=false;discLabel.Text=Path.GetFileName(path)+"\nFichier vérifié et protégé contre les modifications";SetStatus("Disque vérifié. Créez un salon ou collez l'invitation de votre ami.");RefreshLobby();if(onVerified!=null)onVerified();});
+            UI(()=>{disc=verified;hashing=false;discLabel.Text=Path.GetFileName(path)+"\nFichier vérifié et protégé contre les modifications";SetStatus(Lan?"Disque vérifié. Créez une partie LAN ou trouvez-en une dans « Parties en LAN ».":"Disque vérifié. Créez une room, ou rejoignez une room publique ou l'invitation d'un ami.");RefreshLobby();if(onVerified!=null)onVerified();});
         }catch(Exception e){UI(()=>{hashing=false;discLabel.Text="Aucun disque vérifié";SetStatus(Friendly(e));RefreshLobby();});}});
     }
     void Begin(bool create,string invitationText,int players=2){
@@ -219,12 +321,26 @@ sealed class MainForm : Form {
         catch(Exception e){SetStatus(Friendly(e));return;}
         var profile=new PlayerInfo(nickname.Text,disc.Hash,disc.Length,opening,GameLanguage.Current);
         Session current=null;current=new Session(t=>UI(()=>{if(session==current)SetStatus(t);}),()=>UI(()=>{if(session==current)RefreshLobby();}),t=>UI(()=>{if(session==current){Reset();SetStatus(t);}}),profile,disc);
-        session=current;lastReport=current.Report;current.Host=create;RefreshLobby();
+        session=current;lastReport=current.Report;current.Host=create;current.Lan=Lan;RefreshLobby();
         current.Report.Write("role="+(create?"host":"guest")+" connection_requested");
         Task.Run(()=>{try{
-            if(create){current.Create(players);UI(()=>{if(session==current && current.Bridge==null){var encoded=current.Invite.Encode();invitation.Text=encoded;PublishInvitation(encoded);RefreshControls();SetStatus(current.LocalOnly && current.RelayReady?(startup.InvitationOut!=null?"Salon créé. Votre box refuse les connexions depuis Internet : vos amis passeront par le relais en ligne. Ton launcher a l'invitation ; garde cette fenêtre ouverte.":"Salon créé. Votre box refuse les connexions depuis Internet : vos amis passeront par le relais en ligne. Copiez l'invitation et envoyez-la."):current.LocalOnly?"Salon ouvert en réseau local seulement : la box n'a pas pu s'ouvrir. Seuls les joueurs de ce réseau peuvent le rejoindre ; pour Internet, choisissez un port fixe et ouvrez-le sur la box.":(startup.InvitationOut!=null?"Salon créé. Ton launcher a l'invitation : invite tes amis depuis lui. Garde cette fenêtre ouverte.":"Salon créé. Copiez l'invitation et envoyez-la à "+(players>2?"vos amis":"votre ami")+". Vous seul pourrez lancer le jeu."));}});}
+            if(create){current.Create(players);UI(()=>{if(session==current && current.Bridge==null){var encoded=current.Invite.Encode();invitation.Text=current.Lan?"":encoded;if(!current.Lan)PublishInvitation(encoded);RefreshControls();
+                if(PublicWanted){if(current.CanBePublic)Task.Run(()=>{try{current.SetPublic(true);}catch(Exception e){UI(()=>{if(session==current){SetPublicBox(false);SetStatus(Friendly(e));}});}});else{SetPublicBox(false);SetStatus("La room ne peut pas être publique : le relais en ligne n'est pas disponible. Elle reste privée.");return;}}SetStatus(CreatedMessage(current,players));}});}
             else current.Join(invitationText);
-        }catch(Exception e){current.Dispose();UI(()=>{if(session==current){Reset();SetStatus(Friendly(e));}});}});
+        }catch(Exception e){
+            var socket=e as System.Net.Sockets.SocketException;
+            current.Report.Write("event=start_failed error="+e.GetType().Name+(socket!=null?" socket="+socket.SocketErrorCode:"")+" at="+(e.TargetSite!=null?e.TargetSite.Name:"?"));
+            current.Dispose();UI(()=>{if(session==current){Reset();SetStatus(Friendly(e));}});}});
+    }
+    // What the host reads once its room or LAN game exists: who can come in, and how.
+    string CreatedMessage(Session current,int players){
+        if(current.Lan)return "Partie LAN créée. Les joueurs de votre réseau la trouvent dans « Parties en LAN » ; rien ne passe par Internet. Gardez cette fenêtre ouverte.";
+        bool launcher=startup.InvitationOut!=null;
+        if(current.LocalOnly && !current.RelayReady)return "La room n'est pas joignable depuis Internet : votre box refuse et le relais en ligne ne répond pas. Pour jouer à la maison, choisissez « Réseau local (LAN) » ; sinon, réessayez plus tard ou ouvrez un port fixe.";
+        string via=current.LocalOnly?" Votre box refuse les connexions depuis Internet : tout passera par le relais en ligne.":"";
+        if(PublicWanted)return "Room créée, publication en cours…"+via;
+        return launcher?"Room privée créée. Invitez vos amis depuis la liste d'amis de CubeShelf ; gardez cette fenêtre ouverte."+via
+            :"Room privée créée. Invitez vos amis depuis CubeShelf, ou copiez le code et envoyez-le"+(players>2?" à vos amis.":" à votre ami.")+via;
     }
     const string GameId="GMPE01_00";
     ModSet CurrentMods(){var lobby=session?.Lobby;if(lobby!=null)return lobby.Local.Mods;if(session!=null)return session.Profile.Mods;string from;return chosenMods??ModSet.FromCubeShelf(GameId,out from);}
@@ -314,7 +430,9 @@ sealed class MainForm : Form {
             // The launcher remains fully usable when GitHub is offline or blocked.
         }
     }
-    static string Friendly(Exception e){if(e is IOException)return e.Message;if(e is System.ComponentModel.Win32Exception)return "Windows n'a pas donné son autorisation. Réessayez et acceptez sa demande.";if(e is OperationCanceledException)return "Vérification annulée.";return "L'opération n'a pas abouti. Vérifiez votre connexion ou recréez le salon.";}
+    static string Friendly(Exception e){if(e is IOException)return e.Message;
+        // A SocketException is a Win32Exception too, but it is the network, not a refusal.
+        if(e is System.Net.Sockets.SocketException)return "Le réseau a refusé l'opération ("+((System.Net.Sockets.SocketException)e).SocketErrorCode+"). Vérifiez votre connexion, puis réessayez.";if(e is System.ComponentModel.Win32Exception)return "Windows n'a pas donné son autorisation. Réessayez et acceptez sa demande.";if(e is OperationCanceledException)return "Vérification annulée.";return "L'opération n'a pas abouti. Vérifiez votre connexion ou recréez le salon.";}
     // What CubeShelf (or any launcher) asked for before the player touched anything.
     //
     // Nothing here bypasses a rule the player would otherwise meet: the disc is verified with the
@@ -322,6 +440,8 @@ sealed class MainForm : Form {
     // start the game. It removes the typing, not the checks.
     void ApplyStartup(){
         if(startup.Mode==StartupMode.Manual)return;
+        // A launcher's invitations are online rooms: private, for friends.
+        onlineMode.Checked=true;
         if(startup.Nickname!=null)nickname.Text=startup.Nickname;
         if(startup.Invitation!=null)invitation.Text=startup.Invitation;
 
@@ -358,6 +478,6 @@ sealed class MainForm : Form {
             if(!(e is IOException || e is UnauthorizedAccessException || e is NotSupportedException || e is ArgumentException))throw;
         }
     }
-    void Reset(){var old=session;session=null;if(old!=null)Task.Run(()=>old.Dispose());RefreshLobby();SetStatus(disc!=null?"Créez un salon ou rejoignez votre ami.":"Choisissez votre disque pour commencer.");}
+    void Reset(){var old=session;session=null;if(old!=null)Task.Run(()=>old.Dispose());RefreshLobby();SetStatus(disc!=null?(Lan?"Créez une partie LAN ou trouvez-en une dans « Parties en LAN ».":"Créez une room, ou rejoignez une room publique ou l'invitation d'un ami."):"Choisissez votre disque pour commencer.");}
 }
 }
