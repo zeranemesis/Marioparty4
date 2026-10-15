@@ -211,6 +211,9 @@ jobs:
           # outlive the feature.
           $capabilities = @()
           if (Test-Path "tools/online/Startup.cs") { $capabilities += "launcher-invites" }
+          # Public rooms (PARTYBOARD_ONLINE_VISIBILITY, --room-tags) and the room's state shared
+          # with the launcher (PARTYBOARD_ONLINE_STATE_DIR: room.json and requests/).
+          if (Test-Path "tools/online/RoomSync.cs") { $capabilities += "public-rooms"; $capabilities += "room-sync" }
           # The game takes the RetroAchievements session CubeShelf hands over (CUBESHELF_RA_USER /
           # CUBESHELF_RA_TOKEN) and reports logins and progress back. CubeShelf gives its session
           # only to a package that declares this.

@@ -273,6 +273,44 @@ static class Tests {
             Check(LanDiscovery.Find(build,disc,500,port).Count==0,"a full game stops answering");
         }
     }
+    // The files a launcher and this window exchange: room.json whole, requests
+    // taken once, the stale, the malformed and the unknown dropped unacted.
+    static void RoomSyncFiles() {
+        var dir=Path.Combine(Path.GetTempPath(),"pb-roomsync-"+Guid.NewGuid().ToString("N"));
+        try {
+            RoomSync.Write(dir,new Dictionary<string,object>{{"state","waiting"},{"players",new[]{"Zera"}}},1);
+            var state=Relay.Parse(File.ReadAllText(RoomSync.StateFile(dir)));
+            Check((string)state["state"]=="waiting" && (int)state["revision"]==1 && (int)state["schema"]==RoomSync.Schema,"room.json carries state, revision and schema");
+            RoomSync.Write(dir,new Dictionary<string,object>{{"state","full"}},2);
+            Check((string)Relay.Parse(File.ReadAllText(RoomSync.StateFile(dir)))["state"]=="full" && !File.Exists(RoomSync.StateFile(dir)+".tmp"),"rewritten whole, no temporary left");
+            var requests=RoomSync.RequestsDirectory(dir);Directory.CreateDirectory(requests);
+            Action<string,string> put=(name,body)=>File.WriteAllText(Path.Combine(requests,name),body);
+            put("a1.json","{\"id\":\"a1\",\"action\":\"set-visibility\",\"value\":\"public\"}");
+            put("b2.json","{\"id\":\"b2\",\"action\":\"format-disk\"}");
+            put("c3.json","{\"id\":\"other\",\"action\":\"close\"}");
+            put("d4.json","not json");
+            put("e5.json","{\"id\":\"e5\",\"action\":\"close\"}");File.SetLastWriteTimeUtc(Path.Combine(requests,"e5.json"),DateTime.UtcNow.AddMinutes(-5));
+            var read=RoomSync.Read(dir,DateTime.UtcNow);
+            Check(read.Count==1 && read[0].Id=="a1" && read[0].Action=="set-visibility" && read[0].Value=="public","only the valid, fresh request is taken");
+            Check(Directory.GetFiles(requests,"*.json").Length==0,"every request file is consumed, acted on or not");
+            Check(RoomSync.Read(dir,DateTime.UtcNow).Count==0,"and never read twice");
+            RoomSync.Complete(dir,read[0],true,"Room publique.");
+            var done=Relay.Parse(File.ReadAllText(Path.Combine(requests,"a1.done")));
+            Check((string)done["id"]=="a1" && (bool)done["ok"] && (string)done["message"]=="Room publique.","the answer names the request");
+        } finally {try{Directory.Delete(dir,true);}catch{}}
+        var env=new Dictionary<string,string>{{"PARTYBOARD_ONLINE_VISIBILITY","public"},{"PARTYBOARD_ONLINE_STATE_DIR","C:\\x"}};
+        var host=Startup.Parse(new[]{"--host"},k=>env.ContainsKey(k)?env[k]:null);
+        Check(host.Public && host.StateDirectory=="C:\\x","a launcher can ask for a public room and a state directory");
+        env["PARTYBOARD_ONLINE_VISIBILITY"]="Public";
+        Check(!Startup.Parse(new[]{"--host"},k=>env.ContainsKey(k)?env[k]:null).Public,"only the exact word public makes a room public");
+        env.Remove("PARTYBOARD_ONLINE_VISIBILITY");
+        Check(!Startup.Parse(new[]{"--host"},k=>env.ContainsKey(k)?env[k]:null).Public,"private unless asked");
+        var status=new Relay.RoomStatus{State="full",Players=new List<string>{"Zera","Voisin"},Mods=new ModSet(new[]{new ModEntry(4242,"Board Pack","",new byte[]{1,2,3,4,5,6,7,8})})};
+        var sent=Relay.Parse(Relay.StatusRequest(status));
+        var mod=(Dictionary<string,object>)((System.Collections.ArrayList)sent["mods"])[0];
+        Check((string)sent["type"]=="status" && (string)sent["state"]=="full" && ((System.Collections.ArrayList)sent["players"]).Count==2,"a status names the state and every player");
+        Check((int)mod["id"]==4242 && (string)mod["name"]=="Board Pack" && (string)mod["fp"]=="0102030405060708","and each mod with its fingerprint");
+    }
     static void GameLanguages() {
         var disc=Wire.Hash(new byte[]{1,2,3});
         var english=new PlayerInfo("Camille",disc,3);
@@ -1254,12 +1292,43 @@ static class Tests {
                     Check(host.JoinPath=="relay" && guest.JoinPath=="relay","both sides went through the relay");
                     Check(SpinWait.SpinUntil(()=>host.Lobby!=null && host.Lobby.CanStart,15000),"the salon can start");
                     Check(SpinWait.SpinUntil(()=>host.Bridge.UdpReady && guest.Bridge.UdpReady,15000),"game UDP through TURN, both directions");
-                    Check(SpinWait.SpinUntil(()=>!Relay.PublicRooms(build,guestDisc.Hash).Any(r=>r.Room==room),10000),"a full room leaves the list");
+                    Relay.PublicRoom listed=null;
+                    Check(SpinWait.SpinUntil(()=>{listed=Relay.PublicRooms(build,guestDisc.Hash).FirstOrDefault(r=>r.Room==room);return listed!=null && listed.State=="full";},10000),"a full room stays listed, as full ("+(listed==null?"gone":listed.State)+")");
+                    Check(listed.Players.SequenceEqual(new[]{name,"Inconnu"}) && listed.Game==(hostDisc.Pal?"GMPP01":"GMPE01") && listed.MaxPlayers==2,"with both pseudos and the game");
                     bool gone=false;try{Relay.PublicInvite(room);}catch(IOException){gone=true;}
                     Check(gone,"and its invitation is no longer handed out");
+                    bool turnedAway=false;try{IPEndPoint ignored;using(Relay.GuestPipe(room,null,out ignored)){}}catch(IOException){turnedAway=true;}
+                    Check(turnedAway,"a third player who kept the invitation is turned away");
                     Check(failure==null,"no session failure ("+failure+")");
+                    guest.Dispose();host.Dispose();
+                    Check(SpinWait.SpinUntil(()=>!Relay.PublicRooms(build,guestDisc.Hash).Any(r=>r.Room==room),10000),"the session ends: off the list");
                 } finally {try{guest.Dispose();}catch{}try{host.Dispose();}catch{}}
             }
+            }
+            // A game under way, as the Worker keeps it: listed with its players,
+            // its mods and how long it has played, never joinable.
+            {
+                var gameToken=Wire.Random(16);var gameRoom=Relay.RoomId(gameToken);var discTag=Wire.Random(32);
+                using(var fakeHost=Relay.Connect("/room/"+gameRoom+"/host?udp=192.0.2.1:9&key="+BitConverter.ToString(Wire.Random(16)).Replace("-","").ToLowerInvariant())) {
+                    var invite=new Invitation{Address=IPAddress.Any,Port=0,Expires=DateTime.UtcNow.AddMinutes(30),Fingerprint=Wire.Random(16),Token=gameToken,MaxPlayers=2,LocalAddress=IPAddress.Any,LocalPort=0};
+                    var mods=new ModSet(new[]{new ModEntry(777,"Mini-jeux+","",new byte[]{9,9,9,9,9,9,9,9})});
+                    fakeHost.ReadTimeout=5000;bool binary;
+                    fakeHost.SendText(Relay.PublishRequest(invite,"Hôte",0,false,build,discTag,new Relay.RoomStatus{Players=new List<string>{"Hôte"},Mods=mods}));
+                    Check((string)Relay.Parse(fakeHost.ReadMessage(out binary))["type"]=="published","a room with mods is listed");
+                    var r1=Relay.PublicRooms(build,discTag).Single(r=>r.Room==gameRoom);
+                    Check(r1.Waiting && r1.Mods.Count==1 && r1.Mods[0].Id==777 && r1.Mods[0].Name=="Mini-jeux+" && r1.Mods[0].Fingerprint=="0909090909090909","its mods are on the list");
+                    fakeHost.SendText(Relay.StatusRequest(new Relay.RoomStatus{State="playing",Players=new List<string>{"Hôte","Ami"},Mods=mods}));
+                    Relay.PublicRoom r2=null;
+                    Check(SpinWait.SpinUntil(()=>{r2=Relay.PublicRooms(build,discTag).Single(r=>r.Room==gameRoom);return r2.State=="playing";},5000),"the game under way is listed as playing");
+                    Check(r2.Players.SequenceEqual(new[]{"Hôte","Ami"}),"with its players");
+                    bool closed=false;try{Relay.PublicInvite(gameRoom);}catch(IOException){closed=true;}
+                    Check(closed,"and is not joinable");
+                    var flood=new Relay.RoomStatus{State="playing",Players=Enumerable.Range(0,9).Select(i=>new string('x',80)).ToList(),Mods=mods};
+                    fakeHost.SendText(Relay.StatusRequest(flood));Thread.Sleep(500);
+                    var r3=Relay.PublicRooms(build,discTag).Single(r=>r.Room==gameRoom);
+                    Check(r3.Players.Count==4 && r3.Players.All(p=>p.Length==24),"the Worker bounds what a room says about itself");
+                }
+                Check(SpinWait.SpinUntil(()=>!Relay.PublicRooms(build,discTag).Any(r=>r.Room==gameRoom),10000),"its host gone, the game leaves the list");
             }
             // The Worker's own guard: an invitation with an address is refused,
             // whatever a modified client sends.
@@ -1273,7 +1342,7 @@ static class Tests {
                 fake.SendText(Relay.PublishRequest(foreign,"x",0,false,build,Wire.Random(32)));answer=Relay.Parse(fake.ReadMessage(out binary));
                 Check((string)answer["type"]=="publish-refused" && (string)answer["reason"]=="room","and one for another room");
             }
-            Console.WriteLine("PASS: "+checks+" checks; public room listed, filtered by disc and build, joined through the relay by its address-free invitation, delisted when full; leaky and foreign invitations and a second host refused.");
+            Console.WriteLine("PASS: "+checks+" checks; public room listed, filtered by disc and build, joined through the relay by its address-free invitation, listed as full then playing with players and mods, delisted when it ends; leaky and foreign invitations and a second host refused.");
             return 0;
         } catch(Exception e) {Console.Error.WriteLine("FAIL: "+e.Message);return 1;}
     }
@@ -1354,6 +1423,6 @@ static class Tests {
             }
         } catch(Exception e) {Console.Error.WriteLine("FAIL: "+e.Message);return 1;}
     }
-    public static int Run() {try{StartupOptions();GameLanguages();PublicInvitations();LanBeacon();StunVectors();TurnRelay();Reports();Codecs();Leases();LobbyRules();Discs();CancelLoading();MeshWiringTest();MeshRouting();ControlOnlyLink();ChannelPairingTest();Tls(0,true,true);for(int mode=0;mode<4;mode++)Tls(mode,mode==0);Console.WriteLine("PASS: "+checks+" checks; host-only lobby start, full disk hash and locks, UDP ping, native loading barrier/cancel, TLS loss before/after commit, authenticated UDP for 4800 native ticks and a real three-peer UDP mesh. No real router/firewall changes.");return 0;}catch(Exception e){Console.Error.WriteLine("FAIL: "+e.ToString());return 1;}}
+    public static int Run() {try{StartupOptions();GameLanguages();PublicInvitations();LanBeacon();RoomSyncFiles();StunVectors();TurnRelay();Reports();Codecs();Leases();LobbyRules();Discs();CancelLoading();MeshWiringTest();MeshRouting();ControlOnlyLink();ChannelPairingTest();Tls(0,true,true);for(int mode=0;mode<4;mode++)Tls(mode,mode==0);Console.WriteLine("PASS: "+checks+" checks; host-only lobby start, full disk hash and locks, UDP ping, native loading barrier/cancel, TLS loss before/after commit, authenticated UDP for 4800 native ticks and a real three-peer UDP mesh. No real router/firewall changes.");return 0;}catch(Exception e){Console.Error.WriteLine("FAIL: "+e.ToString());return 1;}}
 }
 }

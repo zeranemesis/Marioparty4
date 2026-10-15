@@ -262,7 +262,7 @@ try {
         # An absent field means an older package, which is exactly the answer needed.
         # retroachievements-login: the game takes the RetroAchievements session CubeShelf hands
         # over, and reports logins and progress back; CubeShelf gives it to no package without it.
-        capabilities = @('launcher-invites', 'retroachievements-login')
+        capabilities = @('launcher-invites', 'retroachievements-login', 'public-rooms', 'room-sync')
         discIncluded = $false
         validation   = 'TEST. Aucune session entre deux machines physiques n a jamais ete menee.'
     } | ConvertTo-Json -Depth 4

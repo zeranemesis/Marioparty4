@@ -89,6 +89,11 @@ sealed class MainForm : Form {
         // Not in the constructor: UI() drops a callback while the handle does not exist, so a disc
         // that verified faster than the window appeared would vanish without a trace.
         Shown+=(s,e)=>{if(startupApplied)return;startupApplied=true;ApplyStartup();};
+        // The launcher's view of this room (RoomSync), when it asked for one.
+        if(startup.StateDirectory!=null) {
+            var timer=new System.Windows.Forms.Timer{Interval=400};timer.Tick+=(s,e)=>SyncRoom();timer.Start();
+            FormClosed+=(s,e)=>{timer.Stop();try{RoomSync.Write(startup.StateDirectory,new System.Collections.Generic.Dictionary<string,object>{{"state","closed"}},++syncRevision);}catch{}};
+        }
         FormClosing+=(s,e)=>{closing=true;fileCancel.Cancel();var old=session;session=null;if(old!=null)old.Dispose();if(disc!=null)disc.Dispose();};
     }
     Button network;
@@ -440,8 +445,10 @@ sealed class MainForm : Form {
     // start the game. It removes the typing, not the checks.
     void ApplyStartup(){
         if(startup.Mode==StartupMode.Manual)return;
-        // A launcher's invitations are online rooms: private, for friends.
+        // A launcher's rooms are online: private for friends unless it asked
+        // for a public one.
         onlineMode.Checked=true;
+        if(startup.Mode==StartupMode.Host && startup.Public)SetPublicBox(true);
         if(startup.Nickname!=null)nickname.Text=startup.Nickname;
         if(startup.Invitation!=null)invitation.Text=startup.Invitation;
 
@@ -456,6 +463,60 @@ sealed class MainForm : Form {
         LoadDisc(startup.DiscPath,RunStartupAction);
     }
     bool pendingStartupAction;
+    long syncRevision;string syncLast;
+    // What room.json says: this window's room, in the launcher's words.
+    System.Collections.Generic.Dictionary<string,object> RoomState() {
+        var current=session;
+        var state=new System.Collections.Generic.Dictionary<string,object>{{"mode",Lan?"lan":"online"},{"visibility",PublicWanted?"public":"private"},{"message",status.Text}};
+        if(current==null){state["state"]=disc==null?"needs-disc":"idle";return state;}
+        state["role"]=current.Host?"host":"guest";
+        if(current.Host && current.Invite==null){state["state"]="creating";return state;}
+        if(!current.Host && current.Lobby==null){state["state"]="joining";return state;}
+        var room=current.RoomStatus();
+        state["state"]=room.State;state["game"]=room.Game;state["players"]=room.Players.ToArray();state["max"]=room.MaxPlayers;
+        state["mods"]=room.Fields()["mods"];
+        state["public"]=current.Public==PublicState.Listed;
+        if(current.PingMs.HasValue)state["ping"]=current.PingMs.Value;
+        if(current.Lan)state["path"]="lan";else if(current.Bridge!=null)state["path"]=current.JoinPath;
+        // The invitation goes to the launcher for friends only: a private,
+        // online room it hosts and that still has a seat.
+        if(current.Host && !current.Lan && room.State=="waiting")state["invite"]=current.Invite.Encode();
+        return state;
+    }
+    void SyncRoom() {
+        if(startup.StateDirectory==null || closing)return;
+        try {
+            var state=RoomState();
+            var key=new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(state);
+            if(key!=syncLast){RoomSync.Write(startup.StateDirectory,state,++syncRevision);syncLast=key;}
+            foreach(var request in RoomSync.Read(startup.StateDirectory,DateTime.UtcNow))Act(request);
+        } catch(IOException) {} catch(UnauthorizedAccessException) {}
+    }
+    void Act(RoomSync.Request request) {
+        var current=session;
+        switch(request.Action) {
+            case "set-visibility": {
+                bool on=request.Value=="public";
+                if(on && (Lan || SelectedPlayers()!=2 && current==null)){RoomSync.Complete(startup.StateDirectory,request,false,"Seule une room en ligne à 2 joueurs peut être publique.");return;}
+                if(current!=null && on && !current.RelayReady){RoomSync.Complete(startup.StateDirectory,request,false,"Le relais en ligne n'est pas disponible : la room reste privée.");return;}
+                if(current!=null && !current.CanBePublic){RoomSync.Complete(startup.StateDirectory,request,false,"Cette room ne peut plus changer de visibilité.");return;}
+                if(visibility.SelectedIndex!=(on?1:0))visibility.SelectedIndex=on?1:0; // PublicChanged does the rest
+                RoomSync.Complete(startup.StateDirectory,request,true,on?"Room publique.":"Room privée.");return;
+            }
+            case "reload-mods": {
+                chosenMods=null;
+                if(current==null){RoomSync.Complete(startup.StateDirectory,request,true,"Les mods seront pris au lancement de la room.");return;}
+                try {
+                    string from;current.ChangeMods(ModSet.FromCubeShelf(GameId,out from));RefreshLobby();
+                    RoomSync.Complete(startup.StateDirectory,request,true,"Mods mis à jour dans la room.");
+                } catch(Exception e) {RoomSync.Complete(startup.StateDirectory,request,false,Friendly(e));}
+                return;
+            }
+            case "close":
+                RoomSync.Complete(startup.StateDirectory,request,true,"Room fermée.");
+                Reset();Close();return;
+        }
+    }
     void RunStartupAction(){
         if(startup.Mode==StartupMode.Manual || session!=null)return;
         pendingStartupAction=false;

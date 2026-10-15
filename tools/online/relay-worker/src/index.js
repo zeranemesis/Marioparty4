@@ -14,8 +14,11 @@
 //   GET  /rooms/<id>                    one public room's invitation
 //
 // A host makes its room public by sending {"type":"publish",...} on its host
-// socket, and private again with {"type":"unpublish"}; closing that socket
-// takes it off the list too. A public room's invitation must carry no address
+// socket, and private again with {"type":"unpublish"}; {"type":"status",...}
+// says who is in it, with which mods, and whether it waits or plays. Closing
+// that socket takes it off the list. A room that is full or plays stays listed, so the
+// list shows the games under way, but its invitation is no longer handed out
+// and a guest who comes anyway is turned away. A public room's invitation must carry no address
 // (the Worker checks), so its guests come through the relay and nobody who
 // reads the list learns where the host lives.
 //
@@ -29,6 +32,11 @@ const LANGS = new Set(["en", "de", "fr", "es", "it"]);
 // More than the directory ever needs, and a bound on what one script can fill.
 const MAX_PUBLIC = 300;
 const LIST_SIZE = 60;
+const GAME = /^[A-Z0-9]{6}$/;
+const MAX_PLAYERS = 4;
+const MAX_MODS = 24;
+// A game under way outlives its 30-minute invitation; TURN's credentials last 4 h.
+const PLAYING_SECONDS = 4 * 3600;
 // Long enough for a twenty-turn party; the lobby asks again for a new salon.
 const TURN_TTL_SECONDS = 4 * 3600;
 
@@ -81,12 +89,28 @@ async function roomOf(token) {
 }
 
 // A pseudo for a list everyone reads: printable, short, never empty.
-function cleanName(text) {
+function cleanName(text, max = 24, fallback = "Joueur") {
   const name = String(text || "")
     .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, "")
     .trim()
-    .slice(0, 24);
-  return name || "Joueur";
+    .slice(0, max);
+  return name || fallback;
+}
+
+// What a room says about itself, bounded: the list is read by everyone.
+function cleanStatus(m) {
+  const players = (Array.isArray(m.players) ? m.players : []).slice(0, MAX_PLAYERS).map((n) => cleanName(n));
+  const mods = (Array.isArray(m.mods) ? m.mods : [])
+    .slice(0, MAX_MODS)
+    .filter((x) => x && Number.isInteger(x.id) && x.id > 0 && x.id < 1e9 && HEX.test(x.fp || ""))
+    .map((x) => ({ id: x.id, name: cleanName(x.name, 48, ""), fp: x.fp }));
+  const max = Number.isInteger(m.max) && m.max >= 2 && m.max <= MAX_PLAYERS ? m.max : 2;
+  return {
+    state: m.state === "playing" || m.state === "full" ? m.state : "waiting",
+    players: players.length ? players : ["Joueur"],
+    max,
+    mods,
+  };
 }
 
 async function turnCredentials(env) {
@@ -182,7 +206,8 @@ export class RelayRoom {
 
     if (role === "guest") {
       const host = this.state.getWebSockets("host")[0];
-      const full = this.state.getWebSockets("guest").length >= MAX_GUESTS;
+      const taken = host && ["playing", "full"].includes((host.deserializeAttachment() || {}).state);
+      const full = taken || this.state.getWebSockets("guest").length >= MAX_GUESTS;
       const conn = crypto.randomUUID().replaceAll("-", "");
       // Accepted once, already tagged, so the accept below can find it.
       this.state.acceptWebSocket(server, ["guest", `g:${conn}`]);
@@ -238,6 +263,14 @@ export class RelayRoom {
     } catch {
       return;
     }
+    if (m && m.type === "status") {
+      const status = cleanStatus(m);
+      // Remembered on the host's socket, so a guest who arrives while the
+      // room plays is turned away even after hibernation.
+      ws.serializeAttachment({ ...a, state: status.state });
+      await this.directory().fetch("https://directory/status", { method: "POST", body: JSON.stringify({ room: a.room, ...status }) });
+      return;
+    }
     if (m && m.type === "unpublish") {
       await this.directory().fetch("https://directory/remove", { method: "POST", body: JSON.stringify({ room: a.room }) });
       ws.send(JSON.stringify({ type: "unpublished" }));
@@ -255,15 +288,18 @@ export class RelayRoom {
     const now = Math.floor(Date.now() / 1000);
     if (invite.expires <= now || invite.expires > now + 31 * 60) return refuse("expired");
     if (!HEX.test(m.build || "") || !HEX.test(m.disc || "")) return refuse("fields");
+    const status = cleanStatus(m);
     const entry = {
       room: a.room,
       name: cleanName(m.name),
       lang: LANGS.has(m.lang) ? m.lang : "en",
       region: m.region === "eu" ? "eu" : "us",
+      game: GAME.test(m.game || "") ? m.game : "GMPE01",
       build: m.build,
       disc: m.disc,
       invite: m.invite,
       expires: invite.expires,
+      ...status,
     };
     const r = await this.directory().fetch("https://directory/publish", { method: "POST", body: JSON.stringify(entry) });
     ws.send(JSON.stringify(r.ok ? { type: "published" } : { type: "publish-refused", reason: "full" }));
@@ -311,6 +347,11 @@ export class RoomDirectory {
     this.sql.exec(`CREATE TABLE IF NOT EXISTS rooms (
       room TEXT PRIMARY KEY, name TEXT, lang TEXT, region TEXT, build TEXT, disc TEXT,
       invite TEXT, expires INTEGER, created INTEGER)`);
+    // v2 of the list: the game, who is in the room, its mods, and whether it plays.
+    const columns = new Set(this.sql.exec("PRAGMA table_info(rooms)").toArray().map((c) => c.name));
+    for (const [name, type] of [["game", "TEXT"], ["state", "TEXT"], ["players", "TEXT"], ["max", "INTEGER"], ["mods", "TEXT"], ["started", "INTEGER"]]) {
+      if (!columns.has(name)) this.sql.exec(`ALTER TABLE rooms ADD COLUMN ${name} ${type}`);
+    }
   }
 
   async fetch(request) {
@@ -324,11 +365,27 @@ export class RoomDirectory {
       const count = this.sql.exec("SELECT COUNT(*) AS n FROM rooms WHERE room != ?", e.room).one().n;
       if (count >= MAX_PUBLIC) return new Response("full", { status: 507 });
       this.sql.exec(
-        `INSERT INTO rooms (room, name, lang, region, build, disc, invite, expires, created)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO rooms (room, name, lang, region, build, disc, invite, expires, created, game, state, players, max, mods, started)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
          ON CONFLICT(room) DO UPDATE SET name = excluded.name, lang = excluded.lang, region = excluded.region,
-           build = excluded.build, disc = excluded.disc, invite = excluded.invite, expires = excluded.expires`,
+           build = excluded.build, disc = excluded.disc, invite = excluded.invite, expires = excluded.expires,
+           game = excluded.game, state = excluded.state, players = excluded.players, max = excluded.max, mods = excluded.mods`,
         e.room, e.name, e.lang, e.region, e.build, e.disc, e.invite, e.expires, now,
+        e.game, e.state, JSON.stringify(e.players), e.max, JSON.stringify(e.mods),
+      );
+      return new Response("ok");
+    }
+    if (request.method === "POST" && parts[0] === "status") {
+      const e = await request.json();
+      const row = this.sql.exec("SELECT state, started, expires FROM rooms WHERE room = ?", String(e.room || "")).toArray()[0];
+      // Only a listed room has a status; a private one stays off the list.
+      if (!row) return new Response("not listed", { status: 404 });
+      const playing = e.state === "playing";
+      const started = playing ? row.started || now : null;
+      const expires = playing ? Math.max(row.expires, started + PLAYING_SECONDS) : row.expires;
+      this.sql.exec(
+        "UPDATE rooms SET state = ?, players = ?, max = ?, mods = ?, started = ?, expires = ? WHERE room = ?",
+        e.state, JSON.stringify(e.players), e.max, JSON.stringify(e.mods), started, expires, e.room,
       );
       return new Response("ok");
     }
@@ -340,7 +397,7 @@ export class RoomDirectory {
 
     const headers = { "Cache-Control": "no-store" };
     if (parts[0] === "rooms" && parts.length === 2) {
-      const row = this.sql.exec("SELECT invite FROM rooms WHERE room = ?", parts[1]).toArray()[0];
+      const row = this.sql.exec("SELECT invite FROM rooms WHERE room = ? AND (state IS NULL OR state = 'waiting')", parts[1]).toArray()[0];
       if (!row) return new Response("no such room", { status: 404, headers });
       return Response.json({ invite: row.invite }, { headers });
     }
@@ -349,13 +406,34 @@ export class RoomDirectory {
       const build = url.searchParams.get("build") || "";
       const disc = url.searchParams.get("disc") || "";
       if (!HEX.test(build) || !HEX.test(disc)) return Response.json({ rooms: [] }, { headers });
+      // Rooms that wait first, then games under way.
+      const parse = (text, fallback) => {
+        try {
+          return JSON.parse(text) ?? fallback;
+        } catch {
+          return fallback;
+        }
+      };
       const rooms = this.sql
         .exec(
-          "SELECT room, name, lang, region, created FROM rooms WHERE build = ? AND disc = ? ORDER BY created DESC LIMIT ?",
+          `SELECT room, name, lang, region, created, game, state, players, max, mods, started FROM rooms
+           WHERE build = ? AND disc = ? ORDER BY (state IS NOT NULL AND state != 'waiting'), created DESC LIMIT ?`,
           build, disc, LIST_SIZE,
         )
         .toArray()
-        .map((r) => ({ room: r.room, name: r.name, lang: r.lang, region: r.region, age: Math.max(0, now - r.created) }));
+        .map((r) => ({
+          room: r.room,
+          name: r.name,
+          lang: r.lang,
+          region: r.region,
+          game: r.game || "GMPE01",
+          state: r.state || "waiting",
+          players: parse(r.players, [r.name]),
+          max: r.max || 2,
+          mods: parse(r.mods, []),
+          age: Math.max(0, now - r.created),
+          playing: r.started ? Math.max(0, now - r.started) : 0,
+        }));
       return Response.json({ rooms }, { headers });
     }
     return new Response("unknown", { status: 404 });

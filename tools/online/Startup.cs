@@ -27,6 +27,8 @@ sealed class Startup {
     public string DiscPath;      // null or empty: the player chooses one
     public string Invitation;    // the lobby to join, when Mode is Join
     public string InvitationOut; // where to write the invitation, when Mode is Host
+    public string StateDirectory; // where room.json and the launcher's requests live (RoomSync)
+    public bool Public;           // host a public room rather than a private one
 
     public static readonly Startup Manual = new Startup { Mode = StartupMode.Manual };
 
@@ -34,6 +36,7 @@ sealed class Startup {
     public const string DiscVariable = "PARTYBOARD_ONLINE_DISC";
     public const string InviteVariable = "PARTYBOARD_ONLINE_INVITE";
     public const string InviteOutVariable = "PARTYBOARD_ONLINE_INVITE_OUT";
+    public const string VisibilityVariable = "PARTYBOARD_ONLINE_VISIBILITY";
 
     public static Startup Parse(string[] args, Func<string, string> environment) {
         if (args == null || environment == null) return Manual;
@@ -50,7 +53,10 @@ sealed class Startup {
             Nickname = Trim(environment(NicknameVariable)),
             DiscPath = Trim(environment(DiscVariable)),
             Invitation = Trim(environment(InviteVariable)),
-            InvitationOut = Trim(environment(InviteOutVariable))
+            InvitationOut = Trim(environment(InviteOutVariable)),
+            StateDirectory = Trim(environment(RoomSync.DirectoryVariable)),
+            // Private unless asked, in so many words: a room is public only on purpose.
+            Public = string.Equals(Trim(environment(VisibilityVariable)), "public", StringComparison.Ordinal)
         };
 
         // An invitation is the whole point of joining. Without one there is nothing to join, and

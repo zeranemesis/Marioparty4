@@ -434,7 +434,7 @@ static class Relay {
     // Host side. The room tells us when a guest arrives, with the address TURN
     // will see: that address is permitted, then the guest's connection is opened
     // and handed to offer, which takes it like a TCP one.
-    public static void HostNotices(string room,WebSocketStream control,TurnClient allocation,Func<bool> stop,Action<WebSocketStream> offer,Action<string> report,Action<Dictionary<string,object>> other=null) {
+    public static void HostNotices(string room,WebSocketStream control,TurnClient allocation,Func<bool> stop,Action<WebSocketStream> offer,Action<string> report,Action<Dictionary<string,object>> other=null,Func<bool> accepting=null) {
         try {
             while(!stop()) {
                 bool binary;var notice=control.ReadMessage(out binary);
@@ -444,6 +444,9 @@ static class Relay {
                 if(!n.TryGetValue("type",out type))continue;
                 if((type as string)!="incoming"){if(other!=null)other(n);continue;}
                 if(!n.TryGetValue("conn",out conn) || !(conn is string))continue;
+                // A room that has its player keeps its socket only to stay on the
+                // list; nobody else is let in.
+                if(accepting!=null && !accepting())continue;
                 IPAddress address;
                 if(n.TryGetValue("ip",out ip) && IPAddress.TryParse(ip as string,out address) && address.AddressFamily==AddressFamily.InterNetwork)
                     try{allocation.Permit(address);}catch(Exception e){report("relay_permit_failed="+e.GetType().Name);}
@@ -498,7 +501,25 @@ static class Relay {
 
     // The public list (relay-worker: GET /rooms). Only rooms this player could
     // start are returned: the same PartyBoard build and the same disc.
-    public sealed class PublicRoom {public string Room,Name,Language,Region;public int Age;}
+    public sealed class PublicRoom {
+        public string Room,Name,Language,Region,Game="GMPE01",State="waiting";public int Age,Playing,MaxPlayers=2;
+        public List<string> Players=new List<string>();public List<RoomMod> Mods=new List<RoomMod>();
+        public bool Waiting {get{return State=="waiting";}}
+    }
+    public sealed class RoomMod {public int Id;public string Name,Fingerprint;}
+    // What a listed room says about itself: who is in it, with which mods, and
+    // whether it waits for a player or plays.
+    public sealed class RoomStatus {
+        public string State="waiting",Game="GMPE01";public List<string> Players=new List<string>();public int MaxPlayers=2;public ModSet Mods=ModSet.Empty;
+        public Dictionary<string,object> Fields() {
+            return new Dictionary<string,object>{{"state",State},{"game",Game},{"players",Players.ToArray()},{"max",MaxPlayers},
+                {"mods",Mods.Entries.Select(e=>new Dictionary<string,object>{{"id",e.Id},{"name",e.Name},{"fp",BitConverter.ToString(e.Fingerprint).Replace("-","").ToLowerInvariant()}}).ToArray()}};
+        }
+        public string Key {get{return new JavaScriptSerializer().Serialize(Fields());}}
+    }
+    public static string StatusRequest(RoomStatus status) {
+        var fields=status.Fields();fields["type"]="status";return new JavaScriptSerializer().Serialize(fields);
+    }
     public static string Short(byte[] hash){return BitConverter.ToString(hash,0,8).Replace("-","").ToLowerInvariant();}
     static string Get(string path) {
         using(var client=new WebClient()) {
@@ -520,6 +541,17 @@ static class Relay {
             var r=item as Dictionary<string,object>;if(r==null)continue;object v;
             var room=new PublicRoom{Room=r.TryGetValue("room",out v)?v as string:null,Name=r.TryGetValue("name",out v)?v as string:null,
                 Language=r.TryGetValue("lang",out v)?v as string:"en",Region=r.TryGetValue("region",out v)?v as string:"us",Age=r.TryGetValue("age",out v) && v is int?(int)v:0};
+            if(r.TryGetValue("game",out v) && v is string)room.Game=(string)v;
+            if(r.TryGetValue("state",out v) && v is string)room.State=(string)v;
+            if(r.TryGetValue("playing",out v) && v is int)room.Playing=(int)v;
+            if(r.TryGetValue("max",out v) && v is int)room.MaxPlayers=(int)v;
+            if(r.TryGetValue("players",out v) && v is System.Collections.ArrayList)room.Players=((System.Collections.ArrayList)v).OfType<string>().ToList();
+            if(room.Players.Count==0 && room.Name!=null)room.Players.Add(room.Name);
+            if(r.TryGetValue("mods",out v) && v is System.Collections.ArrayList)
+                foreach(var m in ((System.Collections.ArrayList)v).OfType<Dictionary<string,object>>()) {
+                    object id,name,fp;
+                    if(m.TryGetValue("id",out id) && id is int && m.TryGetValue("fp",out fp) && fp is string)room.Mods.Add(new RoomMod{Id=(int)id,Name=m.TryGetValue("name",out name)?name as string??"":"",Fingerprint=(string)fp});
+                }
             if(room.Room!=null && room.Room.Length==32 && room.Name!=null)rooms.Add(room);
         }
         return rooms;
@@ -530,10 +562,12 @@ static class Relay {
         if(!Parse(Get("/rooms/"+room)).TryGetValue("invite",out invite) || !(invite is string))throw new IOException("Cette salle n'existe plus.");
         return (string)invite;
     }
-    public static string PublishRequest(Invitation invite,string name,byte language,bool pal,byte[] build,byte[] disc) {
-        return new JavaScriptSerializer().Serialize(new Dictionary<string,object>{
+    public static string PublishRequest(Invitation invite,string name,byte language,bool pal,byte[] build,byte[] disc,RoomStatus status=null) {
+        var fields=new Dictionary<string,object>{
             {"type","publish"},{"invite",invite.ForPublicList().Encode()},{"name",name},{"lang",GameLanguage.Code(language)},
-            {"region",pal?"eu":"us"},{"build",Short(build)},{"disc",Short(disc)}});
+            {"region",pal?"eu":"us"},{"build",Short(build)},{"disc",Short(disc)}};
+        if(status!=null)foreach(var f in status.Fields())fields[f.Key]=f.Value;
+        return new JavaScriptSerializer().Serialize(fields);
     }
 
     public static Dictionary<string,object> Parse(string notice){return new JavaScriptSerializer().Deserialize<Dictionary<string,object>>(notice);}

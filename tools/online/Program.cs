@@ -64,7 +64,7 @@ enum PublicState {Private,Pending,Listed}
 
 sealed class Session : IDisposable {
     public Invitation Invite; public Bridge Bridge; public bool Host;
-    public Lobby Lobby;readonly PlayerInfo initialProfile;readonly DiscFile disc;
+    public Lobby Lobby;volatile PlayerInfo initialProfile;readonly DiscFile disc;
     // What this player announces right now. The salon may change its mods while
     // waiting (ChangeMods), so the copy that counts is the Lobby's own seat, and the
     // one passed in only stands in until the Lobby exists. Lobby.Update refuses any
@@ -72,7 +72,16 @@ sealed class Session : IDisposable {
     // safe: the list handed to the game is the one every peer agreed to.
     public PlayerInfo Profile {get{var lobby=Lobby;return lobby!=null?lobby.Local:initialProfile;}}
     public void ChangeMods(ModSet mods) {
-        var lobby=Lobby;if(lobby==null)throw new IOException("Attendez que le salon soit prêt pour changer les mods.");
+        var lobby=Lobby;
+        if(lobby==null) {
+            // A two-player host waits alone, with no salon yet: the mods it
+            // will announce are the ones its profile holds. If the guest arrived
+            // meanwhile, the salon is told as well.
+            var before=initialProfile;
+            initialProfile=new PlayerInfo(before.Name,before.DiscHash,before.DiscLength,mods,before.Language);
+            lobby=Lobby;
+            if(lobby==null){Report.Write("mods_changed count="+mods.Entries.Length+" before_salon");connected();return;}
+        }
         var current=lobby.Local;
         lobby.Update(new PlayerInfo(current.Name,current.DiscHash,current.DiscLength,mods,current.Language));
         Report.Write("mods_changed count="+mods.Entries.Length+" ids="+string.Join(",",mods.Entries.Select(m=>m.Id.ToString()).ToArray()));
@@ -95,7 +104,8 @@ sealed class Session : IDisposable {
         WebSocketStream control;lock(this) control=relayHost;
         if(!CanBePublic || control==null) throw new IOException("Seul un salon à 2 joueurs, encore en attente, peut être public.");
         var profile=Profile;
-        control.SendText(on?Relay.PublishRequest(Invite,profile.Name,profile.Language,disc!=null && disc.Pal,build,profile.DiscHash):"{\"type\":\"unpublish\"}");
+        var status=RoomStatus();if(on)lastStatus=status.Key;
+        control.SendText(on?Relay.PublishRequest(Invite,profile.Name,profile.Language,disc!=null && disc.Pal,build,profile.DiscHash,status):"{\"type\":\"unpublish\"}");
         Public=on?PublicState.Pending:PublicState.Private;connected();
     }
     void PublicNotice(Dictionary<string,object> notice) {
@@ -140,7 +150,28 @@ sealed class Session : IDisposable {
     readonly CancellationTokenSource cancel=new CancellationTokenSource();
     readonly Action<string> status;readonly Action connected;readonly Action<string> failed;
     byte[] build; volatile bool disposed;public Process Game;
-    public Session(Action<string> s,Action c,Action<string> f,PlayerInfo profile,DiscFile verifiedDisc) {status=s;connected=c;failed=f;initialProfile=profile;disc=verifiedDisc;}
+    public Session(Action<string> s,Action c,Action<string> f,PlayerInfo profile,DiscFile verifiedDisc) {status=s;connected=()=>{c();RoomChanged();};failed=f;initialProfile=profile;disc=verifiedDisc;}
+    // The room as everyone else sees it: the directory (when public) and the
+    // launcher that opened this window (RoomSync).
+    public Relay.RoomStatus RoomStatus() {
+        var status=new Relay.RoomStatus{Game=disc!=null && disc.Pal?"GMPP01":"GMPE01",MaxPlayers=maxPlayers,Mods=Profile.Mods};
+        var lobby=Lobby;
+        if(lobby!=null && (lobby.Phase==LobbyPhase.Preparing || lobby.Phase==LobbyPhase.Running))status.State="playing";
+        else if(lobby!=null && lobby.Occupied>=maxPlayers)status.State="full";
+        if(lobby==null)status.Players.Add(Profile.Name);
+        else for(int seat=0;seat<Lobby.MaxSeats;seat++){var info=lobby.SeatInfo(seat);if(info!=null)status.Players.Add(info.Name);}
+        return status;
+    }
+    string lastStatus;
+    // Tells the directory when the room changed: who is in it, its mods, or
+    // that it plays. Only a listed room has anything to tell.
+    void RoomChanged() {
+        if(Public!=PublicState.Listed)return;
+        WebSocketStream control;lock(this)control=relayHost;if(control==null)return;
+        Relay.RoomStatus now;try{now=RoomStatus();}catch{return;}
+        var key=now.Key;if(key==lastStatus)return;lastStatus=key;
+        Task.Run(()=>{try{control.SendText(Relay.StatusRequest(now));}catch(Exception e){Report.Write("public_status_failed error="+e.GetType().Name);}});
+    }
     // players==2 is byte for byte what Create() always did: the box maps one
     // UDP port too, and Bridge relays the single guest's game data directly.
     // Above two, there is no "the guest" to relay for -- every seat, this
@@ -253,8 +284,9 @@ sealed class Session : IDisposable {
             // socket too, which never carried a guest's bytes.
             if(viaRelay){network=turn;relayAllocation=turn;turn=null;if(internetGame!=null){internetGame.Close();internetGame=null;}}
             else{network=new UdpDatagramSocket(internetGame);internetGame=null;if(turn!=null){turn.Dispose();turn=null;}}
-            if(relayHost!=null){relayHost.Dispose();relayHost=null;}
-            Public=PublicState.Private;PublicNotices++;
+            // A public room keeps its socket while it plays: that is what keeps
+            // it on the list, as a game under way. A private one has no use for it.
+            if(relayHost!=null && Public!=PublicState.Listed){relayHost.Dispose();relayHost=null;Public=PublicState.Private;PublicNotices++;}
         }
         JoinPath=viaRelay?"relay":"direct";
         Bridge=new Bridge(admitClosers[0],admitStreams[0],admitClosers[1],admitStreams[1],0,network,null,Invite.Token,gamePort);AttachLobby();
@@ -287,7 +319,7 @@ sealed class Session : IDisposable {
         } catch(Exception e) {if(allocation!=null)allocation.Dispose();Report.Write("relay=unavailable error="+e.GetType().Name);}
     }
     void RelayNotices(string room,WebSocketStream control,TurnClient allocation) {
-        Relay.HostNotices(room,control,allocation,()=>disposed || admitted,pipe=>Offer(pipe,pipe,true),Report.Write,PublicNotice);
+        Relay.HostNotices(room,control,allocation,()=>disposed || (admitted && Public!=PublicState.Listed),pipe=>Offer(pipe,pipe,true),Report.Write,PublicNotice,()=>!admitted);
     }
     // The N-guest loop: keeps accepting until every seat but the host's own is
     // filled, pairing each guest's two channels by the client identifier the
@@ -605,6 +637,7 @@ static class Program {
         if(args.Length==1 && args[0]=="--self-test-relay") return Tests.RunRelay();
         if(args.Length==1 && args[0]=="--public-room-test") return Tests.RunPublicRoom();
         if(args.Length==1 && args[0]=="--lan-test") return Tests.RunLan();
+        if(args.Length==1 && args[0]=="--room-tags") return RoomSync.PrintTags();
         int relayMinutes;if(args.Length==2 && args[0]=="--relay-session-test" && int.TryParse(args[1],out relayMinutes)) return Tests.RunRelaySession(relayMinutes);
         // Both PCs must hold byte-identical folders or Lobby refuses to start the
         // game. Printing the same hash the handshake uses lets a player check that
