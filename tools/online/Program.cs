@@ -111,9 +111,9 @@ sealed class Session : IDisposable {
     void PublicNotice(Dictionary<string,object> notice) {
         object type,reason;notice.TryGetValue("type",out type);notice.TryGetValue("reason",out reason);
         switch(type as string) {
-            case "published": Public=PublicState.Listed;Report.Write("public=listed");status("Salle publique : tous les joueurs qui ont le même disque la voient dans « Salles publiques ».");break;
-            case "unpublished": Public=PublicState.Private;Report.Write("public=private");status("La salle n'est plus publique. Tes amis peuvent toujours la rejoindre avec l'invitation.");break;
-            case "publish-refused": Public=PublicState.Private;Report.Write("public=refused reason="+(reason as string));status((reason as string)=="full"?"La liste des salles publiques est pleine pour l'instant. Réessayez dans quelques minutes.":"Le relais a refusé de rendre la salle publique. Recréez-la et réessayez.");break;
+            case "published": Public=PublicState.Listed;Report.Write("public=listed");status("Room publique : tous les joueurs qui ont le même disque la voient dans « Rooms publiques » (lobby et CubeShelf).");break;
+            case "unpublished": Public=PublicState.Private;Report.Write("public=private");status("La room n'est plus publique. Tes amis peuvent toujours la rejoindre avec l'invitation.");break;
+            case "publish-refused": Public=PublicState.Private;Report.Write("public=refused reason="+(reason as string));status((reason as string)=="full"?"La liste des rooms publiques est pleine pour l'instant. Réessayez dans quelques minutes.":"Le relais a refusé de rendre la room publique. Recréez-la et réessayez.");break;
             default: return;
         }
         PublicNotices++;connected();
@@ -411,7 +411,7 @@ sealed class Session : IDisposable {
         }
         // A public room's invitation has no address: the relay is the only way in.
         if(Invite.ThroughRelayOnly) {
-            if(!Relay.Available)throw new IOException("Les salles publiques passent par le relais en ligne, qui est désactivé sur ce PC.");
+            if(!Relay.Available)throw new IOException("Les rooms publiques passent par le relais en ligne, qui est désactivé sur ce PC.");
             JoinViaRelay(clientId);return;
         }
         if(RelayOnly && Relay.Available && maxPlayers==2) {JoinViaRelay(clientId);return;}
@@ -471,7 +471,7 @@ sealed class Session : IDisposable {
     // Both channels through the relay's room, the game datagrams to the host's
     // TURN address it announced there.
     void JoinViaRelay(byte[] clientId) {
-        status(Invite.ThroughRelayOnly?"Connexion à la salle publique par le relais en ligne…":"Votre ami passe par le relais en ligne…");
+        status(Invite.ThroughRelayOnly?"Connexion à la room publique par le relais en ligne…":"Votre ami passe par le relais en ligne…");
         var room=Relay.RoomId(Invite.Token);
         internetGame=new UdpClient(new IPEndPoint(IPAddress.Any,0));
         var self=Relay.PublicAddress(internetGame);

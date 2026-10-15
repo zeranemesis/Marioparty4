@@ -322,7 +322,7 @@ sealed class MainForm : Form {
         // it and is refused once a launch begins, so nothing the peers did not see can
         // reach the game.
         string modsFrom;ModSet opening;
-        try {opening=chosenMods??ModSet.FromCubeShelf(GameId,out modsFrom);}
+        try {opening=chosenMods??LauncherMods()??ModSet.FromCubeShelf(GameId,out modsFrom);}
         catch(Exception e){SetStatus(Friendly(e));return;}
         var profile=new PlayerInfo(nickname.Text,disc.Hash,disc.Length,opening,GameLanguage.Current);
         Session current=null;current=new Session(t=>UI(()=>{if(session==current)SetStatus(t);}),()=>UI(()=>{if(session==current)RefreshLobby();}),t=>UI(()=>{if(session==current){Reset();SetStatus(t);}}),profile,disc);
@@ -348,6 +348,15 @@ sealed class MainForm : Form {
             :"Room privée créée. Invitez vos amis depuis CubeShelf, ou copiez le code et envoyez-le"+(players>2?" à vos amis.":" à votre ami.")+via;
     }
     const string GameId="GMPE01_00";
+    // The mods a launcher asked this session to play with (PARTYBOARD_ONLINE_MODS),
+    // rebuilt from what is installed here: a room's list, joined without touching
+    // the launcher's own settings. Null when it asked for nothing.
+    ModSet LauncherMods(){
+        if(startup.ModIds==null)return null;
+        string from;var installed=InstalledMod.FromCubeShelf(GameId,out from);
+        var wanted=new ModSet(startup.ModIds.Select(id=>new ModEntry(id,"","",new byte[8])));
+        return ModSet.AlignedTo(wanted,installed);
+    }
     ModSet CurrentMods(){var lobby=session?.Lobby;if(lobby!=null)return lobby.Local.Mods;if(session!=null)return session.Profile.Mods;string from;return chosenMods??ModSet.FromCubeShelf(GameId,out from);}
     // The same window whether CubeShelf opened the salon or PartyBoard did: both read
     // CubeShelf's installed mods (PARTYBOARD_MOD_LIST says where, when it is set) and

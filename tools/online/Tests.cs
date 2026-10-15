@@ -305,6 +305,10 @@ static class Tests {
         Check(!Startup.Parse(new[]{"--host"},k=>env.ContainsKey(k)?env[k]:null).Public,"only the exact word public makes a room public");
         env.Remove("PARTYBOARD_ONLINE_VISIBILITY");
         Check(!Startup.Parse(new[]{"--host"},k=>env.ContainsKey(k)?env[k]:null).Public,"private unless asked");
+        Check(Startup.ParseMods(null)==null && Startup.ParseMods("").Length==0,"no variable: CubeShelf's mods; empty: none at all");
+        Check(Startup.ParseMods("12, 345,6789").SequenceEqual(new[]{12,345,6789}),"a room's mods keep their order");
+        Check(Startup.ParseMods("12,x")==null && Startup.ParseMods("12,12")==null && Startup.ParseMods("-3")==null && Startup.ParseMods("+4")==null,"a malformed list is ignored whole");
+        Check(Startup.ParseMods(string.Join(",",Enumerable.Range(1,ModSet.MaxMods+1)))==null,"and so is one longer than a salon can carry");
         var status=new Relay.RoomStatus{State="full",Players=new List<string>{"Zera","Voisin"},Mods=new ModSet(new[]{new ModEntry(4242,"Board Pack","",new byte[]{1,2,3,4,5,6,7,8})})};
         var sent=Relay.Parse(Relay.StatusRequest(status));
         var mod=(Dictionary<string,object>)((System.Collections.ArrayList)sent["mods"])[0];

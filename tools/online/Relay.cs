@@ -527,7 +527,7 @@ static class Relay {
             try{return client.DownloadString(BaseUrl+path);}
             catch(WebException e) {
                 var r=e.Response as HttpWebResponse;
-                if(r!=null && r.StatusCode==HttpStatusCode.NotFound)throw new IOException("Cette salle n'existe plus : son hôte l'a fermée ou quelqu'un l'a déjà rejointe.",e);
+                if(r!=null && r.StatusCode==HttpStatusCode.NotFound)throw new IOException("Cette room n'existe plus : son hôte l'a fermée ou quelqu'un l'a déjà rejointe.",e);
                 if(r!=null && (int)r.StatusCode==429)throw new IOException("Trop de demandes au relais en ligne. Attendez une minute.",e);
                 throw new IOException("Le relais en ligne n'est pas joignable.",e);
             }
@@ -557,9 +557,9 @@ static class Relay {
         return rooms;
     }
     public static string PublicInvite(string room) {
-        if(room==null || room.Length!=32 || room.Any(c=>!Uri.IsHexDigit(c)))throw new IOException("Salle inconnue.");
+        if(room==null || room.Length!=32 || room.Any(c=>!Uri.IsHexDigit(c)))throw new IOException("Room inconnue.");
         object invite;
-        if(!Parse(Get("/rooms/"+room)).TryGetValue("invite",out invite) || !(invite is string))throw new IOException("Cette salle n'existe plus.");
+        if(!Parse(Get("/rooms/"+room)).TryGetValue("invite",out invite) || !(invite is string))throw new IOException("Cette room n'existe plus.");
         return (string)invite;
     }
     public static string PublishRequest(Invitation invite,string name,byte language,bool pal,byte[] build,byte[] disc,RoomStatus status=null) {

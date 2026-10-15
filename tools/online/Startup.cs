@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 
 namespace PartyBoardOnline {
 
@@ -29,6 +30,7 @@ sealed class Startup {
     public string InvitationOut; // where to write the invitation, when Mode is Host
     public string StateDirectory; // where room.json and the launcher's requests live (RoomSync)
     public bool Public;           // host a public room rather than a private one
+    public int[] ModIds;          // this session's mods, in order, by GameBanana id (null: CubeShelf's own list)
 
     public static readonly Startup Manual = new Startup { Mode = StartupMode.Manual };
 
@@ -37,6 +39,7 @@ sealed class Startup {
     public const string InviteVariable = "PARTYBOARD_ONLINE_INVITE";
     public const string InviteOutVariable = "PARTYBOARD_ONLINE_INVITE_OUT";
     public const string VisibilityVariable = "PARTYBOARD_ONLINE_VISIBILITY";
+    public const string ModsVariable = "PARTYBOARD_ONLINE_MODS";
 
     public static Startup Parse(string[] args, Func<string, string> environment) {
         if (args == null || environment == null) return Manual;
@@ -56,7 +59,8 @@ sealed class Startup {
             InvitationOut = Trim(environment(InviteOutVariable)),
             StateDirectory = Trim(environment(RoomSync.DirectoryVariable)),
             // Private unless asked, in so many words: a room is public only on purpose.
-            Public = string.Equals(Trim(environment(VisibilityVariable)), "public", StringComparison.Ordinal)
+            Public = string.Equals(Trim(environment(VisibilityVariable)), "public", StringComparison.Ordinal),
+            ModIds = ParseMods(environment(ModsVariable))
         };
 
         // An invitation is the whole point of joining. Without one there is nothing to join, and
@@ -69,6 +73,24 @@ sealed class Startup {
 
     public static Startup FromEnvironment(string[] args) {
         return Parse(args, Environment.GetEnvironmentVariable);
+    }
+
+    // "12,345,6789": the room's mods, in its load order, for this session only.
+    // "" means no mods at all; absent means whatever CubeShelf has on. Anything
+    // malformed is ignored as a whole rather than half applied.
+    internal static int[] ParseMods(string value) {
+        if (value == null) return null;
+        value = value.Trim();
+        if (value.Length == 0) return new int[0];
+        var parts = value.Split(',');
+        if (parts.Length > ModSet.MaxMods) return null;
+        var ids = new int[parts.Length];
+        for (int i = 0; i < parts.Length; i++) {
+            int id;
+            if (!int.TryParse(parts[i].Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out id) || id <= 0) return null;
+            ids[i] = id;
+        }
+        return ids.Distinct().Count() == ids.Length ? ids : null;
     }
 
     static string Trim(string value) {
