@@ -168,6 +168,10 @@ sealed class TurnClient : IDatagramSocket {
     readonly ConcurrentDictionary<string,byte> binding=new ConcurrentDictionary<string,byte>();
     readonly HashSet<IPAddress> permitted=new HashSet<IPAddress>();
     int nextChannel=0x4000;volatile bool closed;Thread reader;Timer refresher;uint lifetime=600;
+    // How the periodic refresh of allocation, permissions and channels went.
+    int refreshes,refreshFailures;
+    public int Refreshes {get{return Volatile.Read(ref refreshes);}}
+    public int RefreshFailures {get{return Volatile.Read(ref refreshFailures);}}
 
     public TurnClient(IPEndPoint turnServer,string user,string credential) {
         username=user;password=credential;server=new UdpClient(new IPEndPoint(IPAddress.Any,0));server.Connect(turnServer);
@@ -229,7 +233,8 @@ sealed class TurnClient : IDatagramSocket {
             IPAddress[] addresses;lock(permitted)addresses=permitted.ToArray();
             foreach(var a in addresses)CreatePermissionNow(a);
             foreach(var c in peerOf.ToArray())BindNow(c.Value,c.Key);
-        } catch {}
+            Interlocked.Increment(ref refreshes);
+        } catch {if(!closed)Interlocked.Increment(ref refreshFailures);}
     }
 
     // Lets datagrams from this address reach us. TURN permissions are per

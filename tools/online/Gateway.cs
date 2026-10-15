@@ -226,6 +226,9 @@ sealed class Gateway : IDisposable {
     // invitation then carries the local address as its main one, which
     // Invitation.Decode accepts only when it equals the local address too.
     public bool LocalOnly {get{return method=="LOCAL";}}
+    // A box that refuses, without asking it anything: the relay tests' host
+    // (PARTYBOARD_ONLINE_RELAY_ONLY) must not open ports on a real router.
+    public static Gateway LocalFor(Route r,int port,bool datagram) {return new Gateway(r,port,port,datagram).AsLocal();}
     internal Gateway AsLocal() {
         if(!Private(route.Local))throw new IOException("La box n'a pas autorisé la connexion automatique, et ce PC n'est pas sur un réseau local. Vous pouvez inverser les rôles : votre ami crée la partie.");
         method="LOCAL";externalPort=internalPort;Address=route.Local;Lifetime=3600;

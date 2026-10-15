@@ -1152,6 +1152,51 @@ static class Tests {
     }
     // The relay's own checks alone, quick: PartyBoardOnline.exe --self-test-relay.
     public static int RunRelay() {try{StunVectors();TurnRelay();RelayEndToEnd();Console.WriteLine("PASS: "+checks+" relay checks; RFC 5769 vector, STUN codec, TURN allocation, permission, Send/Data and channels against a loopback TURN server.");return 0;}catch(Exception e){Console.Error.WriteLine("FAIL: "+e.ToString());return 1;}}
+    // Two real lobby sessions, host and guest, through the relay only: the code a
+    // player runs (Create, OpenRelay, Offer, Join, JoinViaRelay), not the pieces
+    // the other relay tests assemble. The host acts as if its box refused, without
+    // touching the router or the firewall. Then the game channel is watched for
+    // `minutes`, so TURN's refresh of allocation, permission and channel runs.
+    // PartyBoardOnline.exe --relay-session-test <minutes>, with PARTYBOARD_RELAY
+    // and PARTYBOARD_TEST_DISC (a disc image online play accepts).
+    public static int RunRelaySession(int minutes) {
+        try {
+            var discPath=Environment.GetEnvironmentVariable("PARTYBOARD_TEST_DISC");
+            if(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("PARTYBOARD_RELAY")) || string.IsNullOrEmpty(discPath)) {
+                Console.WriteLine("NOT RUN: set PARTYBOARD_RELAY and PARTYBOARD_TEST_DISC.");return 2;
+            }
+            Environment.SetEnvironmentVariable("PARTYBOARD_ONLINE_RELAY_ONLY","1");
+            string failure=null;Action<string> fail=m=>{if(failure==null)failure=m;};
+            using(var hostDisc=DiscFile.Verify(discPath,_=>{},CancellationToken.None))
+            using(var guestDisc=DiscFile.Verify(discPath,_=>{},CancellationToken.None)) {
+                var host=new Session(s=>Console.WriteLine("host: "+s),()=>{},fail,new PlayerInfo("Hote",hostDisc.Hash,hostDisc.Length),hostDisc);
+                var guest=new Session(s=>Console.WriteLine("guest: "+s),()=>{},fail,new PlayerInfo("Invite",guestDisc.Hash,guestDisc.Length),guestDisc);
+                try {
+                    host.Create(2);
+                    Check(host.LocalOnly,"the host's box is treated as refusing");
+                    Check(host.RelayReady,"the host opened its relay room and TURN allocation");
+                    guest.Join(host.Invite.Encode());
+                    Check(SpinWait.SpinUntil(()=>host.Bridge!=null,15000),"the host admitted the guest");
+                    Check(host.JoinPath=="relay" && guest.JoinPath=="relay","both sides went through the relay");
+                    Check(SpinWait.SpinUntil(()=>host.Lobby!=null && host.Lobby.CanStart,15000),"the salon can start: profiles and discs crossed the relay");
+                    Check(SpinWait.SpinUntil(()=>host.Bridge.UdpReady && guest.Bridge.UdpReady,15000),"game UDP through TURN, both directions");
+                    var started=DateTime.UtcNow;var end=started.AddMinutes(minutes);int samples=0,down=0,maxPing=0;
+                    while(DateTime.UtcNow<end) {
+                        Thread.Sleep(10000);samples++;
+                        bool alive=failure==null && host.Bridge.UdpReady && guest.Bridge.UdpReady && host.Bridge.ControlConnected && guest.Bridge.ControlConnected;
+                        if(!alive)down++;
+                        int ping=host.PingMs??-1;if(ping>maxPing)maxPing=ping;
+                        if(samples%6==0)Console.WriteLine("minute "+(int)(DateTime.UtcNow-started).TotalMinutes+": alive="+alive+" ping="+ping+" ms "+host.RelayStatus);
+                    }
+                    Check(failure==null,"no session failure ("+failure+")");
+                    Check(down==0,"game and control channels alive at every sample ("+down+"/"+samples+" down)");
+                    if(minutes>=5)Check(host.RelayRefreshes>=minutes/3 && host.RelayRefreshFailures==0,"TURN refreshed "+host.RelayRefreshes+" times, "+host.RelayRefreshFailures+" failures");
+                    Console.WriteLine("PASS: "+checks+" checks; two lobby sessions through the relay for "+minutes+" min, "+samples+" samples, max ping "+maxPing+" ms, "+host.RelayStatus+".");
+                    return 0;
+                } finally {try{guest.Dispose();}catch{}try{host.Dispose();}catch{}}
+            }
+        } catch(Exception e) {Console.Error.WriteLine("FAIL: "+e.Message);return 1;}
+    }
     public static int Run() {try{StartupOptions();GameLanguages();StunVectors();TurnRelay();Reports();Codecs();Leases();LobbyRules();Discs();CancelLoading();MeshWiringTest();MeshRouting();ControlOnlyLink();ChannelPairingTest();Tls(0,true,true);for(int mode=0;mode<4;mode++)Tls(mode,mode==0);Console.WriteLine("PASS: "+checks+" checks; host-only lobby start, full disk hash and locks, UDP ping, native loading barrier/cancel, TLS loss before/after commit, authenticated UDP for 4800 native ticks and a real three-peer UDP mesh. No real router/firewall changes.");return 0;}catch(Exception e){Console.Error.WriteLine("FAIL: "+e.ToString());return 1;}}
 }
 }

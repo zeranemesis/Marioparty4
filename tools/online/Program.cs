@@ -82,6 +82,14 @@ sealed class Session : IDisposable {
     // where guests who cannot reach this box directly arrive. Two players only.
     TurnClient turn;WebSocketStream relayHost;
     public bool RelayReady {get;private set;}
+    // Test only: the host behaves as if its box refused, without touching the
+    // router or the Windows firewall, and the guest goes straight to the relay.
+    static bool RelayOnly {get{return Environment.GetEnvironmentVariable("PARTYBOARD_ONLINE_RELAY_ONLY")=="1";}}
+    // The allocation a relayed session's game runs on, for diagnostics.
+    TurnClient relayAllocation;
+    public int RelayRefreshes {get{var a=relayAllocation;return a==null?0:a.Refreshes;}}
+    public int RelayRefreshFailures {get{var a=relayAllocation;return a==null?0:a.RefreshFailures;}}
+    public string RelayStatus {get{var a=relayAllocation;return a==null?"relay=none":"relay=turn refreshes="+a.Refreshes+" failures="+a.RefreshFailures;}}
     // One guest's two channels, from either path, gathered by Offer.
     readonly object admitLock=new object();readonly IDisposable[] admitClosers=new IDisposable[2];readonly SslStream[] admitStreams=new SslStream[2];
     byte[] admitPairing;bool admitRelay;volatile bool admitted;
@@ -120,11 +128,11 @@ sealed class Session : IDisposable {
         int port=((IPEndPoint)listener.LocalEndpoint).Port;
         try {
             if(players==2) internetGame=new UdpClient(new IPEndPoint(route.Local,port));
-            status("Autorisez PartyBoard si Windows vous le demande…"); firewall=Firewall.Open(port);
+            status("Autorisez PartyBoard si Windows vous le demande…"); firewall=RelayOnly?null:Firewall.Open(port);
             if(disposed) throw new OperationCanceledException();
-            status(NetworkSettings.Port==0?"Préparation automatique de votre box…":"Préparation du port fixe "+port+"…"); mapping=Gateway.OpenFor(route,port,port,false);
+            status(NetworkSettings.Port==0?"Préparation automatique de votre box…":"Préparation du port fixe "+port+"…"); mapping=RelayOnly?Gateway.LocalFor(route,port,false):Gateway.OpenFor(route,port,port,false);
             if(players==2) {
-                mappingUdp=Gateway.OpenFor(route,port,mapping.Port,true);
+                mappingUdp=RelayOnly?Gateway.LocalFor(route,port,true):Gateway.OpenFor(route,port,mapping.Port,true);
                 if(mappingUdp.Port!=mapping.Port || !mappingUdp.Address.Equals(mapping.Address))throw new IOException("La box n'a pas pu réserver le même accès rapide pour le jeu. Inversez les rôles et réessayez.");
             }
             if(disposed) throw new OperationCanceledException();
@@ -205,7 +213,7 @@ sealed class Session : IDisposable {
         lock(this) {
             // Whichever path is left unused is released now; the room's own
             // socket too, which never carried a guest's bytes.
-            if(viaRelay){network=turn;turn=null;if(internetGame!=null){internetGame.Close();internetGame=null;}}
+            if(viaRelay){network=turn;relayAllocation=turn;turn=null;if(internetGame!=null){internetGame.Close();internetGame=null;}}
             else{network=new UdpDatagramSocket(internetGame);internetGame=null;if(turn!=null){turn.Dispose();turn=null;}}
             if(relayHost!=null){relayHost.Dispose();relayHost=null;}
         }
@@ -297,6 +305,7 @@ sealed class Session : IDisposable {
         // pair them and seat us. Random rather than derived from anything: it only has
         // to be unique among the guests of one salon.
         var clientId=Wire.Random(16);
+        if(RelayOnly && Relay.Available && maxPlayers==2) {JoinViaRelay(clientId);return;}
         // Try the host's own network first. Two seconds, because an address that
         // is not on this network refuses or times out fast, and the public
         // address is still there behind it. Reaching the wrong machine cannot
@@ -515,6 +524,7 @@ static class Program {
         if(args.Length==3 && args[0]=="--firewall") {int port,pid;return int.TryParse(args[1],out port)&&int.TryParse(args[2],out pid)?Firewall.Broker(port,pid):2;}
         if(args.Length==1 && args[0]=="--self-test") return Tests.Run();
         if(args.Length==1 && args[0]=="--self-test-relay") return Tests.RunRelay();
+        int relayMinutes;if(args.Length==2 && args[0]=="--relay-session-test" && int.TryParse(args[1],out relayMinutes)) return Tests.RunRelaySession(relayMinutes);
         // Both PCs must hold byte-identical folders or Lobby refuses to start the
         // game. Printing the same hash the handshake uses lets a player check that
         // before a session instead of discovering it as a refusal.
