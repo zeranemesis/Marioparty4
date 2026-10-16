@@ -508,7 +508,7 @@ static class Relay {
     // The public list (relay-worker: GET /rooms). Only rooms this player could
     // start are returned: the same PartyBoard build and the same disc.
     public sealed class PublicRoom {
-        public string Room,Name,Language,Region,Game="GMPE01",State="waiting",Title="";public int Age,Playing,MaxPlayers=2;
+        public string Room,Name,Language,Region,Game="GMPE01",State="waiting",Title="",Activity="";public int Age,Playing,MaxPlayers=2;
         public List<string> Players=new List<string>();public List<RoomMod> Mods=new List<RoomMod>();
         public bool Waiting {get{return State=="waiting";}}
     }
@@ -516,9 +516,9 @@ static class Relay {
     // What a listed room says about itself: who is in it, with which mods, and
     // whether it waits for a player or plays.
     public sealed class RoomStatus {
-        public string State="waiting",Game="GMPE01",Title="";public List<string> Players=new List<string>();public int MaxPlayers=2;public ModSet Mods=ModSet.Empty;
+        public string State="waiting",Game="GMPE01",Title="",Activity="";public List<string> Players=new List<string>();public int MaxPlayers=2;public ModSet Mods=ModSet.Empty;
         public Dictionary<string,object> Fields() {
-            return new Dictionary<string,object>{{"title",Title},{"state",State},{"game",Game},{"players",Players.ToArray()},{"max",MaxPlayers},
+            return new Dictionary<string,object>{{"title",Title},{"activity",Activity},{"state",State},{"game",Game},{"players",Players.ToArray()},{"max",MaxPlayers},
                 {"mods",Mods.Entries.Select(e=>new Dictionary<string,object>{{"id",e.Id},{"name",e.Name},{"fp",BitConverter.ToString(e.Fingerprint).Replace("-","").ToLowerInvariant()}}).ToArray()}};
         }
         public string Key {get{return new JavaScriptSerializer().Serialize(Fields());}}
@@ -549,6 +549,7 @@ static class Relay {
                 Language=r.TryGetValue("lang",out v)?v as string:"en",Region=r.TryGetValue("region",out v)?v as string:"us",Age=r.TryGetValue("age",out v) && v is int?(int)v:0};
             if(r.TryGetValue("game",out v) && v is string)room.Game=(string)v;
             if(r.TryGetValue("title",out v) && v is string)room.Title=(string)v;
+            if(r.TryGetValue("activity",out v) && v is string)room.Activity=(string)v;
             if(r.TryGetValue("state",out v) && v is string)room.State=(string)v;
             if(r.TryGetValue("playing",out v) && v is int)room.Playing=(int)v;
             if(r.TryGetValue("max",out v) && v is int)room.MaxPlayers=(int)v;

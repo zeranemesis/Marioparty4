@@ -108,6 +108,8 @@ function cleanStatus(m) {
   return {
     // The room's name, as its host typed it; empty means "<host>'s room" on the list.
     title: cleanName(m.title, 32, ""),
+    // What the game says is happening (board, turn, minigame), only while it plays.
+    activity: m.state === "playing" ? cleanName(m.activity, 120, "") : "",
     state: m.state === "playing" || m.state === "full" ? m.state : "waiting",
     players: players.length ? players : ["Joueur"],
     max,
@@ -357,7 +359,7 @@ export class RoomDirectory {
       invite TEXT, expires INTEGER, created INTEGER)`);
     // v2 of the list: the game, who is in the room, its mods, and whether it plays.
     const columns = new Set(this.sql.exec("PRAGMA table_info(rooms)").toArray().map((c) => c.name));
-    for (const [name, type] of [["game", "TEXT"], ["state", "TEXT"], ["players", "TEXT"], ["max", "INTEGER"], ["mods", "TEXT"], ["started", "INTEGER"], ["title", "TEXT"]]) {
+    for (const [name, type] of [["game", "TEXT"], ["state", "TEXT"], ["players", "TEXT"], ["max", "INTEGER"], ["mods", "TEXT"], ["started", "INTEGER"], ["title", "TEXT"], ["activity", "TEXT"]]) {
       if (!columns.has(name)) this.sql.exec(`ALTER TABLE rooms ADD COLUMN ${name} ${type}`);
     }
   }
@@ -393,8 +395,8 @@ export class RoomDirectory {
       const started = playing ? row.started || now : null;
       const expires = playing ? Math.max(row.expires, started + PLAYING_SECONDS) : row.expires;
       this.sql.exec(
-        "UPDATE rooms SET state = ?, players = ?, max = ?, mods = ?, started = ?, expires = ?, title = ? WHERE room = ?",
-        e.state, JSON.stringify(e.players), e.max, JSON.stringify(e.mods), started, expires, e.title, e.room,
+        "UPDATE rooms SET state = ?, players = ?, max = ?, mods = ?, started = ?, expires = ?, title = ?, activity = ? WHERE room = ?",
+        e.state, JSON.stringify(e.players), e.max, JSON.stringify(e.mods), started, expires, e.title, e.activity, e.room,
       );
       return new Response("ok");
     }
@@ -425,7 +427,7 @@ export class RoomDirectory {
       };
       const rooms = this.sql
         .exec(
-          `SELECT room, name, lang, region, created, game, state, players, max, mods, started, title FROM rooms
+          `SELECT room, name, lang, region, created, game, state, players, max, mods, started, title, activity FROM rooms
            WHERE build = ? AND disc = ? ORDER BY (state IS NOT NULL AND state != 'waiting'), created DESC LIMIT ?`,
           build, disc, LIST_SIZE,
         )
@@ -443,6 +445,7 @@ export class RoomDirectory {
           age: Math.max(0, now - r.created),
           playing: r.started ? Math.max(0, now - r.started) : 0,
           title: r.title || "",
+          activity: r.activity || "",
         }));
       return Response.json({ rooms }, { headers });
     }

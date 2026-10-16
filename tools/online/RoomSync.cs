@@ -27,7 +27,7 @@ static class RoomSync {
     public static readonly TimeSpan RequestLifetime=TimeSpan.FromSeconds(30);
     const int MaximumRequestBytes=4096,MaximumRequestsPerRead=16;
     static readonly Regex IdPattern=new Regex("^[A-Za-z0-9-]{1,64}$",RegexOptions.CultureInvariant);
-    static readonly string[] Actions={"set-visibility","reload-mods","close","start","set-mods","align-host"};
+    static readonly string[] Actions={"set-visibility","reload-mods","close","start","set-mods","align-host","set-activity"};
 
     public sealed class Request {public string Id,Action,Value;}
 

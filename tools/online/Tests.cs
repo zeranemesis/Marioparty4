@@ -1361,10 +1361,11 @@ static class Tests {
                     fakeHost.SendText("{\"type\":\"refuse\",\"conn\":\""+(string)incoming["conn"]+"\"}");
                     Check(late.Wait(8000) && late.Result.Contains("prise"),"refused by the host, the guest is told the room is taken ("+(late.IsCompleted?late.Result:"no answer")+")");
                     Check(r1.Waiting && r1.Mods.Count==1 && r1.Mods[0].Id==777 && r1.Mods[0].Name=="Mini-jeux+" && r1.Mods[0].Fingerprint=="0909090909090909","its mods are on the list");
-                    fakeHost.SendText(Relay.StatusRequest(new Relay.RoomStatus{State="playing",Players=new List<string>{"Hôte","Ami"},Mods=mods}));
+                    fakeHost.SendText(Relay.StatusRequest(new Relay.RoomStatus{State="playing",Players=new List<string>{"Hôte","Ami"},Mods=mods,Activity="Plateau Jardin de Toad\u0007, tour 5/20"}));
                     Relay.PublicRoom r2=null;
                     Check(SpinWait.SpinUntil(()=>{r2=Relay.PublicRooms(build,discTag).Single(r=>r.Room==gameRoom);return r2.State=="playing";},5000),"the game under way is listed as playing");
                     Check(r2.Players.SequenceEqual(new[]{"Hôte","Ami"}),"with its players");
+                    Check(r2.Activity=="Plateau Jardin de Toad, tour 5/20","and what the game says is happening ("+r2.Activity+")");
                     bool closed=false;try{Relay.PublicInvite(gameRoom);}catch(IOException){closed=true;}
                     Check(closed,"and is not joinable");
                     var flood=new Relay.RoomStatus{State="playing",Players=Enumerable.Range(0,9).Select(i=>new string('x',80)).ToList(),Mods=mods};

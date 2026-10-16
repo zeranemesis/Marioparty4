@@ -496,6 +496,7 @@ sealed class MainForm : Form {
         state["state"]=room.State;state["game"]=room.Game;state["players"]=room.Players.ToArray();state["max"]=room.MaxPlayers;
         state["mods"]=room.Fields()["mods"];
         state["public"]=current.Public==PublicState.Listed;
+        if(!string.IsNullOrEmpty(current.Activity))state["activity"]=current.Activity;
         // Which relay room this is, host or guest, so the launcher never lists it as someone else's.
         if(current.Invite!=null && !current.Lan)state["roomId"]=Relay.RoomId(current.Invite.Token);
         if(current.PingMs.HasValue)state["ping"]=current.PingMs.Value;
@@ -577,6 +578,10 @@ sealed class MainForm : Form {
                     catch(Exception e){RoomSync.Complete(startup.StateDirectory,request,false,e.Message);UI(()=>{if(session==current){SetStatus(e.Message);RefreshLobby();}});}
                 });
                 return;
+            }
+            case "set-activity": {
+                if(current==null){RoomSync.Complete(startup.StateDirectory,request,false,"");return;}
+                current.Activity=request.Value;RoomSync.Complete(startup.StateDirectory,request,true,"");return;
             }
             case "align-host": {
                 if(current==null || current.Host || current.Lobby?.RequiredMods==null){RoomSync.Complete(startup.StateDirectory,request,false,L.T("Attendez que votre ami soit connecté."));return;}
