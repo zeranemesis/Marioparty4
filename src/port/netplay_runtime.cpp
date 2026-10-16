@@ -5,6 +5,7 @@
 #include "port/netplay_transport.hpp"
 #include "port/netplay_pad.hpp"
 #include "port/netplay_progress.hpp"
+#include "port/netplay_idle.hpp"
 #include "port/netplay_canonical.hpp"
 #include "port/rollback.hpp"
 #include "port/rollback_audio.hpp"
@@ -262,6 +263,16 @@ struct Runtime {
     int rollbackSessionContext = -1;
     int observedContext = -1;
     int probeContext = -1; // Set only by the headless PAD regression probe.
+    // Inactivity on a board (netplay_idle.hpp). A replaced seat is out of the
+    // lockstep for good: its input is neutral and nobody waits for it.
+    IdleWatch idle;
+    std::uint8_t idleReported = 0;
+    // A replaced guest keeps ticking a few seconds, so peers still missing one
+    // of its last inputs can get it repeated, then leaves the session.
+    std::uint32_t idleLeaveFrame = UINT32_MAX;
+    // Test-only, --netplay-probe-idle: seat 1's "turn" from frame 600, so the
+    // rule runs end to end without walking menus to a board.
+    bool idleProbe = false;
 };
 
 Runtime gRuntime;
@@ -1122,7 +1133,7 @@ bool collectPeerInputs(const Runtime &runtime, std::uint32_t frame,
     slots = {};
     bool everyPeerReady = true;
     for (std::uint8_t seat = 0; seat < runtime.playerCount; ++seat) {
-        if (seat == runtime.localPlayer) continue;
+        if (seat == runtime.localPlayer || runtime.idle.kicked(seat)) continue;
         slots[seat] = findInput(runtime.peerHistory[seat], frame);
         if (slots[seat] == nullptr) everyPeerReady = false;
     }
@@ -1350,7 +1361,8 @@ bool loadReplaySamples()
 std::uint8_t stateErrorSeat()
 {
     for (std::uint8_t seat = 0; seat < gRuntime.playerCount; ++seat) {
-        if (seat == gRuntime.localPlayer) continue;
+        if (seat == gRuntime.localPlayer || gRuntime.idle.kicked(seat)
+            || gRuntime.idle.kicked(gRuntime.localPlayer)) continue;
         if (gRuntime.states[seat].error() != StateFailure::None) return seat;
     }
     return rollback::kMaxPlayers;
@@ -1563,7 +1575,10 @@ bool captureCommittedState()
     gRuntime.detailFrames[frame % kDetailHistorySize] = frame;
     // Every peer compares our digests against its own, so each stream gets them.
     for (std::uint8_t seat = 0; seat < gRuntime.playerCount; ++seat) {
-        if (seat == gRuntime.localPlayer) continue;
+        // A replaced seat stops answering: its stream would fill and fail. And
+        // once our own seat is replaced, nobody acknowledges ours either.
+        if (seat == gRuntime.localPlayer || gRuntime.idle.kicked(seat)
+            || gRuntime.idle.kicked(gRuntime.localPlayer)) continue;
         gRuntime.states[seat].capture(stamp);
     }
     publishCrashState(stamp);
@@ -1635,8 +1650,9 @@ void receivePendingPackets()
         // Any seat in this session other than our own. The old test named the one
         // other player; this one refuses our own seat (a reflection or a forgery)
         // and anything past the agreed player count, which is the same rule.
+        // A seat replaced for inactivity is no longer in the session either.
         const bool fromKnownSeat = packet.player < gRuntime.playerCount
-            && packet.player != gRuntime.localPlayer;
+            && packet.player != gRuntime.localPlayer && !gRuntime.idle.kicked(packet.player);
         if (packet.sessionId != kSessionId || !fromKnownSeat) {
             ++gRuntime.rejectedPackets;
             continue;
@@ -1716,7 +1732,7 @@ void receivePendingPackets()
             std::fputs("Netplay: host random seed changed during the session.\n", stderr);
             continue;
         }
-        if (!gRuntime.rollbackRequested) {
+        if (!gRuntime.rollbackRequested && !gRuntime.idle.kicked(gRuntime.localPlayer)) {
             gRuntime.states[packet.player].acknowledge(packet.hashAckNext);
             gRuntime.states[packet.player].receive(packet.state);
             if (!checkStateFailure()) return;
@@ -1987,9 +2003,53 @@ bool seatReadinessSelfTest()
 
             // Another frame is independent: readiness is per frame, not sticky.
             if (collectPeerInputs(probe, 11, slots)) return false;
+
+            // A peer replaced for inactivity is never waited for again.
+            if (last != rollback::kMaxPlayers) {
+                probe.peerHistory = {};
+                probe.idle = {};
+                for (std::uint8_t seat = 0; seat < count; ++seat) {
+                    if (seat != localSeat && seat != last) probe.peerHistory[seat][12 % kHistorySize] = { 12, {}, true };
+                }
+                if (collectPeerInputs(probe, 12, slots)) return false;
+                while (probe.idle.observe(last, false) < 0) {}
+                const bool ready = collectPeerInputs(probe, 12, slots) && slots[last] == nullptr;
+                probe.idle = {};
+                if (!ready) return false;
+            }
         }
     }
     return true;
+}
+
+// The inactivity rule on its own: grace, countdown, reset by input and by a
+// new turn, one replacement per seat, and nothing outside a human's turn.
+bool idleWatchSelfTest()
+{
+    IdleWatch watch;
+    bool ok = true;
+    for (std::uint32_t i = 0; i < 100000; ++i) ok &= watch.observe(-1, false) < 0;
+    ok &= watch.countdownSeat() < 0;
+    for (std::uint32_t i = 0; i + 1 < kIdleGraceFrames; ++i) ok &= watch.observe(1, false) < 0;
+    ok &= watch.countdownSeat() < 0 && watch.countdownSeconds() < 0;
+    ok &= watch.observe(1, false) < 0 && watch.countdownSeat() == 1 && watch.countdownSeconds() == 60;
+    // A press during the countdown gives the turn back in full.
+    ok &= watch.observe(1, true) < 0 && watch.countdownSeat() < 0;
+    for (std::uint32_t i = 0; i + 1 < kIdleGraceFrames + kIdleCountdownFrames; ++i) ok &= watch.observe(1, false) < 0;
+    ok &= watch.countdownSeat() == 1 && watch.countdownSeconds() == 1;
+    // Another seat's turn starts its own count from zero.
+    ok &= watch.observe(2, false) < 0 && watch.countdownSeat() < 0;
+    for (std::uint32_t i = 2; i < kIdleGraceFrames + kIdleCountdownFrames; ++i) ok &= watch.observe(2, false) < 0;
+    ok &= watch.observe(2, false) == 2 && watch.kicked(2) && !watch.kicked(1);
+    // Replaced once; its turns are a CPU's from then on.
+    for (std::uint32_t i = 0; i < 2 * (kIdleGraceFrames + kIdleCountdownFrames); ++i) ok &= watch.observe(2, false) < 0;
+    ok &= watch.kickedMask() == 0x04;
+    PartyBoardRollbackInput input {};
+    ok &= !idleInputActive(input);
+    input.stickX = 20; ok &= !idleInputActive(input);
+    input.stickX = -60; ok &= idleInputActive(input);
+    input = {}; input.buttons = PAD_BUTTON_A; ok &= idleInputActive(input);
+    return ok;
 }
 
 bool timelineSelfTest()
@@ -2148,6 +2208,8 @@ extern "C" bool PartyBoard_NetplayConfigureFromArgs(int argc, char **argv)
             rollbackProbe = true;
         } else if (argument == "--netplay-rollback") {
             rollbackRequested = true;
+        } else if (argument == "--netplay-probe-idle") {
+            gRuntime.idleProbe = true;
         } else if (argument == "--netplay-probe-disconnect") {
             gRuntime.disconnectProbe = true;
         } else if (argument == "--netplay-probe-context-mismatch") {
@@ -2539,8 +2601,11 @@ extern "C" bool PartyBoard_NetplayTick(void)
 
     // Bound unvalidated progress without overwriting canonical evidence.
     bool everyStreamReady = true;
+    // Streams a replacement took out of the session (theirs, or all of ours
+    // once our own seat is out) no longer gate anything.
     for (std::uint8_t seat = 0; seat < runtime.playerCount; ++seat) {
-        if (seat != runtime.localPlayer && !runtime.states[seat].canCapture()) everyStreamReady = false;
+        if (seat == runtime.localPlayer || runtime.idle.kicked(seat) || runtime.idle.kicked(runtime.localPlayer)) continue;
+        if (!runtime.states[seat].canCapture()) everyStreamReady = false;
     }
     if (!runtime.rollbackRequested && !everyStreamReady) {
         ++runtime.stalledTicks;
@@ -2837,6 +2902,29 @@ extern "C" bool PartyBoard_NetplayTick(void)
             peerInput[seat] = peerSlot[seat]->input;
         }
     }
+    if (!startupFrame && runtime.fullGame) {
+        // Read before this frame's logic: every peer holds the same game state
+        // and the same inputs here, so every peer counts the same frames.
+        const auto inputOf = [&](int seat) -> PartyBoardRollbackInput & {
+            return seat == runtime.localPlayer ? local : peerInput[seat];
+        };
+        for (std::uint8_t seat = 0; seat < runtime.playerCount; ++seat) {
+            if (runtime.idle.kicked(seat)) inputOf(seat) = {};
+        }
+        const s32 pad = runtime.idleProbe ? (runtime.frame >= 600 ? 1 : -1) : PartyBoard_NetplayTurnPad();
+        const int turnSeat = pad >= 0 && pad < runtime.playerCount ? pad : -1;
+        const int replaced = runtime.idle.observe(turnSeat, turnSeat >= 0 && idleInputActive(inputOf(turnSeat)));
+        if (replaced >= 0) {
+            PartyBoard_NetplayPadBecomesCom(replaced);
+            inputOf(replaced) = {};
+            char event[96];
+            std::snprintf(event, sizeof(event), "idle-replaced seat=%d frame=%u", replaced, runtime.frame);
+            writeDiagnostic(event, true);
+            // The host stays to watch: leaving would end the room for everyone.
+            if (replaced == runtime.localPlayer && runtime.localPlayer != 0)
+                runtime.idleLeaveFrame = runtime.frame + 5 * kIdleTickRate;
+        }
+    }
     const auto previousPeer = runtime.lastPeer;
     for (std::uint8_t seat = 0; seat < runtime.playerCount; ++seat) {
         if (seat == runtime.localPlayer) continue;
@@ -2858,6 +2946,11 @@ extern "C" bool PartyBoard_NetplayTick(void)
     runtime.lockstepPrepared = !runtime.rollbackRequested;
     ++runtime.frame;
     runtime.progress.commit(monotonicMs());
+    if (runtime.frame >= runtime.idleLeaveFrame) {
+        runtime.idleLeaveFrame = UINT32_MAX;
+        // English like every session message; the toast translates it.
+        failSession("You did not play for 90 s: a CPU (normal level) took your place and you left the game for inactivity.");
+    }
     return true;
 }
 
@@ -2890,6 +2983,30 @@ extern "C" bool PartyBoard_NetplayCommitTick(void)
     runtime.progress.commit(monotonicMs());
     if (runtime.frame % 120 == 0) writeDiagnostic("rollback-checkpoint", true);
     return true;
+}
+
+extern "C" int PartyBoard_NetplayIdleCountdown(int *seconds, int *character, bool *local)
+{
+    using namespace partyboard::netplay;
+    const int seat = gRuntime.enabled && gRuntime.error.empty() ? gRuntime.idle.countdownSeat() : -1;
+    if (seconds) *seconds = seat >= 0 ? gRuntime.idle.countdownSeconds() : -1;
+    if (character) *character = seat >= 0 ? PartyBoard_NetplayPadCharacter(seat) : -1;
+    if (local) *local = seat >= 0 && seat == gRuntime.localPlayer;
+    return seat;
+}
+
+extern "C" int PartyBoard_NetplayIdleTakeKick(int *character, bool *local)
+{
+    using namespace partyboard::netplay;
+    const auto fresh = static_cast<std::uint8_t>(gRuntime.idle.kickedMask() & ~gRuntime.idleReported);
+    for (int seat = 0; seat < partyboard::rollback::kMaxPlayers; ++seat) {
+        if (((fresh >> seat) & 1u) == 0) continue;
+        gRuntime.idleReported |= static_cast<std::uint8_t>(1u << seat);
+        if (character) *character = PartyBoard_NetplayPadCharacter(seat);
+        if (local) *local = seat == gRuntime.localPlayer;
+        return seat;
+    }
+    return -1;
 }
 
 extern "C" bool PartyBoard_NetplayHasError(void)
@@ -3130,6 +3247,7 @@ extern "C" bool PartyBoard_NetplayRuntimeRunSelfTest(void)
     };
     check("canonical-state", runCanonicalStateSelfTest());
     check("seat-readiness", partyboard::netplay::seatReadinessSelfTest());
+    check("idle-watch", partyboard::netplay::idleWatchSelfTest());
     check("timeline", partyboard::netplay::timelineSelfTest());
     check("progress", partyboard::netplay::progressSelfTest());
     check("pad-snapshot", HuPadSnapshotSelfTest());

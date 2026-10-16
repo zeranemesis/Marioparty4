@@ -5,6 +5,7 @@
 
 #include "aurora/lib/logging.hpp"
 #include "port/achievements.h"
+#include "port/netplay_runtime.h"
 #include "magic_enum.hpp"
 #include "window.hpp"
 #include "localization.hpp"
@@ -77,6 +78,30 @@ namespace {
             auto *progress = append(elem, "progress");
             progress->SetAttribute("value", 1.f);
         }
+        return elem;
+    }
+
+    // "Luigi (player 2)": the character is what everyone sees on the board, the
+    // seat number tells two players of the same character apart.
+    std::string idle_player_name(int seat, int character)
+    {
+        static constexpr std::array<const char *, 8> kCharacters = {
+            "Mario", "Luigi", "Peach", "Yoshi", "Wario", "Donkey Kong", "Daisy", "Waluigi" };
+        const auto number = fmt::format(fmt::runtime(ui_translate("Player {}")), seat + 1);
+        if (character < 0 || character >= static_cast<int>(kCharacters.size())) return number;
+        return fmt::format("{} ({})", kCharacters[character], number);
+    }
+
+    Rml::Element *create_idle_warning(Rml::Element *parent)
+    {
+        auto *elem = append(parent, "toast");
+        elem->SetClass("idle-warning", true);
+        auto *heading = append(elem, "heading");
+        append(heading, "span")->SetId("idle-title");
+        auto *icon = append(heading, "icon");
+        icon->SetClass("warning", true);
+        auto *message = append(elem, "message");
+        append(message, "span")->SetId("idle-text");
         return elem;
     }
 
@@ -220,6 +245,9 @@ Overlay::Overlay()
         else if (mMenuNotification != nullptr && event.GetTargetElement() == mMenuNotification && !mMenuNotification->HasAttribute("open")) {
             mMenuNotification->SetPseudoClass("done", true);
         }
+        else if (mIdleWarning != nullptr && event.GetTargetElement() == mIdleWarning && !mIdleWarning->HasAttribute("open")) {
+            mIdleWarning->SetPseudoClass("done", true);
+        }
     });
 }
 
@@ -285,6 +313,48 @@ void Overlay::update()
         else {
             mControllerWarning->RemoveAttribute("open");
         }
+    }
+
+    // Online inactivity: the countdown stays up for as long as it runs, on every
+    // screen of the room, so nobody wonders why the board stopped.
+    int idleSeconds = -1, idleCharacter = -1;
+    bool idleLocal = false;
+    const int idleSeat = PartyBoard_NetplayIdleCountdown(&idleSeconds, &idleCharacter, &idleLocal);
+    if (idleSeat >= 0) {
+        if (mIdleWarning == nullptr) mIdleWarning = create_idle_warning(mDocument);
+        const auto who = idle_player_name(idleSeat, idleCharacter);
+        const auto title = idleLocal ? ui_translate("Your turn!")
+                                     : fmt::format(fmt::runtime(ui_translate("{} must play")), who);
+        const auto text = idleLocal
+            ? fmt::format(fmt::runtime(ui_translate("Play within {} s, or a CPU takes your place and you leave the game.")), idleSeconds)
+            : fmt::format(fmt::runtime(ui_translate("{} s left before a CPU (normal level) takes their place.")), idleSeconds);
+        if (auto *span = mDocument->GetElementById("idle-title")) span->SetInnerRML(escape(title));
+        if (auto *span = mDocument->GetElementById("idle-text")) span->SetInnerRML(escape(text));
+        mIdleWarning->SetAttribute("open", "");
+        mIdleWarning->SetPseudoClass("opened", true);
+        mIdleWarning->SetPseudoClass("done", false);
+    }
+    else if (mIdleWarning != nullptr) {
+        if (mIdleWarning->IsPseudoClassSet("done") || !mIdleWarning->IsPseudoClassSet("opened")) {
+            remove_element(mIdleWarning);
+        }
+        else {
+            mIdleWarning->RemoveAttribute("open");
+        }
+    }
+    int kickCharacter = -1;
+    bool kickLocal = false;
+    for (int seat; (seat = PartyBoard_NetplayIdleTakeKick(&kickCharacter, &kickLocal)) >= 0;) {
+        // A replaced guest gets the session's own stop message a few seconds
+        // later; the host stays and watches, and says so.
+        if (kickLocal && seat != 0) continue;
+        push_toast(Toast {
+            "info",
+            ui_translate("Replaced by a CPU"),
+            kickLocal ? ui_translate("You did not play for 90 s: a CPU (normal level) plays in your place. You keep watching the room.")
+                      : fmt::format(fmt::runtime(ui_translate("{} did not play for 90 s: a CPU (normal level) plays in their place and they left the game.")),
+                            idle_player_name(seat, kickCharacter)),
+            std::chrono::seconds(10) });
     }
 
     if (mMenuNotification != nullptr) {

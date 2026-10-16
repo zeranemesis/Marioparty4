@@ -23,6 +23,7 @@ protected:
     Rml::Element *mCurrentToast = nullptr;
     Rml::Element *mControllerWarning = nullptr;
     Rml::Element *mMenuNotification = nullptr;
+    Rml::Element *mIdleWarning = nullptr;
     clock::time_point mCurrentToastStartTime;
     clock::time_point mMenuNotificationStartTime;
 

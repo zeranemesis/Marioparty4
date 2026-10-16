@@ -3,6 +3,7 @@
 #include "game/object.h"
 #include "game/objsub.h"
 #include "game/pad.h"
+#include "game/gamework_data.h"
 #include "game/thpmain.h"
 #include "port/rollback.h"
 #include <stdint.h>
@@ -181,6 +182,41 @@ s32 PartyBoard_NetplayMinigameId(void)
 s32 PartyBoard_NetplayContextId(void)
 {
     return (s32)omcurovl;
+}
+
+// Only the party boards (w01..w06): the tutorial and the result screens are not
+// a turn anyone can hold up.
+s32 PartyBoard_NetplayTurnPad(void)
+{
+    s32 player;
+    if (omcurovl < DLL_w01dll || omcurovl > DLL_w06dll) return -1;
+    player = GWSystem.player_curr;
+    if (player < 0 || player > 3 || GWPlayer[player].com) return -1;
+    return GWPlayer[player].port;
+}
+
+s32 PartyBoard_NetplayPadCharacter(s32 pad)
+{
+    s32 player;
+    for (player = 0; player < 4; player++) {
+        if (GWPlayer[player].port == pad) return GWPlayer[player].character;
+    }
+    return -1;
+}
+
+// Both copies: GWPlayer drives the board, and GWPlayerCfg is what the next
+// minigame and the next board load read the CPU flag back from. Normal is 1
+// (easy, normal, hard, very hard).
+void PartyBoard_NetplayPadBecomesCom(s32 pad)
+{
+    s32 player;
+    for (player = 0; player < 4; player++) {
+        if (GWPlayer[player].port != pad) continue;
+        GWPlayer[player].com = 1;
+        GWPlayer[player].diff = 1;
+        GWPlayerCfg[player].iscom = 1;
+        GWPlayerCfg[player].diff = 1;
+    }
 }
 
 #endif

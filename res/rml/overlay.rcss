@@ -143,6 +143,25 @@ toast.controller-warning heading {
     color: #00b4fa;
 }
 
+/* Online inactivity countdown: high and centred, where nobody misses it. */
+toast.idle-warning {
+    top: 40dp;
+    right: auto;
+    bottom: auto;
+    left: 50%;
+    width: 520dp;
+    max-width: 90%;
+    transform: translateX(-50%) scale(0.9);
+}
+
+toast.idle-warning[open] {
+    transform: translateX(-50%) scale(1);
+}
+
+toast.idle-warning heading {
+    color: #f5a623;
+}
+
 toast.menu-notification {
     top: 40dp;
     right: auto;
