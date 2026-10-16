@@ -1,12 +1,3 @@
-<div align="center">
-  <img src="res/logo.png" alt="Logo" width="800">
-
-  <p align="center">
-    <a href="https://discord.gg/T4faGveujK">Discord</a>
-  </p>
-</div>
-
-# Party Board
 
 **Mario Party 4, natively on PC, phone and Meta Quest**, with online play for up
 to four players. Party Board is a native port built on the GameCube
