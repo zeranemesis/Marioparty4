@@ -294,8 +294,21 @@ jobs:
         with:
           python-version: '3.12'
 
+      # Dawn fetches its dependencies from chromium.googlesource.com while
+      # configuring, and on macOS runners that sometimes leaves them empty
+      # (abseil, jinja2, glfw: directories without sources). A fresh tree and
+      # another try, three at most, rather than a red build for a server.
       - name: Configure CMake
-        run: cmake --preset ${{matrix.preset}} ${{ matrix.platform == 'macos' && '-DCMAKE_OSX_SYSROOT="$SDKROOT"' || '' }} ${{ endsWith(matrix.preset, 'x86_64') && '-DPython3_EXECUTABLE="$pythonLocation/bin/python3" -DPython_EXECUTABLE="$pythonLocation/bin/python3" -DTINT_BUILD_IR_BINARY=OFF' || '' }}
+        run: |
+          for attempt in 1 2 3; do
+            if cmake --preset ${{matrix.preset}} ${{ matrix.platform == 'macos' && '-DCMAKE_OSX_SYSROOT="$SDKROOT"' || '' }} ${{ endsWith(matrix.preset, 'x86_64') && '-DPython3_EXECUTABLE="$pythonLocation/bin/python3" -DPython_EXECUTABLE="$pythonLocation/bin/python3" -DTINT_BUILD_IR_BINARY=OFF' || '' }}; then
+              exit 0
+            fi
+            echo "::warning::Configure attempt $attempt failed; retrying from a clean build tree."
+            rm -rf "build/${{matrix.preset}}"
+            sleep 30
+          done
+          exit 1
 
       - name: Move the Command Line Tools aside
         if: matrix.platform == 'macos'
