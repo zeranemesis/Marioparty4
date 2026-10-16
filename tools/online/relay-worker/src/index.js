@@ -292,8 +292,8 @@ export class RelayRoom {
     if (!invite) return refuse("invite");
     // No address at all: the list must never say where a host is.
     if (invite.address.some((x) => x) || invite.port || invite.local.some((x) => x) || invite.localPort) return refuse("address");
-    // Two players: the relay carries one guest.
-    if (invite.players !== 2) return refuse("players");
+    // Two to four players: every guest comes through this room and TURN.
+    if (invite.players < 2 || invite.players > MAX_PLAYERS) return refuse("players");
     if ((await roomOf(invite.token)) !== a.room) return refuse("room");
     const now = Math.floor(Date.now() / 1000);
     if (invite.expires <= now || invite.expires > now + 31 * 60) return refuse("expired");

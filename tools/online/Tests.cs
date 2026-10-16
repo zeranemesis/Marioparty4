@@ -250,8 +250,11 @@ static class Tests {
         Check(Relay.RoomId(back.Token)==Relay.RoomId(full.Token),"it names the same relay room");
         Check(!Invitation.Decode(full.Encode(),true).ThroughRelayOnly,"a friend's invitation is not relay only");
         var mesh=new Invitation{Address=IPAddress.Any,Port=0,Expires=DateTime.UtcNow.AddMinutes(30),Fingerprint=Wire.Random(16),Token=Wire.Random(16),MaxPlayers=3,LocalAddress=IPAddress.Any,LocalPort=0};
-        bool refused=false;try{Invitation.Decode(mesh.Encode());}catch(IOException){refused=true;}
-        Check(refused,"no address and three players is refused: the relay carries one guest");
+        var meshBack=Invitation.Decode(mesh.Encode());
+        Check(meshBack.ThroughRelayOnly && meshBack.MaxPlayers==3,"a public room for three decodes as relay only too: the relay carries every guest");
+        var five=new Invitation{Address=IPAddress.Any,Port=0,Expires=DateTime.UtcNow.AddMinutes(30),Fingerprint=Wire.Random(16),Token=Wire.Random(16),MaxPlayers=5,LocalAddress=IPAddress.Any,LocalPort=0};
+        bool refused=false;try{Invitation.Decode(five.Encode());}catch(IOException){refused=true;}
+        Check(refused,"but never more seats than a salon has");
         var request=Relay.Parse(Relay.PublishRequest(full,"Hôte",1,true,Wire.Random(32),Wire.Random(32)));
         Check((string)request["invite"]==text && !((string)request["invite"]).Contains("203.0.113.7"),"the publish request sends the address-free copy");
         Check((string)request["lang"]=="de" && (string)request["region"]=="eu" && ((string)request["build"]).Length==16 && ((string)request["disc"]).Length==16,"language, region, build and disc tags");
@@ -1429,6 +1432,59 @@ static class Tests {
             Console.WriteLine("PASS: "+checks+" checks; LAN game found by discovery, joined directly, no relay and no box, delisted when full.");
             return 0;
         } catch(Exception e) {Console.Error.WriteLine("FAIL: "+e.Message);return 1;}
+    }
+    // Three or four players, every one of them behind a box that refuses: the
+    // host opens a public room for that many, the others find it on the list and
+    // come in through the relay, and the game's mesh runs through each player's
+    // own TURN allocation -- every seat must hear every other one. Against the
+    // deployed relay and Cloudflare's TURN (several allocations, which a loopback
+    // TURN cannot stand in for). PartyBoardOnline.exe --mesh-relay-test <players>,
+    // with PARTYBOARD_RELAY and PARTYBOARD_TEST_DISC.
+    public static int RunMeshRelay(int players) {
+        var sessions=new List<Session>();var discs=new List<DiscFile>();
+        try {
+            var discPath=Environment.GetEnvironmentVariable("PARTYBOARD_TEST_DISC");
+            if(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("PARTYBOARD_RELAY")) || string.IsNullOrEmpty(discPath) || players<3 || players>Lobby.MaxSeats) {
+                Console.WriteLine("NOT RUN: set PARTYBOARD_RELAY and PARTYBOARD_TEST_DISC, and ask for 3 or 4 players.");return 2;
+            }
+            Environment.SetEnvironmentVariable("PARTYBOARD_ONLINE_RELAY_ONLY","1");
+            string failure=null;Action<string> fail=m=>{if(failure==null)failure=m;};
+            var build=Wire.BuildHash(AppDomain.CurrentDomain.BaseDirectory);
+            var names=new[]{"Mario","Luigi","Peach","Yoshi"};
+            for(int i=0;i<players;i++) {
+                var disc=DiscFile.Verify(discPath,_=>{},CancellationToken.None);discs.Add(disc);
+                int n=i;sessions.Add(new Session(s=>Console.WriteLine(names[n]+": "+s),()=>{},fail,new PlayerInfo(names[i],disc.Hash,disc.Length),disc));
+            }
+            var host=sessions[0];
+            host.RoomName="Room à "+players;
+            host.Create(players);
+            Check(host.RelayReady && host.MeshThroughRelay,"the host's room is on the relay, its game through TURN");
+            host.SetPublic(true);
+            Check(SpinWait.SpinUntil(()=>host.Public==PublicState.Listed,15000),"a room for "+players+" is listed");
+            var room=Relay.RoomId(host.Invite.Token);
+            var invite=Relay.PublicInvite(room);
+            for(int i=1;i<players;i++) {
+                var guest=sessions[i];
+                guest.Join(invite);
+                Check(SpinWait.SpinUntil(()=>host.Lobby.Occupied==i+1,30000),names[i]+" is seated ("+host.Lobby.Occupied+"/"+players+")");
+                Check(guest.JoinPath=="relay","and came through the relay");
+            }
+            Check(SpinWait.SpinUntil(()=>sessions.All(s=>s.MeshThroughRelay),30000),"every player's mesh runs through its own TURN allocation");
+            Check(SpinWait.SpinUntil(()=>sessions.All(s=>s.MeshReady),45000),"every seat hears every other one through TURN: "+string.Join(" ",sessions.Select((s,i)=>names[i]+"="+s.MeshReady)));
+            Check(SpinWait.SpinUntil(()=>host.Lobby.CanStart,20000),"the room can start: discs and mods agree for all "+players);
+            Relay.PublicRoom listed=null;
+            Check(SpinWait.SpinUntil(()=>{listed=Relay.PublicRooms(build,discs[0].Hash).FirstOrDefault(r=>r.Room==room);return listed!=null && listed.State=="full";},15000),"the list shows it full");
+            Check(listed.Players.Count==players && listed.MaxPlayers==players && listed.Title=="Room à "+players,"with "+players+" players and its name");
+            bool turnedAway=false;try{IPEndPoint ignored;using(Relay.GuestPipe(room,null,out ignored)){}}catch(IOException){turnedAway=true;}
+            Check(turnedAway,"a fifth comer is turned away");
+            Check(failure==null,"no session failure ("+failure+")");
+            Console.WriteLine("PASS: "+checks+" checks; a public room for "+players+", every player through the relay and its own TURN allocation, all seats hearing each other, ready to start.");
+            return 0;
+        } catch(Exception e) {Console.Error.WriteLine("FAIL: "+e.Message);return 1;}
+        finally {
+            foreach(var s in sessions)try{s.Dispose();}catch{}
+            foreach(var d in discs)try{d.Dispose();}catch{}
+        }
     }
     public static int RunRelaySession(int minutes) {
         try {

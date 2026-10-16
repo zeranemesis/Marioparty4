@@ -33,6 +33,7 @@ sealed class Startup {
     public int[] ModIds;          // this session's mods, in order, by GameBanana id (null: CubeShelf's own list)
     public bool Headless;         // no window: the launcher shows the room (needs StateDirectory)
     public string RoomName;       // the room's name on the public list (null: "<host>'s room")
+    public int? Players;          // seats of the room a launcher asked for, 2 to 4
 
     public static readonly Startup Manual = new Startup { Mode = StartupMode.Manual };
 
@@ -44,6 +45,7 @@ sealed class Startup {
     public const string ModsVariable = "PARTYBOARD_ONLINE_MODS";
     public const string HeadlessVariable = "PARTYBOARD_ONLINE_HEADLESS";
     public const string RoomNameVariable = "PARTYBOARD_ONLINE_ROOM_NAME";
+    public const string PlayersVariable = "PARTYBOARD_ONLINE_PLAYERS";
 
     public static Startup Parse(string[] args, Func<string, string> environment) {
         if (args == null || environment == null) return Manual;
@@ -66,7 +68,8 @@ sealed class Startup {
             Public = string.Equals(Trim(environment(VisibilityVariable)), "public", StringComparison.Ordinal),
             ModIds = ParseMods(environment(ModsVariable)),
             Headless = Trim(environment(HeadlessVariable)) == "1",
-            RoomName = Trim(environment(RoomNameVariable))
+            RoomName = Trim(environment(RoomNameVariable)),
+            Players = int.TryParse(Trim(environment(PlayersVariable)), out var seats) && seats >= 2 && seats <= Lobby.MaxSeats ? seats : (int?)null
         };
 
         // An invitation is the whole point of joining. Without one there is nothing to join, and

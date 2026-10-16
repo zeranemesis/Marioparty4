@@ -301,6 +301,7 @@ static class L {
         {"Seul l'hote attribue les places.","Only the host assigns seats."},
         {"Seul l'hote peut lancer la partie.","Only the host can start the game."},
         {"Seul un salon à 2 joueurs, encore en attente, peut être public.","Only a 2-player room still waiting can be public."},
+        {"Seule une room en ligne encore en attente peut être publique.","Only an online room still waiting can be public."},
         {"Seule une room en ligne à 2 joueurs peut être publique.","Only a 2-player online room can be public."},
         {"Seulement si la box ne la donne pas : celle affichée dans son interface.","Only if the router does not give it: the one shown in its interface."},
         {"Seules les adresses IPv4 sont prises en charge pour le maillage.","Only IPv4 addresses are supported for the mesh."},

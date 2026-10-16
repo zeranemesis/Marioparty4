@@ -99,10 +99,14 @@ sealed class Session : IDisposable {
     public PublicState Public {get;private set;}
     // Counts the relay's answers, so the window can follow one it did not ask for.
     public int PublicNotices {get;private set;}
-    public bool CanBePublic {get{return Host && maxPlayers==2 && RelayReady && relayHost!=null && !admitted && !disposed;}}
+    public bool CanBePublic {get{return Host && RelayReady && relayHost!=null && !disposed && (maxPlayers==2?!admitted:Lobby!=null && Lobby.Occupied<maxPlayers);}}
+    // Three or four players: whether every other seat answers through the mesh
+    // (heartbeats acknowledged within the last three seconds).
+    public bool MeshReady {get{var m=meshRelay;return m!=null && m.AllPeersReady(3000);}}
+    public bool MeshThroughRelay {get;private set;}
     public void SetPublic(bool on) {
         WebSocketStream control;lock(this) control=relayHost;
-        if(!CanBePublic || control==null) throw new IOException(L.T("Seul un salon à 2 joueurs, encore en attente, peut être public."));
+        if(!CanBePublic || control==null) throw new IOException(L.T("Seule une room en ligne encore en attente peut être publique."));
         var profile=Profile;
         var status=RoomStatus();if(on)lastStatus=status.Key;
         control.SendText(on?Relay.PublishRequest(Invite,profile.Name,profile.Language,disc!=null && disc.Pal,build,profile.DiscHash,status):"{\"type\":\"unpublish\"}");
@@ -220,7 +224,7 @@ sealed class Session : IDisposable {
                 LocalAddress=Gateway.Private(route.Local)?route.Local:IPAddress.Any,LocalPort=Gateway.Private(route.Local)?port:0};
             // A guest that cannot reach this box -- a CGNAT, no UPnP, or a box that
             // said yes and still drops -- comes through the relay instead.
-            if(players==2 && Relay.Available && !Lan) OpenRelay();
+            if(Relay.Available && !Lan) OpenRelay();
             if(Lan) {
                 try{beacon=new LanDiscovery.Beacon(build,disc.Hash,DescribeForLan);}
                 catch(SocketException e){throw new IOException(L.T("Le port ")+LanDiscovery.Port+L.T(" de recherche des parties LAN est occupé (")+e.SocketErrorCode+L.T("). Fermez l'autre programme qui l'utilise, puis réessayez."),e);}
@@ -353,7 +357,12 @@ sealed class Session : IDisposable {
         } catch(Exception e) {if(allocation!=null)allocation.Dispose();Report.Write("relay=unavailable error="+e.GetType().Name);}
     }
     void RelayNotices(string room,WebSocketStream control,TurnClient allocation) {
-        Relay.HostNotices(room,control,allocation,()=>disposed || (admitted && Public!=PublicState.Listed),pipe=>Offer(pipe,pipe,true),Report.Write,PublicNotice,()=>!admitted);
+        // Two players: the one guest, then the socket only keeps a public room listed.
+        // Three or four: guests keep coming through it until every seat is taken.
+        if(maxPlayers>2)
+            Relay.HostNotices(room,control,allocation,()=>disposed,pipe=>AdmitMeshChannel(pipe,pipe,true),Report.Write,PublicNotice,()=>MeshSeatFree());
+        else
+            Relay.HostNotices(room,control,allocation,()=>disposed || (admitted && Public!=PublicState.Listed),pipe=>Offer(pipe,pipe,true),Report.Write,PublicNotice,()=>!admitted);
     }
     // The N-guest loop: keeps accepting until every seat but the host's own is
     // filled, pairing each guest's two channels by the client identifier the
@@ -365,33 +374,52 @@ sealed class Session : IDisposable {
     void AcceptMesh() {
         try {
             int attempts=0;var rate=Stopwatch.StartNew();
-            var pairing=new ChannelPairing<Tuple<TcpClient,SslStream>>();int seated=0;
             while(!disposed) {
                 if(rate.Elapsed.TotalMinutes>=1) {attempts=0;rate.Restart();}
                 if(attempts>=6) {if(cancel.Token.WaitHandle.WaitOne(1000)) return;continue;}
                 var client=listener.AcceptTcpClient();attempts++;
-                SslStream ssl;byte channel;byte[] clientId;Tuple<TcpClient,SslStream>[] completed=null;
-                try {
-                    ssl=Wire.Server(client,cert,Invite,build,out channel,out clientId);
-                    completed=pairing.Add(clientId,channel,Tuple.Create(client,ssl));
-                } catch {client.Close();if(!disposed) status(L.T("En attente de votre ami…"));continue;}
-                if(disposed) {client.Close();return;}
-                if(completed==null) {status(L.T("Un ami rejoint le salon. Préparation du second canal…"));continue;}
-                int seat=0;for(int s=1;s<maxPlayers;s++)if(guestLinks[s]==null){seat=s;break;}
-                if(seat==0) {completed[0].Item1.Close();completed[1].Item1.Close();continue;}
-                // No game port, no internet peer: this Bridge only ever carries the
-                // salon's TLS control messages. It still needs a UdpClient to
-                // satisfy the constructor and Dispose(), so a throwaway loopback
-                // socket stands in for the game/Internet ones the two-player
-                // Bridge above actually uses.
-                var placeholder=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));
-                var link=new Bridge(completed[0].Item1,completed[0].Item2,completed[1].Item1,completed[1].Item2,0,placeholder,null,Invite.Token,0,seat);
-                guestLinks[seat]=link;Lobby.Admit(seat);link.Control=packet=>Lobby.Receive(seat,packet);
-                WatchGuest(seat,link);seated++;
-                if(seated>=maxPlayers-1) {status(L.T("Salon complet."));listener.Stop();return;}
-                status(L.T("En attente d'un autre invité…"));
+                client.NoDelay=true;client.ReceiveTimeout=8000;client.SendTimeout=8000;
+                if(!MeshSeatFree()){client.Close();continue;}
+                AdmitMeshChannel(client.GetStream(),client,false);
             }
-        } catch {if(!disposed) {failed(L.T("L'attente a été interrompue. Recréez une partie."));Dispose();}}
+        } catch {if(!disposed && MeshSeatFree()) {failed(L.T("L'attente a été interrompue. Recréez une partie."));Dispose();}}
+    }
+    // One guest channel of a three- or four-player salon, from the box (TCP) or
+    // through the relay's room (a WebSocket): the same TLS, the same pairing of a
+    // guest's two channels by its client id, the same seat. Both paths feed one
+    // pairing, so a guest's two channels can even arrive one by each.
+    readonly ChannelPairing<Tuple<IDisposable,SslStream>> meshPairing=new ChannelPairing<Tuple<IDisposable,SslStream>>();
+    bool MeshSeatFree() {
+        lock(this) {
+            if(disposed || guestLinks==null)return false;
+            for(int s=1;s<maxPlayers;s++)if(guestLinks[s]==null)return true;
+            return false;
+        }
+    }
+    void AdmitMeshChannel(Stream transport,IDisposable closer,bool viaRelay) {
+        SslStream ssl;byte channel;byte[] clientId;Tuple<IDisposable,SslStream>[] completed;
+        try {
+            ssl=Wire.Server(transport,cert,Invite,build,out channel,out clientId);
+            lock(meshPairing) completed=meshPairing.Add(clientId,channel,Tuple.Create(closer,ssl));
+        } catch {try{closer.Dispose();}catch{}if(!disposed) status(L.T("En attente de votre ami…"));return;}
+        if(disposed) {ssl.Dispose();try{closer.Dispose();}catch{}return;}
+        if(completed==null) {status(L.T("Un ami rejoint le salon. Préparation du second canal…"));return;}
+        int seat=0;Bridge link;
+        lock(this) {
+            for(int s=1;s<maxPlayers;s++)if(guestLinks[s]==null){seat=s;break;}
+            if(seat==0 || disposed) {foreach(var c in completed){try{c.Item2.Dispose();c.Item1.Dispose();}catch{}}return;}
+            // No game port, no internet peer: this Bridge only ever carries the
+            // salon's TLS control messages; MeshRelay carries the game. It still
+            // needs a socket to satisfy the constructor and Dispose(), so a
+            // throwaway loopback one stands in.
+            var placeholder=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));
+            link=new Bridge(completed[0].Item1,completed[0].Item2,completed[1].Item1,completed[1].Item2,0,placeholder,null,Invite.Token,0,seat);
+            guestLinks[seat]=link;
+        }
+        Report.Write("mesh_guest seat="+seat+" path="+(viaRelay?"relay":"direct"));
+        Lobby.Admit(seat);link.Control=packet=>Lobby.Receive(seat,packet);
+        WatchGuest(seat,link);
+        status(MeshSeatFree()?L.T("En attente d'un autre invité…"):L.T("Salon complet."));
     }
     // One guest's control link failing (or simply ending) frees only its own
     // seat -- unlike the two-player Watch() below, where losing the one
@@ -423,7 +451,8 @@ sealed class Session : IDisposable {
         // to be unique among the guests of one salon.
         var clientId=Wire.Random(16);
         // A LAN game's invitation names this network only: no relay behind it.
-        bool lanGame=Gateway.Private(Invite.Address) && Invite.Address.Equals(Invite.LocalAddress) && Invite.Port==Invite.LocalPort;
+        // ...unless the relay is forced, which must win even over a host on this network.
+        bool lanGame=!(RelayOnly && Relay.Available) && Gateway.Private(Invite.Address) && Invite.Address.Equals(Invite.LocalAddress) && Invite.Port==Invite.LocalPort;
         if(lanGame) {
             status(L.T("Connexion à la partie sur votre réseau…"));peer=new TcpClient(AddressFamily.InterNetwork);
             bool reachedLan=false;try{reachedLan=peer.ConnectAsync(Invite.Address,Invite.Port).Wait(5000) && peer.Connected;}catch{}
@@ -448,7 +477,7 @@ sealed class Session : IDisposable {
             if(!Relay.Available)throw new IOException(L.T("Les rooms publiques passent par le relais en ligne, qui est désactivé sur ce PC."));
             JoinViaRelay(clientId);return;
         }
-        if(RelayOnly && Relay.Available && maxPlayers==2) {JoinViaRelay(clientId);return;}
+        if(RelayOnly && Relay.Available) {JoinViaRelay(clientId);return;}
         // Try the host's own network first. Two seconds, because an address that
         // is not on this network refuses or times out fast, and the public
         // address is still there behind it. Reaching the wrong machine cannot
@@ -476,7 +505,7 @@ sealed class Session : IDisposable {
             try{reached=peer.ConnectAsync(Invite.Address,Invite.Port).Wait(Relay.Available?6000:10000) && peer.Connected;}catch{}
             if(!reached) {
                 peer.Close();peer=null;
-                if(!Relay.Available || maxPlayers>2) throw new IOException(L.T("Votre ami n'est pas joignable. Vérifiez qu'il a laissé sa fenêtre ouverte, ou essayez d'inverser les rôles."));
+                if(!Relay.Available) throw new IOException(L.T("Votre ami n'est pas joignable. Vérifiez qu'il a laissé sa fenêtre ouverte, ou essayez d'inverser les rôles."));
                 JoinViaRelay(clientId);return;
             }
             toHost=Wire.Client(peer,Invite,build,0,clientId);target=Invite.Address;targetPort=Invite.Port;JoinPath="internet";
@@ -520,6 +549,15 @@ sealed class Session : IDisposable {
         if(hostUdp==null){toHost.Dispose();fromHost.Dispose();throw new IOException(L.T("Le relais n'a pas donné l'adresse de jeu de votre ami."));}
         JoinPath="relay";
         Bridge=new Bridge(second,fromHost,first,toHost,1,internetGame,hostUdp,Invite.Token);internetGame=null;AttachLobby();
+        // Three or four players: the mesh opens once the host has said which seat
+        // this is (its first message), through TURN since this guest came that way.
+        if(maxPlayers>2) {
+            var baseReceive=Bridge.Control;bool meshOpened=false;
+            Bridge.Control=packet=>{
+                baseReceive(packet);
+                if(!meshOpened) {meshOpened=true;try{OpenMesh();}catch(Exception e){Report.Write("event=mesh_open_failed error="+e.Message);}}
+            };
+        }
     }
     void AttachLobby() {
         Bridge.Diagnostic=Report.Write;
@@ -548,6 +586,11 @@ sealed class Session : IDisposable {
     // in this repository can reach.
     public void OpenMesh() {
         if(Lobby==null)throw new IOException(L.T("Le salon doit être prêt avant d'ouvrir la mise en réseau directe."));
+        // Through the relay when this player's box cannot take the game: a host
+        // whose box refused (its relay allocation is ready), a guest that came
+        // through the relay, or a test that asks for it.
+        bool throughRelay=!Lan && Relay.Available && (RelayOnly || (Host?LocalOnly && turn!=null:JoinPath=="relay"));
+        if(throughRelay){OpenMeshThroughRelay();return;}
         var route=Route.Detect();
         NetworkSettings.Load();
         UdpClient socket;
@@ -567,6 +610,33 @@ sealed class Session : IDisposable {
             Task.Run(()=>MaintainMesh());
             Lobby.AnnounceEndpoint(new IPEndPoint(meshMapping.Address,meshMapping.Port));
         } catch {socket.Close();meshFirewall?.Dispose();meshMapping=null;throw;}
+    }
+    TurnClient meshTurn;
+    void OpenMeshThroughRelay() {
+        TurnClient allocation;
+        lock(this) {allocation=Host?turn:null;if(Host)turn=null;}
+        if(allocation==null) {
+            var access=Relay.TestTurn??Relay.TurnCredentials();
+            allocation=new TurnClient(access.Item3,access.Item1,access.Item2);
+            try{allocation.Allocate();}catch{allocation.Dispose();throw;}
+        }
+        lock(this) {if(disposed){allocation.Dispose();throw new OperationCanceledException();}meshTurn=allocation;relayAllocation=allocation;}
+        meshRelay=new MeshRelay(Lobby.LocalSeat,Invite.Token,allocation){Diagnostic=Report.Write};
+        var wiring=new MeshWiring(meshRelay,Lobby.LocalSeat);
+        // TURN lets in only the addresses it was told about: every peer this
+        // seat hears of is permitted before its leg is added.
+        Action<int,IPEndPoint> learned=(seat,endpoint)=>{
+            if(seat==Lobby.LocalSeat || endpoint==null)return;
+            try{allocation.Permit(endpoint.Address);}catch(Exception e){Report.Write("mesh_permit_failed="+e.GetType().Name);}
+            wiring.OnEndpointLearned(seat,endpoint);
+        };
+        Lobby.EndpointLearned+=learned;
+        // Anyone already announced before this subscription.
+        for(int seat=0;seat<Lobby.MaxSeats;seat++){var known=Lobby.PeerEndpoint(seat);if(known!=null)learned(seat,known);}
+        MeshThroughRelay=true;
+        Task.Run(()=>meshRelay.Run());
+        Report.Write("mesh=relay seat="+Lobby.LocalSeat);
+        Lobby.AnnounceEndpoint(allocation.Relayed);
     }
     async Task MaintainMesh() {
         try {
@@ -654,6 +724,7 @@ sealed class Session : IDisposable {
             disposed=true;cancel.Cancel();if(listener!=null) listener.Stop();if(peer!=null) peer.Close();if(peerWrite!=null)peerWrite.Close();
             if(turn!=null){turn.Dispose();turn=null;}if(relayHost!=null){relayHost.Dispose();relayHost=null;}
             if(beacon!=null){beacon.Dispose();beacon=null;}
+            if(meshTurn!=null){meshTurn.Dispose();meshTurn=null;}
             if(gameStart!=null)gameStart.Abort();if(Lobby!=null)Lobby.Close();
             if(Bridge!=null) Bridge.Dispose();if(guestLinks!=null)foreach(var g in guestLinks)if(g!=null)try{g.Dispose();}catch{}
             if(internetGame!=null)internetGame.Close();if(mappingUdp!=null)mappingUdp.Dispose();if(mapping!=null) mapping.Dispose();if(firewall!=null) firewall.Dispose();
@@ -674,6 +745,7 @@ static class Program {
         if(args.Length==1 && args[0]=="--self-test-relay") return Tests.RunRelay();
         if(args.Length==1 && args[0]=="--public-room-test") return Tests.RunPublicRoom();
         if(args.Length==1 && args[0]=="--lan-test") return Tests.RunLan();
+        int meshPlayers;if(args.Length==2 && args[0]=="--mesh-relay-test" && int.TryParse(args[1],out meshPlayers)) return Tests.RunMeshRelay(meshPlayers);
         if(args.Length==1 && args[0]=="--room-tags") return RoomSync.PrintTags();
         int relayMinutes;if(args.Length==2 && args[0]=="--relay-session-test" && int.TryParse(args[1],out relayMinutes)) return Tests.RunRelaySession(relayMinutes);
         // Both PCs must hold byte-identical folders or Lobby refuses to start the

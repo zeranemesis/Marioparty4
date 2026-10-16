@@ -156,7 +156,7 @@ sealed class Invitation {
                 // host then announces the same address and port as its local
                 // path, and nothing else is accepted.
                 bool localSalon=Gateway.Private(i.Address) && i.Address.Equals(i.LocalAddress) && i.LocalPort==i.Port;
-                bool relayOnly=i.ThroughRelayOnly && i.MaxPlayers==2;
+                bool relayOnly=i.ThroughRelayOnly;
                 if(!relayOnly && (i.Port==0 || (!localTest && !Gateway.Public(i.Address) && !localSalon))) throw new FormatException();
                 // The local address is deliberately NOT required to be public -
                 // that is the whole point - but it must be a private address, so
@@ -342,7 +342,7 @@ sealed class Bridge : IDisposable {
         return true;
     }
     Task Worker(string name,Action work) {return Task.Factory.StartNew(()=>{try{work();}catch(Exception e){
-        if(!closed){var socket=e.GetBaseException() as SocketException;Diagnostic?.Invoke("worker="+name+" error="+e.GetType().Name+(socket==null?"":" socket_code="+socket.NativeErrorCode));}
+        if(!closed){var socket=e.GetBaseException() as SocketException;Diagnostic?.Invoke("worker="+name+" error="+e.GetType().Name+(socket==null?"":" socket_code="+socket.NativeErrorCode)+(socket==null && e is IOException?" detail="+e.Message.Replace(' ','_'):""));}
         if(e is ControlChannelException && KeepCommittedGame())return;
         Dispose();throw;
     }},CancellationToken.None,TaskCreationOptions.LongRunning,TaskScheduler.Default);}
@@ -376,7 +376,9 @@ sealed class Bridge : IDisposable {
             // 6 and 7 are this layer's own ping and pong; a peer built before this
             // existed will reject it and drop the control channel, which at the end
             // of a session leaves it exactly where it was before -- no worse.
-            if((data[0]>=2 && data[0]<=5) || data[0]==8) {if(Control==null)throw new IOException(L.T("Salon indisponible."));Control(data);continue;}
+            // 9 (seat) and 11 (peer endpoint) only ever travel in a 3-4 player
+            // salon, where every link is control-only; Lobby.Receive checks them.
+            if((data[0]>=2 && data[0]<=5) || data[0]==8 || data[0]==9 || data[0]==11) {if(Control==null)throw new IOException(L.T("Salon indisponible."));Control(data);continue;}
             throw new IOException(L.T("Message réseau incompatible."));
         }
     }
@@ -503,11 +505,13 @@ sealed class MeshRelay : IDisposable {
         public IPEndPoint Game;
         public readonly bool LearnPeer;
         public long LastPongStamp;
-        public Leg(IPEndPoint peer) {NetworkPeer=peer;LearnPeer=peer==null;}
+        // Non-blocking from birth: a leg is usually added while Run() is already
+        // pumping, and a blocking Receive on it would stall every seat.
+        public Leg(IPEndPoint peer) {NetworkPeer=peer;LearnPeer=peer==null;Loopback.Client.Blocking=false;}
         public int LoopbackPort {get{return ((IPEndPoint)Loopback.Client.LocalEndPoint).Port;}}
     }
 
-    readonly int localPlayer;readonly byte[] datagramKey;readonly UdpClient network;
+    readonly int localPlayer;readonly byte[] datagramKey;readonly IDatagramSocket network;
     readonly Leg[] legs=new Leg[Lobby.MaxSeats];
     readonly ReplayWindow replay=new ReplayWindow();
     long networkSequence;long lastPumpStamp;long udpDropped;int lastUdpError;volatile bool closed;int stopping;
@@ -517,7 +521,10 @@ sealed class MeshRelay : IDisposable {
     // the same one every Bridge already derives its key from -- so a mesh peer
     // and a star peer speaking to the same session agree on the key without
     // needing a channel of their own to negotiate one.
-    public MeshRelay(int localPlayer,byte[] token,UdpClient internetSocket) {
+    public MeshRelay(int localPlayer,byte[] token,UdpClient internetSocket):this(localPlayer,token,new UdpDatagramSocket(internetSocket)) {}
+    // The same mesh through a TURN allocation (Relay.cs), for a player whose box
+    // cannot be opened: its peers reach it at the relayed address it announces.
+    public MeshRelay(int localPlayer,byte[] token,IDatagramSocket internetSocket) {
         this.localPlayer=localPlayer;datagramKey=GameDatagram.Key(token);network=internetSocket;
     }
 
@@ -580,7 +587,7 @@ sealed class MeshRelay : IDisposable {
     public Task Run() {
         return Task.Run(()=> {
             try {
-                network.Client.Blocking=false;
+                network.NonBlocking();
                 foreach(var leg in legs)if(leg!=null)leg.Loopback.Client.Blocking=false;
                 long nextHeartbeat=0;
                 while(!closed) {
@@ -644,7 +651,7 @@ sealed class MeshRelay : IDisposable {
 
     public void Dispose() {
         if(Interlocked.Exchange(ref stopping,1)!=0)return;closed=true;
-        network.Close();
+        network.Dispose();
         foreach(var leg in legs)if(leg!=null)leg.Loopback.Close();
     }
 }

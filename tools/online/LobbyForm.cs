@@ -147,10 +147,10 @@ sealed class MainForm : Form {
         // Before a room: a choice for the next one. During: the room itself,
         // for as long as it waits for its guest. Public needs the relay and
         // two players; anything else stays private.
-        visibility.Enabled=Relay.Available && (idle?SelectedPlayers()==2:session.CanBePublic && session.Public!=PublicState.Pending);
+        visibility.Enabled=Relay.Available && (idle || session.CanBePublic && session.Public!=PublicState.Pending);
         if(!idle && session.PublicNotices!=publicNoticesSeen){publicNoticesSeen=session.PublicNotices;SetPublicBox(session.Public==PublicState.Listed);}
         if(idle)publicNoticesSeen=0;
-        if(idle && SelectedPlayers()!=2 && visibility.SelectedIndex==1)SetPublicBox(false);}
+}
     void SetPublicBox(bool on){settingPublic=true;try{visibility.SelectedIndex=on?1:0;}finally{settingPublic=false;}}
     void ModeChanged(){
         if(session!=null)return;
@@ -553,7 +553,7 @@ sealed class MainForm : Form {
         switch(request.Action) {
             case "set-visibility": {
                 bool on=request.Value=="public";
-                if(on && (Lan || SelectedPlayers()!=2 && current==null)){RoomSync.Complete(startup.StateDirectory,request,false,L.T("Seule une room en ligne à 2 joueurs peut être publique."));return;}
+                if(on && Lan){RoomSync.Complete(startup.StateDirectory,request,false,L.T("Seule une room en ligne encore en attente peut être publique."));return;}
                 if(current!=null && on && !current.RelayReady){RoomSync.Complete(startup.StateDirectory,request,false,L.T("Le relais en ligne n'est pas disponible : la room reste privée."));return;}
                 if(current!=null && !current.CanBePublic){RoomSync.Complete(startup.StateDirectory,request,false,L.T("Cette room ne peut plus changer de visibilité."));return;}
                 if(visibility.SelectedIndex!=(on?1:0))visibility.SelectedIndex=on?1:0; // PublicChanged does the rest
@@ -599,7 +599,7 @@ sealed class MainForm : Form {
     void RunStartupAction(){
         if(startup.Mode==StartupMode.Manual || session!=null)return;
         pendingStartupAction=false;
-        if(startup.Mode==StartupMode.Host)Begin(true,"",SelectedPlayers());
+        if(startup.Mode==StartupMode.Host)Begin(true,"",startup.Players??SelectedPlayers());
         else Begin(false,invitation.Text);
     }
     // Writing the invitation where the launcher is watching is what lets it show "invite your
