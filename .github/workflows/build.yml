@@ -264,12 +264,25 @@ jobs:
       # Xcode linker failed on stubs it cannot read ("tapi error: malformed
       # file ... unknown architecture arm64e.x1") - on runners that had both,
       # which is why it came and went. One SDK, Xcode's, from the start.
+      #
+      # SDKROOT alone was not enough: the -L comes from the Rust side (nod is
+      # built through Corrosion, which links what rustc reports it needs), and
+      # rustc found the Command Line Tools SDK by itself. With the Command Line
+      # Tools moved aside for the rest of the job, nothing can find them; the
+      # tools brew and rustup needed have already run.
       - name: Pin the macOS SDK
         if: matrix.platform == 'macos'
         run: |
-          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+          sdk="$(xcrun --sdk macosx --show-sdk-path)"
+          developer="${sdk%%/Platforms/*}"
+          echo "SDKROOT=$sdk" >> "$GITHUB_ENV"
+          echo "DEVELOPER_DIR=$developer" >> "$GITHUB_ENV"
+          sudo xcode-select -s "$developer"
+          if [ -d /Library/Developer/CommandLineTools ]; then
+            sudo mv /Library/Developer/CommandLineTools /Library/Developer/CommandLineTools.unused
+          fi
           xcode-select -p
-          xcrun --sdk macosx --show-sdk-path
+          DEVELOPER_DIR="$developer" xcrun --sdk macosx --show-sdk-path
 
       - name: Configure CMake
         run: cmake --preset ${{matrix.preset}} ${{ matrix.platform == 'macos' && '-DCMAKE_OSX_SYSROOT="$SDKROOT"' || '' }}

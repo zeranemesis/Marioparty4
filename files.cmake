@@ -63,6 +63,7 @@ set(GAME_FILES
         src/game/objsysobj.c
         src/game/ovllist.c
         src/game/pad.c
+        src/game/netplay_board.c
         src/game/perf.c
         src/game/printfunc.c
         src/game/process.c
