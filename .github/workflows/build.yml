@@ -267,9 +267,11 @@ jobs:
       #
       # SDKROOT alone was not enough: the -L comes from the Rust side (nod is
       # built through Corrosion, which links what rustc reports it needs), and
-      # rustc found the Command Line Tools SDK by itself. With the Command Line
-      # Tools moved aside for the rest of the job, nothing can find them; the
-      # tools brew and rustup needed have already run.
+      # rustc found the Command Line Tools SDK by itself. The Command Line
+      # Tools are moved aside once configuring is done (step below): the link
+      # line still names their directory, but a directory that is not there is
+      # skipped, and the libraries come from Xcode's SDK. Not before
+      # configuring: Dawn's dependency fetch then came back empty.
       - name: Pin the macOS SDK
         if: matrix.platform == 'macos'
         run: |
@@ -278,16 +280,12 @@ jobs:
           echo "SDKROOT=$sdk" >> "$GITHUB_ENV"
           echo "DEVELOPER_DIR=$developer" >> "$GITHUB_ENV"
           sudo xcode-select -s "$developer"
-          if [ -d /Library/Developer/CommandLineTools ]; then
-            sudo mv /Library/Developer/CommandLineTools /Library/Developer/CommandLineTools.unused
-          fi
           xcode-select -p
-          DEVELOPER_DIR="$developer" xcrun --sdk macosx --show-sdk-path
+          echo "$sdk"
 
       # x86_64 builds Dawn from source, and Dawn's code generator runs on the
-      # jinja2 it vendors, which does not import under the Python 3.15 that
-      # macos-latest now ships ("module 'jinja2' has no attribute
-      # 'BaseLoader'"). A Python it was written for, named to CMake.
+      # jinja2 it vendors. A Python that code was written for rather than the
+      # newest one macos-latest happens to carry, named to CMake.
       - name: Python for Dawn's generator
         if: endsWith(matrix.preset, 'x86_64')
         uses: actions/setup-python@v5
@@ -296,6 +294,13 @@ jobs:
 
       - name: Configure CMake
         run: cmake --preset ${{matrix.preset}} ${{ matrix.platform == 'macos' && '-DCMAKE_OSX_SYSROOT="$SDKROOT"' || '' }} ${{ endsWith(matrix.preset, 'x86_64') && '-DPython3_EXECUTABLE="$pythonLocation/bin/python3" -DPython_EXECUTABLE="$pythonLocation/bin/python3"' || '' }}
+
+      - name: Move the Command Line Tools aside
+        if: matrix.platform == 'macos'
+        run: |
+          if [ -d /Library/Developer/CommandLineTools ]; then
+            sudo mv /Library/Developer/CommandLineTools /Library/Developer/CommandLineTools.unused
+          fi
 
       - name: Build
         run: cmake --build --preset ${{matrix.preset}}
