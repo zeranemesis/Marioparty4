@@ -257,8 +257,22 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
 
+      # macos-latest carries Xcode and a newer Command Line Tools SDK side by side.
+      # CMake took its default sysroot from the Command Line Tools during
+      # project() while the compiler used Xcode's SDK, so libdol was linked with
+      # -L/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib and the
+      # Xcode linker failed on stubs it cannot read ("tapi error: malformed
+      # file ... unknown architecture arm64e.x1") - on runners that had both,
+      # which is why it came and went. One SDK, Xcode's, from the start.
+      - name: Pin the macOS SDK
+        if: matrix.platform == 'macos'
+        run: |
+          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+          xcode-select -p
+          xcrun --sdk macosx --show-sdk-path
+
       - name: Configure CMake
-        run: cmake --preset ${{matrix.preset}}
+        run: cmake --preset ${{matrix.preset}} ${{ matrix.platform == 'macos' && '-DCMAKE_OSX_SYSROOT="$SDKROOT"' || '' }}
 
       - name: Build
         run: cmake --build --preset ${{matrix.preset}}
