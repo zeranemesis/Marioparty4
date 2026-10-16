@@ -238,6 +238,14 @@ static class Tests {
     // A public room's invitation: on a list anyone can read, so it carries no
     // address -- the host's public one, its local one, nor a port -- and still
     // everything the TLS and the relay room need.
+    // The nicknames the game shows over the characters: hex of UTF-8, seat by
+    // seat, cut on a whole character.
+    static void SeatNames() {
+        var lobby=new Lobby(true,new PlayerInfo("Zéra",new byte[32],1),(s,p)=>{},_=>{},_=>{},()=>{});
+        Check(GameStart.NameArguments(lobby)==" --netplay-name 0:5AC3A97261","the host's name, accent included");
+        var kana=GameStart.NameArguments(new Lobby(true,new PlayerInfo(new string('あ',24),new byte[32],1),(s,p)=>{},_=>{},_=>{},()=>{}));
+        Check(kana==" --netplay-name 0:"+string.Concat(Enumerable.Repeat("E38182",24)),"the longest nickname, 72 bytes, goes whole");
+    }
     static void PublicInvitations() {
         var full=new Invitation{Address=IPAddress.Parse("203.0.113.7"),Port=40123,Expires=DateTime.UtcNow.AddMinutes(30),Fingerprint=Wire.Random(16),Token=Wire.Random(16),MaxPlayers=2,
             LocalAddress=IPAddress.Parse("192.168.1.20"),LocalPort=40123};
@@ -1450,11 +1458,15 @@ static class Tests {
             Environment.SetEnvironmentVariable("PARTYBOARD_ONLINE_RELAY_ONLY","1");
             string failure=null;Action<string> fail=m=>{if(failure==null)failure=m;};
             var build=Wire.BuildHash(AppDomain.CurrentDomain.BaseDirectory);
-            var names=new[]{"Mario","Luigi","Peach","Yoshi"};
-            for(int i=0;i<players;i++) {
+            var names=new List<string>{"Mario","Luigi","Peach","Yoshi"};
+            // The player the host takes out ends its own session, as it must: that
+            // one failure is the point, not a fault.
+            int kickedIndex=-1;
+            Func<int,Session> player=n=>{
                 var disc=DiscFile.Verify(discPath,_=>{},CancellationToken.None);discs.Add(disc);
-                int n=i;sessions.Add(new Session(s=>Console.WriteLine(names[n]+": "+s),()=>{},fail,new PlayerInfo(names[i],disc.Hash,disc.Length),disc));
-            }
+                return new Session(s=>Console.WriteLine(names[n]+": "+s),()=>{},m=>{if(n!=kickedIndex)fail(names[n]+": "+m);},new PlayerInfo(names[n],disc.Hash,disc.Length),disc);
+            };
+            for(int i=0;i<players;i++)sessions.Add(player(i));
             var host=sessions[0];
             host.RoomName="Room à "+players;
             host.Create(players);
@@ -1471,14 +1483,36 @@ static class Tests {
             }
             Check(SpinWait.SpinUntil(()=>sessions.All(s=>s.MeshThroughRelay),30000),"every player's mesh runs through its own TURN allocation");
             Check(SpinWait.SpinUntil(()=>sessions.All(s=>s.MeshReady),45000),"every seat hears every other one through TURN: "+string.Join(" ",sessions.Select((s,i)=>names[i]+"="+s.MeshReady)));
+            Func<Session,bool> pingsEveryone=s=>Enumerable.Range(0,players).All(seat=>seat==s.Lobby.LocalSeat || s.SeatPing(seat).HasValue);
+            Check(SpinWait.SpinUntil(()=>sessions.All(pingsEveryone),10000),"every seat shows a ping for every other one: "+string.Join(" ",sessions.Select((s,i)=>names[i]+"="+string.Join("/",Enumerable.Range(0,players).Select(seat=>s.SeatPing(seat)?.ToString()??"-")))));
             Check(SpinWait.SpinUntil(()=>host.Lobby.CanStart,20000),"the room can start: discs and mods agree for all "+players);
             Relay.PublicRoom listed=null;
             Check(SpinWait.SpinUntil(()=>{listed=Relay.PublicRooms(build,discs[0].Hash).FirstOrDefault(r=>r.Room==room);return listed!=null && listed.State=="full";},15000),"the list shows it full");
             Check(listed.Players.Count==players && listed.MaxPlayers==players && listed.Title=="Room à "+players,"with "+players+" players and its name");
             bool turnedAway=false;try{IPEndPoint ignored;using(Relay.GuestPipe(room,null,out ignored)){}}catch(IOException){turnedAway=true;}
             Check(turnedAway,"a fifth comer is turned away");
+
+            // The host takes the last guest out: that player is told, the room is
+            // open again, and someone else sits down in the same seat and is heard
+            // by everyone (the mesh legs re-point to the newcomer).
+            int lastSeat=players-1;var leaving=sessions[lastSeat];kickedIndex=lastSeat;
+            host.Kick(lastSeat);
+            Check(SpinWait.SpinUntil(()=>leaving.Lobby.Ending==LobbyEnding.Kicked,10000),names[lastSeat]+" hears the host took them out");
+            Check(host.Lobby.Occupied==players-1,"the seat is free at once");
+            Check(!host.Lobby.CanStart,"and a room short of a player cannot start: the game would wait for them");
+            Check(SpinWait.SpinUntil(()=>{listed=Relay.PublicRooms(build,discs[0].Hash).FirstOrDefault(r=>r.Room==room);return listed!=null && listed.State=="waiting" && listed.Players.Count==players-1;},20000),"the list shows the room waiting again, without them");
+            sessions.RemoveAt(lastSeat);try{leaving.Dispose();}catch{}
+            names.Add("Daisy");var newcomer=player(names.Count-1);sessions.Add(newcomer);
+            Check(SpinWait.SpinUntil(()=>{try{invite=Relay.PublicInvite(room);return true;}catch(IOException){return false;}},20000),"the room hands out its invitation again");
+            newcomer.Join(invite);
+            Check(SpinWait.SpinUntil(()=>host.Lobby.Occupied==players,30000),"Daisy takes the freed seat");
+            Check(SpinWait.SpinUntil(()=>newcomer.Lobby.LocalSeat==lastSeat,10000),"the very seat that was freed");
+            Check(SpinWait.SpinUntil(()=>sessions.All(s=>s.MeshReady),45000),"every seat hears the newcomer: "+string.Join(" ",sessions.Select(s=>s.Lobby.Local.Name+"="+s.MeshReady)));
+            Check(SpinWait.SpinUntil(()=>host.Lobby.CanStart,20000),"and the room can start again");
+            host.RoomName="Renommée";
+            Check(SpinWait.SpinUntil(()=>{listed=Relay.PublicRooms(build,discs[0].Hash).FirstOrDefault(r=>r.Room==room);return listed!=null && listed.Title=="Renommée";},15000),"a new name reaches the list");
             Check(failure==null,"no session failure ("+failure+")");
-            Console.WriteLine("PASS: "+checks+" checks; a public room for "+players+", every player through the relay and its own TURN allocation, all seats hearing each other, ready to start.");
+            Console.WriteLine("PASS: "+checks+" checks; a public room for "+players+", every player through the relay and its own TURN allocation, all seats hearing each other, ready to start; a guest taken out, replaced in the same seat, the room renamed.");
             return 0;
         } catch(Exception e) {Console.Error.WriteLine("FAIL: "+e.Message);return 1;}
         finally {
@@ -1524,6 +1558,6 @@ static class Tests {
             }
         } catch(Exception e) {Console.Error.WriteLine("FAIL: "+e.Message);return 1;}
     }
-    public static int Run() {try{StartupOptions();GameLanguages();PublicInvitations();LanBeacon();RoomSyncFiles();Languages();ReservedUdpPorts();StunVectors();TurnRelay();Reports();Codecs();Leases();LobbyRules();Discs();CancelLoading();MeshWiringTest();MeshRouting();ControlOnlyLink();ChannelPairingTest();Tls(0,true,true);for(int mode=0;mode<4;mode++)Tls(mode,mode==0);Console.WriteLine("PASS: "+checks+" checks; host-only lobby start, full disk hash and locks, UDP ping, native loading barrier/cancel, TLS loss before/after commit, authenticated UDP for 4800 native ticks and a real three-peer UDP mesh. No real router/firewall changes.");return 0;}catch(Exception e){Console.Error.WriteLine("FAIL: "+e.ToString());return 1;}}
+    public static int Run() {try{StartupOptions();GameLanguages();SeatNames();PublicInvitations();LanBeacon();RoomSyncFiles();Languages();ReservedUdpPorts();StunVectors();TurnRelay();Reports();Codecs();Leases();LobbyRules();Discs();CancelLoading();MeshWiringTest();MeshRouting();ControlOnlyLink();ChannelPairingTest();Tls(0,true,true);for(int mode=0;mode<4;mode++)Tls(mode,mode==0);Console.WriteLine("PASS: "+checks+" checks; host-only lobby start, full disk hash and locks, UDP ping, native loading barrier/cancel, TLS loss before/after commit, authenticated UDP for 4800 native ticks and a real three-peer UDP mesh. No real router/firewall changes.");return 0;}catch(Exception e){Console.Error.WriteLine("FAIL: "+e.ToString());return 1;}}
 }
 }

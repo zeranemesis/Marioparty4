@@ -22,6 +22,9 @@ sealed class MainForm : Form {
     bool PublicWanted {get{return !Lan && visibility.SelectedIndex==1;}}
     // Mods chosen in this window before any salon exists; null means CubeShelf's own list.
     ModSet chosenMods;
+    // Players the host took out of this room: they are refused if they come back
+    // through the public list, here and in the room recreated for two players.
+    readonly System.Collections.Generic.HashSet<string> kickedNames=new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
     readonly CancellationTokenSource fileCancel=new CancellationTokenSource();bool closing,hashing;
     Report lastReport;readonly Startup startup;bool startupApplied;
     public MainForm():this(Startup.Manual) {}
@@ -221,7 +224,7 @@ sealed class MainForm : Form {
     static string LanguageName(string code){switch(code){case "fr":return "Français";case "de":return "Deutsch";case "es":return "Español";case "it":return "Italiano";default:return "English";}}
     static string Since(int seconds){return seconds<60?L.T("à l'instant"):seconds<3600?(seconds/60)+" min":(seconds/3600)+" h";}
     void RefreshLobby(){UI(()=>{
-        if(players==null)return;RefreshControls();players.BeginUpdate();players.Items.Clear();
+        if(players==null)return;RefuseKicked();RefreshControls();players.BeginUpdate();players.Items.Clear();
         var lobby=session?.Lobby;var local=lobby?.Local??session?.Profile;
         string localName=local?.Name??nickname.Text;
         bool localMatch=lobby!=null && lobby.SeatAgrees(lobby.LocalSeat);
@@ -240,10 +243,8 @@ sealed class MainForm : Form {
             var info=lobby.SeatInfo(seat);if(info==null)continue;
             anyRemote=true;bool agrees=lobby.SeatAgrees(seat);
             string seatDisc=agrees?L.T("Identique — SHA-256 vérifié"):info.DiscHash==null?L.T("Non vérifié"):L.T("DISQUE DIFFÉRENT");
-            // Per-seat ping only exists for the classic two-player Bridge; a
-            // mesh session (session.Bridge stays null there) has no per-seat
-            // latency measurement yet.
-            string ping=session.Bridge==null?"—":session.Bridge.UdpReady && session.PingMs.HasValue?session.PingMs.Value+" ms":L.T("En attente…");
+            var seatPing=session.SeatPing(seat);
+            string ping=seatPing.HasValue?seatPing.Value+" ms":L.T("En attente…");
             players.Items.Add(new ListViewItem(new[]{info.Name,seat==0?L.T("Hôte"):L.T("Invité"),seatDisc,ping}));
         }
         players.EndUpdate();
@@ -267,6 +268,7 @@ sealed class MainForm : Form {
             else if(!lobby.ModsMatch)SetStatus(session.Host
                 ?L.T("Un invité n'a pas les mêmes mods que vous — ")+lobby.ModAdvice+L.T(". Il peut cliquer sur « Utiliser les mods de l'hôte », ou changez les vôtres avec « Mods… ».")
                 :L.T("Vos mods ne correspondent pas à ceux de l'hôte — ")+lobby.ModAdvice+(lobby.Local.Mods.Missing(lobby.RequiredMods).Any()?L.T(". Installez les mods manquants dans CubeShelf, puis cliquez sur « Utiliser les mods de l'hôte »."):L.T(". Cliquez sur « Utiliser les mods de l'hôte ».")));
+            else if(session.Host && !lobby.Complete)SetStatus(L.T("Disques et mods identiques. En attente des autres joueurs : ")+lobby.Occupied+"/"+lobby.Capacity+".");
             else SetStatus(session.Host?L.T("Disques et mods identiques. Vous pouvez lancer la partie pour tout le monde."):L.T("Disques et mods identiques. Attendez que l'hôte lance la partie."));
         }
     });}
@@ -504,16 +506,16 @@ sealed class MainForm : Form {
         var lobby=current.Lobby;
         if(lobby!=null) {
             // Every seat as this window's list shows it: who, which role, whether the disc
-            // matched, the mods, and the ping (two players only).
+            // matched, the mods, and the ping.
             var seats=new System.Collections.Generic.List<object>();
             for(int seat=0;seat<Lobby.MaxSeats;seat++) {
                 var info=lobby.SeatInfo(seat);if(info==null)continue;
                 bool mine=seat==lobby.LocalSeat;bool agrees=lobby.SeatAgrees(seat);
                 seats.Add(new System.Collections.Generic.Dictionary<string,object>{
-                    {"name",info.Name},{"host",seat==0},{"you",mine},
+                    {"seat",seat},{"name",info.Name},{"host",seat==0},{"you",mine},
                     {"disc",agrees?"same":info.DiscHash==null?"unknown":mine?"pending":"different"},
                     {"mods",new Relay.RoomStatus{Mods=info.Mods}.Fields()["mods"]},
-                    {"ping",!mine && current.Bridge!=null && current.Bridge.UdpReady && current.PingMs.HasValue?(object)current.PingMs.Value:null}});
+                    {"ping",mine?null:(object)current.SeatPing(seat)}});
             }
             state["seats"]=seats.ToArray();
             state["phase"]=lobby.Phase.ToString().ToLowerInvariant();
@@ -579,6 +581,18 @@ sealed class MainForm : Form {
                 });
                 return;
             }
+            case "kick": {
+                int seat;
+                if(current==null || !current.Host || current.Lobby==null || !int.TryParse(request.Value,out seat)){RoomSync.Complete(startup.StateDirectory,request,false,L.T("Seul l'hôte peut retirer un joueur."));return;}
+                try{KickSeat(current,seat);}catch(IOException e){RoomSync.Complete(startup.StateDirectory,request,false,e.Message);return;}
+                RoomSync.Complete(startup.StateDirectory,request,true,current.MaxPlayers<=2?L.T("Joueur retiré. La room se recrée sans lui ; une nouvelle invitation est prête."):L.T("Joueur retiré de la room."));return;
+            }
+            case "set-name": {
+                var name=(request.Value??"").Trim();
+                if(name.Length==0){RoomSync.Complete(startup.StateDirectory,request,false,L.T("Donnez un nom à la room."));return;}
+                startup.RoomName=name;if(current!=null && current.Host)current.RoomName=name;
+                RoomSync.Complete(startup.StateDirectory,request,true,L.T("Room renommée."));return;
+            }
             case "set-activity": {
                 if(current==null){RoomSync.Complete(startup.StateDirectory,request,false,"");return;}
                 current.Activity=request.Value;RoomSync.Complete(startup.StateDirectory,request,true,"");return;
@@ -594,6 +608,24 @@ sealed class MainForm : Form {
                 ApplyMods(ModSet.AlignedTo(new ModSet(ids.Select(id=>new ModEntry(id,"","",new byte[8]))),installed));
                 RoomSync.Complete(startup.StateDirectory,request,true,L.T("Mods mis à jour dans la room."));return;
             }
+        }
+    }
+    void KickSeat(Session current,int seat) {
+        var who=current.Lobby.SeatInfo(seat);
+        current.Kick(seat);
+        // Not straight back in through the public list: this room refuses that name.
+        if(who!=null)kickedNames.Add(who.Name);
+        if(current.MaxPlayers<=2)Task.Delay(400).ContinueWith(_=>UI(()=>{if(session==current){hadSession=false;Reset();Begin(true,"",2);}}));
+    }
+    // A player taken out who comes back under the same name is taken out again.
+    void RefuseKicked() {
+        var current=session;var lobby=current?.Lobby;
+        if(kickedNames.Count==0 || current==null || !current.Host || lobby==null || lobby.Phase!=LobbyPhase.Waiting)return;
+        for(int seat=1;seat<Lobby.MaxSeats;seat++) {
+            var info=lobby.SeatInfo(seat);
+            if(info==null || !kickedNames.Contains(info.Name))continue;
+            try{KickSeat(current,seat);SetStatus(L.T("Cette room a retiré ce joueur."));}catch(IOException){}
+            return;
         }
     }
     void RunStartupAction(){

@@ -19,7 +19,8 @@ namespace PartyBoardOnline {
 //
 // Actions: "set-visibility" ("public" or "private"), "reload-mods" (the
 // launcher changed the mods; read its list again), "close" (leave the room
-// and close this window). A request older than RequestLifetime is dropped
+// and close this window), "kick" (the seat number to take out, host only,
+// while waiting), "set-name" (the room's new name). A request older than RequestLifetime is dropped
 // unacted: the launcher gives up long before, and acting late would be worse.
 static class RoomSync {
     public const string DirectoryVariable="PARTYBOARD_ONLINE_STATE_DIR";
@@ -27,7 +28,7 @@ static class RoomSync {
     public static readonly TimeSpan RequestLifetime=TimeSpan.FromSeconds(30);
     const int MaximumRequestBytes=4096,MaximumRequestsPerRead=16;
     static readonly Regex IdPattern=new Regex("^[A-Za-z0-9-]{1,64}$",RegexOptions.CultureInvariant);
-    static readonly string[] Actions={"set-visibility","reload-mods","close","start","set-mods","align-host","set-activity"};
+    static readonly string[] Actions={"set-visibility","reload-mods","close","start","set-mods","align-host","set-activity","kick","set-name"};
 
     public sealed class Request {public string Id,Action,Value;}
 

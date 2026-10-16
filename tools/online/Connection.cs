@@ -239,6 +239,8 @@ sealed class ReplayWindow {
     readonly bool[] seen=new bool[Lobby.MaxSeats];
 
     public bool IsNewest(int seat,ulong sequence){return !seen[seat] || sequence>highest[seat];}
+    // A new player in a freed seat counts its packets from one again.
+    public void Forget(int seat){if(seat>=0 && seat<Lobby.MaxSeats)seen[seat]=false;}
 
     // True the first time a sequence is seen from that seat, false for a repeat or
     // for anything more than 64 behind its newest.
@@ -378,7 +380,7 @@ sealed class Bridge : IDisposable {
             // of a session leaves it exactly where it was before -- no worse.
             // 9 (seat) and 11 (peer endpoint) only ever travel in a 3-4 player
             // salon, where every link is control-only; Lobby.Receive checks them.
-            if((data[0]>=2 && data[0]<=5) || data[0]==8 || data[0]==9 || data[0]==11) {if(Control==null)throw new IOException(L.T("Salon indisponible."));Control(data);continue;}
+            if((data[0]>=2 && data[0]<=5) || data[0]==8 || data[0]==9 || data[0]==11 || data[0]==12) {if(Control==null)throw new IOException(L.T("Salon indisponible."));Control(data);continue;}
             throw new IOException(L.T("Message réseau incompatible."));
         }
     }
@@ -505,6 +507,8 @@ sealed class MeshRelay : IDisposable {
         public IPEndPoint Game;
         public readonly bool LearnPeer;
         public long LastPongStamp;
+        // Round trip of the last heartbeat this leg answered, -1 before the first.
+        public int PingMs=-1;
         // Non-blocking from birth: a leg is usually added while Run() is already
         // pumping, and a blocking Receive on it would stall every seat.
         public Leg(IPEndPoint peer) {NetworkPeer=peer;LearnPeer=peer==null;Loopback.Client.Blocking=false;}
@@ -544,6 +548,13 @@ sealed class MeshRelay : IDisposable {
     // or simply hearing about it twice) can check before calling AddPeer a
     // second time, rather than relying on it to throw.
     public bool HasPeer(int seat){return seat>=0 && seat<Lobby.MaxSeats && legs[seat]!=null;}
+    // A seat that changed hands (its player left or was taken out, someone else
+    // sat down): the leg and its game port stay, the far end and its count restart.
+    public void RePoint(int seat,IPEndPoint peerEndpoint) {
+        if(!HasPeer(seat) || peerEndpoint==null)return;
+        var leg=legs[seat];if(peerEndpoint.Equals(leg.NetworkPeer))return;
+        leg.NetworkPeer=peerEndpoint;leg.PingMs=-1;leg.LastPongStamp=0;replay.Forget(seat);
+    }
     // The port LoadGame() has to tell the native engine to reach this seat on
     // (--netplay-peer), looked up after AddPeer already handed it out once --
     // by the time a game actually launches, every peer this attempt needs is
@@ -582,6 +593,14 @@ sealed class MeshRelay : IDisposable {
             if((now-leg.LastPongStamp)*1000/Stopwatch.Frequency>maxAgeMs)return false;
         }
         return true;
+    }
+
+    // A seat's latency, while its heartbeats still come back (5 s); null otherwise.
+    public int? PeerPing(int seat) {
+        if(seat<0 || seat>=Lobby.MaxSeats)return null;
+        var leg=legs[seat];if(leg==null || leg.PingMs<0 || leg.LastPongStamp==0)return null;
+        if((Stopwatch.GetTimestamp()-leg.LastPongStamp)*1000/Stopwatch.Frequency>5000)return null;
+        return leg.PingMs;
     }
 
     public Task Run() {
@@ -631,7 +650,12 @@ sealed class MeshRelay : IDisposable {
                         if(leg.LearnPeer && newest)leg.NetworkPeer=from;
                         if(Bridge.IsHeartbeat(payload,seat)) {
                             if(payload[6]==1){payload[5]=(byte)localPlayer;payload[6]=2;SendToLeg(leg,payload);}
-                            else leg.LastPongStamp=Stopwatch.GetTimestamp();
+                            else {
+                                long receivedAt=Stopwatch.GetTimestamp(),sent=BitConverter.ToInt64(payload,8);
+                                leg.LastPongStamp=receivedAt;
+                                // Our own stamp coming back: only a plausible one is a ping.
+                                if(sent<=receivedAt && receivedAt-sent<15*Stopwatch.Frequency)leg.PingMs=(int)((receivedAt-sent)*1000/Stopwatch.Frequency);
+                            }
                             continue;
                         }
                         // Nowhere to deliver to until the engine has sent at least once
@@ -672,7 +696,8 @@ sealed class MeshWiring {
     readonly MeshRelay relay;readonly int localSeat;
     public MeshWiring(MeshRelay relay,int localSeat){this.relay=relay;this.localSeat=localSeat;}
     public void OnEndpointLearned(int seat,IPEndPoint endpoint) {
-        if(seat==localSeat || relay.HasPeer(seat))return;
+        if(seat==localSeat)return;
+        if(relay.HasPeer(seat)){relay.RePoint(seat,endpoint);return;}
         relay.AddPeer(seat,endpoint);
     }
 }

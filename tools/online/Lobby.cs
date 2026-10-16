@@ -150,7 +150,7 @@ enum LobbyPhase { Waiting, Preparing, Running, Closed }
 // control channel dropping during a game is normal and tolerated on purpose (the game
 // itself keeps running over UDP). The one signal that would have meant "they left" was
 // the one the lobby was designed to ignore. So the departure is now said out loud.
-enum LobbyEnding { None, LocalGameClosed, RemoteGameClosed }
+enum LobbyEnding { None, LocalGameClosed, RemoteGameClosed, Kicked }
 // Role checks live in the protocol state machine, not just the disabled button.
 //
 // Seats, not "us and them". The host is always seat 0 and assigns 1..3 to guests
@@ -219,7 +219,12 @@ sealed class Lobby {
         return true;
     }
 
-    public bool CanStart {get{lock(this)return Host && Phase==LobbyPhase.Waiting && Occupied>=2 && EveryoneAgrees();}}
+    // The seats the room was made for. Above two the game is launched for exactly
+    // that many players and waits for every one of them, so the room must be full;
+    // two players start as soon as both are there, as always.
+    public int Capacity {get;set;}=2;
+    public bool Complete {get{lock(this)return Capacity<=2 || Occupied>=Capacity;}}
+    public bool CanStart {get{lock(this)return Host && Phase==LobbyPhase.Waiting && Occupied>=2 && Complete && EveryoneAgrees();}}
     public bool DiscMatches {get{lock(this){
         if(seats[0]==null || Occupied<2)return false;
         for(int i=1;i<MaxSeats;i++)if(seats[i]!=null && !seats[0].SameDisc(seats[i]))return false;
@@ -311,6 +316,20 @@ sealed class Lobby {
         }
     }
 
+    // The host takes a guest out of a waiting room. The guest is told first (12),
+    // so it says why instead of "connection lost"; the caller then closes its link.
+    // Only while waiting: once a launch exists every seat is part of the game.
+    internal static readonly byte[] KickCommand={12};
+    public void Kick(int guest) {
+        lock(this) {
+            if(!Host)throw new IOException(L.T("Seul l'hôte peut retirer un joueur."));
+            if(Phase!=LobbyPhase.Waiting)throw new IOException(L.T("La partie a commencé : on ne peut plus retirer de joueur."));
+            if(guest<1 || guest>=MaxSeats || seats[guest]==null)throw new IOException(L.T("Cette place est déjà vide."));
+            try{send(guest,KickCommand);}catch{}
+            seats[guest]=null;ready[guest]=false;endpoints[guest]=null;changed();
+        }
+    }
+
     public void Leave(int guest) {
         lock(this) {
             if(guest<1 || guest>=MaxSeats || guest==LocalSeat)return;
@@ -323,6 +342,7 @@ sealed class Lobby {
             if(!CanStart) {
                 if(!Host)throw new IOException(L.T("Seul l'hote peut lancer la partie."));
                 if(Occupied<2)throw new IOException(L.T("Il faut au moins deux joueurs."));
+                if(!Complete)throw new IOException(L.T("Toutes les places doivent être prises avant le lancement : ")+Occupied+"/"+Capacity+".");
                 if(!DiscMatches)throw new IOException(L.T("Tous les joueurs doivent avoir exactement le meme fichier disque."));
                 throw new IOException(L.T("Tous les joueurs doivent avoir exactement les memes mods actifs : ")+ModAdvice);
             }
@@ -369,6 +389,10 @@ sealed class Lobby {
                 if(seat<1 || seat>=MaxSeats)throw new IOException(L.T("Place invalide."));
                 if(seat!=LocalSeat){var mine=seats[LocalSeat];seats[LocalSeat]=null;LocalSeat=seat;seats[seat]=mine;}
                 changed();return;
+            }
+            if(packet.Length==1 && packet[0]==12) {
+                if(Host || from!=0 || Phase!=LobbyPhase.Waiting)throw new IOException(L.T("Commande de salon incorrecte."));
+                Ending=LobbyEnding.Kicked;Phase=LobbyPhase.Closed;changed();return;
             }
             if(packet.Length==8 && packet[0]==11) {
                 int subjectSeat;IPEndPoint endpoint;
@@ -441,6 +465,23 @@ sealed class Lobby {
 sealed class GameStart : IDisposable {
     // Normal online play stays in lockstep for the whole session. Live
     // rollback remains an explicit native developer option, not a lobby default.
+    // Every seat's nickname, for the game to show over its character on a board.
+    // Hex of the UTF-8 bytes: no name can break the command line, and the game
+    // bounds it again. Display only; the game never synchronizes it.
+    public static string NameArguments(Lobby lobby) {
+        var text=new System.Text.StringBuilder();
+        for(int seat=0;seat<Lobby.MaxSeats;seat++) {
+            var info=lobby.SeatInfo(seat);if(info==null || string.IsNullOrEmpty(info.Name))continue;
+            var clean=new string(info.Name.Where(c=>!char.IsControl(c)).ToArray()).Trim();
+            var bytes=System.Text.Encoding.UTF8.GetBytes(clean);
+            // A nickname is at most 24 characters, 72 bytes even in kana; past that,
+            // cut on a whole character, never inside one.
+            int length=Math.Min(bytes.Length,72);while(length>0 && length<bytes.Length && (bytes[length]&0xC0)==0x80)length--;
+            if(length==0)continue;
+            text.Append(" --netplay-name ").Append(seat).Append(':').Append(BitConverter.ToString(bytes,0,length).Replace("-",""));
+        }
+        return text.ToString();
+    }
     public static string OnlineArguments(string transportArguments) {
         return transportArguments+" --netplay-loopback --netplay-full --netplay-pad 1 --netplay-delay 3";
     }

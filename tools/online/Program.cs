@@ -87,6 +87,14 @@ sealed class Session : IDisposable {
         Report.Write("mods_changed count="+mods.Entries.Length+" ids="+string.Join(",",mods.Entries.Select(m=>m.Id.ToString()).ToArray()));
     }
     public int? PingMs;GameStart gameStart;string modListDirectory;
+    // One seat's latency as this player sees it: through its own mesh leg with
+    // three or four players, through the one Bridge with two.
+    public int? SeatPing(int seat) {
+        var mesh=meshRelay;
+        if(mesh!=null)return mesh.PeerPing(seat);
+        if(maxPlayers==2 && Bridge!=null && Bridge.UdpReady && Lobby!=null && seat!=Lobby.LocalSeat)return PingMs;
+        return null;
+    }
     public readonly Report Report=new Report();System.Threading.Timer diagnosticTimer;
     TcpListener listener;TcpClient peer,peerWrite;X509Certificate2 cert;Gateway mapping,mappingUdp;Firewall firewall;UdpClient internetGame;
     // The relay (Relay.cs): a TURN allocation for the game datagrams and the room
@@ -168,7 +176,7 @@ sealed class Session : IDisposable {
     }
     string lastStatus;
     // The room's name on the public list, at most 32 characters (the relay cleans it again).
-    public string RoomName {get{return roomName;}set{roomName=value==null?null:new string(value.Where(c=>!char.IsControl(c)).Take(32).ToArray()).Trim();}}
+    public string RoomName {get{return roomName;}set{var clean=value==null?null:new string(value.Where(c=>!char.IsControl(c)).Take(32).ToArray()).Trim();if(clean==roomName)return;roomName=clean;RoomChanged();}}
     string roomName;
     // What the game says is happening, as the launcher reads it from the game (CubeShelf's
     // in-game bridge): a board and turn, a minigame. Sent with the room's status while it plays.
@@ -234,7 +242,7 @@ sealed class Session : IDisposable {
                 // salon has to exist, and announce this seat's own mesh
                 // address, before anyone has connected to admit into it.
                 guestLinks=new Bridge[players];
-                Lobby=new Lobby(true,Profile,SendToSeat,id=>Task.Run(()=>LoadGame(id)),id=>Report.Write("commit="+id),connected);
+                Lobby=new Lobby(true,Profile,SendToSeat,id=>Task.Run(()=>LoadGame(id)),id=>Report.Write("commit="+id),connected){Capacity=players};
                 Report.Write("role=host mode=mesh build="+BitConverter.ToString(build).Replace("-","")+" players="+players);
                 OpenMesh();
                 lock(this) {if(!disposed) diagnosticTimer=new System.Threading.Timer(_=>Report.Write("phase="+Lobby.Phase+" occupied="+Lobby.Occupied+"/"+players+" disk_match="+Lobby.DiscMatches),null,0,5000);}
@@ -420,6 +428,18 @@ sealed class Session : IDisposable {
         Lobby.Admit(seat);link.Control=packet=>Lobby.Receive(seat,packet);
         WatchGuest(seat,link);
         status(MeshSeatFree()?L.T("En attente d'un autre invité…"):L.T("Salon complet."));
+    }
+    // The host takes a guest out of the waiting room. With three or four players
+    // only that seat goes and the room keeps its other guests; with two, the
+    // window recreates the room (a two-player session is one link, start to end).
+    public void Kick(int seat) {
+        if(!Host || Lobby==null)throw new IOException(L.T("Seul l'hôte peut retirer un joueur."));
+        Lobby.Kick(seat);
+        Report.Write("kicked seat="+seat);
+        if(maxPlayers<=2)return;
+        Bridge link;lock(this)link=guestLinks!=null && seat<guestLinks.Length?guestLinks[seat]:null;
+        // A moment for the notice to leave before the link closes under it.
+        if(link!=null)Task.Delay(400).ContinueWith(_=>{try{link.Dispose();}catch{}});
     }
     // One guest's control link failing (or simply ending) frees only its own
     // seat -- unlike the two-player Watch() below, where losing the one
@@ -651,7 +671,7 @@ sealed class Session : IDisposable {
         // game data either -- MeshRelay does, once OpenMesh() is under way --
         // so it runs control-only, exactly like every guest link the host
         // itself holds in AcceptMesh().
-        Task.Run(async ()=> {string reason="Votre ami s'est déconnecté. Recréez une connexion.";try {await (maxPlayers>2?Bridge.RunControlOnly():Bridge.Run());}catch(IOException e){Report.Write("transport_error="+e.GetBaseException().GetType().Name+" hresult="+e.GetBaseException().HResult);reason=e.Message;}catch(Exception e){Report.Write("transport_error="+e.GetType().Name);}finally {if(!disposed) {failed(reason);Dispose();}}});
+        Task.Run(async ()=> {string reason="Votre ami s'est déconnecté. Recréez une connexion.";try {await (maxPlayers>2?Bridge.RunControlOnly():Bridge.Run());}catch(IOException e){Report.Write("transport_error="+e.GetBaseException().GetType().Name+" hresult="+e.GetBaseException().HResult);reason=e.Message;}catch(Exception e){Report.Write("transport_error="+e.GetType().Name);}finally {if(Lobby!=null && Lobby.Ending==LobbyEnding.Kicked)reason=L.T("L'hôte vous a retiré de la room.");if(!disposed) {failed(reason);Dispose();}}});
     }
     public void Launch() {
         if(Lobby==null || disposed)throw new IOException(L.T("Attendez que votre ami soit connecté."));
@@ -685,7 +705,7 @@ sealed class Session : IDisposable {
         } else {
             args=Host ? "--netplay-host "+HostGamePort : "--netplay-join 127.0.0.1:"+Bridge.LocalPort;
         }
-        args=GameStart.OnlineArguments(args);
+        args=GameStart.OnlineArguments(args)+GameStart.NameArguments(Lobby);
         // A European disc loads its text in the language chosen; every seat takes the
         // host's, or the games would differ from their first tick. The game also
         // refuses a peer in another language at its handshake.
