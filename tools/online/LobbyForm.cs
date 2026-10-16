@@ -328,7 +328,7 @@ sealed class MainForm : Form {
         catch(Exception e){SetStatus(Friendly(e));return;}
         var profile=new PlayerInfo(nickname.Text,disc.Hash,disc.Length,opening,GameLanguage.Current);
         Session current=null;current=new Session(t=>UI(()=>{if(session==current)SetStatus(t);}),()=>UI(()=>{if(session==current)RefreshLobby();}),t=>UI(()=>{if(session==current){Reset();SetStatus(t);}}),profile,disc);
-        session=current;lastReport=current.Report;current.Host=create;current.Lan=Lan;RefreshLobby();
+        session=current;lastReport=current.Report;current.Host=create;current.Lan=Lan;if(create)current.RoomName=startup.RoomName;RefreshLobby();
         current.Report.Write("role="+(create?"host":"guest")+" connection_requested");
         Task.Run(()=>{try{
             if(create){current.Create(players);UI(()=>{if(session==current && current.Bridge==null){var encoded=current.Invite.Encode();invitation.Text=current.Lan?"":encoded;if(!current.Lan)PublishInvitation(encoded);RefreshControls();

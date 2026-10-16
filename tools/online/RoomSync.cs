@@ -37,7 +37,8 @@ static class RoomSync {
     // Writes room.json whole or not at all: the launcher never reads half a file.
     public static void Write(string directory,Dictionary<string,object> state,long revision) {
         Directory.CreateDirectory(directory);
-        var fields=new Dictionary<string,object>(state){{"schema",Schema},{"revision",revision},{"updated",DateTime.UtcNow.ToString("o")}};
+        // pid: the launcher tells a room still open from one whose window was closed without a word.
+        var fields=new Dictionary<string,object>(state){{"schema",Schema},{"revision",revision},{"updated",DateTime.UtcNow.ToString("o")},{"pid",System.Diagnostics.Process.GetCurrentProcess().Id}};
         var file=StateFile(directory);var temporary=file+".tmp";
         File.WriteAllText(temporary,new JavaScriptSerializer().Serialize(fields),new UTF8Encoding(false));
         if(File.Exists(file))File.Replace(temporary,file,null);else File.Move(temporary,file);

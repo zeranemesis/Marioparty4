@@ -154,7 +154,7 @@ sealed class Session : IDisposable {
     // The room as everyone else sees it: the directory (when public) and the
     // launcher that opened this window (RoomSync).
     public Relay.RoomStatus RoomStatus() {
-        var status=new Relay.RoomStatus{Game=disc!=null && disc.Pal?"GMPP01":"GMPE01",MaxPlayers=maxPlayers,Mods=Profile.Mods};
+        var status=new Relay.RoomStatus{Game=disc!=null && disc.Pal?"GMPP01":"GMPE01",MaxPlayers=maxPlayers,Mods=Profile.Mods,Title=RoomName??""};
         var lobby=Lobby;
         if(lobby!=null && (lobby.Phase==LobbyPhase.Preparing || lobby.Phase==LobbyPhase.Running))status.State="playing";
         else if(lobby!=null && lobby.Occupied>=maxPlayers)status.State="full";
@@ -163,6 +163,9 @@ sealed class Session : IDisposable {
         return status;
     }
     string lastStatus;
+    // The room's name on the public list, at most 32 characters (the relay cleans it again).
+    public string RoomName {get{return roomName;}set{roomName=value==null?null:new string(value.Where(c=>!char.IsControl(c)).Take(32).ToArray()).Trim();}}
+    string roomName;
     // Tells the directory when the room changed: who is in it, its mods, or
     // that it plays. Only a listed room has anything to tell.
     void RoomChanged() {

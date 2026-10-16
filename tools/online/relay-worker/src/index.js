@@ -106,6 +106,8 @@ function cleanStatus(m) {
     .map((x) => ({ id: x.id, name: cleanName(x.name, 48, ""), fp: x.fp }));
   const max = Number.isInteger(m.max) && m.max >= 2 && m.max <= MAX_PLAYERS ? m.max : 2;
   return {
+    // The room's name, as its host typed it; empty means "<host>'s room" on the list.
+    title: cleanName(m.title, 32, ""),
     state: m.state === "playing" || m.state === "full" ? m.state : "waiting",
     players: players.length ? players : ["Joueur"],
     max,
@@ -355,7 +357,7 @@ export class RoomDirectory {
       invite TEXT, expires INTEGER, created INTEGER)`);
     // v2 of the list: the game, who is in the room, its mods, and whether it plays.
     const columns = new Set(this.sql.exec("PRAGMA table_info(rooms)").toArray().map((c) => c.name));
-    for (const [name, type] of [["game", "TEXT"], ["state", "TEXT"], ["players", "TEXT"], ["max", "INTEGER"], ["mods", "TEXT"], ["started", "INTEGER"]]) {
+    for (const [name, type] of [["game", "TEXT"], ["state", "TEXT"], ["players", "TEXT"], ["max", "INTEGER"], ["mods", "TEXT"], ["started", "INTEGER"], ["title", "TEXT"]]) {
       if (!columns.has(name)) this.sql.exec(`ALTER TABLE rooms ADD COLUMN ${name} ${type}`);
     }
   }
@@ -371,13 +373,14 @@ export class RoomDirectory {
       const count = this.sql.exec("SELECT COUNT(*) AS n FROM rooms WHERE room != ?", e.room).one().n;
       if (count >= MAX_PUBLIC) return new Response("full", { status: 507 });
       this.sql.exec(
-        `INSERT INTO rooms (room, name, lang, region, build, disc, invite, expires, created, game, state, players, max, mods, started)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+        `INSERT INTO rooms (room, name, lang, region, build, disc, invite, expires, created, game, state, players, max, mods, started, title)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
          ON CONFLICT(room) DO UPDATE SET name = excluded.name, lang = excluded.lang, region = excluded.region,
            build = excluded.build, disc = excluded.disc, invite = excluded.invite, expires = excluded.expires,
-           game = excluded.game, state = excluded.state, players = excluded.players, max = excluded.max, mods = excluded.mods`,
+           game = excluded.game, state = excluded.state, players = excluded.players, max = excluded.max, mods = excluded.mods,
+           title = excluded.title`,
         e.room, e.name, e.lang, e.region, e.build, e.disc, e.invite, e.expires, now,
-        e.game, e.state, JSON.stringify(e.players), e.max, JSON.stringify(e.mods),
+        e.game, e.state, JSON.stringify(e.players), e.max, JSON.stringify(e.mods), e.title,
       );
       return new Response("ok");
     }
@@ -390,8 +393,8 @@ export class RoomDirectory {
       const started = playing ? row.started || now : null;
       const expires = playing ? Math.max(row.expires, started + PLAYING_SECONDS) : row.expires;
       this.sql.exec(
-        "UPDATE rooms SET state = ?, players = ?, max = ?, mods = ?, started = ?, expires = ? WHERE room = ?",
-        e.state, JSON.stringify(e.players), e.max, JSON.stringify(e.mods), started, expires, e.room,
+        "UPDATE rooms SET state = ?, players = ?, max = ?, mods = ?, started = ?, expires = ?, title = ? WHERE room = ?",
+        e.state, JSON.stringify(e.players), e.max, JSON.stringify(e.mods), started, expires, e.title, e.room,
       );
       return new Response("ok");
     }
@@ -422,7 +425,7 @@ export class RoomDirectory {
       };
       const rooms = this.sql
         .exec(
-          `SELECT room, name, lang, region, created, game, state, players, max, mods, started FROM rooms
+          `SELECT room, name, lang, region, created, game, state, players, max, mods, started, title FROM rooms
            WHERE build = ? AND disc = ? ORDER BY (state IS NOT NULL AND state != 'waiting'), created DESC LIMIT ?`,
           build, disc, LIST_SIZE,
         )
@@ -439,6 +442,7 @@ export class RoomDirectory {
           mods: parse(r.mods, []),
           age: Math.max(0, now - r.created),
           playing: r.started ? Math.max(0, now - r.started) : 0,
+          title: r.title || "",
         }));
       return Response.json({ rooms }, { headers });
     }

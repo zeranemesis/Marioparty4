@@ -1300,6 +1300,7 @@ static class Tests {
                 var host=new Session(s=>Console.WriteLine("host: "+s),()=>{},fail,new PlayerInfo(name,hostDisc.Hash,hostDisc.Length,null,2),hostDisc);
                 var guest=new Session(s=>Console.WriteLine("guest: "+s),()=>{},fail,new PlayerInfo("Inconnu",guestDisc.Hash,guestDisc.Length),guestDisc);
                 try {
+                    host.RoomName="Soirée\u0007 du vendredi soir entre amis, venez nombreux";
                     host.Create(2);
                     Check(host.RelayReady && host.CanBePublic,"a waiting two-player salon with its relay room can be public");
                     var room=Relay.RoomId(host.Invite.Token);
@@ -1314,6 +1315,7 @@ static class Tests {
                     var rooms=Relay.PublicRooms(build,guestDisc.Hash);var mine=rooms.FirstOrDefault(r=>r.Room==room);
                     Check(mine!=null,"a stranger with the same disc and build sees it");
                     Check(mine.Name==name && mine.Language=="fr" && mine.Region==(hostDisc.Pal?"eu":"us"),"with the host's pseudo, game language and disc region");
+                    Check(mine.Title=="Soirée du vendredi soir entre am","and its name, cleaned and cut to 32 characters ("+mine.Title+")");
                     Check(!Relay.PublicRooms(build,Wire.Random(32)).Any(r=>r.Room==room),"another disc does not see it");
                     Check(!Relay.PublicRooms(Wire.Random(32),guestDisc.Hash).Any(r=>r.Room==room),"another PartyBoard build does not see it");
                     var invite=Relay.PublicInvite(room);var decoded=Invitation.Decode(invite);
