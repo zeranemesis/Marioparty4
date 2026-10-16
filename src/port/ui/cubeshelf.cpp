@@ -9,6 +9,7 @@
 #include "port/main.h"
 #include "port/online/cubeshelf_friends.hpp"
 #include "port/game_activity.hpp"
+#include "port/netplay_runtime.h"
 #include "port/retroachievements.h"
 #include "string_button.hpp"
 
@@ -264,13 +265,23 @@ namespace {
         catch (...) {
             return;
         }
-        if (text == lastText && now - lastWrite < std::chrono::seconds(30)) {
+        // The characters change the file too: a pick made in the menus shows up on the board.
+        int picked[4] = { -1, -1, -1, -1 };
+        std::string key = text;
+        if (PartyBoard_NetplayPadCharacters(picked)) {
+            key += fmt::format("|{},{},{},{}", picked[0], picked[1], picked[2], picked[3]);
+        }
+        if (key == lastText && now - lastWrite < std::chrono::seconds(30)) {
             return;
         }
         lastWrite = now;
-        lastText = text;
+        lastText = key;
         const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
         nlohmann::json document = { { "schema", 1 }, { "text", text }, { "updatedAt", seconds } };
+        // Who plays whom, by pad (which is the seat online), once a party is under way.
+        if (int characters[4]; PartyBoard_NetplayPadCharacters(characters)) {
+            document["characters"] = { characters[0], characters[1], characters[2], characters[3] };
+        }
         write_atomically(*dir / "activity.json", document.dump());
     }
 

@@ -315,6 +315,8 @@ void Overlay::update()
         }
     }
 
+    update_name_tags();
+
     // Online inactivity: the countdown stays up for as long as it runs, on every
     // screen of the room, so nobody wonders why the board stopped.
     int idleSeconds = -1, idleCharacter = -1;
@@ -413,6 +415,40 @@ void Overlay::update()
             mCurrentToast->SetAttribute("open", "");
             mCurrentToast->SetPseudoClass("opened", true);
         }
+    }
+}
+
+// Each online player's nickname over their character on a board, on every
+// screen, so nobody wonders who plays Luigi.
+void Overlay::update_name_tags()
+{
+    auto *context = mDocument->GetContext();
+    const auto size = context != nullptr ? context->GetDimensions() : Rml::Vector2i {};
+    for (int pad = 0; pad < static_cast<int>(mNameTags.size()); ++pad) {
+        const char *name = PartyBoard_NetplaySeatName(pad);
+        float x = 0.0f, y = 0.0f;
+        bool shown = name != nullptr && size.x > 0 && size.y > 0;
+        if (shown && PartyBoard_NetplayNameProbe()) {
+            x = 0.2f + 0.2f * static_cast<float>(pad);
+            y = 0.62f;
+        }
+        else if (shown) {
+            shown = PartyBoard_NetplayPadHeadOnScreen(pad, &x, &y);
+        }
+        auto *&tag = mNameTags[pad];
+        if (!shown) {
+            if (tag != nullptr) tag->SetProperty(Rml::PropertyId::Display, Rml::Property(Rml::Style::Display::None));
+            continue;
+        }
+        if (tag == nullptr) {
+            tag = append(mDocument, "nametag");
+            tag->SetClass(fmt::format("seat{}", pad), true);
+        }
+        const auto text = escape(name);
+        if (tag->GetInnerRML() != text) tag->SetInnerRML(text);
+        tag->SetProperty(Rml::PropertyId::Display, Rml::Property(Rml::Style::Display::Block));
+        tag->SetProperty(Rml::PropertyId::Left, Rml::Property(x * static_cast<float>(size.x), Rml::Unit::PX));
+        tag->SetProperty(Rml::PropertyId::Top, Rml::Property(y * static_cast<float>(size.y), Rml::Unit::PX));
     }
 }
 

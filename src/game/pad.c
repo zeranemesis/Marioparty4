@@ -4,6 +4,12 @@
 #include "game/objsub.h"
 #include "game/pad.h"
 #include "game/gamework_data.h"
+#include "game/board/model.h"
+#include "game/board/player.h"
+#include "game/disp.h"
+#include "game/hsfex.h"
+#include "game/hu3d.h"
+#include "port/widescreen.h"
 #include "game/thpmain.h"
 #include "port/rollback.h"
 #include <stdint.h>
@@ -202,6 +208,51 @@ s32 PartyBoard_NetplayPadCharacter(s32 pad)
         if (GWPlayer[player].port == pad) return GWPlayer[player].character;
     }
     return -1;
+}
+
+// Display only: reads the board and the camera, changes nothing.
+bool PartyBoard_NetplayPadHeadOnScreen(s32 pad, float *x, float *y)
+{
+    s32 player;
+    s16 model;
+    Vec head, view, screen;
+    Mtx look;
+    HU3DCAMERA *camera = &Hu3DCamera[0];
+    float scale;
+    if (omcurovl < DLL_w01dll || omcurovl > DLL_w06dll) return false;
+    for (player = 0; player < 4; player++) {
+        if (GWPlayer[player].port == pad) break;
+    }
+    if (player == 4) return false;
+    model = BoardPlayerModelGet(player);
+    if (BoardModelPosGet(model, &head) != 0 || !BoardModelVisibilityGet(model)) return false;
+    // Just over the head, where the board itself puts what a player picks up.
+    head.y += 280.0f;
+    // Behind the camera would project mirrored onto the screen.
+    C_MTXLookAt(look, &camera->pos, &camera->up, &camera->target);
+    MTXMultVec(look, &head, &view);
+    if (view.z > -1.0f) return false;
+    Hu3D3Dto2D(&head, 1, &screen);
+    *x = screen.x / HU_DISP_WIDTHF;
+    *y = screen.y / HU_DISP_HEIGHTF;
+    // A wider picture shows more on each side at the same height.
+    scale = PartyBoard_WidescreenAspectScale();
+    if (scale > 0.0f) *x = 0.5f + (*x - 0.5f) / scale;
+    return *x >= 0.0f && *x <= 1.0f && *y >= 0.0f && *y <= 1.0f;
+}
+
+bool PartyBoard_NetplayPadCharacters(int characters[4])
+{
+    s32 pad, player;
+    // The menus have not chosen yet; boards and minigames have.
+    if (omcurovl < DLL_w01dll || (omcurovl > DLL_w06dll && omMgIndexGet(omcurovl) == -1)) return false;
+    for (pad = 0; pad < 4; pad++) {
+        characters[pad] = -1;
+        for (player = 0; player < 4; player++) {
+            if (GWPlayerCfg[player].pad_idx == pad) characters[pad] = GWPlayerCfg[player].character;
+        }
+    }
+    return true;
 }
 
 // Both copies: GWPlayer drives the board, and GWPlayerCfg is what the next

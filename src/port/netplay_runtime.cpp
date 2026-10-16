@@ -273,6 +273,10 @@ struct Runtime {
     // Test-only, --netplay-probe-idle: seat 1's "turn" from frame 600, so the
     // rule runs end to end without walking menus to a board.
     bool idleProbe = false;
+    bool nameProbe = false;
+    // Each seat's nickname, from the companion. Shown over the characters on a
+    // board; it never reaches the simulation.
+    std::array<std::string, rollback::kMaxPlayers> seatNames {};
 };
 
 Runtime gRuntime;
@@ -2208,6 +2212,24 @@ extern "C" bool PartyBoard_NetplayConfigureFromArgs(int argc, char **argv)
             rollbackProbe = true;
         } else if (argument == "--netplay-rollback") {
             rollbackRequested = true;
+        } else if (argument == "--netplay-name" && index + 1 < argc) {
+            // <seat>:<hex of the UTF-8 name>. Hex, so no name can break the
+            // command line; bounded (72 bytes: 24 characters in kana), so none can be large.
+            const std::string_view value = argv[++index];
+            const auto colon = value.find(':');
+            std::uint8_t seat = 0;
+            std::string name;
+            bool ok = colon != std::string_view::npos && parseSeat(value.substr(0, colon), seat)
+                && (value.size() - colon - 1) % 2 == 0 && value.size() - colon - 1 <= 144;
+            for (std::size_t i = colon + 1; ok && i + 1 < value.size(); i += 2) {
+                unsigned byte = 0;
+                const auto [end, error] = std::from_chars(value.data() + i, value.data() + i + 2, byte, 16);
+                ok = error == std::errc() && end == value.data() + i + 2 && byte >= 0x20 && byte != 0x7f;
+                name.push_back(static_cast<char>(byte));
+            }
+            if (ok) gRuntime.seatNames[seat] = name;
+        } else if (argument == "--netplay-probe-names") {
+            gRuntime.nameProbe = true;
         } else if (argument == "--netplay-probe-idle") {
             gRuntime.idleProbe = true;
         } else if (argument == "--netplay-probe-disconnect") {
@@ -2993,6 +3015,19 @@ extern "C" int PartyBoard_NetplayIdleCountdown(int *seconds, int *character, boo
     if (character) *character = seat >= 0 ? PartyBoard_NetplayPadCharacter(seat) : -1;
     if (local) *local = seat >= 0 && seat == gRuntime.localPlayer;
     return seat;
+}
+
+extern "C" bool PartyBoard_NetplayNameProbe(void)
+{
+    return partyboard::netplay::gRuntime.enabled && partyboard::netplay::gRuntime.nameProbe;
+}
+
+extern "C" const char *PartyBoard_NetplaySeatName(int seat)
+{
+    using namespace partyboard::netplay;
+    if (!gRuntime.enabled || seat < 0 || seat >= partyboard::rollback::kMaxPlayers) return nullptr;
+    const auto &name = gRuntime.seatNames[seat];
+    return name.empty() ? nullptr : name.c_str();
 }
 
 extern "C" int PartyBoard_NetplayIdleTakeKick(int *character, bool *local)
