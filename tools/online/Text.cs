@@ -222,6 +222,8 @@ static class L {
         {"Les versions du jeu sont différentes. Copiez le même dossier PartyBoard sur les deux PC.","The game versions differ. Copy the same PartyBoard folder to both PCs."},
         {"Les versions sont différentes. Copiez le même dossier PartyBoard sur les deux PC.","The versions differ. Copy the same PartyBoard folder to both PCs."},
         {"Liste de mods trop longue.","Mod list too long."},
+        {"La partie ne peut pas encore être lancée.","The game cannot be started yet."},
+        {"Partie lancée.","Game started."},
         {"Mario Party 4 USA révision 1, ou européen\nISO, GCM ou RVZ — vérification du fichier complet","Mario Party 4 USA revision 1, or European\nISO, GCM or RVZ — the whole file is verified"},
         {"Mario Party 4.iso\nFichier vérifié","Mario Party 4.iso\nFile verified"},
         {"Message de salon trop long.","Room message too long."},

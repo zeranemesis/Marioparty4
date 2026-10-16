@@ -147,10 +147,13 @@ When the game is started from CubeShelf:
   unlock one.
 - **Invitations** to an online room are shared through CubeShelf, with the
   room's mods: a friend missing one installs it from GameBanana in the same click.
-- **Online tab**: public rooms waiting for a player and games under way, games
-  on the local network, and your own room, kept in step with the lobby window
-  (make it public or private, invite friends, close it). Joining a room installs
-  the mods it needs for that game only; your own mod choice is not changed.
+- **Online tab**: public rooms waiting for a player and games under way, and
+  the room itself, played inside CubeShelf -- the lobby runs without a window
+  of its own: every player's disc, mods and ping, Start for the host, the
+  room's mods picked among those installed or added from GameBanana, Use the
+  host's mods or Install the missing ones for a guest. Joining installs the
+  mods a room needs for that game only; your own mod choice is not changed.
+  LAN games stay in the game's own lobby.
 - **In the game (F1, Friends tab)**: your room and the public rooms, joinable
   without leaving for CubeShelf when your mods already match.
 

@@ -85,14 +85,16 @@ sealed class MainForm : Form {
         network=Make(L.T("Port fixe…"),ChooseNetwork);actions.Controls.Add(network);
         update=Make(L.T("Vérifier les mises à jour"),CheckForUpdates);actions.Controls.Add(update);
         footer=new Label{Dock=DockStyle.Fill,Font=new Font("Segoe UI",9),ForeColor=Color.DimGray};root.Controls.Add(footer,0,10);UpdateFooter();
-        nickname.TextChanged+=(s,e)=>RefreshLobby();RefreshControls();RefreshLobby();Task.Run(()=>StartupUpdateCheck());
+        nickname.TextChanged+=(s,e)=>RefreshLobby();RefreshControls();RefreshLobby();
+        // A launcher that shows the room itself offers updates itself: no dialog out of nowhere.
+        if(!startup.Headless)Task.Run(()=>StartupUpdateCheck());else ShowInTaskbar=false;
         // Not in the constructor: UI() drops a callback while the handle does not exist, so a disc
         // that verified faster than the window appeared would vanish without a trace.
         Shown+=(s,e)=>{if(startupApplied)return;startupApplied=true;ApplyStartup();};
         // The launcher's view of this room (RoomSync), when it asked for one.
         if(startup.StateDirectory!=null) {
             var timer=new System.Windows.Forms.Timer{Interval=400};timer.Tick+=(s,e)=>SyncRoom();timer.Start();
-            FormClosed+=(s,e)=>{timer.Stop();try{RoomSync.Write(startup.StateDirectory,new System.Collections.Generic.Dictionary<string,object>{{"state","closed"}},++syncRevision);}catch{}};
+            FormClosed+=(s,e)=>{timer.Stop();try{RoomSync.Write(startup.StateDirectory,new System.Collections.Generic.Dictionary<string,object>{{"state","closed"},{"message",status.Text}},++syncRevision);}catch{}};
         }
         FormClosing+=(s,e)=>{closing=true;fileCancel.Cancel();var old=session;session=null;if(old!=null)old.Dispose();if(disc!=null)disc.Dispose();};
     }
@@ -454,9 +456,9 @@ sealed class MainForm : Form {
     // start the game. It removes the typing, not the checks.
     void ApplyStartup(){
         if(startup.Mode==StartupMode.Manual)return;
-        // A launcher's rooms are online -- private for friends unless it asked
-        // for a public one -- or a game on this network when it says so.
-        if(startup.Lan)lanMode.Checked=true;else onlineMode.Checked=true;
+        // A launcher's rooms are online: private for friends unless it asked
+        // for a public one. LAN games are this window's own.
+        onlineMode.Checked=true;
         if(startup.Mode==StartupMode.Host && startup.Public)SetPublicBox(true);
         if(startup.Nickname!=null)nickname.Text=startup.Nickname;
         if(startup.Invitation!=null)invitation.Text=startup.Invitation;
@@ -472,6 +474,15 @@ sealed class MainForm : Form {
         LoadDisc(startup.DiscPath,RunStartupAction);
     }
     bool pendingStartupAction;
+    // Headless (PARTYBOARD_ONLINE_HEADLESS, with a state directory): the launcher shows the
+    // room, so this window never appears; everything else runs as it would, room.json carries
+    // what it would have shown and the launcher's requests do what its buttons would have.
+    protected override void SetVisibleCore(bool value) {
+        if(!startup.Headless){base.SetVisibleCore(value);return;}
+        if(!IsHandleCreated){CreateHandle();BeginInvoke((Action)(()=>{if(startupApplied)return;startupApplied=true;ApplyStartup();}));}
+        base.SetVisibleCore(false);
+    }
+    bool hadSession;
     long syncRevision;string syncLast;
     // What room.json says: this window's room, in the launcher's words.
     System.Collections.Generic.Dictionary<string,object> RoomState() {
@@ -485,8 +496,36 @@ sealed class MainForm : Form {
         state["state"]=room.State;state["game"]=room.Game;state["players"]=room.Players.ToArray();state["max"]=room.MaxPlayers;
         state["mods"]=room.Fields()["mods"];
         state["public"]=current.Public==PublicState.Listed;
+        // Which relay room this is, host or guest, so the launcher never lists it as someone else's.
+        if(current.Invite!=null && !current.Lan)state["roomId"]=Relay.RoomId(current.Invite.Token);
         if(current.PingMs.HasValue)state["ping"]=current.PingMs.Value;
         if(current.Lan)state["path"]="lan";else if(current.Bridge!=null)state["path"]=current.JoinPath;
+        var lobby=current.Lobby;
+        if(lobby!=null) {
+            // Every seat as this window's list shows it: who, which role, whether the disc
+            // matched, the mods, and the ping (two players only).
+            var seats=new System.Collections.Generic.List<object>();
+            for(int seat=0;seat<Lobby.MaxSeats;seat++) {
+                var info=lobby.SeatInfo(seat);if(info==null)continue;
+                bool mine=seat==lobby.LocalSeat;bool agrees=lobby.SeatAgrees(seat);
+                seats.Add(new System.Collections.Generic.Dictionary<string,object>{
+                    {"name",info.Name},{"host",seat==0},{"you",mine},
+                    {"disc",agrees?"same":info.DiscHash==null?"unknown":mine?"pending":"different"},
+                    {"mods",new Relay.RoomStatus{Mods=info.Mods}.Fields()["mods"]},
+                    {"ping",!mine && current.Bridge!=null && current.Bridge.UdpReady && current.PingMs.HasValue?(object)current.PingMs.Value:null}});
+            }
+            state["seats"]=seats.ToArray();
+            state["phase"]=lobby.Phase.ToString().ToLowerInvariant();
+            state["canStart"]=lobby.CanStart;
+            state["discsMatch"]=lobby.DiscMatches;
+            state["modsMatch"]=lobby.ModsMatch;
+            state["modAdvice"]=lobby.ModAdvice;
+            if(lobby.Ending!=LobbyEnding.None)state["ending"]=lobby.Ending.ToString();
+            if(!current.Host && lobby.RequiredMods!=null) {
+                state["missingMods"]=new Relay.RoomStatus{Mods=new ModSet(lobby.Local.Mods.Missing(lobby.RequiredMods))}.Fields()["mods"];
+                state["differsFromHost"]=lobby.HostInfo!=null && !lobby.Local.SameMods(lobby.HostInfo);
+            }
+        }
         // The invitation goes to the launcher for friends only: a private,
         // online room it hosts and that still has a seat.
         if(current.Host && !current.Lan && room.State=="waiting")state["invite"]=current.Invite.Encode();
@@ -495,6 +534,13 @@ sealed class MainForm : Form {
     void SyncRoom() {
         if(startup.StateDirectory==null || closing)return;
         try {
+            // Headless, a room that ended (left, failed, or its game is over) has nothing left
+            // to show here: the launcher is told why, and this process goes.
+            if(session!=null)hadSession=true;
+            if(startup.Headless && hadSession && session==null) {
+                RoomSync.Write(startup.StateDirectory,new System.Collections.Generic.Dictionary<string,object>{{"state","closed"},{"message",status.Text}},++syncRevision);
+                Close();return;
+            }
             var state=RoomState();
             var key=new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(state);
             if(key!=syncLast){RoomSync.Write(startup.StateDirectory,state,++syncRevision);syncLast=key;}
@@ -523,7 +569,26 @@ sealed class MainForm : Form {
             }
             case "close":
                 RoomSync.Complete(startup.StateDirectory,request,true,L.T("Room fermée."));
-                Reset();Close();return;
+                hadSession=false;Reset();Close();return;
+            case "start": {
+                if(current==null || current.Lobby==null || !current.Lobby.CanStart){RoomSync.Complete(startup.StateDirectory,request,false,current!=null && !current.Host?L.T("Seul l'hote peut lancer la partie."):L.T("La partie ne peut pas encore être lancée."));return;}
+                Task.Run(()=>{
+                    try{current.Launch();RoomSync.Complete(startup.StateDirectory,request,true,L.T("Partie lancée."));}
+                    catch(Exception e){RoomSync.Complete(startup.StateDirectory,request,false,e.Message);UI(()=>{if(session==current){SetStatus(e.Message);RefreshLobby();}});}
+                });
+                return;
+            }
+            case "align-host": {
+                if(current==null || current.Host || current.Lobby?.RequiredMods==null){RoomSync.Complete(startup.StateDirectory,request,false,L.T("Attendez que votre ami soit connecté."));return;}
+                AlignOnHost();RoomSync.Complete(startup.StateDirectory,request,true,L.T("Mods mis à jour dans la room."));return;
+            }
+            case "set-mods": {
+                var ids=Startup.ParseMods(request.Value??"");
+                if(ids==null){RoomSync.Complete(startup.StateDirectory,request,false,L.T("Liste de mods trop longue."));return;}
+                string from;var installed=InstalledMod.FromCubeShelf(GameId,out from);
+                ApplyMods(ModSet.AlignedTo(new ModSet(ids.Select(id=>new ModEntry(id,"","",new byte[8]))),installed));
+                RoomSync.Complete(startup.StateDirectory,request,true,L.T("Mods mis à jour dans la room."));return;
+            }
         }
     }
     void RunStartupAction(){

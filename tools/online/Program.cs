@@ -668,7 +668,6 @@ static class Program {
         if(args.Length==1 && args[0]=="--public-room-test") return Tests.RunPublicRoom();
         if(args.Length==1 && args[0]=="--lan-test") return Tests.RunLan();
         if(args.Length==1 && args[0]=="--room-tags") return RoomSync.PrintTags();
-        if(args.Length==1 && args[0]=="--lan-games") return RoomSync.PrintLanGames();
         int relayMinutes;if(args.Length==2 && args[0]=="--relay-session-test" && int.TryParse(args[1],out relayMinutes)) return Tests.RunRelaySession(relayMinutes);
         // Both PCs must hold byte-identical folders or Lobby refuses to start the
         // game. Printing the same hash the handshake uses lets a player check that

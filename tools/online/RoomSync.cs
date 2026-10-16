@@ -27,7 +27,7 @@ static class RoomSync {
     public static readonly TimeSpan RequestLifetime=TimeSpan.FromSeconds(30);
     const int MaximumRequestBytes=4096,MaximumRequestsPerRead=16;
     static readonly Regex IdPattern=new Regex("^[A-Za-z0-9-]{1,64}$",RegexOptions.CultureInvariant);
-    static readonly string[] Actions={"set-visibility","reload-mods","close"};
+    static readonly string[] Actions={"set-visibility","reload-mods","close","start","set-mods","align-host"};
 
     public sealed class Request {public string Id,Action,Value;}
 
@@ -81,23 +81,6 @@ static class RoomSync {
             Console.WriteLine(new JavaScriptSerializer().Serialize(new Dictionary<string,object>{
                 {"schema",Schema},{"build",Relay.Short(Wire.BuildHash(AppDomain.CurrentDomain.BaseDirectory))},{"disc",disc},{"game",game},
                 {"mods",status.Fields()["mods"]},{"relay",Relay.BaseUrl}}));
-            return 0;
-        } catch(Exception e) {Console.Error.WriteLine("FAIL: "+e.Message);return 1;}
-    }
-
-    // PartyBoardOnline.exe --lan-games, with PARTYBOARD_ONLINE_DISC: the games
-    // on this network a launcher can offer, found as the lobby's own "Parties
-    // en LAN" finds them (LanDiscovery), for the same build and disc. One JSON
-    // line on stdout; nothing leaves the network.
-    public static int PrintLanGames() {
-        try {
-            string disc,game;
-            if(!DiscTags(out disc,out game))return 2;
-            var tag=Enumerable.Range(0,8).Select(i=>Convert.ToByte(disc.Substring(i*2,2),16)).ToArray();
-            var games=LanDiscovery.Find(Wire.BuildHash(AppDomain.CurrentDomain.BaseDirectory),tag,1500);
-            Console.WriteLine(new JavaScriptSerializer().Serialize(new Dictionary<string,object>{
-                {"schema",Schema},{"games",games.Select(g=>new Dictionary<string,object>{
-                    {"name",g.Name},{"lang",g.Language},{"region",g.Region},{"players",g.Players},{"max",g.MaxPlayers},{"invite",g.Invite}}).ToArray()}}));
             return 0;
         } catch(Exception e) {Console.Error.WriteLine("FAIL: "+e.Message);return 1;}
     }

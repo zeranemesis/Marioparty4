@@ -31,7 +31,7 @@ sealed class Startup {
     public string StateDirectory; // where room.json and the launcher's requests live (RoomSync)
     public bool Public;           // host a public room rather than a private one
     public int[] ModIds;          // this session's mods, in order, by GameBanana id (null: CubeShelf's own list)
-    public bool Lan;              // a game on this network, not an online room
+    public bool Headless;         // no window: the launcher shows the room (needs StateDirectory)
 
     public static readonly Startup Manual = new Startup { Mode = StartupMode.Manual };
 
@@ -41,7 +41,7 @@ sealed class Startup {
     public const string InviteOutVariable = "PARTYBOARD_ONLINE_INVITE_OUT";
     public const string VisibilityVariable = "PARTYBOARD_ONLINE_VISIBILITY";
     public const string ModsVariable = "PARTYBOARD_ONLINE_MODS";
-    public const string ModeVariable = "PARTYBOARD_ONLINE_MODE";
+    public const string HeadlessVariable = "PARTYBOARD_ONLINE_HEADLESS";
 
     public static Startup Parse(string[] args, Func<string, string> environment) {
         if (args == null || environment == null) return Manual;
@@ -63,13 +63,16 @@ sealed class Startup {
             // Private unless asked, in so many words: a room is public only on purpose.
             Public = string.Equals(Trim(environment(VisibilityVariable)), "public", StringComparison.Ordinal),
             ModIds = ParseMods(environment(ModsVariable)),
-            Lan = string.Equals(Trim(environment(ModeVariable)), "lan", StringComparison.Ordinal)
+            Headless = Trim(environment(HeadlessVariable)) == "1"
         };
 
         // An invitation is the whole point of joining. Without one there is nothing to join, and
         // falling back to the manual window is better than a lobby error the player cannot act on.
         if (startup.Mode == StartupMode.Join && string.IsNullOrEmpty(startup.Invitation))
             return Manual;
+
+        // Without a state directory nobody would see the room: a window it is, then.
+        if (startup.StateDirectory == null) startup.Headless = false;
 
         return startup;
     }
