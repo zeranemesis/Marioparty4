@@ -285,7 +285,9 @@ jobs:
 
       # x86_64 builds Dawn from source, and Dawn's code generator runs on the
       # jinja2 it vendors. A Python that code was written for rather than the
-      # newest one macos-latest happens to carry, named to CMake.
+      # newest one macos-latest happens to carry, named to CMake. Tint's IR
+      # binary format is off there: it needs Dawn's protobuf target, which its
+      # configure no longer creates on this runner, and the game never uses it.
       - name: Python for Dawn's generator
         if: endsWith(matrix.preset, 'x86_64')
         uses: actions/setup-python@v5
@@ -293,7 +295,7 @@ jobs:
           python-version: '3.12'
 
       - name: Configure CMake
-        run: cmake --preset ${{matrix.preset}} ${{ matrix.platform == 'macos' && '-DCMAKE_OSX_SYSROOT="$SDKROOT"' || '' }} ${{ endsWith(matrix.preset, 'x86_64') && '-DPython3_EXECUTABLE="$pythonLocation/bin/python3" -DPython_EXECUTABLE="$pythonLocation/bin/python3"' || '' }}
+        run: cmake --preset ${{matrix.preset}} ${{ matrix.platform == 'macos' && '-DCMAKE_OSX_SYSROOT="$SDKROOT"' || '' }} ${{ endsWith(matrix.preset, 'x86_64') && '-DPython3_EXECUTABLE="$pythonLocation/bin/python3" -DPython_EXECUTABLE="$pythonLocation/bin/python3" -DTINT_BUILD_IR_BINARY=OFF' || '' }}
 
       - name: Move the Command Line Tools aside
         if: matrix.platform == 'macos'
