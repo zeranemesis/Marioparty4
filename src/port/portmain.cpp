@@ -29,6 +29,7 @@
 
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_filesystem.h>
+#include <SDL3/SDL_locale.h>
 #include <SDL3/SDL_log.h>
 #include <aurora/aurora.h>
 #include <aurora/event.h>
@@ -85,6 +86,33 @@ static void LanguageInit() {
 
     // Cache this to avoid funky shenanigans.
     selectedLanguage = static_cast<u8>(partyboard::getSettings().game.language.getValue());
+}
+
+// Until the player picks a language in the settings, the game follows the
+// system's: its first preferred language when the game has it (French, German,
+// Spanish, Italian), English otherwise. Held as an override, never saved, so a
+// change of the system's language is followed too, and choosing one in the
+// settings (a saved value) replaces it. Launch arguments (--lang, the online
+// lobby's host language) are applied after and win. A USA disc stays English
+// whatever this says (see the language cache above).
+static void FollowSystemLanguage() {
+    auto &language = partyboard::getSettings().game.language;
+    if (language.getLayer() != partyboard::config::ConfigVarLayer::Default) {
+        return;
+    }
+    int count = 0;
+    SDL_Locale **locales = SDL_GetPreferredLocales(&count);
+    if (locales == nullptr) {
+        return;
+    }
+    if (count > 0 && locales[0] != nullptr && locales[0]->language != nullptr) {
+        const std::string_view code = locales[0]->language;
+        if (code == "fr") language.setOverrideValue(partyboard::GameLanguage::French);
+        else if (code == "de") language.setOverrideValue(partyboard::GameLanguage::German);
+        else if (code == "es") language.setOverrideValue(partyboard::GameLanguage::Spanish);
+        else if (code == "it") language.setOverrideValue(partyboard::GameLanguage::Italian);
+    }
+    SDL_free(locales);
 }
 
 bool launchUILoop() {
@@ -644,6 +672,7 @@ extern "C" int port_main(int argc, char* argv[]) {
     PartyBoard_ConfigPath = calculate_config_path();
 
     partyboard::config::LoadFromUserPreferences();
+    FollowSystemLanguage();
     partyboard::launch::setCurrent(partyboard::launch::parse(argc, argv));
     ApplyLaunchArgs(partyboard::launch::current());
     std::string onlineDisc;

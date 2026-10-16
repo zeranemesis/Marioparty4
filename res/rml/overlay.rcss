@@ -143,6 +143,46 @@ toast.controller-warning heading {
     color: #00b4fa;
 }
 
+/* An online player's nickname over their character on a board. Its anchor is
+   the point over the head: centred on it, sitting on it. */
+nametag {
+    position: absolute;
+    display: none;
+    padding: 2dp 8dp;
+    border-radius: 6dp;
+    background-color: rgba(10, 14, 30, 72%);
+    border: 1dp rgba(255, 255, 255, 40%);
+    color: #ffffff;
+    font-size: 15dp;
+    font-weight: bold;
+    white-space: nowrap;
+    transform: translate(-50%, -100%);
+}
+
+nametag.seat0 { border-color: #e2453c; }
+nametag.seat1 { border-color: #3c7be2; }
+nametag.seat2 { border-color: #e2c23c; }
+nametag.seat3 { border-color: #3cc25a; }
+
+/* Online inactivity countdown: high and centred, where nobody misses it. */
+toast.idle-warning {
+    top: 40dp;
+    right: auto;
+    bottom: auto;
+    left: 50%;
+    width: 520dp;
+    max-width: 90%;
+    transform: translateX(-50%) scale(0.9);
+}
+
+toast.idle-warning[open] {
+    transform: translateX(-50%) scale(1);
+}
+
+toast.idle-warning heading {
+    color: #f5a623;
+}
+
 toast.menu-notification {
     top: 40dp;
     right: auto;

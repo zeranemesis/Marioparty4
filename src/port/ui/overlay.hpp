@@ -5,6 +5,7 @@
 #include "document.hpp"
 
 #include <chrono>
+#include <array>
 #include <deque>
 
 namespace partyboard::ui {
@@ -23,6 +24,10 @@ protected:
     Rml::Element *mCurrentToast = nullptr;
     Rml::Element *mControllerWarning = nullptr;
     Rml::Element *mMenuNotification = nullptr;
+    Rml::Element *mIdleWarning = nullptr;
+    std::array<Rml::Element *, 4> mNameTags {};
+
+    void update_name_tags();
     clock::time_point mCurrentToastStartTime;
     clock::time_point mMenuNotificationStartTime;
 

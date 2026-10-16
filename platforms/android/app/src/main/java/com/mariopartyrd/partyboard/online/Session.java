@@ -17,6 +17,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -51,6 +53,14 @@ final class Session implements AutoCloseable {
 
     volatile Invitation invite;
     volatile Bridge bridge;
+    // The relay (Relay.java) for a box that cannot be opened: a TURN allocation for
+    // the game, the room's socket, and the local ports of the connections it
+    // delivered to our own listener. Two-player salons only.
+    private Relay.TurnClient turn;
+    private Relay.RelaySocket relayHost;
+    private Relay.TurnShim shim;
+    private final Set<Integer> relayedPorts = ConcurrentHashMap.newKeySet();
+    volatile boolean relayReady;
     volatile boolean host;
     volatile Lobby lobby;
     volatile Integer pingMs;
@@ -189,6 +199,11 @@ final class Session implements AutoCloseable {
             i.localAddress = privateLocal ? route.local : Invitation.any();
             i.localPort = privateLocal ? port : 0;
             invite = i;
+            // A guest that cannot reach this phone -- the usual case on mobile
+            // data, behind a CGNAT -- comes through the relay instead.
+            if (players == 2 && Relay.available()) {
+                openRelay(bindAddress);
+            }
             if (players > 2) {
                 guestLinks = new Bridge[players];
                 lobby = new Lobby(true, profile, this::sendToSeat, this::prepare, this::commit, listener::changed);
@@ -270,6 +285,79 @@ final class Session implements AutoCloseable {
 
     private static final class PendingGuest {
         final SSLSocket[] channels = new SSLSocket[2];
+        final boolean[] relayed = new boolean[2];
+    }
+
+    // Credentials, a TURN allocation and the room, before the invitation is
+    // shown. Any failure leaves the salon as it was without a relay.
+    private void openRelay(InetAddress bindAddress) {
+        Relay.TurnClient allocation = null;
+        try {
+            listener.status(Msg.s("Préparation du relais en ligne…", "Preparing the online relay…"));
+            Relay.Credentials access = Relay.turnCredentials();
+            allocation = new Relay.TurnClient(access.server, access.username, access.credential);
+            allocation.allocate();
+            String room = Relay.roomId(invite.token);
+            InetSocketAddress relayed = allocation.relayed;
+            Relay.RelaySocket control = Relay.connect("/room/" + room + "/host?udp=" + relayed.getAddress().getHostAddress() + ":" + relayed.getPort());
+            InetAddress own = bindAddress.isAnyLocalAddress() ? Wire.LOOPBACK : bindAddress;
+            InetSocketAddress ownListener = new InetSocketAddress(own, server.getLocalPort());
+            synchronized (this) {
+                if (disposed) {
+                    allocation.close();
+                    control.close();
+                    return;
+                }
+                turn = allocation;
+                relayHost = control;
+                relayReady = true;
+            }
+            report.write("relay=ready");
+            Relay.TurnClient held = allocation;
+            spawn("relay", () -> relayNotices(room, control, held, ownListener));
+        } catch (IOException | RuntimeException e) {
+            if (allocation != null) {
+                allocation.close();
+            }
+            report.write("relay=unavailable error=" + e.getClass().getSimpleName());
+        }
+    }
+
+    // The room tells us when a guest arrives, with the address TURN will see: it
+    // is permitted, then the guest's connection is delivered to our own listener
+    // and accept() takes it like a TCP one.
+    private void relayNotices(String room, Relay.RelaySocket control, Relay.TurnClient allocation, InetSocketAddress ownListener) {
+        try {
+            while (!disposed && bridge == null) {
+                Relay.RelaySocket.Frame f = control.read();
+                if (f == null) {
+                    return;
+                }
+                if (f.text == null || !"incoming".equals(Relay.field(f.text, "type"))) {
+                    continue;
+                }
+                String conn = Relay.field(f.text, "conn");
+                String ip = Relay.field(f.text, "ip");
+                if (conn == null || !conn.matches("[0-9a-f]{32}")) {
+                    continue;
+                }
+                if (ip != null && ip.matches("\\d{1,3}(\\.\\d{1,3}){3}")) {
+                    try {
+                        allocation.permit(InetAddress.getByName(ip));
+                    } catch (IOException | RuntimeException e) {
+                        report.write("relay_permit_failed=" + e.getClass().getSimpleName());
+                    }
+                }
+                spawn("relay accept", () -> {
+                    try {
+                        Relay.forward(Relay.connect("/room/" + room + "/accept/" + conn), ownListener, relayedPorts);
+                    } catch (IOException | RuntimeException e) {
+                        report.write("relay_accept_failed=" + e.getClass().getSimpleName());
+                    }
+                });
+            }
+        } catch (IOException ignored) {
+        }
     }
 
     private void accept() {
@@ -327,6 +415,8 @@ final class Session implements AutoCloseable {
                     continue;
                 }
                 guest.channels[accepted.channel] = accepted.ssl;
+                guest.relayed[accepted.channel] = relayedPorts.contains(client.getPort()) && client.getInetAddress().isLoopbackAddress()
+                    || relayedPorts.contains(client.getPort()) && client.getInetAddress().equals(client.getLocalAddress());
                 if (guest.channels[0] == null || guest.channels[1] == null) {
                     listener.status(Msg.s("Premier canal sécurisé. Préparation du second…", "First secure channel ready. Preparing the second…"));
                     continue;
@@ -339,9 +429,31 @@ final class Session implements AutoCloseable {
                         gamePort = reserve.getLocalPort();
                     }
                     hostGamePort = gamePort;
-                    joinPath = "host";
-                    bridge = new Bridge(guest.channels[0], guest.channels[1], 0, internetGame, null, invite.token, gamePort, -1, false);
-                    internetGame = null;
+                    // The game datagrams go where the control came from: through
+                    // TURN for a relayed guest, the box's mapped port otherwise.
+                    boolean relayed = guest.relayed[0] || guest.relayed[1];
+                    DatagramChannel network;
+                    synchronized (this) {
+                        if (relayed && turn != null) {
+                            shim = new Relay.TurnShim(turn);
+                            turn = null;
+                            network = shim.internet;
+                            Wire.closeQuietly(internetGame);
+                        } else {
+                            network = internetGame;
+                            if (turn != null) {
+                                turn.close();
+                                turn = null;
+                            }
+                        }
+                        internetGame = null;
+                        if (relayHost != null) {
+                            relayHost.close();
+                            relayHost = null;
+                        }
+                    }
+                    joinPath = relayed ? "relay" : "host";
+                    bridge = new Bridge(guest.channels[0], guest.channels[1], 0, network, null, invite.token, gamePort, -1, false);
                     attachLobby();
                     return;
                 }
@@ -434,6 +546,10 @@ final class Session implements AutoCloseable {
             if (lanError instanceof Wire.Refused) {
                 throw lanError;
             }
+            if (invite.localOnly() && Relay.available() && maxPlayers == 2) {
+                joinViaRelay(clientId);
+                return;
+            }
             if (invite.localOnly()) {
                 throw new IOException(Msg.s(
                     "Votre ami n'est pas joignable. Sa box refuse les connexions depuis Internet : connectez-vous au même Wi-Fi que lui, puis réessayez.",
@@ -441,10 +557,17 @@ final class Session implements AutoCloseable {
             }
             listener.status(Msg.s("Connexion à votre ami…", "Connecting to your friend…"));
             Socket peer = new Socket();
+            boolean relay = Relay.available() && maxPlayers == 2;
             try {
-                peer.connect(new InetSocketAddress(invite.address, invite.port), 10000);
+                peer.connect(new InetSocketAddress(invite.address, invite.port), relay ? 6000 : 10000);
             } catch (IOException e) {
                 Wire.closeQuietly(peer);
+                // Only an unreachable host falls through to the relay; one that
+                // answers and refuses says why below.
+                if (relay) {
+                    joinViaRelay(clientId);
+                    return;
+                }
                 throw new IOException(Msg.s(
                     "Votre ami n'est pas joignable. Vérifiez qu'il a laissé son salon ouvert, ou inversez les rôles.",
                     "Your friend cannot be reached. Check that their lobby is still open, or swap roles."));
@@ -776,6 +899,35 @@ final class Session implements AutoCloseable {
         return a instanceof Inet4Address;
     }
 
+    // Both channels through the relay's room, each on a loopback socket the room's
+    // WebSocket carries, and the game datagrams to the host's TURN address.
+    private void joinViaRelay(byte[] clientId) throws IOException {
+        listener.status(Msg.s("Votre ami passe par le relais en ligne…", "Reaching your friend through the online relay…"));
+        String room = Relay.roomId(invite.token);
+        DatagramChannel udp = DatagramChannel.open();
+        SSLSocket toHost = null;
+        try {
+            udp.bind(new InetSocketAddress(0));
+            String self = Relay.publicAddress(udp, null);
+            InetSocketAddress[] hostUdp = new InetSocketAddress[1];
+            toHost = Wire.client(Relay.loopback(Relay.guestPipe(room, self, hostUdp)), invite, build, 0, clientId);
+            listener.status(Msg.s("Premier canal sécurisé. Préparation du second…", "First secure channel ready. Preparing the second…"));
+            SSLSocket fromHost = Wire.client(Relay.loopback(Relay.guestPipe(room, self, new InetSocketAddress[1])), invite, build, 1, clientId);
+            if (hostUdp[0] == null || disposed) {
+                Wire.closeQuietly(fromHost);
+                throw new IOException(disposed ? Msg.s("Salon fermé.", "Lobby closed.")
+                    : Msg.s("Le relais n'a pas donné l'adresse de jeu de votre ami.", "The relay did not give your friend's game address."));
+            }
+            joinPath = "relay";
+            bridge = new Bridge(fromHost, toHost, 1, udp, hostUdp[0], invite.token, 0, -1, false);
+            attachLobby();
+        } catch (IOException | RuntimeException e) {
+            Wire.closeQuietly(toHost);
+            Wire.closeQuietly(udp);
+            throw e;
+        }
+    }
+
     @Override
     public void close() {
         synchronized (this) {
@@ -787,6 +939,18 @@ final class Session implements AutoCloseable {
                 diagnosticTimer.shutdownNow();
             }
             Wire.closeQuietly(server);
+            if (turn != null) {
+                turn.close();
+                turn = null;
+            }
+            if (relayHost != null) {
+                relayHost.close();
+                relayHost = null;
+            }
+            if (shim != null) {
+                shim.close();
+                shim = null;
+            }
             GameLink link = gameLink;
             if (link != null) {
                 link.abort();

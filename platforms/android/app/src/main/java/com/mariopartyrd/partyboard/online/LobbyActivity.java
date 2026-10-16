@@ -640,7 +640,9 @@ public final class LobbyActivity extends Activity implements OnlineService.Obser
             }
         }
         status.setText(text);
-        String route = s != null && s.localOnly ? Msg.s(" · Même Wi-Fi uniquement", " · Same Wi-Fi only") : "";
+        String route = s != null && s.localOnly
+            ? (s.relayReady ? Msg.s(" · Par le relais en ligne", " · Through the online relay") : Msg.s(" · Même Wi-Fi uniquement", " · Same Wi-Fi only"))
+            : "";
         footer.setText(selectedPlayers + Msg.s(" joueurs", " players") + (selectedPlayers > 2 ? Msg.s(" (expérimental)", " (experimental)") : "")
             + Msg.s(" · Même fichier disque requis · Ping : aller-retour entre les téléphones", " · Same disc file required · Ping: round trip between the phones")
             + route);

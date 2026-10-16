@@ -98,14 +98,25 @@ Press **F1** (or **Back/Select**) in the game:
   data, so a session never mixes the two.
 - **With the European disc**, every player plays in the **host's language**,
   whatever their own setting.
-- **Create a lobby** and share the invitation (it starts with `PB4`), or **join**
-  by pasting the one a friend sent. Only the host starts the game.
+- **Two ways to play**:
+  - **Local network (LAN)**: the host creates a LAN game and the others pick it
+    from **Parties en LAN**, with no code to copy. Nothing goes through the
+    Internet.
+  - **Online, in rooms**: a **private room** for friends, who join by invitation
+    (from CubeShelf's friend list, or a code starting with `PB4`), or a **public
+    room**, listed for every player with the same disc and the same release.
+    The list shows each room's host, language, disc, players and mods, and the
+    games under way. Public rooms are for two players.
+- Only the host starts the game.
 - The lobby shows who is in, their disc and their ping; **every disc is checked
   in full** before joining.
 - **Mods**: the host chooses the lobby's mods; a guest whose list differs aligns
   on the host's in one click.
 - **Connection**: the router is opened automatically (UPnP, PCP or NAT-PMP).
-  Without that, the lobby still works for players on the same network.
+  When it cannot be (CGNAT, 4G, UPnP off), a two-player room goes through the
+  **online relay** instead (Cloudflare): the lobby is encrypted end to end
+  through it, and the game's packets are authenticated. A public room always
+  goes through the relay, so the list never says where a host is.
 - **Fair play**: both games run the same simulation in lockstep and compare their
   state every tick. If they ever diverge, the session stops rather than letting
   the two games drift apart.
@@ -125,7 +136,17 @@ When the game is started from CubeShelf:
 - **Friends**: see which board, turn or minigame they are on, or whether they
   are away; see their achievement progress, and get a notification when they
   unlock one.
-- **Invitations** to an online lobby are shared through CubeShelf.
+- **Invitations** to an online room are shared through CubeShelf, with the
+  room's mods: a friend missing one installs it from GameBanana in the same click.
+- **Online tab**: public rooms waiting for a player and games under way, and
+  the room itself, played inside CubeShelf -- the lobby runs without a window
+  of its own: every player's disc, mods and ping, Start for the host, the
+  room's mods picked among those installed or added from GameBanana, Use the
+  host's mods or Install the missing ones for a guest. Joining installs the
+  mods a room needs for that game only; your own mod choice is not changed.
+  LAN games stay in the game's own lobby.
+- **In the game (F1, Friends tab)**: your room and the public rooms, joinable
+  without leaving for CubeShelf when your mods already match.
 
 ## Meta Quest
 

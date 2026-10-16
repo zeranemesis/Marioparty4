@@ -29,9 +29,9 @@ static class UpdateService {
                 client.Headers[HttpRequestHeader.UserAgent]="PartyBoard-Updater/1.0";
                 var raw=client.DownloadString(ManifestUrl+"?t="+DateTime.UtcNow.Ticks);
                 Version remote;
-                if(!Version.TryParse(Json(raw,"version"),out remote)) throw new InvalidDataException("Le manifeste GitHub contient une version invalide.");
+                if(!Version.TryParse(Json(raw,"version"),out remote)) throw new InvalidDataException(L.T("Le manifeste GitHub contient une version invalide."));
                 var url=Json(raw,"downloadUrl");var hash=Json(raw,"sha256");
-                if(String.IsNullOrWhiteSpace(url)||!Regex.IsMatch(hash,"^[0-9a-fA-F]{64}$")) throw new InvalidDataException("Le manifeste GitHub est incomplet.");
+                if(String.IsNullOrWhiteSpace(url)||!Regex.IsMatch(hash,"^[0-9a-fA-F]{64}$")) throw new InvalidDataException(L.T("Le manifeste GitHub est incomplet."));
                 return new UpdateInfo{Version=remote,DownloadUrl=url,Sha256=hash.ToUpperInvariant(),Notes=Json(raw,"notes")};
             }
         });
@@ -45,7 +45,7 @@ static class UpdateService {
         }
         using(var sha=SHA256.Create()) using(var stream=File.OpenRead(zip)) {
             var actual=BitConverter.ToString(sha.ComputeHash(stream)).Replace("-","");
-            if(!String.Equals(actual,info.Sha256,StringComparison.OrdinalIgnoreCase)) {File.Delete(zip);throw new InvalidDataException("La signature SHA-256 de la mise à jour ne correspond pas.");}
+            if(!String.Equals(actual,info.Sha256,StringComparison.OrdinalIgnoreCase)) {File.Delete(zip);throw new InvalidDataException(L.T("La signature SHA-256 de la mise à jour ne correspond pas."));}
         }
         var target=AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar);
         var script=Path.Combine(Path.GetTempPath(),"PartyBoard-update-"+Guid.NewGuid().ToString("N")+".ps1");

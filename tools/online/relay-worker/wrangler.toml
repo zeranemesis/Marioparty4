@@ -1,0 +1,49 @@
+# PartyBoard online relay. Deploy from this folder:
+#   npx wrangler login
+#   npx wrangler secret put TURN_KEY_ID
+#   npx wrangler secret put TURN_KEY_API_TOKEN
+#   npx wrangler deploy
+# The two secrets come from Realtime > TURN in the Cloudflare dashboard. They
+# never go in this file, in the lobby or in the game.
+name = "partyboard-relay"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+# Served at https://partyboard-relay.<subdomain>.workers.dev; no preview URLs.
+workers_dev = true
+preview_urls = false
+
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "RelayRoom"
+
+[[durable_objects.bindings]]
+name = "DIRECTORY"
+class_name = "RoomDirectory"
+
+# SQLite-backed Durable Objects are the ones the Workers free plan offers.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelayRoom"]
+
+# The public room list.
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["RoomDirectory"]
+
+# Per address: TURN credentials, and new rooms. A lobby asks for one of each per
+# salon; these only stop someone scripting the relay.
+[[ratelimits]]
+name = "TURN_LIMIT"
+namespace_id = "41001"
+simple = { limit = 10, period = 60 }
+
+[[ratelimits]]
+name = "ROOM_LIMIT"
+namespace_id = "41002"
+simple = { limit = 20, period = 60 }
+
+# Reading the public list: a lobby refreshes it every few seconds at most.
+[[ratelimits]]
+name = "LIST_LIMIT"
+namespace_id = "41003"
+simple = { limit = 60, period = 60 }

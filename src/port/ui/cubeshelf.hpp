@@ -53,6 +53,28 @@ struct Friend {
     std::optional<FriendAchievements> achievements;
 };
 
+// The player's own online room, as the companion that hosts or joined it reports it.
+struct Room {
+    std::string state; // creating, joining, waiting, full, playing
+    std::string label; // in words, from CubeShelf
+    bool isHost = false;
+    bool isPublic = false;
+    bool canChangeVisibility = false;
+    std::vector<std::string> players;
+    int maxPlayers = 2;
+};
+
+// A public room of the relay's list, for this disc and this build.
+struct PublicRoom {
+    std::string id; // the relay room, 32 hex digits
+    std::string host;
+    std::string label;
+    std::vector<std::string> players;
+    int maxPlayers = 2;
+    bool joinable = false;  // still waiting for a player
+    bool modsReady = false; // every mod it plays with is installed here
+};
+
 struct State {
     bool fresh = false; // rewritten by a running CubeShelf within the last fifteen seconds
     long long revision = 0;
@@ -62,6 +84,9 @@ struct State {
     bool canHost = false;
     bool hosting = false;
     std::vector<Friend> friends;
+    std::optional<Room> room;
+    std::vector<PublicRoom> rooms;
+    bool canHostPublic = false;
     std::map<std::string, std::string> text;
 
     // A string CubeShelf supplied, or the English fallback when it did not.
@@ -116,6 +141,7 @@ private:
 
     long long mRevision = -1;
     bool mFresh = false;
+    void add_rooms(Pane &pane, const State &state);
     std::string mPendingId;
     bool mPendingCloses = false;
     clock::time_point mPendingSince {};

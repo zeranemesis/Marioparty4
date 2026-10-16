@@ -51,6 +51,34 @@ const char *PartyBoard_NetplayError(void);
 void PartyBoard_NetplayShutdown(void);
 bool PartyBoard_NetplayRuntimeRunSelfTest(void);
 
+/* Online inactivity (netplay_idle.hpp). The seat the board is counting down,
+ * or -1; seconds left, that seat's character (0..7, -1 unknown) and whether it
+ * is this machine's own seat. */
+int PartyBoard_NetplayIdleCountdown(int *seconds, int *character, bool *local);
+/* A seat replaced by a CPU since the last call, or -1. Each replacement is
+ * reported once; *local says whether it is this machine's own seat. */
+int PartyBoard_NetplayIdleTakeKick(int *character, bool *local);
+
+/* Game side, in pad.c: the pad of the human whose board turn it is (-1 outside
+ * a party board or during a CPU's turn), a pad's character, and turning a pad's
+ * player into a CPU of normal level for the rest of the party. */
+s32 PartyBoard_NetplayTurnPad(void);
+/* The nickname of a seat as the companion passed it (--netplay-name), UTF-8, or
+ * NULL when it gave none. Display only: never hashed, never synchronized. */
+const char *PartyBoard_NetplaySeatName(int seat);
+/* Where the head of the player on that pad is on the picture, as fractions of
+ * its width and height (0..1, widescreen included). False outside a party
+ * board, while that player's model is hidden, or off screen. */
+bool PartyBoard_NetplayPadHeadOnScreen(s32 pad, float *x, float *y);
+/* Test-only (--netplay-probe-names): the name tags sit in a fixed row, so their
+ * names and drawing can be checked without walking menus to a board. */
+bool PartyBoard_NetplayNameProbe(void);
+/* The character on each pad (0..7, -1 none) once a party is under way, for the
+ * launcher's room; false in the menus, before anyone has chosen. */
+bool PartyBoard_NetplayPadCharacters(int characters[4]);
+s32 PartyBoard_NetplayPadCharacter(s32 pad);
+void PartyBoard_NetplayPadBecomesCom(s32 pad);
+
 #ifdef __cplusplus
 }
 #endif
