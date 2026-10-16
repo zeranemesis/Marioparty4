@@ -284,8 +284,18 @@ jobs:
           xcode-select -p
           DEVELOPER_DIR="$developer" xcrun --sdk macosx --show-sdk-path
 
+      # x86_64 builds Dawn from source, and Dawn's code generator runs on the
+      # jinja2 it vendors, which does not import under the Python 3.15 that
+      # macos-latest now ships ("module 'jinja2' has no attribute
+      # 'BaseLoader'"). A Python it was written for, named to CMake.
+      - name: Python for Dawn's generator
+        if: endsWith(matrix.preset, 'x86_64')
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Configure CMake
-        run: cmake --preset ${{matrix.preset}} ${{ matrix.platform == 'macos' && '-DCMAKE_OSX_SYSROOT="$SDKROOT"' || '' }}
+        run: cmake --preset ${{matrix.preset}} ${{ matrix.platform == 'macos' && '-DCMAKE_OSX_SYSROOT="$SDKROOT"' || '' }} ${{ endsWith(matrix.preset, 'x86_64') && '-DPython3_EXECUTABLE="$pythonLocation/bin/python3" -DPython_EXECUTABLE="$pythonLocation/bin/python3"' || '' }}
 
       - name: Build
         run: cmake --build --preset ${{matrix.preset}}
