@@ -241,7 +241,16 @@ jobs:
             )
             capabilities = $capabilities
             changes = $changes
-          } | ConvertTo-Json -Depth 6
+          }
+          # What a player reads in CubeShelf about this version, in its two languages. Written
+          # by hand for a release (docs/releases/<tag>.json); a dev build has only its commits.
+          $notesFile = "docs/releases/${{ github.ref_name }}.json"
+          $notes = $null
+          if ("${{ github.ref_type }}" -eq "tag" -and (Test-Path $notesFile)) {
+            $notes = Get-Content $notesFile -Raw -Encoding utf8 | ConvertFrom-Json
+            $manifest.notes = $notes
+          }
+          $manifest = $manifest | ConvertTo-Json -Depth 6
 
           # Inside the package first, then beside it for the release. Not part of the folder hash:
           # Wire.BuildHash covers the DLLs and the two executables only.
@@ -262,6 +271,18 @@ jobs:
           Recent changes:
           $changes
           "@ | Set-Content "release-notes.txt" -Encoding utf8
+          if ($notes) {
+            @"
+          PartyBoard ${{ github.ref_name }}
+
+          $($notes.fr)
+
+          ---
+
+          $($notes.en)
+
+          "@ + (Get-Content "release-notes.txt" -Raw) | Set-Content "release-notes.txt" -Encoding utf8
+          }
 
       - name: Upload Actions artifact
         uses: actions/upload-artifact@v7

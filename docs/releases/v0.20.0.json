@@ -1,0 +1,4 @@
+{
+  "fr": "Rooms en ligne de 2 à 4 joueurs, publiques ou privées, par le relais : plus besoin d'ouvrir de port.\nRetirer un joueur et renommer la room tant qu'elle attend ; le ping de chaque joueur s'affiche.\nUne room à 3 ou 4 se lance quand toutes les places sont prises.\nSur le plateau, un joueur qui ne joue pas pendant 30 s a 60 s de compte à rebours, puis un ordinateur (niveau normal) prend sa place.\nLe pseudo de chaque joueur s'affiche au-dessus de son personnage.\nLa room indique quel personnage joue chacun.",
+  "en": "Online rooms for 2 to 4 players, public or private, through the relay: no port to open.\nRemove a player and rename the room while it waits; every player's ping is shown.\nA room for 3 or 4 starts once every seat is taken.\nOn a board, a player who does not play for 30 s gets a 60 s countdown, then a CPU (normal level) takes their place.\nEach player's nickname shows over their character.\nThe room says which character everyone plays."
+}
