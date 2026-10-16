@@ -27,8 +27,8 @@ sealed class ModEntry {
     public readonly byte[] Fingerprint;     // first 8 bytes of the archive SHA-256
 
     public ModEntry(int id,string name,string contentRoot,byte[] fingerprint) {
-        if(id<=0)throw new IOException("Identifiant de mod invalide.");
-        if(fingerprint==null || fingerprint.Length!=8)throw new IOException("Empreinte de mod invalide.");
+        if(id<=0)throw new IOException(L.T("Identifiant de mod invalide."));
+        if(fingerprint==null || fingerprint.Length!=8)throw new IOException(L.T("Empreinte de mod invalide."));
         Id=id;Name=ShortName(name);ContentRoot=contentRoot??"";Fingerprint=(byte[])fingerprint.Clone();
     }
 
@@ -70,7 +70,7 @@ sealed class ModSet {
     public readonly ModEntry[] Entries;
     public ModSet(IEnumerable<ModEntry> entries) {
         Entries=(entries??Enumerable.Empty<ModEntry>()).ToArray();
-        if(Entries.Length>MaxMods)throw new IOException("Trop de mods actifs pour une partie en ligne : "+Entries.Length+", maximum "+MaxMods+".");
+        if(Entries.Length>MaxMods)throw new IOException(L.T("Trop de mods actifs pour une partie en ligne : ")+Entries.Length+", maximum "+MaxMods+".");
     }
 
     public static readonly ModSet Empty=new ModSet(new ModEntry[0]);
@@ -105,15 +105,15 @@ sealed class ModSet {
     // the comparison, so a pure reordering is reported as such instead of leaving
     // someone hunting for a mod they already have.
     public string DifferenceFrom(ModSet required) {
-        if(required==null)return "Les mods de l'autre joueur ne sont pas encore connus.";
+        if(required==null)return L.T("Les mods de l'autre joueur ne sont pas encore connus.");
         var missing=required.Entries.Where(r=>Find(r.Id)==null).ToArray();
         var extra=Entries.Where(e=>required.Find(e.Id)==null).ToArray();
         var differing=required.Entries.Where(r=>{var m=Find(r.Id);return m!=null && !Wire.Equal(m.Fingerprint,r.Fingerprint);}).ToArray();
         var parts=new List<string>();
-        if(missing.Length>0)parts.Add("à installer : "+string.Join(", ",missing.Select(m=>m.Describe()).ToArray()));
-        if(extra.Length>0)parts.Add("à désactiver : "+string.Join(", ",extra.Select(m=>m.Describe()).ToArray()));
-        if(differing.Length>0)parts.Add("version différente : "+string.Join(", ",differing.Select(m=>m.Describe()).ToArray()));
-        if(parts.Count==0 && !Same(required))parts.Add("mêmes mods mais dans un autre ordre : alignez les priorités dans CubeShelf");
+        if(missing.Length>0)parts.Add(L.T("à installer : ")+string.Join(", ",missing.Select(m=>m.Describe()).ToArray()));
+        if(extra.Length>0)parts.Add(L.T("à désactiver : ")+string.Join(", ",extra.Select(m=>m.Describe()).ToArray()));
+        if(differing.Length>0)parts.Add(L.T("version différente : ")+string.Join(", ",differing.Select(m=>m.Describe()).ToArray()));
+        if(parts.Count==0 && !Same(required))parts.Add(L.T("mêmes mods mais dans un autre ordre : alignez les priorités dans CubeShelf"));
         return parts.Count==0?"":string.Join(" • ",parts.ToArray());
     }
 
@@ -122,18 +122,18 @@ sealed class ModSet {
         foreach(var e in Entries) {
             w.Write(e.Id);w.Write(e.Fingerprint);
             var name=Encoding.UTF8.GetBytes(e.Name);
-            if(name.Length>NameBytes+4)throw new IOException("Nom de mod trop long.");
+            if(name.Length>NameBytes+4)throw new IOException(L.T("Nom de mod trop long."));
             w.Write((byte)name.Length);w.Write(name);
         }
     }
 
     public static ModSet Read(BinaryReader r) {
         int count=r.ReadByte();
-        if(count>MaxMods)throw new IOException("Liste de mods trop longue.");
+        if(count>MaxMods)throw new IOException(L.T("Liste de mods trop longue."));
         var entries=new List<ModEntry>();
         for(int i=0;i<count;i++) {
             int id=r.ReadInt32();var fingerprint=r.ReadBytes(8);
-            int n=r.ReadByte();if(n>NameBytes+4)throw new IOException("Nom de mod trop long.");
+            int n=r.ReadByte();if(n>NameBytes+4)throw new IOException(L.T("Nom de mod trop long."));
             var name=new UTF8Encoding(false,true).GetString(r.ReadBytes(n));
             entries.Add(new ModEntry(id,name,"",fingerprint));
         }

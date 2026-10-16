@@ -23,8 +23,8 @@ sealed class Firewall : IDisposable {
             using(var ready=new EventWaitHandle(false,EventResetMode.ManualReset,Name(pid,port,"-ready"))) {
                 var info=new ProcessStartInfo(Application.ExecutablePath,"--firewall "+port+" "+pid+(lan?" lan":"")){UseShellExecute=true,Verb="runas",WindowStyle=ProcessWindowStyle.Hidden};
                 using(var p=Process.Start(info)) {
-                    if(!ready.WaitOne(15000)) throw new IOException("Windows n'a pas autorisé la connexion. Réessayez et acceptez sa demande d'autorisation.");
-                    if(p.HasExited) throw new IOException("Windows n'a pas pu préparer la connexion.");
+                    if(!ready.WaitOne(15000)) throw new IOException(L.T("Windows n'a pas autorisé la connexion. Réessayez et acceptez sa demande d'autorisation."));
+                    if(p.HasExited) throw new IOException(L.T("Windows n'a pas pu préparer la connexion."));
                 }
             }
             return result;
@@ -102,7 +102,7 @@ sealed class Session : IDisposable {
     public bool CanBePublic {get{return Host && maxPlayers==2 && RelayReady && relayHost!=null && !admitted && !disposed;}}
     public void SetPublic(bool on) {
         WebSocketStream control;lock(this) control=relayHost;
-        if(!CanBePublic || control==null) throw new IOException("Seul un salon à 2 joueurs, encore en attente, peut être public.");
+        if(!CanBePublic || control==null) throw new IOException(L.T("Seul un salon à 2 joueurs, encore en attente, peut être public."));
         var profile=Profile;
         var status=RoomStatus();if(on)lastStatus=status.Key;
         control.SendText(on?Relay.PublishRequest(Invite,profile.Name,profile.Language,disc!=null && disc.Pal,build,profile.DiscHash,status):"{\"type\":\"unpublish\"}");
@@ -180,25 +180,30 @@ sealed class Session : IDisposable {
     // No opening was possible: the salon is reachable only from this network.
     public bool LocalOnly {get{return mapping!=null && mapping.LocalOnly;}}
     public void Create(int players=2) {
-        if(players<2 || players>Lobby.MaxSeats)throw new IOException("Nombre de joueurs invalide.");
+        if(players<2 || players>Lobby.MaxSeats)throw new IOException(L.T("Nombre de joueurs invalide."));
         maxPlayers=players;
-        Host=true;status("Vérification de votre connexion…");var route=Route.Detect();
+        Host=true;status(L.T("Vérification de votre connexion…"));var route=Route.Detect();
         build=Wire.BuildHash(AppDomain.CurrentDomain.BaseDirectory);
         NetworkSettings.Load();
-        cert=Wire.Certificate(); listener=new TcpListener(route.Local,NetworkSettings.Port);
-        try {listener.Start(4);}
-        catch(SocketException) {if(NetworkSettings.Port==0)throw;throw new IOException("Le port fixe "+NetworkSettings.Port+" est déjà utilisé par un autre programme. Choisissez-en un autre dans Port fixe….");}
-        int port=((IPEndPoint)listener.LocalEndpoint).Port;
+        cert=Wire.Certificate();
+        // The game's UDP socket takes the same number as the TCP listener. An
+        // automatic port is TCP's choice, and Windows may reserve that number
+        // for UDP alone (Hyper-V, WSL and Docker exclude whole UDP ranges):
+        // then another port is drawn, rather than failing a salon at random.
+        var local=route.Local;
+        var pair=OpenPorts(NetworkSettings.Port,()=>new TcpListener(local,NetworkSettings.Port),
+            players==2?(Func<int,UdpClient>)(p=>new UdpClient(new IPEndPoint(local,p))):null,
+            p=>Report.Write("event=udp_port_reserved port="+p));
+        listener=pair.Item1;internetGame=pair.Item2;int port=((IPEndPoint)listener.LocalEndpoint).Port;
         try {
-            if(players==2) internetGame=new UdpClient(new IPEndPoint(route.Local,port));
-            status("Autorisez PartyBoard si Windows vous le demande…"); firewall=NoSystemChanges?null:Firewall.Open(port,Lan);
+            status(L.T("Autorisez PartyBoard si Windows vous le demande…")); firewall=NoSystemChanges?null:Firewall.Open(port,Lan);
             if(disposed) throw new OperationCanceledException();
             bool boxed=!RelayOnly && !Lan;
-            if(boxed)status(NetworkSettings.Port==0?"Préparation automatique de votre box…":"Préparation du port fixe "+port+"…");
+            if(boxed)status(NetworkSettings.Port==0?L.T("Préparation automatique de votre box…"):L.T("Préparation du port fixe ")+port+"…");
             mapping=boxed?Gateway.OpenFor(route,port,port,false):Gateway.LocalFor(route,port,false);
             if(players==2) {
                 mappingUdp=boxed?Gateway.OpenFor(route,port,mapping.Port,true):Gateway.LocalFor(route,port,true);
-                if(mappingUdp.Port!=mapping.Port || !mappingUdp.Address.Equals(mapping.Address))throw new IOException("La box n'a pas pu réserver le même accès rapide pour le jeu. Inversez les rôles et réessayez.");
+                if(mappingUdp.Port!=mapping.Port || !mappingUdp.Address.Equals(mapping.Address))throw new IOException(L.T("La box n'a pas pu réserver le même accès rapide pour le jeu. Inversez les rôles et réessayez."));
             }
             if(disposed) throw new OperationCanceledException();
             // route.Local is what the listener and the game UDP socket are
@@ -211,7 +216,7 @@ sealed class Session : IDisposable {
             if(players==2 && Relay.Available && !Lan) OpenRelay();
             if(Lan) {
                 try{beacon=new LanDiscovery.Beacon(build,disc.Hash,DescribeForLan);}
-                catch(SocketException e){throw new IOException("Le port "+LanDiscovery.Port+" de recherche des parties LAN est occupé ("+e.SocketErrorCode+"). Fermez l'autre programme qui l'utilise, puis réessayez.",e);}
+                catch(SocketException e){throw new IOException(L.T("Le port ")+LanDiscovery.Port+L.T(" de recherche des parties LAN est occupé (")+e.SocketErrorCode+L.T("). Fermez l'autre programme qui l'utilise, puis réessayez."),e);}
             }
             if(players>2) {
                 // Built now, not from the first guest's AttachLobby(): a mesh
@@ -241,10 +246,10 @@ sealed class Session : IDisposable {
         try {
             while(!cancel.IsCancellationRequested) {
                 await Task.Delay(TimeSpan.FromSeconds(Math.Max(5,mapping.Lifetime/2)),cancel.Token);
-                if(Bridge==null && DateTime.UtcNow>Invite.Expires) throw new IOException("L'invitation a expiré. Cliquez sur Créer une partie pour recommencer.");
-                lock(this) {if(disposed) return;mapping.Renew();mappingUdp.Renew();if(mappingUdp.Port!=mapping.Port || !mappingUdp.Address.Equals(mapping.Address))throw new IOException("La connexion de la box a changé.");}
+                if(Bridge==null && DateTime.UtcNow>Invite.Expires) throw new IOException(L.T("L'invitation a expiré. Cliquez sur Créer une partie pour recommencer."));
+                lock(this) {if(disposed) return;mapping.Renew();mappingUdp.Renew();if(mappingUdp.Port!=mapping.Port || !mappingUdp.Address.Equals(mapping.Address))throw new IOException(L.T("La connexion de la box a changé."));}
             }
-        } catch(OperationCanceledException) {} catch {if(!disposed) {failed("La connexion temporaire a été interrompue. Recréez une partie.");Dispose();}}
+        } catch(OperationCanceledException) {} catch {if(!disposed) {failed(L.T("La connexion temporaire a été interrompue. Recréez une partie."));Dispose();}}
     }
     void Accept() {
         if(maxPlayers>2) {AcceptMesh();return;}
@@ -257,7 +262,7 @@ sealed class Session : IDisposable {
                 client.NoDelay=true;client.ReceiveTimeout=8000;client.SendTimeout=8000;
                 Offer(client.GetStream(),client,false);
             }
-        } catch {if(!disposed && !admitted) {failed("L'attente a été interrompue. Recréez une partie.");Dispose();}}
+        } catch {if(!disposed && !admitted) {failed(L.T("L'attente a été interrompue. Recréez une partie."));Dispose();}}
     }
     // One channel of the guest, over TCP or through the relay. Both channels must
     // come from the same guest -- otherwise the two halves of one bridge could
@@ -266,13 +271,13 @@ sealed class Session : IDisposable {
     void Offer(Stream transport,IDisposable closer,bool viaRelay) {
         SslStream ssl;byte channel;byte[] clientId;
         try {ssl=Wire.Server(transport,cert,Invite,build,out channel,out clientId);}
-        catch {try{closer.Dispose();}catch{}if(!disposed && !admitted) status("En attente de votre ami…");return;}
+        catch {try{closer.Dispose();}catch{}if(!disposed && !admitted) status(L.T("En attente de votre ami…"));return;}
         lock(admitLock) {
             bool sameGuest=admitPairing==null || (Wire.Equal(admitPairing,clientId) && admitRelay==viaRelay);
             if(admitted || disposed || admitStreams[channel]!=null || !sameGuest) {ssl.Dispose();try{closer.Dispose();}catch{}return;}
             admitPairing=clientId;admitRelay=viaRelay;admitClosers[channel]=closer;admitStreams[channel]=ssl;
             if(!viaRelay){if(channel==0)peer=(TcpClient)closer;else peerWrite=(TcpClient)closer;}
-            if(admitStreams[0]==null || admitStreams[1]==null) {status("Premier canal sécurisé. Préparation du second…");return;}
+            if(admitStreams[0]==null || admitStreams[1]==null) {status(L.T("Premier canal sécurisé. Préparation du second…"));return;}
             admitted=true;
         }
         try{listener.Stop();}catch{}
@@ -293,6 +298,28 @@ sealed class Session : IDisposable {
     }
     // Credentials, a TURN allocation and the room, before the invitation is
     // shown. Any failure leaves the salon exactly as it was without a relay.
+    // The salon's TCP listener and, for two players, the game's UDP socket on
+    // the same number. An automatic port is TCP's choice, and Windows may
+    // reserve that number for UDP alone (Hyper-V, WSL and Docker exclude whole
+    // UDP ranges): another port is drawn then, up to twenty times, rather than
+    // failing a salon at random. A fixed port has no other choice and says so.
+    internal static Tuple<TcpListener,UdpClient> OpenPorts(int fixedPort,Func<TcpListener> listen,Func<int,UdpClient> bindUdp,Action<int> reserved) {
+        string busy=L.T("Le port fixe ")+fixedPort+L.T(" est déjà utilisé par un autre programme. Choisissez-en un autre dans Port fixe….");
+        for(int attempt=0;;attempt++) {
+            var listener=listen();
+            try {listener.Start(4);}
+            catch(SocketException) {if(fixedPort==0)throw;throw new IOException(busy);}
+            int port=((IPEndPoint)listener.LocalEndpoint).Port;
+            if(bindUdp==null) return Tuple.Create(listener,(UdpClient)null);
+            try {return Tuple.Create(listener,bindUdp(port));}
+            catch(SocketException e) when (e.SocketErrorCode==SocketError.AccessDenied || e.SocketErrorCode==SocketError.AddressAlreadyInUse) {
+                listener.Stop();
+                if(fixedPort!=0)throw new IOException(busy);
+                if(attempt>=20)throw;
+                reserved(port);
+            }
+        }
+    }
     // What a LAN question is answered with, while there is still a seat.
     LanDiscovery.Game DescribeForLan() {
         if(disposed || Invite==null)return null;
@@ -305,7 +332,7 @@ sealed class Session : IDisposable {
     void OpenRelay() {
         TurnClient allocation=null;
         try {
-            status("Préparation du relais en ligne…");
+            status(L.T("Préparation du relais en ligne…"));
             var access=Relay.TestTurn??Relay.TurnCredentials();
             allocation=new TurnClient(access.Item3,access.Item1,access.Item2);allocation.Allocate();
             var room=Relay.RoomId(Invite.Token);
@@ -340,9 +367,9 @@ sealed class Session : IDisposable {
                 try {
                     ssl=Wire.Server(client,cert,Invite,build,out channel,out clientId);
                     completed=pairing.Add(clientId,channel,Tuple.Create(client,ssl));
-                } catch {client.Close();if(!disposed) status("En attente de votre ami…");continue;}
+                } catch {client.Close();if(!disposed) status(L.T("En attente de votre ami…"));continue;}
                 if(disposed) {client.Close();return;}
-                if(completed==null) {status("Un ami rejoint le salon. Préparation du second canal…");continue;}
+                if(completed==null) {status(L.T("Un ami rejoint le salon. Préparation du second canal…"));continue;}
                 int seat=0;for(int s=1;s<maxPlayers;s++)if(guestLinks[s]==null){seat=s;break;}
                 if(seat==0) {completed[0].Item1.Close();completed[1].Item1.Close();continue;}
                 // No game port, no internet peer: this Bridge only ever carries the
@@ -354,10 +381,10 @@ sealed class Session : IDisposable {
                 var link=new Bridge(completed[0].Item1,completed[0].Item2,completed[1].Item1,completed[1].Item2,0,placeholder,null,Invite.Token,0,seat);
                 guestLinks[seat]=link;Lobby.Admit(seat);link.Control=packet=>Lobby.Receive(seat,packet);
                 WatchGuest(seat,link);seated++;
-                if(seated>=maxPlayers-1) {status("Salon complet.");listener.Stop();return;}
-                status("En attente d'un autre invité…");
+                if(seated>=maxPlayers-1) {status(L.T("Salon complet."));listener.Stop();return;}
+                status(L.T("En attente d'un autre invité…"));
             }
-        } catch {if(!disposed) {failed("L'attente a été interrompue. Recréez une partie.");Dispose();}}
+        } catch {if(!disposed) {failed(L.T("L'attente a été interrompue. Recréez une partie."));Dispose();}}
     }
     // One guest's control link failing (or simply ending) frees only its own
     // seat -- unlike the two-player Watch() below, where losing the one
@@ -382,8 +409,8 @@ sealed class Session : IDisposable {
     public void Join(string invitation) {
         Host=false;Invite=Invitation.Decode(invitation);maxPlayers=Invite.MaxPlayers;
         build=Wire.BuildHash(AppDomain.CurrentDomain.BaseDirectory);
-        if(Invite.Build!=null && !Wire.Equal(Invite.Build,build)) throw new IOException("Les versions sont différentes. Copiez le même dossier PartyBoard sur les deux PC.");
-        status("Connexion à votre ami…");
+        if(Invite.Build!=null && !Wire.Equal(Invite.Build,build)) throw new IOException(L.T("Les versions sont différentes. Copiez le même dossier PartyBoard sur les deux PC."));
+        status(L.T("Connexion à votre ami…"));
         // One identity for this guest, used on both of its channels, so the host can
         // pair them and seat us. Random rather than derived from anything: it only has
         // to be unique among the guests of one salon.
@@ -391,12 +418,12 @@ sealed class Session : IDisposable {
         // A LAN game's invitation names this network only: no relay behind it.
         bool lanGame=Gateway.Private(Invite.Address) && Invite.Address.Equals(Invite.LocalAddress) && Invite.Port==Invite.LocalPort;
         if(lanGame) {
-            status("Connexion à la partie sur votre réseau…");peer=new TcpClient(AddressFamily.InterNetwork);
+            status(L.T("Connexion à la partie sur votre réseau…"));peer=new TcpClient(AddressFamily.InterNetwork);
             bool reachedLan=false;try{reachedLan=peer.ConnectAsync(Invite.Address,Invite.Port).Wait(5000) && peer.Connected;}catch{}
-            if(!reachedLan){peer.Close();peer=null;throw new IOException("Cette partie n'est plus joignable sur votre réseau. Vérifiez que l'hôte a laissé sa fenêtre ouverte, puis actualisez la liste.");}
+            if(!reachedLan){peer.Close();peer=null;throw new IOException(L.T("Cette partie n'est plus joignable sur votre réseau. Vérifiez que l'hôte a laissé sa fenêtre ouverte, puis actualisez la liste."));}
             var lanHost=Wire.Client(peer,Invite,build,0,clientId);JoinPath="lan";
-            status("Premier canal sécurisé. Préparation du second…");peerWrite=new TcpClient(AddressFamily.InterNetwork);
-            if(!peerWrite.ConnectAsync(Invite.Address,Invite.Port).Wait(10000)){peerWrite.Close();lanHost.Dispose();throw new IOException("Le second canal n'a pas pu être créé.");}
+            status(L.T("Premier canal sécurisé. Préparation du second…"));peerWrite=new TcpClient(AddressFamily.InterNetwork);
+            if(!peerWrite.ConnectAsync(Invite.Address,Invite.Port).Wait(10000)){peerWrite.Close();lanHost.Dispose();throw new IOException(L.T("Le second canal n'a pas pu être créé."));}
             var lanFrom=Wire.Client(peerWrite,Invite,build,1,clientId);if(disposed){lanHost.Dispose();lanFrom.Dispose();throw new OperationCanceledException();}
             internetGame=new UdpClient(new IPEndPoint(IPAddress.Any,0));
             Bridge=new Bridge(peerWrite,lanFrom,peer,lanHost,1,internetGame,new IPEndPoint(Invite.Address,Invite.Port),Invite.Token);internetGame=null;AttachLobby();
@@ -411,7 +438,7 @@ sealed class Session : IDisposable {
         }
         // A public room's invitation has no address: the relay is the only way in.
         if(Invite.ThroughRelayOnly) {
-            if(!Relay.Available)throw new IOException("Les rooms publiques passent par le relais en ligne, qui est désactivé sur ce PC.");
+            if(!Relay.Available)throw new IOException(L.T("Les rooms publiques passent par le relais en ligne, qui est désactivé sur ce PC."));
             JoinViaRelay(clientId);return;
         }
         if(RelayOnly && Relay.Available && maxPlayers==2) {JoinViaRelay(clientId);return;}
@@ -423,7 +450,7 @@ sealed class Session : IDisposable {
         // fall through exactly as if nothing had answered.
         var target=Invite.Address;var targetPort=Invite.Port;SslStream toHost=null;
         if(Invite.HasLocalPath) {
-            status("Recherche de votre ami sur votre réseau…");
+            status(L.T("Recherche de votre ami sur votre réseau…"));
             var lan=new TcpClient(AddressFamily.InterNetwork);
             try {
                 if(lan.ConnectAsync(Invite.LocalAddress,Invite.LocalPort).Wait(2000) && lan.Connected) {
@@ -434,7 +461,7 @@ sealed class Session : IDisposable {
             if(toHost==null) {try{lan.Close();}catch{}}
         }
         if(toHost==null) {
-            status("Connexion à votre ami…");peer=new TcpClient(AddressFamily.InterNetwork);
+            status(L.T("Connexion à votre ami…"));peer=new TcpClient(AddressFamily.InterNetwork);
             // Only an unreachable host falls through to the relay. A host that
             // answers and refuses (another version, an expired invitation) says
             // why, and the relay would only say it again.
@@ -442,14 +469,14 @@ sealed class Session : IDisposable {
             try{reached=peer.ConnectAsync(Invite.Address,Invite.Port).Wait(Relay.Available?6000:10000) && peer.Connected;}catch{}
             if(!reached) {
                 peer.Close();peer=null;
-                if(!Relay.Available || maxPlayers>2) throw new IOException("Votre ami n'est pas joignable. Vérifiez qu'il a laissé sa fenêtre ouverte, ou essayez d'inverser les rôles.");
+                if(!Relay.Available || maxPlayers>2) throw new IOException(L.T("Votre ami n'est pas joignable. Vérifiez qu'il a laissé sa fenêtre ouverte, ou essayez d'inverser les rôles."));
                 JoinViaRelay(clientId);return;
             }
             toHost=Wire.Client(peer,Invite,build,0,clientId);target=Invite.Address;targetPort=Invite.Port;JoinPath="internet";
         }
-        status("Premier canal sécurisé. Préparation du second…");peerWrite=new TcpClient(AddressFamily.InterNetwork);
+        status(L.T("Premier canal sécurisé. Préparation du second…"));peerWrite=new TcpClient(AddressFamily.InterNetwork);
         var task=peerWrite.ConnectAsync(target,targetPort);
-        if(!task.Wait(10000)){peerWrite.Close();throw new IOException("Le second canal n'a pas pu être créé.");}
+        if(!task.Wait(10000)){peerWrite.Close();throw new IOException(L.T("Le second canal n'a pas pu être créé."));}
         var fromHost=Wire.Client(peerWrite,Invite,build,1,clientId);if(disposed){toHost.Dispose();fromHost.Dispose();throw new OperationCanceledException();}
         internetGame=new UdpClient(new IPEndPoint(IPAddress.Any,0));
         Bridge=new Bridge(peerWrite,fromHost,peer,toHost,1,internetGame,new IPEndPoint(target,targetPort),Invite.Token);internetGame=null;AttachLobby();
@@ -471,19 +498,19 @@ sealed class Session : IDisposable {
     // Both channels through the relay's room, the game datagrams to the host's
     // TURN address it announced there.
     void JoinViaRelay(byte[] clientId) {
-        status(Invite.ThroughRelayOnly?"Connexion à la room publique par le relais en ligne…":"Votre ami passe par le relais en ligne…");
+        status(Invite.ThroughRelayOnly?L.T("Connexion à la room publique par le relais en ligne…"):L.T("Votre ami passe par le relais en ligne…"));
         var room=Relay.RoomId(Invite.Token);
         internetGame=new UdpClient(new IPEndPoint(IPAddress.Any,0));
         var self=Relay.PublicAddress(internetGame);
         IPEndPoint hostUdp;WebSocketStream first=Relay.GuestPipe(room,self,out hostUdp),second=null;SslStream toHost,fromHost;
         try {
             toHost=Wire.Client(first,Invite,build,0,clientId);
-            status("Premier canal sécurisé. Préparation du second…");
+            status(L.T("Premier canal sécurisé. Préparation du second…"));
             IPEndPoint again;second=Relay.GuestPipe(room,self,out again);
             fromHost=Wire.Client(second,Invite,build,1,clientId);
         } catch {first.Dispose();if(second!=null)second.Dispose();throw;}
         if(disposed){toHost.Dispose();fromHost.Dispose();throw new OperationCanceledException();}
-        if(hostUdp==null){toHost.Dispose();fromHost.Dispose();throw new IOException("Le relais n'a pas donné l'adresse de jeu de votre ami.");}
+        if(hostUdp==null){toHost.Dispose();fromHost.Dispose();throw new IOException(L.T("Le relais n'a pas donné l'adresse de jeu de votre ami."));}
         JoinPath="relay";
         Bridge=new Bridge(second,fromHost,first,toHost,1,internetGame,hostUdp,Invite.Token);internetGame=null;AttachLobby();
     }
@@ -513,12 +540,12 @@ sealed class Session : IDisposable {
     // the live Gateway/Firewall exchange against a real router, which no test
     // in this repository can reach.
     public void OpenMesh() {
-        if(Lobby==null)throw new IOException("Le salon doit être prêt avant d'ouvrir la mise en réseau directe.");
+        if(Lobby==null)throw new IOException(L.T("Le salon doit être prêt avant d'ouvrir la mise en réseau directe."));
         var route=Route.Detect();
         NetworkSettings.Load();
         UdpClient socket;
         try {socket=new UdpClient(new IPEndPoint(route.Local,NetworkSettings.MeshPort));}
-        catch(SocketException) {if(NetworkSettings.MeshPort==0)throw;throw new IOException("Le port fixe "+NetworkSettings.MeshPort+" (jeu à 3 ou 4) est déjà utilisé par un autre programme. Choisissez un autre port fixe.");}
+        catch(SocketException) {if(NetworkSettings.MeshPort==0)throw;throw new IOException(L.T("Le port fixe ")+NetworkSettings.MeshPort+L.T(" (jeu à 3 ou 4) est déjà utilisé par un autre programme. Choisissez un autre port fixe."));}
         int port=((IPEndPoint)socket.Client.LocalEndPoint).Port;
         try {
             bool lanMesh=Lan || (Invite!=null && Gateway.Private(Invite.Address));
@@ -550,8 +577,8 @@ sealed class Session : IDisposable {
         Task.Run(async ()=> {string reason="Votre ami s'est déconnecté. Recréez une connexion.";try {await (maxPlayers>2?Bridge.RunControlOnly():Bridge.Run());}catch(IOException e){Report.Write("transport_error="+e.GetBaseException().GetType().Name+" hresult="+e.GetBaseException().HResult);reason=e.Message;}catch(Exception e){Report.Write("transport_error="+e.GetType().Name);}finally {if(!disposed) {failed(reason);Dispose();}}});
     }
     public void Launch() {
-        if(Lobby==null || disposed)throw new IOException("Attendez que votre ami soit connecté.");
-        if(!Bridge.UdpReady)throw new IOException("Le canal rapide du jeu se prépare encore. Attendez deux secondes puis réessayez.");
+        if(Lobby==null || disposed)throw new IOException(L.T("Attendez que votre ami soit connecté."));
+        if(!Bridge.UdpReady)throw new IOException(L.T("Le canal rapide du jeu se prépare encore. Attendez deux secondes puis réessayez."));
         Lobby.Start();
     }
     // Not the diagnostics directory: Report is documented as never holding a file
@@ -566,13 +593,13 @@ sealed class Session : IDisposable {
     void LoadGame(Guid attempt) {
         try {
         Report.Write("loading="+attempt);
-        if(disc==null || !Wire.Equal(disc.Hash,Profile.DiscHash))throw new IOException("Le disque n'est pas vérifié.");
+        if(disc==null || !Wire.Equal(disc.Hash,Profile.DiscHash))throw new IOException(L.T("Le disque n'est pas vérifié."));
         cancel.Token.ThrowIfCancellationRequested();
         gameStart=new GameStart(attempt);
         cancel.Token.ThrowIfCancellationRequested();
         string args;
         if(maxPlayers>2) {
-            if(meshRelay==null)throw new IOException("La mise en réseau directe n'est pas prête.");
+            if(meshRelay==null)throw new IOException(L.T("La mise en réseau directe n'est pas prête."));
             int ownPort;using(var reserve=new UdpClient(new IPEndPoint(IPAddress.Loopback,0)))ownPort=((IPEndPoint)reserve.Client.LocalEndPoint).Port;
             var peers=new List<Tuple<int,int>>();
             for(int seat=0;seat<maxPlayers;seat++)
@@ -608,9 +635,9 @@ sealed class Session : IDisposable {
         // port mapping -- left the player looking at a salon still listing both of them
         // after their own game had closed. failed() is idempotent: it does nothing once
         // the form has moved on to another session.
-        failed("La partie est terminée. Recréez un salon pour rejouer.");
+        failed(L.T("La partie est terminée. Recréez un salon pour rejouer."));
         if(!disposed)Dispose();
-        }catch(OperationCanceledException){}catch(Exception e){if(!disposed){failed(e is IOException?e.Message:"Le lancement a échoué. Fermez le salon puis réessayez.");Dispose();}}
+        }catch(OperationCanceledException){}catch(Exception e){if(!disposed){failed(e is IOException?e.Message:L.T("Le lancement a échoué. Fermez le salon puis réessayez."));Dispose();}}
         finally {if(gameStart!=null)gameStart.Dispose();}
     }
     public void Dispose() {
@@ -632,6 +659,9 @@ sealed class Session : IDisposable {
 
 static class Program {
     [STAThread] static int Main(string[] args) {
+        L.Init(Environment.GetEnvironmentVariable);
+        // The tests read the French messages, whatever the language of Windows.
+        if(args.Length>=1 && args[0].Contains("test")) L.English=false;
         if((args.Length==3 || (args.Length==4 && args[3]=="lan")) && args[0]=="--firewall") {int port,pid;return int.TryParse(args[1],out port)&&int.TryParse(args[2],out pid)?Firewall.Broker(port,pid,args.Length==4):2;}
         if(args.Length==1 && args[0]=="--self-test") return Tests.Run();
         if(args.Length==1 && args[0]=="--self-test-relay") return Tests.RunRelay();
@@ -651,7 +681,7 @@ static class Program {
             } catch(Exception e) {Console.Error.WriteLine(e.Message);return 1;}
         }
         if(args.Length==1 && args[0]=="--verify-disc") {
-            try {using(var disc=DiscFile.Verify(Environment.GetEnvironmentVariable("PARTYBOARD_ONLINE_DISC"),_=>{},CancellationToken.None))Console.WriteLine("PASS: disque "+(disc.Pal?"européen":"USA Rev 1")+" compatible, SHA-256 complet calculé, verrou de lecture actif.");return 0;}
+            try {using(var disc=DiscFile.Verify(Environment.GetEnvironmentVariable("PARTYBOARD_ONLINE_DISC"),_=>{},CancellationToken.None))Console.WriteLine("PASS: disque "+(disc.Pal?L.T("européen"):"USA Rev 1")+L.T(" compatible, SHA-256 complet calculé, verrou de lecture actif."));return 0;}
             catch(Exception e){Console.Error.WriteLine(e.Message);return 3;}
         }
         if(args.Length==2 && (args[0]=="--render-ui" || args[0]=="--render-lobby-preview")) {
@@ -659,7 +689,7 @@ static class Program {
             using(var form=new MainForm()) {form.ShowInTaskbar=false;form.StartPosition=FormStartPosition.Manual;form.Location=new Point(-32000,-32000);form.Show();if(args[0]=="--render-lobby-preview")form.PreviewLobby();form.PerformLayout();Application.DoEvents();using(var bitmap=new Bitmap(form.Width,form.Height)) {form.DrawToBitmap(bitmap,new Rectangle(0,0,form.Width,form.Height));bitmap.Save(args[1],System.Drawing.Imaging.ImageFormat.Png);}}
             return 0;
         }
-        if(args.Length==1 && args[0]=="--diagnose") {try{var r=Route.Detect();Console.WriteLine("Connexion physique détectée. Aucun port ouvert.");return 0;}catch(Exception e){Console.WriteLine(e.Message);return 1;}}
+        if(args.Length==1 && args[0]=="--diagnose") {try{var r=Route.Detect();Console.WriteLine(L.T("Connexion physique détectée. Aucun port ouvert."));return 0;}catch(Exception e){Console.WriteLine(e.Message);return 1;}}
         GameLanguage.Current=GameLanguage.FromArguments(args);
         Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);
         // --host / --join let a launcher open the companion on a lobby instead of on an empty

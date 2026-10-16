@@ -40,7 +40,7 @@ sealed class DiscFile : IDisposable {
         // Keep the verified file open until the session ends. Windows refuses
         // writes and replacement, including between verification and launch.
         file=new FileStream(Path,FileMode.Open,FileAccess.Read,FileShare.Read,1024*1024,FileOptions.SequentialScan);
-        Length=file.Length;if(Length==0){file.Dispose();throw new IOException("Ce fichier disque est vide.");}
+        Length=file.Length;if(Length==0){file.Dispose();throw new IOException(L.T("Ce fichier disque est vide."));}
     }
     public static DiscFile Verify(string path,Action<int> progress,CancellationToken token,bool inspect=true) {
         var disc=new DiscFile(path);
@@ -51,11 +51,11 @@ sealed class DiscFile : IDisposable {
                 using(var p=ChildProcess.Start(info,"PARTYBOARD_ONLINE_DISC",disc.Path)) {
                     var timer=Stopwatch.StartNew();
                     while(!p.WaitForExit(100)) {
-                        if(token.IsCancellationRequested || timer.Elapsed.TotalSeconds>30) {p.Kill();token.ThrowIfCancellationRequested();throw new IOException("La lecture du disque a pris trop de temps.");}
+                        if(token.IsCancellationRequested || timer.Elapsed.TotalSeconds>30) {p.Kill();token.ThrowIfCancellationRequested();throw new IOException(L.T("La lecture du disque a pris trop de temps."));}
                     }
                     // 0: USA revision 1, 4: the European disc (partyboard.exe --online-disc-check).
                     if(p.ExitCode==4) disc.Pal=true;
-                    else if(p.ExitCode!=0) throw new IOException("Choisissez un disque Mario Party 4 USA révision 1 ou européen (ISO, GCM ou RVZ). Ce fichier n'est pas compatible.");
+                    else if(p.ExitCode!=0) throw new IOException(L.T("Choisissez un disque Mario Party 4 USA révision 1 ou européen (ISO, GCM ou RVZ). Ce fichier n'est pas compatible."));
                 }
             }
             using(var sha=SHA256.Create()) {
@@ -98,13 +98,13 @@ sealed class PlayerInfo {
     // Only the host's counts: it is the language every seat loads (see LoadGame).
     public readonly byte Language;
     public PlayerInfo(string name,byte[] hash=null,long length=0,ModSet mods=null,byte language=GameLanguage.English) {
-        Name=CleanName(name);if(hash!=null && (hash.Length!=32 || length<=0)) throw new IOException("Information disque incorrecte.");
-        if(language>GameLanguage.Max) throw new IOException("Langue de jeu inconnue.");
+        Name=CleanName(name);if(hash!=null && (hash.Length!=32 || length<=0)) throw new IOException(L.T("Information disque incorrecte."));
+        if(language>GameLanguage.Max) throw new IOException(L.T("Langue de jeu inconnue."));
         DiscHash=hash==null?null:(byte[])hash.Clone();DiscLength=hash==null?0:length;Mods=mods??ModSet.Empty;Language=language;
     }
     public static string CleanName(string name) {
         name=(name??"").Trim();if(name.Length<1 || name.Length>24 || name.Any(c=>char.IsControl(c) || char.IsSurrogate(c)))
-            throw new IOException("Choisissez un pseudo de 1 à 24 caractères, sans retour à la ligne.");
+            throw new IOException(L.T("Choisissez un pseudo de 1 à 24 caractères, sans retour à la ligne."));
         return name;
     }
     public bool SameDisc(PlayerInfo other) {return other!=null && DiscHash!=null && other.DiscHash!=null && DiscLength==other.DiscLength && Wire.Equal(DiscHash,other.DiscHash);}
@@ -138,7 +138,7 @@ sealed class PlayerInfo {
                 if(r.BaseStream.Position==data.Length-1){language=r.ReadByte();if(language==GameLanguage.English || language>GameLanguage.Max)throw new IOException();}
                 if(r.BaseStream.Position!=data.Length)throw new IOException();return new PlayerInfo(name,hash,length,mods,language);
             }
-        }catch{throw new IOException("Informations du joueur incompatibles.");}
+        }catch{throw new IOException(L.T("Informations du joueur incompatibles."));}
     }
 }
 
@@ -247,7 +247,7 @@ sealed class Lobby {
     }}}
 
     public void Announce(){lock(this){if(Phase==LobbyPhase.Waiting)send(Broadcast,seats[LocalSeat].Encode());}}
-    public void Update(PlayerInfo local) {lock(this){if(Phase!=LobbyPhase.Waiting)throw new IOException("Le lancement est deja en cours.");seats[LocalSeat]=local;send(Broadcast,seats[LocalSeat].Encode());changed();}}
+    public void Update(PlayerInfo local) {lock(this){if(Phase!=LobbyPhase.Waiting)throw new IOException(L.T("Le lancement est deja en cours."));seats[LocalSeat]=local;send(Broadcast,seats[LocalSeat].Encode());changed();}}
     internal static byte[] Command(byte type,Guid id){return new[]{type}.Concat(id.ToByteArray()).ToArray();}
     // Seat assignment. Only the host sends it, and a guest accepts it only while
     // waiting: a seat moving under a launch would repoint every rule at once.
@@ -258,7 +258,7 @@ sealed class Lobby {
     // free-form profile PlayerInfo already owns.
     internal static byte[] EndpointCommand(int subjectSeat,IPEndPoint endpoint) {
         var address=endpoint.Address.GetAddressBytes();
-        if(address.Length!=4)throw new IOException("Seules les adresses IPv4 sont prises en charge pour le maillage.");
+        if(address.Length!=4)throw new IOException(L.T("Seules les adresses IPv4 sont prises en charge pour le maillage."));
         var packet=new byte[8];packet[0]=11;packet[1]=(byte)subjectSeat;
         Buffer.BlockCopy(address,0,packet,2,4);
         packet[6]=(byte)(endpoint.Port>>8);packet[7]=(byte)endpoint.Port;
@@ -296,9 +296,9 @@ sealed class Lobby {
     // changes.
     public void Admit(int guest,PlayerInfo info=null) {
         lock(this) {
-            if(!Host)throw new IOException("Seul l'hote attribue les places.");
-            if(guest<1 || guest>=MaxSeats)throw new IOException("Place invalide.");
-            if(Phase!=LobbyPhase.Waiting)throw new IOException("Le lancement est deja en cours.");
+            if(!Host)throw new IOException(L.T("Seul l'hote attribue les places."));
+            if(guest<1 || guest>=MaxSeats)throw new IOException(L.T("Place invalide."));
+            if(Phase!=LobbyPhase.Waiting)throw new IOException(L.T("Le lancement est deja en cours."));
             if(info!=null)seats[guest]=info;
             send(guest,SeatCommand(guest));send(guest,seats[0].Encode());
             // Catch-up: seats admitted earlier already broadcast their endpoint
@@ -321,10 +321,10 @@ sealed class Lobby {
     public void Start() {
         lock(this) {
             if(!CanStart) {
-                if(!Host)throw new IOException("Seul l'hote peut lancer la partie.");
-                if(Occupied<2)throw new IOException("Il faut au moins deux joueurs.");
-                if(!DiscMatches)throw new IOException("Tous les joueurs doivent avoir exactement le meme fichier disque.");
-                throw new IOException("Tous les joueurs doivent avoir exactement les memes mods actifs : "+ModAdvice);
+                if(!Host)throw new IOException(L.T("Seul l'hote peut lancer la partie."));
+                if(Occupied<2)throw new IOException(L.T("Il faut au moins deux joueurs."));
+                if(!DiscMatches)throw new IOException(L.T("Tous les joueurs doivent avoir exactement le meme fichier disque."));
+                throw new IOException(L.T("Tous les joueurs doivent avoir exactement les memes mods actifs : ")+ModAdvice);
             }
             attempt=Guid.NewGuid();Phase=LobbyPhase.Preparing;Array.Clear(ready,0,ready.Length);
             send(Broadcast,Command(3,attempt));prepare(attempt);changed();
@@ -355,29 +355,29 @@ sealed class Lobby {
     // message does not: a guest cannot claim to be someone else by writing it down.
     public void Receive(int from,byte[] packet) {
         lock(this) {
-            if(Phase==LobbyPhase.Closed)throw new IOException("Le salon est ferme.");
-            if(from<0 || from>=MaxSeats || from==LocalSeat)throw new IOException("Place inconnue.");
+            if(Phase==LobbyPhase.Closed)throw new IOException(L.T("Le salon est ferme."));
+            if(from<0 || from>=MaxSeats || from==LocalSeat)throw new IOException(L.T("Place inconnue."));
             if(packet.Length>0 && packet[0]==2) {
-                if(Phase!=LobbyPhase.Waiting)throw new IOException("Le disque ou le pseudo a change pendant le lancement.");
+                if(Phase!=LobbyPhase.Waiting)throw new IOException(L.T("Le disque ou le pseudo a change pendant le lancement."));
                 seats[from]=PlayerInfo.Decode(packet);changed();return;
             }
             if(packet.Length==2 && packet[0]==9) {
-                if(Host)throw new IOException("Un invite n attribue pas les places.");
-                if(from!=0)throw new IOException("Seul l hote attribue les places.");
-                if(Phase!=LobbyPhase.Waiting)throw new IOException("La place ne peut pas changer pendant le lancement.");
+                if(Host)throw new IOException(L.T("Un invite n attribue pas les places."));
+                if(from!=0)throw new IOException(L.T("Seul l hote attribue les places."));
+                if(Phase!=LobbyPhase.Waiting)throw new IOException(L.T("La place ne peut pas changer pendant le lancement."));
                 int seat=packet[1];
-                if(seat<1 || seat>=MaxSeats)throw new IOException("Place invalide.");
+                if(seat<1 || seat>=MaxSeats)throw new IOException(L.T("Place invalide."));
                 if(seat!=LocalSeat){var mine=seats[LocalSeat];seats[LocalSeat]=null;LocalSeat=seat;seats[seat]=mine;}
                 changed();return;
             }
             if(packet.Length==8 && packet[0]==11) {
                 int subjectSeat;IPEndPoint endpoint;
-                if(!DecodeEndpoint(packet,out subjectSeat,out endpoint))throw new IOException("Adresse de pair incorrecte.");
+                if(!DecodeEndpoint(packet,out subjectSeat,out endpoint))throw new IOException(L.T("Adresse de pair incorrecte."));
                 if(Host) {
                     // Self-announcement only: a guest cannot speak for a seat that
                     // is not its own, since that is exactly the roster the other
                     // guests will trust.
-                    if(subjectSeat!=from)throw new IOException("Un joueur ne peut annoncer que sa propre adresse.");
+                    if(subjectSeat!=from)throw new IOException(L.T("Un joueur ne peut annoncer que sa propre adresse."));
                     endpoints[subjectSeat]=endpoint;
                     for(int seat=1;seat<MaxSeats;seat++)
                         if(seats[seat]!=null && seat!=from)send(seat,packet);
@@ -390,30 +390,30 @@ sealed class Lobby {
                 EndpointLearned?.Invoke(subjectSeat,endpoint);
                 changed();return;
             }
-            if(packet.Length!=17)throw new IOException("Commande de salon incorrecte.");
+            if(packet.Length!=17)throw new IOException(L.T("Commande de salon incorrecte."));
             var id=new Guid(packet.Skip(1).ToArray());
             switch(packet[0]) {
                 case 3:
-                    if(Host || from!=0 || Phase!=LobbyPhase.Waiting || !AgreesWithHost(LocalSeat) || id==Guid.Empty)throw new IOException("Demande de lancement non autorisee.");
+                    if(Host || from!=0 || Phase!=LobbyPhase.Waiting || !AgreesWithHost(LocalSeat) || id==Guid.Empty)throw new IOException(L.T("Demande de lancement non autorisee."));
                     attempt=id;Phase=LobbyPhase.Preparing;Array.Clear(ready,0,ready.Length);prepare(attempt);break;
                 case 4:
-                    if(!Host || Phase!=LobbyPhase.Preparing || id!=attempt || ready[from])throw new IOException("Confirmation de chargement inattendue.");
+                    if(!Host || Phase!=LobbyPhase.Preparing || id!=attempt || ready[from])throw new IOException(L.T("Confirmation de chargement inattendue."));
                     ready[from]=true;TryCommit();break;
                 case 5:
-                    if(Host || from!=0 || Phase!=LobbyPhase.Preparing || id!=attempt || !ready[LocalSeat])throw new IOException("Depart de partie non autorise.");
+                    if(Host || from!=0 || Phase!=LobbyPhase.Preparing || id!=attempt || !ready[LocalSeat])throw new IOException(L.T("Depart de partie non autorise."));
                     Phase=LobbyPhase.Running;commit(attempt);break;
                 case 8:
                     // A player has closed their game. Accepted only for the attempt
                     // actually under way, and only once a launch exists, so it cannot be
                     // used to knock a waiting salon over.
-                    if(Phase!=LobbyPhase.Running && Phase!=LobbyPhase.Preparing)throw new IOException("Fin de partie inattendue.");
-                    if(id!=attempt)throw new IOException("Fin de partie perimee.");
+                    if(Phase!=LobbyPhase.Running && Phase!=LobbyPhase.Preparing)throw new IOException(L.T("Fin de partie inattendue."));
+                    if(id!=attempt)throw new IOException(L.T("Fin de partie perimee."));
                     // In a star the host has to relay it: a guest hears only from the
                     // host, so without this the other guests sit in a salon that never
                     // empties -- the very bug this protocol just learned to avoid.
                     if(Host)for(int i=1;i<MaxSeats;i++)if(seats[i]!=null && i!=from){try{send(i,Command(8,attempt));}catch{}}
                     Ending=LobbyEnding.RemoteGameClosed;Phase=LobbyPhase.Closed;break;
-                default:throw new IOException("Commande de salon inconnue.");
+                default:throw new IOException(L.T("Commande de salon inconnue."));
             }
             changed();
         }
@@ -453,14 +453,14 @@ sealed class GameStart : IDisposable {
     // Lobby and every socket type so the string itself is what Tests.cs checks,
     // the same way OnlineArguments already is.
     public static string MeshArguments(int ownPort,int seat,int players,IEnumerable<Tuple<int,int>> peers) {
-        if(ownPort<=0 || ownPort>65535)throw new IOException("Port de jeu invalide.");
-        if(players<3 || players>Lobby.MaxSeats || seat<0 || seat>=players)throw new IOException("Configuration de maillage invalide.");
+        if(ownPort<=0 || ownPort>65535)throw new IOException(L.T("Port de jeu invalide."));
+        if(players<3 || players>Lobby.MaxSeats || seat<0 || seat>=players)throw new IOException(L.T("Configuration de maillage invalide."));
         var args="--netplay-host "+ownPort+" --netplay-players "+players+" --netplay-seat "+seat;
         var seen=new bool[players];
         foreach(var peer in peers) {
             int peerSeat=peer.Item1,peerPort=peer.Item2;
-            if(peerSeat==seat || peerSeat<0 || peerSeat>=players)throw new IOException("Pair de maillage invalide.");
-            if(seen[peerSeat])throw new IOException("Pair de maillage répété.");
+            if(peerSeat==seat || peerSeat<0 || peerSeat>=players)throw new IOException(L.T("Pair de maillage invalide."));
+            if(seen[peerSeat])throw new IOException(L.T("Pair de maillage répété."));
             seen[peerSeat]=true;
             args+=" --netplay-peer "+peerSeat+":127.0.0.1:"+peerPort;
         }
@@ -489,12 +489,12 @@ sealed class GameStart : IDisposable {
         var timer=Stopwatch.StartNew();
         while(!ready.WaitOne(50)) {
             token.ThrowIfCancellationRequested();
-            if(Process.HasExited)throw new IOException("Le jeu s'est fermé pendant le chargement. Vérifiez votre disque et relancez le salon.");
-            if(timer.Elapsed.TotalSeconds>=120)throw new IOException("Le jeu n'a pas terminé son chargement après deux minutes.");
+            if(Process.HasExited)throw new IOException(L.T("Le jeu s'est fermé pendant le chargement. Vérifiez votre disque et relancez le salon."));
+            if(timer.Elapsed.TotalSeconds>=120)throw new IOException(L.T("Le jeu n'a pas terminé son chargement après deux minutes."));
         }
-        token.ThrowIfCancellationRequested();if(Process.HasExited)throw new IOException("Le jeu s'est fermé avant le départ.");
+        token.ThrowIfCancellationRequested();if(Process.HasExited)throw new IOException(L.T("Le jeu s'est fermé avant le départ."));
     }
-    public void Commit(Guid id){if(id!=Attempt)throw new IOException("Départ périmé.");go.Set();}
+    public void Commit(Guid id){if(id!=Attempt)throw new IOException(L.T("Départ périmé."));go.Set();}
     public void Abort(){try{cancel.Set();}catch(ObjectDisposedException){}}
     public void Dispose(){cancel.Set();ready.Dispose();go.Dispose();cancel.Dispose();}
 }

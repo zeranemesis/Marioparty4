@@ -190,7 +190,7 @@ sealed class TurnClient : IDatagramSocket {
                 server.Send(bytes,bytes.Length);
                 if(done.Task.Wait(wait))return done.Task.Result;
             }
-            throw new IOException("Le relais ne répond pas.");
+            throw new IOException(L.T("Le relais ne répond pas."));
         } finally {TaskCompletionSource<Stun.Message> ignored;pending.TryRemove(Key(request.Transaction),out ignored);}
     }
 
@@ -204,9 +204,9 @@ sealed class TurnClient : IDatagramSocket {
             if(reply.Class==Stun.Success)return reply;
             int code=Stun.ReadErrorCode(reply.Get(Stun.ErrorCode));
             if(code==438 && reply.Get(Stun.Nonce)!=null){nonce=reply.Get(Stun.Nonce);continue;}
-            throw new IOException("Le relais a refusé la demande (code "+code+").");
+            throw new IOException(L.T("Le relais a refusé la demande (code ")+code+").");
         }
-        throw new IOException("Le relais a refusé la demande.");
+        throw new IOException(L.T("Le relais a refusé la demande."));
     }
 
     public void Allocate() {
@@ -215,11 +215,11 @@ sealed class TurnClient : IDatagramSocket {
         var probe=Stun.New(Stun.Allocate,Stun.Request).Add(Stun.RequestedTransport,new byte[]{17,0,0,0});
         var challenge=Transact(probe,false);
         if(challenge.Class!=Stun.Error || Stun.ReadErrorCode(challenge.Get(Stun.ErrorCode))!=401 || challenge.Get(Stun.Realm)==null || challenge.Get(Stun.Nonce)==null)
-            throw new IOException("Le relais ne propose pas d'authentification.");
+            throw new IOException(L.T("Le relais ne propose pas d'authentification."));
         realm=Encoding.UTF8.GetString(challenge.Get(Stun.Realm));nonce=challenge.Get(Stun.Nonce);key=Stun.LongTermKey(username,realm,password);
         var reply=Authenticated(Stun.Allocate,r=>r.Add(Stun.RequestedTransport,new byte[]{17,0,0,0}));
         Relayed=Stun.ReadXorAddress(reply.Get(Stun.XorRelayedAddress));Mapped=Stun.ReadXorAddress(reply.Get(Stun.XorMappedAddress));
-        if(Relayed==null)throw new IOException("Le relais n'a pas donné d'adresse.");
+        if(Relayed==null)throw new IOException(L.T("Le relais n'a pas donné d'adresse."));
         var granted=Stun.ReadU32(reply.Get(Stun.Lifetime));if(granted>=60)lifetime=granted;
         // An allocation lives `lifetime` seconds, a permission five minutes and a
         // channel binding ten: one timer refreshes all three well before.
@@ -343,8 +343,8 @@ sealed class WebSocketStream : Stream {
             while(true) {
                 WebSocketReceiveResult r;
                 try{r=socket.ReceiveAsync(new ArraySegment<byte>(chunk),deadline.Token).GetAwaiter().GetResult();}
-                catch(OperationCanceledException){throw new IOException("Le relais ne répond plus.");}
-                catch(WebSocketException e){throw new IOException("Le relais a fermé la connexion.",e);}
+                catch(OperationCanceledException){throw new IOException(L.T("Le relais ne répond plus."));}
+                catch(WebSocketException e){throw new IOException(L.T("Le relais a fermé la connexion."),e);}
                 if(r.MessageType==WebSocketMessageType.Close){Closed=true;CloseCode=(int?)r.CloseStatus??0;binary=false;return null;}
                 message.Write(chunk,0,r.Count);
                 if(!r.EndOfMessage)continue;
@@ -374,15 +374,15 @@ sealed class WebSocketStream : Stream {
         var bytes=Encoding.UTF8.GetBytes(text);
         lock(sendLock) using(var deadline=Deadline(WriteTimeout==Timeout.Infinite?10000:WriteTimeout)) {
             try{socket.SendAsync(new ArraySegment<byte>(bytes),WebSocketMessageType.Text,true,deadline.Token).GetAwaiter().GetResult();}
-            catch(OperationCanceledException){throw new IOException("Le relais ne répond plus.");}
-            catch(WebSocketException e){throw new IOException("Le relais a fermé la connexion.",e);}
+            catch(OperationCanceledException){throw new IOException(L.T("Le relais ne répond plus."));}
+            catch(WebSocketException e){throw new IOException(L.T("Le relais a fermé la connexion."),e);}
         }
     }
     public override void Write(byte[] source,int at,int count) {
         using(var deadline=Deadline(WriteTimeout)) {
             try{socket.SendAsync(new ArraySegment<byte>(source,at,count),WebSocketMessageType.Binary,true,deadline.Token).GetAwaiter().GetResult();}
-            catch(OperationCanceledException){throw new IOException("Le relais ne répond plus.");}
-            catch(WebSocketException e){throw new IOException("Le relais a fermé la connexion.",e);}
+            catch(OperationCanceledException){throw new IOException(L.T("Le relais ne répond plus."));}
+            catch(WebSocketException e){throw new IOException(L.T("Le relais a fermé la connexion."),e);}
         }
     }
     protected override void Dispose(bool disposing) {if(disposing){try{socket.Abort();}catch{}socket.Dispose();}base.Dispose(disposing);}
@@ -412,7 +412,7 @@ static class Relay {
         var ws=new ClientWebSocket();ws.Options.KeepAliveInterval=TimeSpan.FromSeconds(20);
         using(var deadline=new CancellationTokenSource(timeoutMs)) {
             try{ws.ConnectAsync(Socket(path),deadline.Token).GetAwaiter().GetResult();}
-            catch(Exception e){ws.Dispose();throw new IOException("Le relais en ligne n'est pas joignable.",e);}
+            catch(Exception e){ws.Dispose();throw new IOException(L.T("Le relais en ligne n'est pas joignable."),e);}
         }
         return new WebSocketStream(ws);
     }
@@ -426,7 +426,7 @@ static class Relay {
         var urls=((System.Collections.ArrayList)reply["urls"]).Cast<object>().Select(u=>(string)u).ToArray();
         // turn:host:port?transport=udp -- the UDP one on 3478, the port TURN is for.
         var url=urls.FirstOrDefault(u=>u.StartsWith("turn:") && u.Contains("transport=udp") && u.Contains(":3478"))??urls.FirstOrDefault(u=>u.StartsWith("turn:") && u.Contains("transport=udp"));
-        if(username==null || credential==null || url==null)throw new IOException("Le relais n'a pas donné d'accès.");
+        if(username==null || credential==null || url==null)throw new IOException(L.T("Le relais n'a pas donné d'accès."));
         var hostPort=url.Substring(5).Split('?')[0];var colon=hostPort.LastIndexOf(':');
         var host=hostPort.Substring(0,colon);int port=int.Parse(hostPort.Substring(colon+1));
         var address=Dns.GetHostAddresses(host).First(a=>a.AddressFamily==AddressFamily.InterNetwork);
@@ -472,9 +472,9 @@ static class Relay {
             while(true) {
                 bool binary;var notice=pipe.ReadMessage(out binary);
                 if(pipe.Closed) {
-                    if(pipe.CloseCode==4429) throw new IOException("Cette room vient d'être prise par un autre joueur. Choisissez-en une autre, ou créez la vôtre.");
-                    if(pipe.CloseCode==4404) throw new IOException("Cette room n'existe plus : son hôte l'a fermée.");
-                    throw new IOException("Votre ami n'est pas joignable, ni directement ni par le relais en ligne. Vérifiez qu'il a laissé sa fenêtre ouverte.");
+                    if(pipe.CloseCode==4429) throw new IOException(L.T("Cette room vient d'être prise par un autre joueur. Choisissez-en une autre, ou créez la vôtre."));
+                    if(pipe.CloseCode==4404) throw new IOException(L.T("Cette room n'existe plus : son hôte l'a fermée."));
+                    throw new IOException(L.T("Votre ami n'est pas joignable, ni directement ni par le relais en ligne. Vérifiez qu'il a laissé sa fenêtre ouverte."));
                 }
                 if(notice==null)continue;
                 Dictionary<string,object> n;try{n=Parse(notice);}catch{continue;}
@@ -533,9 +533,9 @@ static class Relay {
             try{return client.DownloadString(BaseUrl+path);}
             catch(WebException e) {
                 var r=e.Response as HttpWebResponse;
-                if(r!=null && r.StatusCode==HttpStatusCode.NotFound)throw new IOException("Cette room n'existe plus : son hôte l'a fermée ou quelqu'un l'a déjà rejointe.",e);
-                if(r!=null && (int)r.StatusCode==429)throw new IOException("Trop de demandes au relais en ligne. Attendez une minute.",e);
-                throw new IOException("Le relais en ligne n'est pas joignable.",e);
+                if(r!=null && r.StatusCode==HttpStatusCode.NotFound)throw new IOException(L.T("Cette room n'existe plus : son hôte l'a fermée ou quelqu'un l'a déjà rejointe."),e);
+                if(r!=null && (int)r.StatusCode==429)throw new IOException(L.T("Trop de demandes au relais en ligne. Attendez une minute."),e);
+                throw new IOException(L.T("Le relais en ligne n'est pas joignable."),e);
             }
         }
     }
@@ -563,9 +563,9 @@ static class Relay {
         return rooms;
     }
     public static string PublicInvite(string room) {
-        if(room==null || room.Length!=32 || room.Any(c=>!Uri.IsHexDigit(c)))throw new IOException("Room inconnue.");
+        if(room==null || room.Length!=32 || room.Any(c=>!Uri.IsHexDigit(c)))throw new IOException(L.T("Room inconnue."));
         object invite;
-        if(!Parse(Get("/rooms/"+room)).TryGetValue("invite",out invite) || !(invite is string))throw new IOException("Cette room n'existe plus.");
+        if(!Parse(Get("/rooms/"+room)).TryGetValue("invite",out invite) || !(invite is string))throw new IOException(L.T("Cette room n'existe plus."));
         return (string)invite;
     }
     public static string PublishRequest(Invitation invite,string name,byte language,bool pal,byte[] build,byte[] disc,RoomStatus status=null) {

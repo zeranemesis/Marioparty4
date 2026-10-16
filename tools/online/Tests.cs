@@ -315,6 +315,37 @@ static class Tests {
         Check((string)sent["type"]=="status" && (string)sent["state"]=="full" && ((System.Collections.ArrayList)sent["players"]).Count==2,"a status names the state and every player");
         Check((int)mod["id"]==4242 && (string)mod["name"]=="Board Pack" && (string)mod["fp"]=="0102030405060708","and each mod with its fingerprint");
     }
+    // The companion's languages: English when asked or when Windows is not in
+    // French, every message through L.T, the French text as the key.
+    static void Languages() {
+        var saved=L.English;
+        try {
+            L.Init(k=>k==L.Variable?"en":null);
+            Check(L.English && L.T("Rejoindre")=="Join" && L.T("Cette room vient d'être prise par un autre joueur. Choisissez-en une autre, ou créez la vôtre.").StartsWith("This room was just taken"),"English when asked");
+            Check(L.T("texte inconnu")=="texte inconnu","an untranslated string stays as it is");
+            Check(L.T("Laissez vide pour la préparation automatique de la box.\nAvec un port fixe P, ouvrez sur votre box : TCP P, UDP P et UDP P+1.").Contains("\n"),"a line break survives translation");
+            L.Init(k=>k==L.Variable?"fr":null);
+            Check(!L.English && L.T("Rejoindre")=="Rejoindre","French when asked, whatever Windows says");
+        } finally {L.English=saved;}
+    }
+    // A UDP port Windows refuses (a range Hyper-V or WSL reserved): an
+    // automatic port draws another, a fixed one says it is taken.
+    static void ReservedUdpPorts() {
+        int refusals=2;var reserved=new List<int>();
+        var pair=Session.OpenPorts(0,()=>new TcpListener(IPAddress.Loopback,0),
+            p=>{if(refusals-->0)throw new SocketException((int)SocketError.AccessDenied);return new UdpClient(new IPEndPoint(IPAddress.Loopback,p));},
+            reserved.Add);
+        try {
+            Check(reserved.Count==2 && pair.Item2!=null,"two refused UDP ports, the third drawn is used");
+            Check(((IPEndPoint)pair.Item1.LocalEndpoint).Port==((IPEndPoint)pair.Item2.Client.LocalEndPoint).Port,"TCP and UDP still share the number");
+            Check(!reserved.Contains(((IPEndPoint)pair.Item1.LocalEndpoint).Port),"and it is none of the refused ones");
+        } finally {pair.Item1.Stop();pair.Item2.Close();}
+        int fixedPort;using(var probe=new UdpClient(new IPEndPoint(IPAddress.Loopback,0)))fixedPort=((IPEndPoint)probe.Client.LocalEndPoint).Port;
+        string said=null;
+        try {Session.OpenPorts(fixedPort,()=>new TcpListener(IPAddress.Loopback,fixedPort),p=>{throw new SocketException((int)SocketError.AccessDenied);},_=>{});}
+        catch(IOException e){said=e.Message;}
+        Check(said!=null && said.Contains(fixedPort.ToString()),"a fixed port that UDP refuses is reported, not retried");
+    }
     static void GameLanguages() {
         var disc=Wire.Hash(new byte[]{1,2,3});
         var english=new PlayerInfo("Camille",disc,3);
@@ -1434,6 +1465,6 @@ static class Tests {
             }
         } catch(Exception e) {Console.Error.WriteLine("FAIL: "+e.Message);return 1;}
     }
-    public static int Run() {try{StartupOptions();GameLanguages();PublicInvitations();LanBeacon();RoomSyncFiles();StunVectors();TurnRelay();Reports();Codecs();Leases();LobbyRules();Discs();CancelLoading();MeshWiringTest();MeshRouting();ControlOnlyLink();ChannelPairingTest();Tls(0,true,true);for(int mode=0;mode<4;mode++)Tls(mode,mode==0);Console.WriteLine("PASS: "+checks+" checks; host-only lobby start, full disk hash and locks, UDP ping, native loading barrier/cancel, TLS loss before/after commit, authenticated UDP for 4800 native ticks and a real three-peer UDP mesh. No real router/firewall changes.");return 0;}catch(Exception e){Console.Error.WriteLine("FAIL: "+e.ToString());return 1;}}
+    public static int Run() {try{StartupOptions();GameLanguages();PublicInvitations();LanBeacon();RoomSyncFiles();Languages();ReservedUdpPorts();StunVectors();TurnRelay();Reports();Codecs();Leases();LobbyRules();Discs();CancelLoading();MeshWiringTest();MeshRouting();ControlOnlyLink();ChannelPairingTest();Tls(0,true,true);for(int mode=0;mode<4;mode++)Tls(mode,mode==0);Console.WriteLine("PASS: "+checks+" checks; host-only lobby start, full disk hash and locks, UDP ping, native loading barrier/cancel, TLS loss before/after commit, authenticated UDP for 4800 native ticks and a real three-peer UDP mesh. No real router/firewall changes.");return 0;}catch(Exception e){Console.Error.WriteLine("FAIL: "+e.ToString());return 1;}}
 }
 }

@@ -18,18 +18,18 @@ sealed class Route {
         uint index,other;
         if(GetBestInterface(BitConverter.ToUInt32(new byte[]{1,1,1,1},0),out index)!=0 ||
            GetBestInterface(BitConverter.ToUInt32(new byte[]{208,67,222,222},0),out other)!=0 || index!=other)
-            throw new IOException("Plusieurs connexions sont actives. Gardez une seule connexion Internet puis réessayez.");
+            throw new IOException(L.T("Plusieurs connexions sont actives. Gardez une seule connexion Internet puis réessayez."));
         var nic=NetworkInterface.GetAllNetworkInterfaces().FirstOrDefault(n=>n.Supports(NetworkInterfaceComponent.IPv4) && n.GetIPProperties().GetIPv4Properties().Index==index);
-        if(nic==null) throw new IOException("Aucune connexion Internet disponible.");
+        if(nic==null) throw new IOException(L.T("Aucune connexion Internet disponible."));
         string name=(nic.Name+" "+nic.Description).ToLowerInvariant();
         if((nic.NetworkInterfaceType!=NetworkInterfaceType.Ethernet && nic.NetworkInterfaceType!=NetworkInterfaceType.Wireless80211) ||
             new[]{"vpn","nord","lynx","wireguard","tailscale","tunnel","proton","wintun","virtual","tap-","tap "}.Any(name.Contains))
-            throw new IOException("Votre VPN ou votre connexion virtuelle empêche la préparation automatique. Mettez votre VPN en pause, puis cliquez sur Créer une partie.");
+            throw new IOException(L.T("Votre VPN ou votre connexion virtuelle empêche la préparation automatique. Mettez votre VPN en pause, puis cliquez sur Créer une partie."));
         var props=nic.GetIPProperties();
         var local=props.UnicastAddresses.FirstOrDefault(a=>a.Address.AddressFamily==AddressFamily.InterNetwork && !IPAddress.IsLoopback(a.Address));
         var gateway=props.GatewayAddresses.FirstOrDefault(a=>a.Address.AddressFamily==AddressFamily.InterNetwork && !a.Address.Equals(IPAddress.Any));
         if(local==null || gateway==null || !Gateway.Private(gateway.Address))
-            throw new IOException("Cette connexion ne donne pas accès à une box compatible. Essayez depuis votre Wi-Fi ou votre câble Ethernet habituel.");
+            throw new IOException(L.T("Cette connexion ne donne pas accès à une box compatible. Essayez depuis votre Wi-Fi ou votre câble Ethernet habituel."));
         return new Route{Local=local.Address,Router=gateway.Address};
     }
 }
@@ -93,7 +93,7 @@ sealed class Gateway : IDisposable {
         using(var u=new UdpClient(new IPEndPoint(route.Local,0))) {
             u.Connect(route.Router,5351); u.Client.ReceiveTimeout=1400;
             for(int i=0;i<2;i++) {u.Send(request,request.Length); try {IPEndPoint from=null;return u.Receive(ref from);} catch(SocketException) {if(i==1) throw;}}
-            throw new IOException("La box ne répond pas.");
+            throw new IOException(L.T("La box ne répond pas."));
         }
     }
     internal static byte[] PcpRequest(IPAddress local,byte[] key,int inside,int outside,uint lifetime) {return PcpRequest(local,key,inside,outside,lifetime,6);}
@@ -111,7 +111,7 @@ sealed class Gateway : IDisposable {
     }
     internal void Pcp(uint lifetime) {
         var b=Exchange(PcpRequest(route.Local,nonce,internalPort,externalPort,lifetime,ipProtocol));int port;IPAddress ip;uint life;
-        if(!PcpReply(b,nonce,internalPort,ipProtocol,out port,out ip,out life)) throw new IOException("Réponse PCP non compatible.");
+        if(!PcpReply(b,nonce,internalPort,ipProtocol,out port,out ip,out life)) throw new IOException(L.T("Réponse PCP non compatible."));
         if(lifetime==0) return;
         externalPort=port;Address=ip;Lifetime=life;method="PCP";
         ValidateLease();
@@ -129,21 +129,21 @@ sealed class Gateway : IDisposable {
     void Pmp(uint lifetime) {
         if(lifetime!=0 && Address==null) {
             var a=Exchange(new byte[]{0,0});
-            if(a.Length!=12 || a[0]!=0 || a[1]!=128 || U16(a,2)!=0) throw new IOException("Adresse de la box indisponible.");
-            Address=new IPAddress(a.Skip(8).Take(4).ToArray());if(!Public(Address)) throw new IOException("La box est derrière un autre réseau.");
+            if(a.Length!=12 || a[0]!=0 || a[1]!=128 || U16(a,2)!=0) throw new IOException(L.T("Adresse de la box indisponible."));
+            Address=new IPAddress(a.Skip(8).Take(4).ToArray());if(!Public(Address)) throw new IOException(L.T("La box est derrière un autre réseau."));
         }
         byte operation=(byte)(udp?1:2);var b=Exchange(PmpRequest(internalPort,externalPort,lifetime,operation));int port;uint life;
-        if(!PmpReply(b,internalPort,operation,out port,out life)) throw new IOException("Réponse NAT-PMP non compatible.");
+        if(!PmpReply(b,internalPort,operation,out port,out life)) throw new IOException(L.T("Réponse NAT-PMP non compatible."));
         if(lifetime==0) return;
         externalPort=port;Lifetime=life;method="PMP";ValidateLease();
     }
-    void ValidateLease() {if(!Public(Address) || Lifetime<30 || Lifetime>7200) throw new IOException("La box ne propose pas d'accès temporaire compatible.");}
+    void ValidateLease() {if(!Public(Address) || Lifetime<30 || Lifetime>7200) throw new IOException(L.T("La box ne propose pas d'accès temporaire compatible."));}
     internal static bool SafeUrl(Uri u,IPAddress router) {
         IPAddress ip; return u!=null && u.Scheme=="http" && u.UserInfo=="" && u.Fragment=="" &&
             IPAddress.TryParse(u.Host,out ip) && ip.Equals(router) && u.Port>0;
     }
     XmlDocument Http(Uri uri,string action=null,string body=null) {
-        if(!SafeUrl(uri,route.Router)) throw new IOException("Adresse de configuration de la box refusée.");
+        if(!SafeUrl(uri,route.Router)) throw new IOException(L.T("Adresse de configuration de la box refusée."));
         var request=(HttpWebRequest)WebRequest.Create(uri);request.Proxy=null;request.AllowAutoRedirect=false;
         request.Timeout=2500;request.ReadWriteTimeout=2500;
         if(action!=null) {
@@ -152,7 +152,7 @@ sealed class Gateway : IDisposable {
             request.ContentLength=bytes.Length;using(var s=request.GetRequestStream()) s.Write(bytes,0,bytes.Length);
         }
         using(var response=(HttpWebResponse)request.GetResponse()) {
-            if(response.StatusCode!=HttpStatusCode.OK || response.ContentLength>131072) throw new IOException("Réponse de la box non compatible.");
+            if(response.StatusCode!=HttpStatusCode.OK || response.ContentLength>131072) throw new IOException(L.T("Réponse de la box non compatible."));
             var settings=new XmlReaderSettings{DtdProcessing=DtdProcessing.Prohibit,XmlResolver=null,MaxCharactersInDocument=131072};
             using(var reader=XmlReader.Create(response.GetResponseStream(),settings)) {var doc=new XmlDocument{XmlResolver=null};doc.Load(reader);return doc;}
         }
@@ -175,7 +175,7 @@ sealed class Gateway : IDisposable {
                 } catch(SocketException) {}
             }
         }
-        throw new IOException("La box ne répond pas à la préparation automatique.");
+        throw new IOException(L.T("La box ne répond pas à la préparation automatique."));
     }
     string MappingKey() {return "<NewRemoteHost></NewRemoteHost><NewExternalPort>"+externalPort+"</NewExternalPort><NewProtocol>"+(udp?"UDP":"TCP")+"</NewProtocol>";}
     void Upnp(uint lifetime) {
@@ -186,15 +186,15 @@ sealed class Gateway : IDisposable {
                 if(type!="urn:schemas-upnp-org:service:WANIPConnection:1" && type!="urn:schemas-upnp-org:service:WANIPConnection:2" && type!="urn:schemas-upnp-org:service:WANPPPConnection:1") continue;
                 Uri candidate;if(Uri.TryCreate(url,Value(node,"controlURL"),out candidate) && SafeUrl(candidate,route.Router)) {service=type;control=candidate;break;}
             }
-            if(control==null) throw new IOException("La box ne propose pas de connexion automatique compatible.");
+            if(control==null) throw new IOException(L.T("La box ne propose pas de connexion automatique compatible."));
             IPAddress ip;if(!IPAddress.TryParse(Value(Http(control,"GetExternalIPAddress",""),"NewExternalIPAddress"),out ip) || !Public(ip))
-                throw new IOException("Votre box est derrière un autre réseau. La connexion directe n'est pas disponible ici.");
+                throw new IOException(L.T("Votre box est derrière un autre réseau. La connexion directe n'est pas disponible ici."));
             Address=ip;
         }
         if(lifetime==0) {Http(control,"DeletePortMapping",MappingKey());return;}
         // Avoid replacing an existing mapping owned by another program.
         if(method!="UPNP") {
-            try {Http(control,"GetSpecificPortMappingEntry",MappingKey());throw new IOException("Ce port est déjà utilisé sur la box. Réessayez pour en choisir un autre.");}
+            try {Http(control,"GetSpecificPortMappingEntry",MappingKey());throw new IOException(L.T("Ce port est déjà utilisé sur la box. Réessayez pour en choisir un autre."));}
             catch(WebException ex) {
                 // Only the SOAP 'NoSuchEntryInArray' response permits creation.
                 var response=ex.Response; if(response==null) throw;
@@ -207,7 +207,7 @@ sealed class Gateway : IDisposable {
         Http(control,"AddPortMapping",MappingKey()+"<NewInternalPort>"+internalPort+"</NewInternalPort><NewInternalClient>"+route.Local+"</NewInternalClient><NewEnabled>1</NewEnabled><NewPortMappingDescription>PartyBoard temporary session</NewPortMappingDescription><NewLeaseDuration>"+lifetime+"</NewLeaseDuration>");
         method="UPNP"; // Cleanup is required even if the router ignores the lease.
         var check=Http(control,"GetSpecificPortMappingEntry",MappingKey());
-        uint granted;if(Value(check,"NewInternalClient")!=route.Local.ToString() || Value(check,"NewInternalPort")!=internalPort.ToString() || !uint.TryParse(Value(check,"NewLeaseDuration"),out granted)) throw new IOException("La box n'a pas confirmé la connexion temporaire.");
+        uint granted;if(Value(check,"NewInternalClient")!=route.Local.ToString() || Value(check,"NewInternalPort")!=internalPort.ToString() || !uint.TryParse(Value(check,"NewLeaseDuration"),out granted)) throw new IOException(L.T("La box n'a pas confirmé la connexion temporaire."));
         Lifetime=granted;ValidateLease();
     }
     // Automatic opening first, even with a fixed port: a box that can open it
@@ -230,7 +230,7 @@ sealed class Gateway : IDisposable {
     // (PARTYBOARD_ONLINE_RELAY_ONLY) must not open ports on a real router.
     public static Gateway LocalFor(Route r,int port,bool datagram) {return new Gateway(r,port,port,datagram).AsLocal();}
     internal Gateway AsLocal() {
-        if(!Private(route.Local))throw new IOException("La box n'a pas autorisé la connexion automatique, et ce PC n'est pas sur un réseau local. Vous pouvez inverser les rôles : votre ami crée la partie.");
+        if(!Private(route.Local))throw new IOException(L.T("La box n'a pas autorisé la connexion automatique, et ce PC n'est pas sur un réseau local. Vous pouvez inverser les rôles : votre ami crée la partie."));
         method="LOCAL";externalPort=internalPort;Address=route.Local;Lifetime=3600;
         return this;
     }
@@ -239,7 +239,7 @@ sealed class Gateway : IDisposable {
     internal Gateway AsManual(int requestedPort) {
         method="MANUAL";externalPort=requestedPort;Lifetime=3600;
         Address=BoxAddress()??NetworkSettings.PublicAddress;
-        if(Address==null)throw new IOException("Port fixe "+requestedPort+" : la box ne donne pas votre adresse publique. Indiquez-la dans Port fixe…, puis recréez le salon.");
+        if(Address==null)throw new IOException(L.T("Port fixe ")+requestedPort+L.T(" : la box ne donne pas votre adresse publique. Indiquez-la dans Port fixe…, puis recréez le salon."));
         return this;
     }
     // Asks the box for its public address over NAT-PMP, without opening
@@ -256,13 +256,13 @@ sealed class Gateway : IDisposable {
             try {if(candidate=="PCP") Pcp(120);else if(candidate=="PMP") Pmp(120);else Upnp(120);return;}
             catch {if(method!=null) Dispose();method=null;Address=null;externalPort=requestedExternalPort;}
         }
-        throw new IOException("La box n'a pas autorisé la connexion automatique. Vous pouvez essayer d'inverser les rôles : votre ami crée la partie. Si vous avez ouvert un port à la main sur votre box, indiquez-le dans Port fixe…. Certains réseaux, comme le partage de connexion d'un téléphone, ne permettent pas d'héberger.");
+        throw new IOException(L.T("La box n'a pas autorisé la connexion automatique. Vous pouvez essayer d'inverser les rôles : votre ami crée la partie. Si vous avez ouvert un port à la main sur votre box, indiquez-le dans Port fixe…. Certains réseaux, comme le partage de connexion d'un téléphone, ne permettent pas d'héberger."));
     }
     public void Renew() {
         int beforePort=externalPort;var beforeAddress=Address;
         if(method=="MANUAL" || method=="LOCAL") return;
-        if(method=="PCP") Pcp(120);else if(method=="PMP") Pmp(120);else if(method=="UPNP") Upnp(120);else throw new IOException("Connexion temporaire fermée.");
-        if(beforePort!=externalPort || !beforeAddress.Equals(Address)) throw new IOException("La connexion de la box a changé. Recréez une partie.");
+        if(method=="PCP") Pcp(120);else if(method=="PMP") Pmp(120);else if(method=="UPNP") Upnp(120);else throw new IOException(L.T("Connexion temporaire fermée."));
+        if(beforePort!=externalPort || !beforeAddress.Equals(Address)) throw new IOException(L.T("La connexion de la box a changé. Recréez une partie."));
     }
     public void Dispose() {try{if(method=="PCP") Pcp(0);else if(method=="PMP") Pmp(0);else if(method=="UPNP") Upnp(0);}catch{} finally{method=null;}}
 }

@@ -21,7 +21,7 @@ static class Wire {
     public static byte[] Random(int n) { var b = new byte[n]; using(var r = RandomNumberGenerator.Create()) r.GetBytes(b); return b; }
     public static byte[] Hash(byte[] b) { using(var h=SHA256.Create()) return h.ComputeHash(b); }
     public static bool Equal(byte[] a, byte[] b) { if(a==null || b==null || a.Length!=b.Length) return false; int d=0; for(int i=0;i<a.Length;i++) d|=a[i]^b[i]; return d==0; }
-    public static byte[] Read(Stream s,int n) { var b=new byte[n]; int p=0; while(p<n) { int k=s.Read(b,p,n-p); if(k==0) throw new IOException("L'autre joueur s'est déconnecté."); p+=k; } return b; }
+    public static byte[] Read(Stream s,int n) { var b=new byte[n]; int p=0; while(p<n) { int k=s.Read(b,p,n-p); if(k==0) throw new IOException(L.T("L'autre joueur s'est déconnecté.")); p+=k; } return b; }
     public static byte[] BuildHash(string root) {
         using(var h=SHA256.Create()) using(var m=new MemoryStream()) {
             var paths=Directory.GetFiles(root,"*.dll").Concat(new[]{Path.Combine(root,"partyboard.exe"),Path.Combine(root,"PartyBoardOnline.exe")}).OrderBy(x=>Path.GetFileName(x),StringComparer.OrdinalIgnoreCase);
@@ -59,7 +59,7 @@ static class Wire {
     // through the relay (Relay.cs), which then only ever carries ciphertext.
     public static SslStream Client(Stream transport,Invitation invite,byte[] build,byte channel=0,byte[] clientId=null) {
         if(clientId==null)clientId=new byte[16];
-        if(clientId.Length!=16)throw new IOException("Identifiant de connexion incorrect.");
+        if(clientId.Length!=16)throw new IOException(L.T("Identifiant de connexion incorrect."));
         var ssl=new SslStream(transport,false,(s,c,ch,e)=>c!=null && Equal(Hash(c.GetRawCertData()).Take(invite.Fingerprint.Length).ToArray(),invite.Fingerprint));
         try {
             ssl.ReadTimeout=8000; ssl.WriteTimeout=8000;
@@ -67,8 +67,8 @@ static class Wire {
             byte[] hello=Encoding.ASCII.GetBytes("PBAUTO3\n").Concat(Hash(invite.Token)).Concat(build).Concat(new[]{channel}).Concat(clientId).ToArray();
             ssl.Write(hello); ssl.Flush();
             byte ack=Read(ssl,1)[0];
-            if(ack==2) throw new IOException("Les versions du jeu sont différentes. Copiez le même dossier PartyBoard sur les deux PC.");
-            if(ack!=1) throw new IOException("Cette invitation n'est plus valable. Demandez-en une nouvelle.");
+            if(ack==2) throw new IOException(L.T("Les versions du jeu sont différentes. Copiez le même dossier PartyBoard sur les deux PC."));
+            if(ack!=1) throw new IOException(L.T("Cette invitation n'est plus valable. Demandez-en une nouvelle."));
             ssl.ReadTimeout=120000; ssl.WriteTimeout=120000; return ssl;
         } catch {ssl.Dispose(); throw;}
     }
@@ -88,8 +88,8 @@ static class Wire {
             var hello=Read(ssl,89);channel=hello[72];clientId=hello.Skip(73).Take(16).ToArray();
             if(!Equal(hello.Take(8).ToArray(),Encoding.ASCII.GetBytes("PBAUTO3\n")) || channel>1 ||
                 !Equal(hello.Skip(8).Take(32).ToArray(),Hash(invite.Token)) || DateTime.UtcNow>invite.Expires)
-                throw new AuthenticationException("Invitation refusée.");
-            if(!Equal(hello.Skip(40).Take(32).ToArray(),build)) {ssl.WriteByte(2); ssl.Flush(); throw new AuthenticationException("Versions différentes.");}
+                throw new AuthenticationException(L.T("Invitation refusée."));
+            if(!Equal(hello.Skip(40).Take(32).ToArray(),build)) {ssl.WriteByte(2); ssl.Flush(); throw new AuthenticationException(L.T("Versions différentes."));}
             ssl.WriteByte(1); ssl.Flush(); ssl.ReadTimeout=120000; ssl.WriteTimeout=120000; return ssl;
         } catch {ssl.Dispose(); throw;}
     }
@@ -121,8 +121,8 @@ sealed class Invitation {
         return new Invitation{Address=IPAddress.Any,Port=0,Expires=Expires,Fingerprint=Fingerprint,Token=Token,Build=Build,MaxPlayers=MaxPlayers,LocalAddress=IPAddress.Any,LocalPort=0};
     }
     public string Encode() {
-        if(Fingerprint.Length!=16 || Token.Length!=16)throw new IOException("Invitation incompatible.");
-        if(MaxPlayers<2 || MaxPlayers>Lobby.MaxSeats)throw new IOException("Invitation incompatible.");
+        if(Fingerprint.Length!=16 || Token.Length!=16)throw new IOException(L.T("Invitation incompatible."));
+        if(MaxPlayers<2 || MaxPlayers>Lobby.MaxSeats)throw new IOException(L.T("Invitation incompatible."));
         using(var m=new MemoryStream()) using(var w=new BinaryWriter(m)) {
             w.Write(Address.GetAddressBytes());w.Write((ushort)Port);
             w.Write((uint)(Expires-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalSeconds);
@@ -141,9 +141,9 @@ sealed class Invitation {
             // same build anyway, so a mismatched prefix only ever means one of
             // them has an old folder.
             if(text.StartsWith("PB2.",StringComparison.Ordinal))
-                throw new IOException("Cette invitation vient d'une version plus ancienne de PartyBoard. Copiez le même dossier sur les deux PC et recréez le salon.");
+                throw new IOException(L.T("Cette invitation vient d'une version plus ancienne de PartyBoard. Copiez le même dossier sur les deux PC et recréez le salon."));
             if(text.StartsWith("PB3.",StringComparison.Ordinal))
-                throw new IOException("Cette invitation vient d'une version plus ancienne de PartyBoard. Copiez le même dossier sur les deux PC et recréez le salon.");
+                throw new IOException(L.T("Cette invitation vient d'une version plus ancienne de PartyBoard. Copiez le même dossier sur les deux PC et recréez le salon."));
             if(text.Length!=72 || !text.StartsWith("PB4.",StringComparison.Ordinal)) throw new FormatException();
             var b64=text.Substring(4).Replace('-','+').Replace('_','/'); b64+=new string('=',(4-b64.Length%4)%4);
             var data=Convert.FromBase64String(b64); if(data.Length!=49) throw new FormatException();
@@ -164,11 +164,11 @@ sealed class Invitation {
                 // Reaching the wrong machine is harmless anyway: the TLS
                 // handshake pins the certificate fingerprint from the invitation.
                 if(i.LocalPort!=0 && !Gateway.Private(i.LocalAddress)) {i.LocalAddress=IPAddress.Any;i.LocalPort=0;}
-                if(i.Expires<DateTime.UtcNow) throw new IOException("Cette invitation a expiré. L'hôte doit recréer une partie.");
+                if(i.Expires<DateTime.UtcNow) throw new IOException(L.T("Cette invitation a expiré. L'hôte doit recréer une partie."));
                 if(i.Expires>DateTime.UtcNow.AddMinutes(31)) throw new FormatException();
                 return i;
             }
-        } catch(IOException) {throw;} catch {throw new IOException("L'invitation est incomplète. Copiez-la entièrement depuis le PC de votre ami.");}
+        } catch(IOException) {throw;} catch {throw new IOException(L.T("L'invitation est incomplète. Copiez-la entièrement depuis le PC de votre ami."));}
     }
 }
 
@@ -180,7 +180,7 @@ sealed class Invitation {
 sealed class ChannelPairing<T> {
     readonly Dictionary<string,T[]> pending=new Dictionary<string,T[]>();
     static string Key(byte[] clientId) {
-        if(clientId==null || clientId.Length!=16)throw new IOException("Identifiant de connexion incorrect.");
+        if(clientId==null || clientId.Length!=16)throw new IOException(L.T("Identifiant de connexion incorrect."));
         return Convert.ToBase64String(clientId);
     }
     public int Pending {get{return pending.Count;}}
@@ -190,11 +190,11 @@ sealed class ChannelPairing<T> {
     // than silently replaced, since that would let a second connection steal
     // the first one's slot without anybody noticing.
     public T[] Add(byte[] clientId,int channel,T value) {
-        if(channel!=0 && channel!=1)throw new IOException("Canal invalide.");
+        if(channel!=0 && channel!=1)throw new IOException(L.T("Canal invalide."));
         string key=Key(clientId);
         T[] slots;
         if(!pending.TryGetValue(key,out slots)) {slots=new T[2];pending[key]=slots;}
-        if(slots[channel]!=null)throw new IOException("Canal déjà connecté.");
+        if(slots[channel]!=null)throw new IOException(L.T("Canal déjà connecté."));
         slots[channel]=value;
         if(slots[0]!=null && slots[1]!=null) {pending.Remove(key);return slots;}
         return null;
@@ -213,7 +213,7 @@ static class GameDatagram {
         // Seats 0..3. This said 0..1, which is a two-player limit sitting inside the
         // layer that authenticates game traffic -- the last place it would be looked
         // for, and one that no amount of work above it could get past.
-        if(key==null || key.Length!=32 || payload==null || payload.Length!=Payload || player<0 || player>=Lobby.MaxSeats)throw new IOException("Paquet de jeu invalide.");
+        if(key==null || key.Length!=32 || payload==null || payload.Length!=Payload || player<0 || player>=Lobby.MaxSeats)throw new IOException(L.T("Paquet de jeu invalide."));
         var data=new byte[Size];data[0]=(byte)'P';data[1]=(byte)'B';data[2]=(byte)'U';data[3]=(byte)'1';data[4]=1;data[5]=(byte)player;
         Buffer.BlockCopy(BitConverter.GetBytes(sequence),0,data,6,8);Buffer.BlockCopy(payload,0,data,Header,Payload);
         using(var h=new HMACSHA256(key)) {var tag=h.ComputeHash(data,0,Header+Payload);Buffer.BlockCopy(tag,0,data,Header+Payload,Tag);}
@@ -258,7 +258,7 @@ sealed class ReplayWindow {
 // TLS carries lobby/control messages. Time-sensitive game inputs use their own
 // authenticated UDP path so one lost Internet packet cannot block later input.
 sealed class ControlChannelException : IOException {
-    public ControlChannelException(Exception error):base("La connexion du salon a ete interrompue.",error){}
+    public ControlChannelException(Exception error):base(L.T("La connexion du salon a ete interrompue."),error){}
 }
 sealed class Bridge : IDisposable {
     // The two control channels' transports (TCP connections, or relay WebSockets)
@@ -278,7 +278,7 @@ sealed class Bridge : IDisposable {
     long udpPingStamp,lastUdpPongStamp;int committed,controlLost;
     public bool ControlConnected {get{return Volatile.Read(ref controlLost)==0;}}
     // Set only by the authenticated lobby commit callback, never by UDP input.
-    public void CommitGame(){if(closed || !ControlConnected)throw new IOException("Le salon s'est ferme avant le depart.");Volatile.Write(ref committed,1);}
+    public void CommitGame(){if(closed || !ControlConnected)throw new IOException(L.T("Le salon s'est ferme avant le depart."));Volatile.Write(ref committed,1);}
     public Action<string> Diagnostic;
     long lastUdpStamp,lastPumpStamp,deliveredPackets,udpDropped;int lastUdpError;
     static long Age(long stamp) {return stamp==0?-1:(Stopwatch.GetTimestamp()-stamp)*1000/Stopwatch.Frequency;}
@@ -303,7 +303,7 @@ sealed class Bridge : IDisposable {
     }
     internal static bool Packet(byte[] b,int player) {return b.Length==GameDatagram.Payload && b[0]==80 && b[1]==66 && b[2]==82 && b[3]==66 && b[4]==WireFormat.VersionHigh && b[5]==WireFormat.VersionLow && b[6]>=1 && b[6]<=3 && b[7]==player;}
     void Write(byte[] payload) {
-        if(payload.Length<1 || payload.Length>256)throw new IOException("Message de salon trop long.");
+        if(payload.Length<1 || payload.Length>256)throw new IOException(L.T("Message de salon trop long."));
         var frame=new byte[payload.Length+2];frame[0]=(byte)(payload.Length>>8);frame[1]=(byte)payload.Length;
         Buffer.BlockCopy(payload,0,frame,2,payload.Length);
         if(closed || !ControlConnected)throw new ControlChannelException(new IOException("Control channel closed."));
@@ -361,7 +361,7 @@ sealed class Bridge : IDisposable {
             // nickname alone never needed. 2048 leaves room for the 24 mods ModSet
             // allows, names included, and still refuses anything a peer could use to
             // make us allocate.
-            if(n<1 || n>2048) throw new IOException("Message réseau incompatible.");
+            if(n<1 || n>2048) throw new IOException(L.T("Message réseau incompatible."));
             var data=ReadControl(n);
             if(n==1 && data[0]==0) continue;
             if(n==9 && data[0]==6) {data[0]=7;Write(data);continue;}
@@ -376,8 +376,8 @@ sealed class Bridge : IDisposable {
             // 6 and 7 are this layer's own ping and pong; a peer built before this
             // existed will reject it and drop the control channel, which at the end
             // of a session leaves it exactly where it was before -- no worse.
-            if((data[0]>=2 && data[0]<=5) || data[0]==8) {if(Control==null)throw new IOException("Salon indisponible.");Control(data);continue;}
-            throw new IOException("Message réseau incompatible.");
+            if((data[0]>=2 && data[0]<=5) || data[0]==8) {if(Control==null)throw new IOException(L.T("Salon indisponible."));Control(data);continue;}
+            throw new IOException(L.T("Message réseau incompatible."));
         }
     }
     // The tls_write worker's body, same reasoning as ReceiveLoop above.
@@ -527,8 +527,8 @@ sealed class MeshRelay : IDisposable {
     // learnNetworkPeer -- the case a guest is in before it knows a fellow
     // guest's address, only the host having handed out the roster.
     public int AddPeer(int seat,IPEndPoint peerEndpoint) {
-        if(seat<0 || seat>=Lobby.MaxSeats || seat==localPlayer)throw new IOException("Siège de pair invalide.");
-        if(legs[seat]!=null)throw new IOException("Ce siège a déjà un pair.");
+        if(seat<0 || seat>=Lobby.MaxSeats || seat==localPlayer)throw new IOException(L.T("Siège de pair invalide."));
+        if(legs[seat]!=null)throw new IOException(L.T("Ce siège a déjà un pair."));
         var leg=new Leg(peerEndpoint);legs[seat]=leg;return leg.LoopbackPort;
     }
 
@@ -544,7 +544,7 @@ sealed class MeshRelay : IDisposable {
     // MeshWiring's event handler to LoadGame() would be a longer path to the
     // same number.
     public int LoopbackPort(int seat) {
-        if(seat<0 || seat>=Lobby.MaxSeats || legs[seat]==null)throw new IOException("Ce siège n'a pas de pair de maillage.");
+        if(seat<0 || seat>=Lobby.MaxSeats || legs[seat]==null)throw new IOException(L.T("Ce siège n'a pas de pair de maillage."));
         return legs[seat].LoopbackPort;
     }
 
