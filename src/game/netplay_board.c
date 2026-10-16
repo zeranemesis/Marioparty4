@@ -10,6 +10,7 @@
 #include "game/hsfex.h"
 #include "game/hu3d.h"
 #include "game/object.h"
+#include "game/objsub.h"
 #include "port/netplay_runtime.h"
 #include "port/widescreen.h"
 
