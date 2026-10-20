@@ -41,11 +41,15 @@ inline HudSpan hud_span(float scale, float windowWidth, float safeX, float safeW
 // Where HUD x (0..2 * centerX) is drawn in the widened HUD projection, which
 // runs from centerX - centerX * scale to centerX + centerX * scale. The middle
 // half stays where it was, over the 3D scene it belongs to (the scene keeps
-// its size and gains room on the sides); from there to the edges the HUD is
-// carried out, all the way to the window's edges.
+// its size and gains room on the sides); the outer quarter on each side moves
+// out with the window's edge, keeping its margin, and the HUD between follows
+// part way.
 inline float placed_x(float hudX, float centerX, float scale, HudSpan span) {
-    const float edge = centerX + centerX * scale * 2.0f * span.mid + (hudX - centerX) * scale * span.span;
-    const float weight = std::clamp(std::fabs(hudX - centerX) / centerX * 2.0f - 1.0f, 0.0f, 1.0f);
+    const float width = 2.0f * centerX * scale;
+    const float left = centerX - centerX * scale + width * (0.5f + span.mid - span.span * 0.5f);
+    const float right = centerX - centerX * scale + width * (0.5f + span.mid + span.span * 0.5f);
+    const float edge = hudX < centerX ? hudX + left : hudX + right - 2.0f * centerX;
+    const float weight = std::clamp((std::fabs(hudX - centerX) / centerX - 0.5f) * 4.0f, 0.0f, 1.0f);
     return hudX + (edge - hudX) * weight;
 }
 

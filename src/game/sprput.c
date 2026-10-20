@@ -178,6 +178,13 @@ void HuSprDisp(HUSPRITE *sprite)
         if (HuSprWidescreenBackdrop(pat, modelview[0][0], modelview[1][1])) {
             PartyBoard_WidescreenStretchHudMatrix(modelview);
         }
+        if (HuSprWideStretch[spriteId][0] != 1.0f) {
+            for (i = 0; i < 3; i++) {
+                modelview[0][i] *= HuSprWideStretch[spriteId][0];
+            }
+            modelview[0][3] = HuSprWideStretch[spriteId][2]
+                + (modelview[0][3] - HuSprWideStretch[spriteId][1]) * HuSprWideStretch[spriteId][0];
+        }
         modelview[0][3] += HuSprWideShift[spriteId];
 #endif
         GXLoadPosMtxImm(modelview, GX_PNMTX0);

@@ -61,6 +61,9 @@ int main()
         }
         check(near(on_window(0, scale, whole), 0), "left edge on the window's");
         check(near(on_window(kWidth, scale, whole), 1), "right edge on the window's");
+        // A corner panel keeps the margin it had on a 4:3 screen.
+        check(near(placed_x(20, kCenter, scale, whole) - (kCenter - kCenter * scale), 20), "left margin kept");
+        check(near(kCenter + kCenter * scale - placed_x(kWidth - 20, kCenter, scale, whole), 20), "right margin kept");
         float previous = -1e9f;
         bool grows = true;
         for (float x = -200; x <= kWidth + 200; x += 3) {

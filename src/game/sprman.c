@@ -98,12 +98,17 @@ void HuSprExec(s16 draw_no)
 
 #ifdef TARGET_PC
 float HuSprWideShift[HUSPR_MAX];
+float HuSprWideStretch[HUSPR_MAX][3];
 float HuSprDispWideShift;
 
 typedef struct {
     float x0, x1, y0, y1;
+    float x;
     s16 sprite;
+    s16 group;
+    s16 prio;
     s16 root;
+    BOOL frame;
 } WideBox;
 
 static s16 WideRoot(WideBox *boxes, s16 i)
@@ -114,14 +119,46 @@ static s16 WideRoot(WideBox *boxes, s16 i)
     return i;
 }
 
-// Adaptive widescreen: sprites that touch on screen move as one piece, from
-// the middle of the piece, so a panel and the icons in its text stay together
-// while separate elements each find their place. Hidden sprites count: an
+// Sprites of a group that touch belong together; across groups only when one
+// lies on the other, drawn over it (a label on its bar), not when a dialog box
+// covers a corner panel: never with a window frame. A lower priority draws
+// later, on top.
+static BOOL WideJoined(WideBox *a, WideBox *b)
+{
+    float w = (a->x1 < b->x1 ? a->x1 : b->x1) - (a->x0 > b->x0 ? a->x0 : b->x0);
+    float h = (a->y1 < b->y1 ? a->y1 : b->y1) - (a->y0 > b->y0 ? a->y0 : b->y0);
+    float areaA = (a->x1 - a->x0)*(a->y1 - a->y0);
+    float areaB = (b->x1 - b->x0)*(b->y1 - b->y0);
+    if(w < 0.0f || h < 0.0f) {
+        return FALSE;
+    }
+    if(a->group == b->group) {
+        return TRUE;
+    }
+    if(a->frame || b->frame) {
+        return FALSE;
+    }
+    if(areaA > areaB) {
+        WideBox *swap = a;
+        a = b;
+        b = swap;
+        areaA = areaB;
+    }
+    return a->prio <= b->prio && w*h >= 0.75f*areaA;
+}
+
+// Adaptive widescreen: sprites that belong together move as one piece, so a
+// panel and the icons in its text stay together while separate elements each
+// find their place. A piece across the middle stays; one to a side follows its
+// outer edge, so a corner panel reaches the corner; a lone sprite follows its
+// position, which Hu3D3Dto2D set over a 3D point. Hidden sprites count: an
 // invisible window frame ties its text to the icons in it.
 static void HuSprWidescreenLayout(void)
 {
     static WideBox boxes[HUSPR_MAX];
     static float lo[HUSPR_MAX], hi[HUSPR_MAX];
+    static s16 count[HUSPR_MAX];
+    float left, right;
     HUSPRGRP *group;
     HUSPRITE *sprite;
     ANIMPAT *pat;
@@ -131,6 +168,7 @@ static void HuSprWidescreenLayout(void)
     s16 i, j, n = 0;
     for(i=0; i<HUSPR_MAX; i++) {
         HuSprWideShift[i] = 0.0f;
+        HuSprWideStretch[i][0] = 1.0f;
     }
     if(PartyBoard_WidescreenHudShift(0.0f) == 0.0f) {
         return;
@@ -145,7 +183,7 @@ static void HuSprWidescreenLayout(void)
             sprite = &HuSprData[group->members[j]];
             x = mtx0[0]*sprite->pos.x + mtx0[1]*sprite->pos.y + mtx0[3];
             y = mtx1[0]*sprite->pos.x + mtx1[1]*sprite->pos.y + mtx1[3];
-            boxes[n].x0 = boxes[n].x1 = x;
+            boxes[n].x = boxes[n].x0 = boxes[n].x1 = x;
             boxes[n].y0 = boxes[n].y1 = y;
             if(!(sprite->attr & HUSPR_ATTR_FUNC)) {
                 pat = &sprite->data->pat[sprite->data->bank[sprite->bank].frame[sprite->animNo].pat];
@@ -172,14 +210,16 @@ static void HuSprWidescreenLayout(void)
                 boxes[n].y1 = boxes[n].y0 + h;
             }
             boxes[n].sprite = group->members[j];
+            boxes[n].group = i;
+            boxes[n].prio = sprite->prio;
+            boxes[n].frame = sprite->bg != NULL;
             boxes[n].root = n;
             n++;
         }
     }
     for(i=0; i<n; i++) {
         for(j=i+1; j<n; j++) {
-            if(boxes[i].x0 <= boxes[j].x1 && boxes[j].x0 <= boxes[i].x1
-                && boxes[i].y0 <= boxes[j].y1 && boxes[j].y0 <= boxes[i].y1) {
+            if(WideJoined(&boxes[i], &boxes[j])) {
                 boxes[WideRoot(boxes, i)].root = WideRoot(boxes, j);
             }
         }
@@ -187,9 +227,11 @@ static void HuSprWidescreenLayout(void)
     for(i=0; i<n; i++) {
         lo[i] = 1e9f;
         hi[i] = -1e9f;
+        count[i] = 0;
     }
     for(i=0; i<n; i++) {
         j = WideRoot(boxes, i);
+        count[j]++;
         if(boxes[i].x0 < lo[j]) {
             lo[j] = boxes[i].x0;
         }
@@ -198,12 +240,38 @@ static void HuSprWidescreenLayout(void)
         }
     }
     for(i=0; i<n; i++) {
-        if(boxes[i].root == i) {
-            lo[i] = PartyBoard_WidescreenHudShift((lo[i]+hi[i])*0.5f);
+        if(boxes[i].root != i) {
+            continue;
         }
+        if(lo[i] < HU_DISP_CENTERX && hi[i] > HU_DISP_CENTERX) {
+            x = HU_DISP_CENTERX;
+            count[i] = -1;
+        } else if(count[i] == 1) {
+            x = boxes[i].x;
+        } else if(hi[i] < HU_DISP_CENTERX) {
+            x = lo[i];
+        } else if(lo[i] > HU_DISP_CENTERX) {
+            x = hi[i];
+        } else {
+            x = HU_DISP_CENTERX;
+        }
+        lo[i] = PartyBoard_WidescreenHudShift(x);
     }
+    // A piece across the middle stays, but what of it ran off a side of the
+    // 4:3 picture (a title bar) is lengthened to run off the new side.
+    left = PartyBoard_WidescreenHudShift(0.0f);
+    right = PartyBoard_WidescreenHudShift(HU_DISP_WIDTHF);
     for(i=0; i<n; i++) {
-        HuSprWideShift[boxes[i].sprite] = lo[WideRoot(boxes, i)];
+        j = WideRoot(boxes, i);
+        HuSprWideShift[boxes[i].sprite] = lo[j];
+        if(count[j] == -1 && boxes[i].x1 > boxes[i].x0
+            && (boxes[i].x0 <= 0.5f || boxes[i].x1 >= HU_DISP_WIDTHF - 0.5f)) {
+            x = boxes[i].x0 + (boxes[i].x0 <= 0.5f ? left : 0.0f);
+            HuSprWideStretch[boxes[i].sprite][0] = (boxes[i].x1 + (boxes[i].x1 >= HU_DISP_WIDTHF - 0.5f ? right : 0.0f) - x)
+                / (boxes[i].x1 - boxes[i].x0);
+            HuSprWideStretch[boxes[i].sprite][1] = boxes[i].x0;
+            HuSprWideStretch[boxes[i].sprite][2] = x;
+        }
     }
 }
 #endif

@@ -89,6 +89,8 @@ SHARED_SYM extern HUSPRGRP HuSprGrpData[HUSPR_GRP_MAX];
 /* Adaptive widescreen: how far each sprite moves towards the edges, and that
  * of the sprite whose draw function is running. */
 extern float HuSprWideShift[HUSPR_MAX];
+/* Lengthening of a sprite that ran off a side: factor, from x, to x. */
+extern float HuSprWideStretch[HUSPR_MAX][3];
 extern float HuSprDispWideShift;
 BOOL HuSprWidescreenBackdrop(ANIMPAT *pat, float scaleX, float scaleY);
 #endif

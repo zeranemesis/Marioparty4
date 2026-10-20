@@ -2,6 +2,7 @@
 #include "port/config.hpp"
 #include "port/widescreen.h"
 #include "port/netplay_runtime.h"
+#include "port/quest_stereo.h"
 #include "port/widescreen_fit.hpp"
 #include "game/disp.h"
 
@@ -205,7 +206,8 @@ bool partyboard_settings_unlock_bowsers_gnarly_party(void)
 
 bool partyboard_settings_adaptive_widescreen(void)
 {
-    return !PartyBoard_NetplayEnabled()
+    // PC and phones only: the headset shows the game on a 4:3 screen of its own.
+    return !PartyBoard_NetplayEnabled() && !PartyBoard_StereoActive()
         && partyboard::getSettings().video.enableAdaptiveWidescreen.getValue();
 }
 
