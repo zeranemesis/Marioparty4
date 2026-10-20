@@ -1,4 +1,5 @@
 #include "game/hsfex.h"
+#include "port/widescreen.h"
 #include "game/hu3d.h"
 #include "game/disp.h"
 #include "game/process.h"
@@ -435,8 +436,8 @@ void Hu3D2Dto3D(Vec *arg0, s16 arg1, Vec *arg2) {
     temp_r31 = &Hu3DCamera[i];
     temp_f30 = sind(temp_r31->fov / 2) / cosd(temp_r31->fov / 2);
     temp_f31 = temp_f30 * arg0->z * 2.0f;
-    temp_f29 = temp_f31 * HU_DISP_ASPECT;
-    temp_f28 = arg0->x / HU_DISP_WIDTH;
+    temp_f29 = temp_f31 * PARTYBOARD_WIDESCREEN_ASPECT(HU_DISP_ASPECT);
+    temp_f28 = PARTYBOARD_WIDESCREEN_PICTURE_X(arg0->x) / HU_DISP_WIDTH;
     temp_f27 = arg0->y / HU_DISP_HEIGHT;
     arg2->x = (temp_f28 - 0.5) * temp_f29;
     arg2->y = -(temp_f27 - 0.5) * temp_f31;
@@ -462,9 +463,9 @@ void Hu3D3Dto2D(Vec *arg0, s16 arg1, Vec *arg2) {
     temp_r31 = &Hu3DCamera[i];
     C_MTXLookAt(sp1C, &temp_r31->pos, &temp_r31->up, &temp_r31->target);
     MTXMultVec(sp1C, arg0, &sp10);
-    temp_f31 = (sind(temp_r31->fov / 2) / cosd(temp_r31->fov / 2)) * sp10.z * HU_DISP_ASPECT;
+    temp_f31 = (sind(temp_r31->fov / 2) / cosd(temp_r31->fov / 2)) * sp10.z * PARTYBOARD_WIDESCREEN_ASPECT(HU_DISP_ASPECT);
     temp_f30 = (sind(temp_r31->fov / 2) / cosd(temp_r31->fov / 2)) * sp10.z;
-    arg2->x = DISP_HALF_W + sp10.x * (DISP_HALF_W / -temp_f31);
+    arg2->x = PARTYBOARD_WIDESCREEN_HUD_X(DISP_HALF_W + sp10.x * (DISP_HALF_W / -temp_f31));
     arg2->y = DISP_HALF_H + sp10.y * (DISP_HALF_H / temp_f30);
     arg2->z = 0.0f;
 }

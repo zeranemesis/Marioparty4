@@ -44,7 +44,6 @@ bool PartyBoard_NetplayPadHeadOnScreen(s32 pad, float *x, float *y)
     Vec head, view, screen;
     Mtx look;
     HU3DCAMERA *camera = &Hu3DCamera[0];
-    float scale;
     if (omcurovl < DLL_w01dll || omcurovl > DLL_w06dll) return false;
     for (player = 0; player < 4; player++) {
         if (GWPlayer[player].port == pad) break;
@@ -59,11 +58,9 @@ bool PartyBoard_NetplayPadHeadOnScreen(s32 pad, float *x, float *y)
     MTXMultVec(look, &head, &view);
     if (view.z > -1.0f) return false;
     Hu3D3Dto2D(&head, 1, &screen);
-    *x = screen.x / HU_DISP_WIDTHF;
+    // Where it is on the picture, not where a HUD sprite would go.
+    *x = PartyBoard_WidescreenPictureX(screen.x) / HU_DISP_WIDTHF;
     *y = screen.y / HU_DISP_HEIGHTF;
-    // A wider picture shows more on each side at the same height.
-    scale = PartyBoard_WidescreenAspectScale();
-    if (scale > 0.0f) *x = 0.5f + (*x - 0.5f) / scale;
     return *x >= 0.0f && *x <= 1.0f && *y >= 0.0f && *y <= 1.0f;
 }
 

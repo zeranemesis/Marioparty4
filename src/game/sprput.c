@@ -12,6 +12,7 @@ extern bool PartyBoard_IsSimulationTick;
 
 #ifdef TARGET_PC
 #include <assert.h>
+#include <math.h>
 #include "port/frame_interpolation.h"
 #include "port/widescreen.h"
 #endif
@@ -60,6 +61,28 @@ void HuSprDispInit(void)
     GXSetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
 }
 
+#ifdef TARGET_PC
+BOOL HuSprWidescreenBackdrop(ANIMPAT *pat, float scaleX, float scaleY)
+{
+    // What the layers draw, not the pattern: a full-screen pattern can hold a
+    // smaller panel.
+    s16 lo[2] = {0x7FFF, 0x7FFF}, hi[2] = {-0x7FFF, -0x7FFF};
+    s16 i, j;
+    for (i = 0; i < pat->layerNum; i++) {
+        for (j = 0; j < 8; j++) {
+            if (pat->layer[i].vtx[j] < lo[j & 1]) {
+                lo[j & 1] = pat->layer[i].vtx[j];
+            }
+            if (pat->layer[i].vtx[j] > hi[j & 1]) {
+                hi[j & 1] = pat->layer[i].vtx[j];
+            }
+        }
+    }
+    return pat->layerNum > 0
+        && PartyBoard_WidescreenBackdrop((hi[0] - lo[0]) * fabsf(scaleX), (hi[1] - lo[1]) * fabsf(scaleY));
+}
+#endif
+
 void HuSprDisp(HUSPRITE *sprite)
 {
     short i;
@@ -87,7 +110,12 @@ void HuSprDisp(HUSPRITE *sprite)
              * this pass runs once per rendered frame, not once per tick. */
             if(!PartyBoard_HookTickGateEnabled() || PartyBoard_IsSimulationTick)
 #endif
-            func(sprite);
+            {
+#ifdef TARGET_PC
+                HuSprDispWideShift = HuSprWideShift[spriteId];
+#endif
+                func(sprite);
+            }
             HuSprDispInit();
         }
         
@@ -146,7 +174,11 @@ void HuSprDisp(HUSPRITE *sprite)
         mtxTransCat(modelview, sprite->pos.x, sprite->pos.y, 0);
         MTXConcat(*sprite->groupMtx, modelview, modelview);
 #ifdef TARGET_PC
-        PartyBoard_WidescreenAdjustHudMatrix(modelview, HU_DISP_CENTERX);
+        // A backdrop as big as the original picture fills the widened one.
+        if (HuSprWidescreenBackdrop(pat, modelview[0][0], modelview[1][1])) {
+            PartyBoard_WidescreenStretchHudMatrix(modelview);
+        }
+        modelview[0][3] += HuSprWideShift[spriteId];
 #endif
         GXLoadPosMtxImm(modelview, GX_PNMTX0);
         for(i=pat->layerNum-1; i>=0; i--) {

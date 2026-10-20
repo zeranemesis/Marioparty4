@@ -12,6 +12,8 @@
 #ifdef TARGET_PC
 #include "port/byteswap.h"
 #include "port/frame_interpolation.h"
+#include "port/widescreen.h"
+#include <math.h>
 #include <string.h>
 #endif
 
@@ -94,6 +96,118 @@ void HuSprExec(s16 draw_no)
     }
 }
 
+#ifdef TARGET_PC
+float HuSprWideShift[HUSPR_MAX];
+float HuSprDispWideShift;
+
+typedef struct {
+    float x0, x1, y0, y1;
+    s16 sprite;
+    s16 root;
+} WideBox;
+
+static s16 WideRoot(WideBox *boxes, s16 i)
+{
+    while(boxes[i].root != i) {
+        i = boxes[i].root = boxes[boxes[i].root].root;
+    }
+    return i;
+}
+
+// Adaptive widescreen: sprites that touch on screen move as one piece, from
+// the middle of the piece, so a panel and the icons in its text stay together
+// while separate elements each find their place. Hidden sprites count: an
+// invisible window frame ties its text to the icons in it.
+static void HuSprWidescreenLayout(void)
+{
+    static WideBox boxes[HUSPR_MAX];
+    static float lo[HUSPR_MAX], hi[HUSPR_MAX];
+    HUSPRGRP *group;
+    HUSPRITE *sprite;
+    ANIMPAT *pat;
+    ANIMBMP *bmp;
+    float *mtx0, *mtx1;
+    float x, y, w, h;
+    s16 i, j, n = 0;
+    for(i=0; i<HUSPR_MAX; i++) {
+        HuSprWideShift[i] = 0.0f;
+    }
+    if(PartyBoard_WidescreenHudShift(0.0f) == 0.0f) {
+        return;
+    }
+    for(i=0, group=HuSprGrpData; i<HUSPR_GRP_MAX; i++, group++) {
+        mtx0 = HuSprRenderMtx[i][0];
+        mtx1 = HuSprRenderMtx[i][1];
+        for(j=0; j<group->capacity && n<HUSPR_MAX; j++) {
+            if(group->members[j] == -1) {
+                continue;
+            }
+            sprite = &HuSprData[group->members[j]];
+            x = mtx0[0]*sprite->pos.x + mtx0[1]*sprite->pos.y + mtx0[3];
+            y = mtx1[0]*sprite->pos.x + mtx1[1]*sprite->pos.y + mtx1[3];
+            boxes[n].x0 = boxes[n].x1 = x;
+            boxes[n].y0 = boxes[n].y1 = y;
+            if(!(sprite->attr & HUSPR_ATTR_FUNC)) {
+                pat = &sprite->data->pat[sprite->data->bank[sprite->bank].frame[sprite->animNo].pat];
+                // A backdrop is stretched in place (HuSprDisp), never moved.
+                if(HuSprWidescreenBackdrop(pat, mtx0[0]*sprite->scale.x, mtx1[1]*sprite->scale.y)) {
+                    continue;
+                }
+                w = fabsf(mtx0[0]*sprite->scale.x);
+                h = fabsf(mtx1[1]*sprite->scale.y);
+                if(sprite->bg) {
+                    // A window frame: drawn the size of its background, centred (HuSprDisp).
+                    bmp = &sprite->bg->bmp[sprite->bg->pat[sprite->bg->bank[sprite->bgBank].frame->pat].layer->bmpNo];
+                    w *= bmp->sizeX*16;
+                    h *= bmp->sizeY*16;
+                    boxes[n].x0 = x - w*0.5f;
+                    boxes[n].y0 = y - h*0.5f;
+                } else {
+                    boxes[n].x0 = x - w*pat->centerX;
+                    boxes[n].y0 = y - h*pat->centerY;
+                    w *= pat->sizeX;
+                    h *= pat->sizeY;
+                }
+                boxes[n].x1 = boxes[n].x0 + w;
+                boxes[n].y1 = boxes[n].y0 + h;
+            }
+            boxes[n].sprite = group->members[j];
+            boxes[n].root = n;
+            n++;
+        }
+    }
+    for(i=0; i<n; i++) {
+        for(j=i+1; j<n; j++) {
+            if(boxes[i].x0 <= boxes[j].x1 && boxes[j].x0 <= boxes[i].x1
+                && boxes[i].y0 <= boxes[j].y1 && boxes[j].y0 <= boxes[i].y1) {
+                boxes[WideRoot(boxes, i)].root = WideRoot(boxes, j);
+            }
+        }
+    }
+    for(i=0; i<n; i++) {
+        lo[i] = 1e9f;
+        hi[i] = -1e9f;
+    }
+    for(i=0; i<n; i++) {
+        j = WideRoot(boxes, i);
+        if(boxes[i].x0 < lo[j]) {
+            lo[j] = boxes[i].x0;
+        }
+        if(boxes[i].x1 > hi[j]) {
+            hi[j] = boxes[i].x1;
+        }
+    }
+    for(i=0; i<n; i++) {
+        if(boxes[i].root == i) {
+            lo[i] = PartyBoard_WidescreenHudShift((lo[i]+hi[i])*0.5f);
+        }
+    }
+    for(i=0; i<n; i++) {
+        HuSprWideShift[boxes[i].sprite] = lo[WideRoot(boxes, i)];
+    }
+}
+#endif
+
 void HuSprBegin(void)
 {
     Mtx temp, rot;
@@ -132,6 +246,9 @@ void HuSprBegin(void)
             }
         }
     }
+#ifdef TARGET_PC
+    HuSprWidescreenLayout();
+#endif
     HuSprOrderNo = 0;
 }
 

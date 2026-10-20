@@ -85,6 +85,13 @@ typedef struct HuSprGrp_s {
 
 SHARED_SYM extern HUSPRITE HuSprData[HUSPR_MAX];
 SHARED_SYM extern HUSPRGRP HuSprGrpData[HUSPR_GRP_MAX];
+#ifdef TARGET_PC
+/* Adaptive widescreen: how far each sprite moves towards the edges, and that
+ * of the sprite whose draw function is running. */
+extern float HuSprWideShift[HUSPR_MAX];
+extern float HuSprDispWideShift;
+BOOL HuSprWidescreenBackdrop(ANIMPAT *pat, float scaleX, float scaleY);
+#endif
 
 void HuSprInit(void);
 void HuSprClose(void);

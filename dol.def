@@ -1170,7 +1170,8 @@ EXPORTS
     PartyBoard_WidescreenAspectScale
     PartyBoard_WidescreenPerspectiveAspect
     PartyBoard_WidescreenOrthoBounds
-    PartyBoard_WidescreenAdjustHudMatrix
+    PartyBoard_WidescreenHudX
+    PartyBoard_WidescreenPictureX
     partyboard_version_is_pal
     partyboard_version_is_ntsc
     partyboard_version_is_usa

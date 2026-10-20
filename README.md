@@ -60,8 +60,9 @@ Press **F1** (or **Back/Select**) in the game:
   smooth the 3D and 2D motion, cameras and fades without speeding up the game or
   delaying input.
 - **Adaptive widescreen HUD**: uses the whole width of the window without
-  stretching the scene, and moves the HUD towards the edges. Or **lock 4:3** for
-  the original picture.
+  stretching the scene, and moves the HUD towards the edges, clear of a phone's
+  notch. Any shape up to 48:9; a screen narrower than 4:3 gets bars above and
+  below. Or **lock 4:3** for the original picture.
 - **Internal resolution** and **shadow resolution**.
 - VSync, FPS counter, pause when the window loses focus.
 

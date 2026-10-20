@@ -165,6 +165,7 @@ jobs:
           build/x-linux-ci-${{matrix.preset}}/tests/disc_version_test
           build/x-linux-ci-${{matrix.preset}}/tests/launch_args_test
           build/x-linux-ci-${{matrix.preset}}/tests/app_update_test
+          build/x-linux-ci-${{matrix.preset}}/tests/widescreen_fit_test
 
       - name: Generate AppImage
         run: ci/build-appimage.sh

@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include "port/widescreen.h"
 #include <stdlib.h>
 #include "game/disp.h"
 #include "game/hu3d.h"
@@ -481,7 +482,8 @@ BOOL ObjCullCheck(HSFDATA *hsf, HSFOBJECT *objPtr, Mtx mtx) {
     }
     fovTan = sind(cameraP->fov * 0.5) / cosd(cameraP->fov * 0.5);
     cameraH = fovTan * z;
-    cameraW = HU_DISP_ASPECT * cameraH;
+    // The widened picture shows more on each side: keep what is there.
+    cameraW = PARTYBOARD_WIDESCREEN_ASPECT(HU_DISP_ASPECT) * cameraH;
     cameraW = radius + ABS(cameraW);
     cameraH = radius + ABS(cameraH);
     if (ABS(x) < cameraW && ABS(y) < cameraH) {

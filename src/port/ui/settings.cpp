@@ -519,7 +519,7 @@ SettingsWindow::SettingsWindow(bool prelaunch)
         config_bool_select(leftPane, rightPane, getSettings().video.enableAdaptiveWidescreen,
             {
                 .key = "Adaptive Widescreen HUD",
-                .helpText = "Uses the window's aspect ratio without stretching the 3D scene. HUD elements keep their proportions and reposition towards the screen edges. Disable this to retain the original presentation.",
+                .helpText = "Uses the window's aspect ratio without stretching the 3D scene. HUD elements keep their proportions and reposition towards the screen edges, clear of notches. Screens narrower than 4:3 get bars above and below. Disable this to retain the original presentation.",
                 .onChange = [](bool value) {
                     if (value) {
                         getSettings().video.lockAspectRatio.setValue(false);

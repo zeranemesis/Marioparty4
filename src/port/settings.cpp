@@ -2,11 +2,13 @@
 #include "port/config.hpp"
 #include "port/widescreen.h"
 #include "port/netplay_runtime.h"
+#include "port/widescreen_fit.hpp"
+#include "game/disp.h"
 
 #include "dolphin/gx/GXAurora.h"
 
-#include <algorithm>
-#include <cmath>
+#include <SDL3/SDL_video.h>
+#include <aurora/lib/window.hpp>
 
 namespace partyboard {
 
@@ -167,8 +169,6 @@ void registerSettings() {
 
 }
 
-static constexpr float kOriginalFramebufferAspect = 4.0f / 3.0f;
-
 extern "C" {
 
 CARDFileType partyboard_settings_card_file_type(void)
@@ -216,24 +216,75 @@ bool PartyBoard_WidescreenEnabled(void)
 
 float PartyBoard_WidescreenAspectScale(void)
 {
-    u32 width;
-    u32 height;
+    SDL_Window *window = aurora::window::get_sdl_window();
+    int width = 0;
+    int height = 0;
 
-    if (!PartyBoard_WidescreenEnabled()) {
+    if (!PartyBoard_WidescreenEnabled() || window == nullptr || !SDL_GetWindowSize(window, &width, &height)) {
         return 1.0f;
     }
 
-    AuroraGetRenderSize(&width, &height);
-    if (width == 0 || height == 0) {
-        return 1.0f;
-    }
+    // Narrower than 4:3 (a 5:4 monitor, a portrait screen, a window dragged
+    // narrow) is letterboxed rather than cut. The window decides, not the
+    // framebuffer: letterboxing makes that one 4:3.
+    AuroraSetViewportPolicy(static_cast<s64>(width) * 3 < static_cast<s64>(height) * 4 ? AURORA_VIEWPORT_FIT
+                                                                                    : AURORA_VIEWPORT_STRETCH);
+    return partyboard::widescreen::aspect_scale(static_cast<float>(width), static_cast<float>(height));
+}
 
-    const float scale = (static_cast<float>(width) / static_cast<float>(height)) /
-                        kOriginalFramebufferAspect;
-    if (!std::isfinite(scale)) {
-        return 1.0f;
+static partyboard::widescreen::HudSpan WidescreenHudSpan(float scale)
+{
+    SDL_Window *window = aurora::window::get_sdl_window();
+    int width = 0;
+    int height = 0;
+    SDL_Rect safe {};
+    if (scale == 1.0f || window == nullptr || !SDL_GetWindowSize(window, &width, &height)
+        || !SDL_GetWindowSafeArea(window, &safe)) {
+        return {};
     }
-    return std::clamp(scale, 0.5f, 3.0f);
+    return partyboard::widescreen::hud_span(scale, static_cast<float>(width), static_cast<float>(safe.x),
+                                            static_cast<float>(safe.w));
+}
+
+bool PartyBoard_WidescreenBackdrop(float width, float height)
+{
+    // Three quarters of the height: some backdrops leave room for borders.
+    return width >= HU_DISP_WIDTHF && height >= HU_DISP_HEIGHTF * 0.75f;
+}
+
+void PartyBoard_WidescreenStretchHudMatrix(Mtx matrix)
+{
+    const float scale = PartyBoard_WidescreenAspectScale();
+    for (int column = 0; column < 3; ++column) {
+        matrix[0][column] *= scale;
+    }
+}
+
+float PartyBoard_WidescreenHudShift(float hudX)
+{
+    const float scale = PartyBoard_WidescreenAspectScale();
+    if (scale == 1.0f) {
+        return 0.0f;
+    }
+    return partyboard::widescreen::placed_x(hudX, HU_DISP_CENTERX, scale, WidescreenHudSpan(scale)) - hudX;
+}
+
+float PartyBoard_WidescreenHudX(float pictureX)
+{
+    const float scale = PartyBoard_WidescreenAspectScale();
+    if (scale == 1.0f) {
+        return pictureX;
+    }
+    return partyboard::widescreen::hud_x(pictureX, HU_DISP_CENTERX, scale, WidescreenHudSpan(scale));
+}
+
+float PartyBoard_WidescreenPictureX(float hudX)
+{
+    const float scale = PartyBoard_WidescreenAspectScale();
+    if (scale == 1.0f) {
+        return hudX;
+    }
+    return partyboard::widescreen::picture_x(hudX, HU_DISP_CENTERX, scale, WidescreenHudSpan(scale));
 }
 
 float PartyBoard_WidescreenPerspectiveAspect(float originalAspect)
@@ -249,13 +300,5 @@ void PartyBoard_WidescreenOrthoBounds(float originalLeft, float originalRight,
                             PartyBoard_WidescreenAspectScale();
     *renderLeft = center - halfWidth;
     *renderRight = center + halfWidth;
-}
-
-void PartyBoard_WidescreenAdjustHudMatrix(Mtx matrix, float originalCenterX)
-{
-    const float scale = PartyBoard_WidescreenAspectScale();
-    if (scale != 1.0f) {
-        matrix[0][3] = originalCenterX + (matrix[0][3] - originalCenterX) * scale;
-    }
 }
 }

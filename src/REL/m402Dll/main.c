@@ -1,4 +1,5 @@
 #include "REL/executor.h"
+#include "port/widescreen.h"
 #include "game/chrman.h"
 #include "game/data.h"
 #include "game/disp.h"
@@ -583,11 +584,11 @@ static void fn_1_1A60(Vec *arg0, s16 arg1, Vec *arg2)
     temp_r31 = &Hu3DCamera[i];
     C_MTXLookAt(sp1C, &temp_r31->pos, &temp_r31->up, &temp_r31->target);
     MTXMultVec(sp1C, arg0, &sp10);
-    temp_f30 = sp10.z * (sind(temp_r31->fov / 2) / cosd(temp_r31->fov / 2)) * temp_r31->aspect;
+    temp_f30 = sp10.z * (sind(temp_r31->fov / 2) / cosd(temp_r31->fov / 2)) * PARTYBOARD_WIDESCREEN_ASPECT(temp_r31->aspect);
     temp_f29 = sp10.z * (sind(temp_r31->fov / 2) / cosd(temp_r31->fov / 2));
     temp_f28 = 0.9f * temp_r31->viewportX;
     temp_f31 = 0.9f * temp_r31->viewportW;
-    arg2->x = temp_f31 / 2 + sp10.x * ((temp_f31 / 2) / -temp_f30) + temp_f28;
+    arg2->x = PARTYBOARD_WIDESCREEN_HUD_X(temp_f31 / 2 + sp10.x * ((temp_f31 / 2) / -temp_f30) + temp_f28);
     arg2->y = temp_r31->viewportH / 2 + sp10.y * ((temp_r31->viewportH / 2) / temp_f29) + temp_r31->viewportY;
     arg2->z = 0.0f;
 }

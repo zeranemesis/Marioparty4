@@ -461,7 +461,7 @@ static void MesDispFunc(HUSPRITE *sprite)
         mtxTransCat(modelview, sprite->pos.x, sprite->pos.y, 0.0f);
         MTXConcat(*sprite->groupMtx, modelview, modelview);
 #ifdef TARGET_PC
-        PartyBoard_WidescreenAdjustHudMatrix(modelview, HU_DISP_CENTERX);
+        modelview[0][3] += HuSprDispWideShift;
 #endif
         GXLoadPosMtxImm(modelview, 0);
         GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
