@@ -329,15 +329,21 @@ static class Tests {
     // The companion's languages: English when asked or when Windows is not in
     // French, every message through L.T, the French text as the key.
     static void Languages() {
-        var saved=L.English;
+        var saved=L.Language;
         try {
+            L.Init(k=>k==L.Variable?"de":null);
+            Check(L.T("Mise à jour disponible")=="Update verfügbar" && L.T("Rejoindre")=="Join","German update messages, English for the rest");
+            foreach(var language in new[]{"en","de","es","it"}){
+                L.Language=language;
+                Check(String.Format(L.T("La version v{0} est disponible."),"1.2")!=String.Format("La version v{0} est disponible.","1.2") && L.T("Télécharger et installer maintenant ?")!="Télécharger et installer maintenant ?","update prompt translated in "+language);
+            }
             L.Init(k=>k==L.Variable?"en":null);
             Check(L.English && L.T("Rejoindre")=="Join" && L.T("Cette room vient d'être prise par un autre joueur. Choisissez-en une autre, ou créez la vôtre.").StartsWith("This room was just taken"),"English when asked");
             Check(L.T("texte inconnu")=="texte inconnu","an untranslated string stays as it is");
             Check(L.T("Laissez vide pour la préparation automatique de la box.\nAvec un port fixe P, ouvrez sur votre box : TCP P, UDP P et UDP P+1.").Contains("\n"),"a line break survives translation");
             L.Init(k=>k==L.Variable?"fr":null);
             Check(!L.English && L.T("Rejoindre")=="Rejoindre","French when asked, whatever Windows says");
-        } finally {L.English=saved;}
+        } finally {L.Language=saved;}
     }
     // A UDP port Windows refuses (a range Hyper-V or WSL reserved): an
     // automatic port draws another, a fixed one says it is taken.

@@ -951,6 +951,11 @@ void Prelaunch::update()
                 state = "available";
                 message = fmt::format(fmt::runtime(ui_translate("Build {} is available.")), status.manifest.versionCode);
                 action = "Update";
+                // The startup check asks at once, once per launch; the button stays for later.
+                if (static bool offered = false; status.quiet && !offered) {
+                    offered = true;
+                    push_update_modal(*this, status);
+                }
                 break;
             case update::State::Downloading:
                 // The download may not have finished or been opened: the button stays to start it again.

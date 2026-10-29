@@ -89,7 +89,7 @@ sealed class MainForm : Form {
         update=Make(L.T("Vérifier les mises à jour"),CheckForUpdates);actions.Controls.Add(update);
         footer=new Label{Dock=DockStyle.Fill,Font=new Font("Segoe UI",9),ForeColor=Color.DimGray};root.Controls.Add(footer,0,10);UpdateFooter();
         nickname.TextChanged+=(s,e)=>RefreshLobby();RefreshControls();RefreshLobby();
-        // A launcher that shows the room itself offers updates itself: no dialog out of nowhere.
+        // A launcher that shows the room itself offers updates itself (headless: CubeShelf does).
         if(!startup.Headless)Task.Run(()=>StartupUpdateCheck());else ShowInTaskbar=false;
         // Not in the constructor: UI() drops a callback while the handle does not exist, so a disc
         // that verified faster than the window appeared would vanish without a trace.
@@ -427,23 +427,33 @@ sealed class MainForm : Form {
     async void CheckForUpdates(){
         if(session!=null){SetStatus(L.T("Quittez le salon avant de mettre à jour PartyBoard."));return;}
         update.Enabled=false;SetStatus(L.T("Recherche d'une mise à jour sur GitHub…"));
+        UpdateInfo info;
+        try{info=await UpdateService.CheckAsync();}
+        catch(Exception e){SetStatus(L.T("Impossible de vérifier la mise à jour : ")+e.Message);if(!IsDisposed)update.Enabled=true;return;}
+        if(info.Version<=new Version(UpdateService.CurrentVersion)){SetStatus(String.Format(L.T("PartyBoard est déjà à jour (v{0})."),UpdateService.CurrentVersion));update.Enabled=true;return;}
+        OfferUpdate(info);
+    }
+    async void OfferUpdate(UpdateInfo info){
+        update.Enabled=false;
         try{
-            var info=await UpdateService.CheckAsync();
-            var current=new Version(UpdateService.CurrentVersion);
-            if(info.Version<=current){SetStatus(L.T("PartyBoard est déjà à jour (v")+UpdateService.CurrentVersion+").");return;}
             var notes=String.IsNullOrWhiteSpace(info.Notes)?L.T("Une nouvelle version est disponible."):info.Notes;
-            if(MessageBox.Show(this,L.T("La version v")+info.Version+" est disponible.\n\n"+notes+L.T("\n\nTélécharger et installer maintenant ?"),L.T("Mise à jour PartyBoard"),MessageBoxButtons.YesNo,MessageBoxIcon.Information)!=DialogResult.Yes){SetStatus(L.T("Mise à jour reportée."));return;}
+            if(MessageBox.Show(this,String.Format(L.T("La version v{0} est disponible."),info.Version)+"\n\n"+notes+"\n\n"+L.T("Télécharger et installer maintenant ?"),L.T("Mise à jour PartyBoard"),MessageBoxButtons.YesNo,MessageBoxIcon.Information)!=DialogResult.Yes){update.Text=L.T("Mise à jour disponible");SetStatus(L.T("Mise à jour reportée."));return;}
             SetStatus(L.T("Téléchargement de la mise à jour…"));await UpdateService.InstallAsync(info);
             MessageBox.Show(this,L.T("La mise à jour a été téléchargée. PartyBoard va redémarrer pour l'installer."),L.T("Mise à jour PartyBoard"),MessageBoxButtons.OK,MessageBoxIcon.Information);
             closing=true;Application.Exit();
-        }catch(Exception e){SetStatus(L.T("Impossible de vérifier la mise à jour : ")+e.Message);}
+        }catch(Exception e){SetStatus(L.T("Impossible d'installer la mise à jour : ")+e.Message);}
         finally{if(!closing && !IsDisposed)update.Enabled=true;}
     }
+    // Asked as soon as the window is up; inside a room only the button says so.
     async Task StartupUpdateCheck(){
         try{
             var info=await UpdateService.CheckAsync();
             if(info.Version<=new Version(UpdateService.CurrentVersion))return;
-            UI(()=>{if(update!=null && !IsDisposed){update.Text=L.T("Mise à jour disponible");update.Enabled=true;SetStatus(L.T("Une mise à jour est disponible sur GitHub. Cliquez sur le bouton de mise à jour pour l'installer."));}});
+            UI(()=>{
+                if(update==null || IsDisposed)return;
+                if(session==null){OfferUpdate(info);return;}
+                update.Text=L.T("Mise à jour disponible");update.Enabled=true;SetStatus(L.T("Une mise à jour est disponible sur GitHub. Cliquez sur le bouton de mise à jour pour l'installer."));
+            });
         }catch{
             // The launcher remains fully usable when GitHub is offline or blocked.
         }
