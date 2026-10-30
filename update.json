@@ -1,6 +1,6 @@
 {
-  "version": "0.15.6",
-  "downloadUrl": "https://github.com/zeranemesis/Marioparty4/raw/refs/heads/audio-local/dist/PartyBoard-rollback-etape15-correctifs.zip",
-  "sha256": "C9D37CEEE2DB09997724B1D26BB911EED6D33811EB438C47B4332FAFCBB6C310",
-  "notes": "Le lanceur utilise la synchronisation sans prediction avec un delai de trois images. Le rollback experimental ne s'active plus automatiquement. Les deux PC suivent la meme sequence de demarrage."
+  "version": "0.21.0",
+  "downloadUrl": "https://github.com/zeranemesis/Marioparty4/releases/download/v0.21.0/PartyBoard-win-x64.zip",
+  "sha256": "5F51708602040E849F126E1BEE4250F85D4A2497EAD1A3B8FA59E34EDD294274",
+  "notes": "Adaptive widescreen. Online desyncs fixed in The Great Deflate and Three Throw. Updates are offered as soon as PartyBoard opens, in your language."
 }
