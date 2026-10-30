@@ -9,7 +9,55 @@ namespace partyboard::ui {
 
 inline std::string ui_translate(std::string_view text)
 {
-    if (partyboard::getSettings().game.language.getValue() != partyboard::GameLanguage::French) {
+    const auto language = partyboard::getSettings().game.language.getValue();
+    // German, Spanish and Italian cover the update messages only; the rest stays English.
+    if (language == partyboard::GameLanguage::German || language == partyboard::GameLanguage::Spanish
+        || language == partyboard::GameLanguage::Italian) {
+        struct Other { std::string_view source; std::string_view de; std::string_view es; std::string_view it; };
+        static constexpr Other others[] = {
+            {"Update Available", "Update verfügbar", "Actualización disponible", "Aggiornamento disponibile"},
+            {"Update", "Aktualisieren", "Actualizar", "Aggiorna"},
+            {"Download", "Herunterladen", "Descargar", "Scarica"},
+            {"Later", "Später", "Más tarde", "Più tardi"},
+            {"Retry", "Erneut versuchen", "Reintentar", "Riprova"},
+            {"Check for Updates", "Nach Updates suchen", "Buscar actualizaciones", "Cerca aggiornamenti"},
+            {"Check Now", "Jetzt suchen", "Buscar ahora", "Cerca ora"},
+            {"Look for a newer build on GitHub when Party Board starts. When there is one, the home screen offers to download it; nothing is downloaded without asking.",
+             "Sucht beim Start von Party Board auf GitHub nach einer neueren Version. Gibt es eine, wird der Download angeboten; ohne Ihre Zustimmung wird nichts heruntergeladen.",
+             "Busca una versión más reciente en GitHub al iniciar Party Board. Si la hay, se ofrece descargarla; no se descarga nada sin preguntar.",
+             "Cerca una versione più recente su GitHub all'avvio di Party Board. Se c'è, viene proposto di scaricarla; nulla viene scaricato senza chiedere."},
+            {"Look for a newer build on GitHub now. The answer shows on the home screen, under the version.",
+             "Sucht jetzt auf GitHub nach einer neueren Version. Die Antwort erscheint auf dem Startbildschirm unter der Versionsnummer.",
+             "Busca ahora una versión más reciente en GitHub. La respuesta aparece en la pantalla de inicio, debajo de la versión.",
+             "Cerca ora una versione più recente su GitHub. La risposta appare nella schermata iniziale, sotto la versione."},
+            {"Checking GitHub for an update...", "Suche auf GitHub nach einem Update…", "Buscando una actualización en GitHub…", "Ricerca di un aggiornamento su GitHub…"},
+            {"Party Board is up to date (build {}).", "Party Board ist auf dem neuesten Stand (Build {}).", "Party Board está actualizado (build {}).", "Party Board è aggiornato (build {})."},
+            {"Build {} is available.", "Build {} ist verfügbar.", "La build {} está disponible.", "La build {} è disponibile."},
+            {"Open the downloaded file to install the update.", "Öffnen Sie die heruntergeladene Datei, um das Update zu installieren.",
+             "Abre el archivo descargado para instalar la actualización.", "Apri il file scaricato per installare l'aggiornamento."},
+            {"Party Board build {} is available. This phone has build {}.", "Party Board Build {} ist verfügbar. Dieses Gerät hat Build {}.",
+             "La build {} de Party Board está disponible. Este dispositivo tiene la build {}.", "La build {} di Party Board è disponibile. Questo dispositivo ha la build {}."},
+            {"What changed:", "Was ist neu:", "Novedades:", "Novità:"},
+            {"The download opens in your browser: open the file once it is downloaded to install the update. Your saves and settings are kept.",
+             "Der Download öffnet sich in Ihrem Browser: Öffnen Sie die Datei nach dem Herunterladen, um das Update zu installieren. Ihre Spielstände und Einstellungen bleiben erhalten.",
+             "La descarga se abre en tu navegador: abre el archivo cuando se haya descargado para instalar la actualización. Tus partidas guardadas y tus ajustes se conservan.",
+             "Il download si apre nel browser: apri il file una volta scaricato per installare l'aggiornamento. I salvataggi e le impostazioni vengono conservati."},
+            {"Could not open the download.", "Der Download konnte nicht geöffnet werden.", "No se pudo abrir la descarga.", "Impossibile aprire il download."},
+            {"Could not reach GitHub.", "GitHub ist nicht erreichbar.", "No se pudo conectar con GitHub.", "Impossibile raggiungere GitHub."},
+            {"GitHub did not send the update manifest.", "GitHub hat das Update-Manifest nicht gesendet.", "GitHub no envió el manifiesto de actualización.",
+             "GitHub non ha inviato il manifesto di aggiornamento."},
+            {"The update manifest on GitHub is invalid.", "Das Update-Manifest auf GitHub ist ungültig.", "El manifiesto de actualización de GitHub no es válido.",
+             "Il manifesto di aggiornamento su GitHub non è valido."},
+        };
+        for (const auto &entry : others) {
+            if (entry.source == text) {
+                return std::string(language == partyboard::GameLanguage::German ? entry.de
+                    : language == partyboard::GameLanguage::Spanish ? entry.es : entry.it);
+            }
+        }
+        return std::string(text);
+    }
+    if (language != partyboard::GameLanguage::French) {
         return std::string(text);
     }
     struct Entry { std::string_view source; std::string_view translated; };

@@ -4,22 +4,26 @@ using System.Globalization;
 
 namespace PartyBoardOnline {
 
-// The companion's two languages. Every string the player reads is written in
-// French in the code and goes through T(), which gives the English one when
-// English is shown. English is shown when a launcher asks for it
-// (PARTYBOARD_ONLINE_UI_LANGUAGE=en, CubeShelf passes its own language), or,
-// when nothing asks, when Windows is not in French: French for a French
-// Windows, English for every other language.
+// The companion's languages: the game's five. Every string the player reads is
+// written in French in the code and goes through T(). The language is the one a
+// launcher asks for (PARTYBOARD_ONLINE_UI_LANGUAGE, CubeShelf passes its own),
+// else Windows' when it is one of the five, else English. German, Spanish and
+// Italian cover the update messages only; any other string shows in English.
 static class L {
     public const string Variable="PARTYBOARD_ONLINE_UI_LANGUAGE";
-    public static bool English {get;set;}
+    static readonly string[] Languages={"fr","en","de","es","it"};
+    public static string Language {get;set;}="en";
+    public static bool English {get{return Language!="fr";} set{Language=value?"en":"fr";}}
     public static void Init(Func<string,string> environment) {
         var asked=(environment(Variable)??"").Trim().ToLowerInvariant();
-        English=asked=="en" || (asked!="fr" && !string.Equals(CultureInfo.CurrentUICulture.TwoLetterISOLanguageName,"fr",StringComparison.OrdinalIgnoreCase));
+        if(Array.IndexOf(Languages,asked)<0) asked=CultureInfo.CurrentUICulture.TwoLetterISOLanguageName.ToLowerInvariant();
+        Language=Array.IndexOf(Languages,asked)<0?"en":asked;
     }
     public static string T(string french) {
-        string english;
-        return English && french!=null && Table.TryGetValue(french,out english)?english:french;
+        if(Language=="fr" || french==null) return french;
+        Dictionary<string,string> other;string text;
+        if(Others.TryGetValue(Language,out other) && other.TryGetValue(french,out text)) return text;
+        return Table.TryGetValue(french,out text)?text:french;
     }
     static readonly Dictionary<string,string> Table=new Dictionary<string,string>(StringComparer.Ordinal) {
         {" (jeu à 3 ou 4) est déjà utilisé par un autre programme. Choisissez un autre port fixe."," (3 or 4 player games) is already used by another program. Pick another fixed port."},
@@ -138,6 +142,7 @@ static class L {
         {"Identique — SHA-256 vérifié","Same — SHA-256 verified"},
         {"Il faut au moins deux joueurs.","At least two players are needed."},
         {"Images de disque|*.iso;*.gcm;*.rvz;*.wia;*.gcz;*.ciso|Tous les fichiers|*.*","Disc images|*.iso;*.gcm;*.rvz;*.wia;*.gcz;*.ciso|All files|*.*"},
+        {"Impossible d'installer la mise à jour : ","Could not install the update: "},
         {"Impossible de vérifier la mise à jour : ","Could not check for updates: "},
         {"Information disque incorrecte.","Incorrect disc information."},
         {"Informations du joueur incompatibles.","Incompatible player information."},
@@ -180,7 +185,7 @@ static class L {
         {"La room n'est plus publique. Tes amis peuvent toujours la rejoindre avec l'invitation.","The room is no longer public. Your friends can still join with the invitation."},
         {"La room ne peut pas être publique : le relais en ligne n'est pas disponible. Elle reste privée.","The room cannot be public: the online relay is not available. It stays private."},
         {"La signature SHA-256 de la mise à jour ne correspond pas.","The update's SHA-256 does not match."},
-        {"La version v","Version v"},
+        {"La version v{0} est disponible.","Version v{0} is available."},
         {"Laissez vide pour la préparation automatique de la box.\nAvec un port fixe P, ouvrez sur votre box : TCP P, UDP P et UDP P+1.","Leave empty for the router's automatic setup.\nWith a fixed port P, open on your router: TCP P, UDP P and UDP P+1."},
         {"Lancer pour tout le monde","Start for everyone"},
         {"Langue de jeu inconnue.","Unknown game language."},
@@ -252,7 +257,7 @@ static class L {
         {"Parties en LAN","LAN games"},
         {"Parties en LAN…","LAN games…"},
         {"Parties sur le réseau local","Games on the local network"},
-        {"PartyBoard est déjà à jour (v","PartyBoard is up to date (v"},
+        {"PartyBoard est déjà à jour (v{0}).","PartyBoard is up to date (v{0})."},
         {"PartyBoard — Réseau local v","PartyBoard — Local network v"},
         {"PartyBoard — Salon en ligne v","PartyBoard — Online room v"},
         {"Place inconnue.","Unknown seat."},
@@ -353,7 +358,7 @@ static class L {
         {"Windows n'a pas pu préparer la connexion.","Windows could not prepare the connection."},
         {"\nFichier vérifié et protégé contre les modifications","\nFile verified and protected from changes"},
         {"\nVérification SHA-256 : ","\nSHA-256 check: "},
-        {"\n\nTélécharger et installer maintenant ?","\n\nDownload and install now?"},
+        {"Télécharger et installer maintenant ?","Download and install now?"},
         {"européen","European"},
         {"mêmes mods mais dans un autre ordre : alignez les priorités dans CubeShelf","same mods in another order: align the priorities in CubeShelf"},
         {"version différente : ","different version: "},
@@ -362,6 +367,68 @@ static class L {
         {"à désactiver : ","to turn off: "},
         {"à installer : ","to install: "},
         {"à l'instant","just now"},
+    };
+    static readonly Dictionary<string,Dictionary<string,string>> Others=new Dictionary<string,Dictionary<string,string>> {
+        {"de",new Dictionary<string,string>(StringComparer.Ordinal) {
+            {"Vérifier les mises à jour","Nach Updates suchen"},
+            {"Quittez le salon avant de mettre à jour PartyBoard.","Verlassen Sie den Raum, bevor Sie PartyBoard aktualisieren."},
+            {"Recherche d'une mise à jour sur GitHub…","Suche auf GitHub nach einem Update…"},
+            {"Impossible de vérifier la mise à jour : ","Update-Prüfung fehlgeschlagen: "},
+            {"PartyBoard est déjà à jour (v{0}).","PartyBoard ist auf dem neuesten Stand (v{0})."},
+            {"Une nouvelle version est disponible.","Eine neue Version ist verfügbar."},
+            {"La version v{0} est disponible.","Version v{0} ist verfügbar."},
+            {"Télécharger et installer maintenant ?","Jetzt herunterladen und installieren?"},
+            {"Mise à jour PartyBoard","PartyBoard-Update"},
+            {"Mise à jour disponible","Update verfügbar"},
+            {"Mise à jour reportée.","Update verschoben."},
+            {"Téléchargement de la mise à jour…","Update wird heruntergeladen…"},
+            {"La mise à jour a été téléchargée. PartyBoard va redémarrer pour l'installer.","Das Update wurde heruntergeladen. PartyBoard startet neu, um es zu installieren."},
+            {"Impossible d'installer la mise à jour : ","Das Update konnte nicht installiert werden: "},
+            {"Une mise à jour est disponible sur GitHub. Cliquez sur le bouton de mise à jour pour l'installer.","Auf GitHub ist ein Update verfügbar. Klicken Sie auf die Update-Schaltfläche, um es zu installieren."},
+            {"Le manifeste GitHub contient une version invalide.","Das GitHub-Manifest enthält eine ungültige Version."},
+            {"Le manifeste GitHub est incomplet.","Das GitHub-Manifest ist unvollständig."},
+            {"La signature SHA-256 de la mise à jour ne correspond pas.","Die SHA-256-Prüfsumme des Updates stimmt nicht überein."},
+        }},
+        {"es",new Dictionary<string,string>(StringComparer.Ordinal) {
+            {"Vérifier les mises à jour","Buscar actualizaciones"},
+            {"Quittez le salon avant de mettre à jour PartyBoard.","Sal de la sala antes de actualizar PartyBoard."},
+            {"Recherche d'une mise à jour sur GitHub…","Buscando una actualización en GitHub…"},
+            {"Impossible de vérifier la mise à jour : ","No se pudo comprobar la actualización: "},
+            {"PartyBoard est déjà à jour (v{0}).","PartyBoard está actualizado (v{0})."},
+            {"Une nouvelle version est disponible.","Hay una nueva versión disponible."},
+            {"La version v{0} est disponible.","La versión v{0} está disponible."},
+            {"Télécharger et installer maintenant ?","¿Descargar e instalar ahora?"},
+            {"Mise à jour PartyBoard","Actualización de PartyBoard"},
+            {"Mise à jour disponible","Actualización disponible"},
+            {"Mise à jour reportée.","Actualización pospuesta."},
+            {"Téléchargement de la mise à jour…","Descargando la actualización…"},
+            {"La mise à jour a été téléchargée. PartyBoard va redémarrer pour l'installer.","La actualización se ha descargado. PartyBoard se reiniciará para instalarla."},
+            {"Impossible d'installer la mise à jour : ","No se pudo instalar la actualización: "},
+            {"Une mise à jour est disponible sur GitHub. Cliquez sur le bouton de mise à jour pour l'installer.","Hay una actualización disponible en GitHub. Haz clic en el botón de actualización para instalarla."},
+            {"Le manifeste GitHub contient une version invalide.","El manifiesto de GitHub contiene una versión no válida."},
+            {"Le manifeste GitHub est incomplet.","El manifiesto de GitHub está incompleto."},
+            {"La signature SHA-256 de la mise à jour ne correspond pas.","El SHA-256 de la actualización no coincide."},
+        }},
+        {"it",new Dictionary<string,string>(StringComparer.Ordinal) {
+            {"Vérifier les mises à jour","Cerca aggiornamenti"},
+            {"Quittez le salon avant de mettre à jour PartyBoard.","Esci dalla stanza prima di aggiornare PartyBoard."},
+            {"Recherche d'une mise à jour sur GitHub…","Ricerca di un aggiornamento su GitHub…"},
+            {"Impossible de vérifier la mise à jour : ","Impossibile verificare l'aggiornamento: "},
+            {"PartyBoard est déjà à jour (v{0}).","PartyBoard è aggiornato (v{0})."},
+            {"Une nouvelle version est disponible.","È disponibile una nuova versione."},
+            {"La version v{0} est disponible.","La versione v{0} è disponibile."},
+            {"Télécharger et installer maintenant ?","Scaricare e installare ora?"},
+            {"Mise à jour PartyBoard","Aggiornamento di PartyBoard"},
+            {"Mise à jour disponible","Aggiornamento disponibile"},
+            {"Mise à jour reportée.","Aggiornamento rimandato."},
+            {"Téléchargement de la mise à jour…","Download dell'aggiornamento…"},
+            {"La mise à jour a été téléchargée. PartyBoard va redémarrer pour l'installer.","L'aggiornamento è stato scaricato. PartyBoard si riavvierà per installarlo."},
+            {"Impossible d'installer la mise à jour : ","Impossibile installare l'aggiornamento: "},
+            {"Une mise à jour est disponible sur GitHub. Cliquez sur le bouton de mise à jour pour l'installer.","È disponibile un aggiornamento su GitHub. Fai clic sul pulsante di aggiornamento per installarlo."},
+            {"Le manifeste GitHub contient une version invalide.","Il manifesto GitHub contiene una versione non valida."},
+            {"Le manifeste GitHub est incomplet.","Il manifesto GitHub è incompleto."},
+            {"La signature SHA-256 de la mise à jour ne correspond pas.","Lo SHA-256 dell'aggiornamento non corrisponde."},
+        }},
     };
 }
 }
