@@ -18,6 +18,10 @@
 SHARED_SYM extern u32 GlobalCounter;
 SHARED_SYM extern HU3DLIGHT Hu3DLocalLight[0x20];
 
+#ifdef TARGET_PC
+s16 HuSysVWaitGet(s16 old);
+#endif
+
 typedef struct M425DllUnkStruct4 {
     s16 unk_00;
     s16 unk_02;
@@ -2087,7 +2091,14 @@ void fn_1_101C4(HU3DMODEL *var_r29, Mtx var_r28)
     MTXInvXpose(var_r28, sp50);
     GXLoadNrmMtxImm(sp50, 0);
     var_r27 = fn_1_115D4(var_r29, Hu3DCameraMtx, Hu3DCameraMtxXPose, 4.0f);
-    if (omPauseChk() == 0) {
+    /* fn_1_E914 is the balloon's physics, run from this draw hook. On PC an
+     * image can carry no game tick (a netplay peer waiting for its partner),
+     * and running it there made the waiting peer's balloon diverge (#26). */
+    if (omPauseChk() == 0
+#ifdef TARGET_PC
+        && HuSysVWaitGet(0) != 0
+#endif
+    ) {
         fn_1_E914(var_r29, var_r28);
     }
     var_r29->scale.y = var_r31->unk_DC;

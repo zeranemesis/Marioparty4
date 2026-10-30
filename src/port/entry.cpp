@@ -13,6 +13,7 @@
 
 #if defined(_WIN32)
 #include <cstdio>
+#include <math.h>
 #include <windows.h>
 #endif
 
@@ -47,6 +48,12 @@ int main(int argc, char *argv[])
     PartyBoard_CrashReportInit(nullptr, -1, nullptr);
 #if defined(_WIN32)
     DisableQuickEditInOwnConsole();
+#endif
+#if defined(_MSC_VER) && defined(_M_X64)
+    // The x64 CRT takes an FMA3 sin/cos/atan2 when the CPU has it, and ~1 % of
+    // their results differ in the last bit from the plain ones. Netplay peers
+    // on different CPUs then diverge, first in Three Throw's balls (#26).
+    _set_FMA3_enable(0);
 #endif
 
     if (argc == 2 && std::strcmp(argv[1], "--crash-report-self-test") == 0)
