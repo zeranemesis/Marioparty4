@@ -99,12 +99,15 @@ final class DualScreen {
         return null;
     }
 
-    private static boolean french() {
-        return "fr".equals(Locale.getDefault().getLanguage());
-    }
-
-    private static String tr(String english, String french) {
-        return french() ? french : english;
+    // The languages PartyBoard speaks (src/port/ui/localization.hpp); English otherwise.
+    private static String tr(String english, String french, String german, String spanish, String italian) {
+        switch (Locale.getDefault().getLanguage()) {
+        case "fr": return french;
+        case "de": return german;
+        case "es": return spanish;
+        case "it": return italian;
+        default: return english;
+        }
     }
 
     private static final class Screen extends Presentation {
@@ -157,8 +160,8 @@ final class DualScreen {
             LinearLayout tabs = new LinearLayout(getContext());
             tabs.setOrientation(LinearLayout.HORIZONTAL);
             tabs.setPadding(dp(12), dp(12), dp(12), dp(4));
-            mapTab = tabButton(tr("Board map", "Carte du plateau"));
-            settingsTab = tabButton(tr("Settings", "Réglages"));
+            mapTab = tabButton(tr("Board map", "Carte du plateau", "Spielbrett", "Mapa del tablero", "Mappa del tabellone"));
+            settingsTab = tabButton(tr("Settings", "Réglages", "Einstellungen", "Ajustes", "Impostazioni"));
             mapTab.setOnClickListener(v -> select(true));
             settingsTab.setOnClickListener(v -> select(false));
             tabs.addView(mapTab, new LinearLayout.LayoutParams(0, dp(56), 1));
@@ -229,12 +232,12 @@ final class DualScreen {
         private void buildSettings() {
             settings.removeAllViews();
             settingsReady = nativeGetSetting("video.targetFrameRate") >= 0;
-            section(tr("Display", "Affichage"));
-            toggle(tr("Adaptive widescreen", "Écran large adaptatif"),
-                tr("Fills the screen without stretching the scene.", "Remplit l'écran sans étirer la scène."),
+            section(tr("Display", "Affichage", "Anzeige", "Pantalla", "Schermo"));
+            toggle(tr("Adaptive widescreen", "Écran large adaptatif", "Adaptives Breitbild", "Panorámica adaptable", "Widescreen adattivo"),
+                tr("Fills the screen without stretching the scene.", "Remplit l'écran sans étirer la scène.", "Füllt den Bildschirm, ohne die Szene zu strecken.", "Llena la pantalla sin estirar la escena.", "Riempie lo schermo senza allungare la scena."),
                 "video.enableAdaptiveWidescreen");
-            toggle(tr("Original 4:3 picture", "Image 4:3 d'origine"),
-                tr("Keeps the GameCube's proportions, with bars.", "Garde les proportions de la GameCube, avec des bandes."),
+            toggle(tr("Original 4:3 picture", "Image 4:3 d'origine", "Originales 4:3-Bild", "Imagen 4:3 original", "Immagine 4:3 originale"),
+                tr("Keeps the GameCube's proportions, with bars.", "Garde les proportions de la GameCube, avec des bandes.", "Behält die Proportionen des GameCube bei, mit Balken.", "Mantiene las proporciones de GameCube, con franjas.", "Mantiene le proporzioni del GameCube, con bande."),
                 "video.lockAspectRatio");
             int[] rates;
             try {
@@ -244,13 +247,13 @@ final class DualScreen {
             }
             String[] rateNames = new String[rates.length];
             for (int i = 0; i < rates.length; ++i) {
-                rateNames[i] = rates[i] + tr(" FPS", " images/s");
+                rateNames[i] = rates[i] + tr(" FPS", " images/s", " FPS", " FPS", " FPS");
             }
-            choice(tr("Frame rate", "Images par seconde"), "video.targetFrameRate", rates, rateNames);
-            toggle(tr("Frame counter", "Compteur d'images"), null, "game.enableFpsOverlay");
-            section(tr("Controls", "Commandes"));
-            choice(tr("On-screen controller", "Manette à l'écran"), "game.touchControls", new int[] {0, 1, 2},
-                new String[] {tr("Automatic", "Automatique"), tr("Always", "Toujours"), tr("Never", "Jamais")});
+            choice(tr("Frame rate", "Images par seconde", "Bildrate", "Fotogramas por segundo", "Fotogrammi al secondo"), "video.targetFrameRate", rates, rateNames);
+            toggle(tr("Frame counter", "Compteur d'images", "Bildzähler", "Contador de fotogramas", "Contatore fotogrammi"), null, "game.enableFpsOverlay");
+            section(tr("Controls", "Commandes", "Steuerung", "Controles", "Comandi"));
+            choice(tr("On-screen controller", "Manette à l'écran", "Bildschirm-Controller", "Mando en pantalla", "Controller su schermo"), "game.touchControls", new int[] {0, 1, 2},
+                new String[] {tr("Automatic", "Automatique", "Automatisch", "Automático", "Automatico"), tr("Always", "Toujours", "Immer", "Siempre", "Sempre"), tr("Never", "Jamais", "Nie", "Nunca", "Mai")});
         }
 
         private void section(String title) {
@@ -268,7 +271,7 @@ final class DualScreen {
             if (value < 0) {
                 return;
             }
-            row(label, help, value != 0 ? tr("On", "Activé") : tr("Off", "Désactivé"), value != 0, () -> {
+            row(label, help, value != 0 ? tr("On", "Activé", "An", "Activado", "Attivo") : tr("Off", "Désactivé", "Aus", "Desactivado", "Disattivo"), value != 0, () -> {
                 nativeSetSetting(key, nativeGetSetting(key) != 0 ? 0 : 1);
                 // Widescreen and 4:3 switch each other off: redraw every row.
                 handler.postDelayed(this::buildSettings, 50);
@@ -471,8 +474,7 @@ final class DualScreen {
                 paint.setColor(0xFFA9B0D0);
                 paint.setTextSize(sp(20));
                 paint.setTextAlign(Paint.Align.CENTER);
-                canvas.drawText(tr("The map appears once a party is on the board.",
-                    "La carte apparaît dès qu'une partie est sur le plateau."), width / 2, height / 2, paint);
+                canvas.drawText(tr("The map appears once a party is on the board.", "La carte apparaît dès qu'une partie est sur le plateau.", "Die Karte erscheint, sobald eine Partie auf dem Spielbrett läuft.", "El mapa aparece cuando hay una partida en el tablero.", "La mappa appare quando una partita è sul tabellone."), width / 2, height / 2, paint);
                 return;
             }
             int spaces = (int) data[6];
@@ -555,7 +557,7 @@ final class DualScreen {
             paint.setTextSize(sp(18));
             float column = (width - sp(150)) / 2; // two players a row, after the turn counter
             paint.setColor(Color.WHITE);
-            canvas.drawText(tr("Turn ", "Tour ") + (int) data[2] + "/" + (int) data[3], sp(16), sp(36), paint);
+            canvas.drawText(tr("Turn ", "Tour ", "Runde ", "Turno ", "Turno ") + (int) data[2] + "/" + (int) data[3], sp(16), sp(36), paint);
             for (int p = 0; p < 4; ++p) {
                 int o = HEADER + p * PLAYER_STRIDE;
                 int character = Math.max(0, Math.min(7, (int) data[o + 2]));
@@ -576,7 +578,7 @@ final class DualScreen {
                 paint.setColor(Color.WHITE);
                 paint.setTextAlign(Paint.Align.CENTER);
                 paint.setTextSize(sp(22));
-                canvas.drawText(tr("Mini-game in progress", "Mini-jeu en cours"), width / 2, height / 2, paint);
+                canvas.drawText(tr("Mini-game in progress", "Mini-jeu en cours", "Minispiel läuft", "Minijuego en curso", "Minigioco in corso"), width / 2, height / 2, paint);
             }
         }
 
