@@ -95,6 +95,18 @@ int main()
     check(near(tight.mid, 0) && near(tight.span, 1), "too narrow a safe area is ignored");
     check(near(hud_span(2, 0, 0, 0).span, 1), "no window size");
 
+    // The original placement moves no HUD x, and sprites still land over their 3D point.
+    const HudSpan original = original_hud_span(phone);
+    bool unmoved = true;
+    for (float x = -100; x <= kWidth + 100; x += 7) {
+        unmoved = unmoved && near(placed_x(x, kCenter, phone, original), x);
+    }
+    check(unmoved, "original placement leaves the HUD where it was");
+    for (float picture : {0.0f, 100.0f, kCenter, kWidth}) {
+        check(near(picture_x(hud_x(picture, kCenter, phone, original), kCenter, phone, original), picture),
+            "sprite over a 3D point with the original placement");
+    }
+
     if (failures == 0) std::printf("widescreen_fit_test: all checks passed\n");
     return failures == 0 ? 0 : 1;
 }

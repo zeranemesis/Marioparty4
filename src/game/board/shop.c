@@ -28,6 +28,7 @@
 #include "game/hsfex.h"
 #include "port/board_coverage.h"
 #include "port/version_runtime.h"
+#include "port/widescreen.h"
 
 typedef struct {
     struct {
@@ -475,6 +476,11 @@ static void CreateShopWin(void)
     HuWinDrawNoSet(var_r30->unk06, 0x40);
     HuWinExAnimIn(var_r30->unk06);
     sp8.x = 84.0f;
+#ifdef TARGET_PC
+    // The window runs across the middle, so the adaptive widescreen leaves it in place; keep the
+    // item over the window instead of pushing it towards the edge like a side HUD.
+    sp8.x = PARTYBOARD_WIDESCREEN_HUD_X(HU_DISP_CENTERX + (sp8.x - HU_DISP_CENTERX) / PartyBoard_WidescreenAspectScale());
+#endif
     sp8.y = HU_DISP_HEIGHT - 88;
     sp8.z = 400.0f;
     var_r31->scale.x = var_r31->scale.y = var_r31->scale.z = 0.25f;

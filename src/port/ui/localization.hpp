@@ -118,7 +118,7 @@ inline std::string ui_translate(std::string_view text)
         {"Configure Controller", "Configurer la manette"}, {"Allow Background Input", "Autoriser les entrées en arrière-plan"},
         {"Turbo Key", "Touche turbo"}, {"Speedrun Mode", "Mode course rapide"}, {"Unlock All Minigames", "Déverrouiller tous les mini-jeux"},
         {"Unlock Bowser's Gnarly Party", "Déverrouiller la fête infernale de Bowser"}, {"Frame Rate", "Fréquence d’images"},
-        {"Lock 4:3 Aspect Ratio", "Verrouiller le format 4:3"}, {"Adaptive Widescreen HUD", "HUD écran large adaptatif"},
+        {"Lock 4:3 Aspect Ratio", "Verrouiller le format 4:3"}, {"Adaptive Widescreen HUD", "HUD écran large adaptatif"}, {"Original HUD Placement", "HUD à sa place d'origine"},
         {"Internal Resolution", "Résolution interne"}, {"Shadow Resolution", "Résolution des ombres"},
         {"Pause On Focus Lost", "Pause si la fenêtre perd le focus"}, {"Skip Party Board Main Menu", "Ignorer le menu principal Party Board"},
         {"Skip Game Boot Sequence", "Ignorer le démarrage du jeu"}, {"Off", "Désactivées"}, {"All", "Toutes"}, {"Some", "Certaines"},

@@ -72,6 +72,7 @@ struct UserSettings {
         ConfigVar<int> targetFrameRate;
         ConfigVar<bool> lockAspectRatio;
         ConfigVar<bool> enableAdaptiveWidescreen;
+        ConfigVar<bool> keepOriginalHud;
         ConfigVar<bool> enableFpsOverlay;
         ConfigVar<int> fpsOverlayCorner;
     } video;
