@@ -1197,3 +1197,16 @@ void BoardSpaceDestroy(void)
     GXDestroyTexObj(&spaceTex);
 #endif
 }
+
+#ifdef TARGET_PC
+/* Bottom-screen map (src/port/dual_screen.cpp): the space icons, a 4x4 atlas, as loaded. */
+void *BoardSpaceIconAtlasGet(s32 *size, s32 *format)
+{
+    if (spaceTexData == NULL) {
+        return NULL;
+    }
+    *size = GXGetTexObjWidth(&spaceTex);
+    *format = spaceTexFmt;
+    return spaceTexData;
+}
+#endif

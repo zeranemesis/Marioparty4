@@ -2012,3 +2012,24 @@ static void KillPickerWindow(UnkUiWork01 *arg0)
         arg0->unk06 = -1;
     }
 }
+
+#ifdef TARGET_PC
+/* Bottom-screen map (src/port/dual_screen.cpp): a sprite of a player's status bar
+ * (0xB the portrait, 6 the coin icon, 10 the star icon). */
+ANIMDATA *BoardStatusSpriteDataGet(s32 player, s32 member)
+{
+    s16 group = uiStatus[player & 3].unk02;
+    s16 sprite;
+    if (group < 0 || group >= HUSPR_GRP_MAX || HuSprGrpData[group].capacity != 0x11 || HuSprGrpData[group].members == NULL) {
+        return NULL;
+    }
+    if (member < 0 || member >= 0x11) {
+        return NULL;
+    }
+    sprite = HuSprGrpData[group].members[member];
+    if (sprite < 0 || sprite >= HUSPR_MAX) {
+        return NULL;
+    }
+    return HuSprData[sprite].data;
+}
+#endif

@@ -3,9 +3,12 @@ package com.mariopartyrd.partyboard;
 import android.app.Activity;
 import android.app.Presentation;
 import android.content.Context;
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Rect;
+import android.graphics.RectF;
 import android.graphics.Path;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -40,6 +43,8 @@ final class DualScreen {
     private static native int nativeGetSetting(String key);
     private static native void nativeSetSetting(String key, int value);
     private static native int[] nativeFrameRates();
+    private static native int nativeImageGeneration();
+    private static native int[] nativeImage(int id, int[] size);
 
     // Layout of the snapshot, as written by src/port/dual_screen.cpp.
     private static final int HEADER = 7;
@@ -112,6 +117,8 @@ final class DualScreen {
         private boolean wasOnBoard;
         // The engine registers its settings only once the game starts: until then, retry.
         private boolean settingsReady;
+        private int imageGeneration;
+        private boolean imagesSupported = true;
 
         private final Runnable poll = new Runnable() {
             @Override
@@ -123,6 +130,7 @@ final class DualScreen {
                 }
                 wasOnBoard = onBoard;
                 if (map.getVisibility() == View.VISIBLE) {
+                    refreshImages();
                     map.update(snapshot, size);
                 } else if (!settingsReady) {
                     buildSettings();
@@ -181,6 +189,31 @@ final class DualScreen {
         protected void onStop() {
             handler.removeCallbacks(poll);
             super.onStop();
+        }
+
+        // The game's own space icons and portraits, once the board has loaded them.
+        private void refreshImages() {
+            if (!imagesSupported) {
+                return;
+            }
+            try {
+                int generation = nativeImageGeneration();
+                if (generation == imageGeneration) {
+                    return;
+                }
+                imageGeneration = generation;
+                Bitmap[] images = new Bitmap[11];
+                int[] dims = new int[2];
+                for (int id = 0; id < images.length; ++id) {
+                    int[] pixels = nativeImage(id, dims);
+                    if (pixels != null && dims[0] > 0 && dims[1] > 0) {
+                        images[id] = Bitmap.createBitmap(pixels, dims[0], dims[1], Bitmap.Config.ARGB_8888);
+                    }
+                }
+                map.setImages(images);
+            } catch (UnsatisfiedLinkError e) {
+                imagesSupported = false; // an engine from before the game images: keep the drawn map
+            }
         }
 
         private void select(boolean showMap) {
@@ -333,8 +366,18 @@ final class DualScreen {
         private static final int[] SPACE_COLORS = {0, 0xFF2F80ED, 0xFFE53935, 0xFF3D1A4F, 0xFFE8C21A,
             0xFFFB8C00, 0xFF2EAD5B, 0xFFEC6FB4, 0xFFFFD34D, 0xFF4FC3E8, 0xFF9E9E9E, 0xFF9E9E9E};
 
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        // Tile of each space type in the game's 4x4 icon atlas (spaceImgIdx in space.c, 1-based).
+        private static final int[] SPACE_TILES = {0, 1, 2, 7, 6, 5, 3, 4, 9, 10, 11, 0};
+
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final Path star = new Path();
+        private final Path clip = new Path();
+        private final Rect src = new Rect();
+        private final RectF dst = new RectF();
+        private Bitmap atlas;
+        private final Bitmap[] portraits = new Bitmap[8];
+        private Bitmap coinIcon;
+        private Bitmap starIcon;
         private float[] data = new float[0];
         private int size;
         private boolean live;
@@ -342,6 +385,63 @@ final class DualScreen {
         BoardMapView(Context context) {
             super(context);
             paint.setTypeface(Typeface.DEFAULT_BOLD);
+        }
+
+        void setImages(Bitmap[] images) {
+            atlas = images[0];
+            System.arraycopy(images, 1, portraits, 0, portraits.length);
+            coinIcon = images[9];
+            starIcon = images[10];
+            invalidate();
+        }
+
+        // Draws the game's icon for a space type; false when there is none to draw.
+        private boolean drawSpaceIcon(Canvas canvas, int type, float x, float y, float radius) {
+            if (atlas == null || type >= SPACE_TILES.length || SPACE_TILES[type] <= 0) {
+                return false;
+            }
+            int tile = SPACE_TILES[type] - 1;
+            int cell = atlas.getWidth() / 4;
+            int used = Math.round(atlas.getWidth() * 63f / 256f);
+            src.set((tile % 4) * cell, (tile / 4) * cell, (tile % 4) * cell + used, (tile / 4) * cell + used);
+            dst.set(x - radius, y - radius, x + radius, y + radius);
+            paint.setColor(0xFF10142A); // hides the path under the icon's see-through rim
+            canvas.drawCircle(x, y, radius * 0.9f, paint);
+            paint.setAlpha(255);
+            canvas.drawBitmap(atlas, src, dst, paint);
+            return true;
+        }
+
+        // A round portrait from the game, ringed in the character's colour; initials without one.
+        private void drawToken(Canvas canvas, int character, float x, float y, float radius) {
+            Bitmap face = portraits[character];
+            if (face == null) {
+                paint.setColor(COLORS[character]);
+                canvas.drawCircle(x, y, radius, paint);
+                paint.setColor(Color.WHITE);
+                paint.setTextAlign(Paint.Align.CENTER);
+                paint.setTextSize(radius * 0.95f);
+                String initial = character == 7 ? "DK" : character == 6 ? "Wa" : NAMES[character].substring(0, 1);
+                canvas.drawText(initial, x, y + radius * 0.32f, paint);
+                return;
+            }
+            paint.setColor(0xFF10142A);
+            canvas.drawCircle(x, y, radius, paint);
+            canvas.save();
+            clip.reset();
+            clip.addCircle(x, y, radius, Path.Direction.CW);
+            canvas.clipPath(clip);
+            // The status portrait stacks three square faces (normal, happy, sad): the first.
+            src.set(0, 0, face.getWidth(), Math.min(face.getWidth(), face.getHeight()));
+            dst.set(x - radius, y - radius, x + radius, y + radius);
+            paint.setAlpha(255);
+            canvas.drawBitmap(face, src, dst, paint);
+            canvas.restore();
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(radius * 0.18f);
+            paint.setColor(COLORS[character]);
+            canvas.drawCircle(x, y, radius, paint);
+            paint.setStyle(Paint.Style.FILL);
         }
 
         void update(float[] snapshot, int snapshotSize) {
@@ -383,7 +483,7 @@ final class DualScreen {
                 minX = Math.min(minX, x); maxX = Math.max(maxX, x);
                 minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
             }
-            float panel = sp(64);
+            float panel = sp(104); // turn and scores, two rows
             float margin = sp(52); // room for the player tokens around the outer spaces
             float scale = Math.min((width - 2 * margin) / Math.max(1, maxX - minX),
                 (height - panel - 2 * margin) / Math.max(1, maxZ - minZ));
@@ -413,7 +513,8 @@ final class DualScreen {
 
             // Spaces.
             paint.setStyle(Paint.Style.FILL);
-            float radius = sp(9);
+            // Spaces sit about 250 units apart: a radius of 115 leaves a little gap between them.
+            float radius = Math.min(sp(14), Math.max(sp(6), 115 * scale));
             for (int i = 0; i < spaces; ++i) {
                 int s = base + i * SPACE_STRIDE;
                 int type = (int) data[s + 2];
@@ -422,8 +523,10 @@ final class DualScreen {
                 }
                 float x = offX + data[s] * scale, y = offZ + data[s + 1] * scale;
                 if (type == 8) {
+                    // The star waits here: the game's star space, under a big star.
+                    drawSpaceIcon(canvas, type, x, y, radius);
                     drawStar(canvas, x, y, radius * 2.2f);
-                } else {
+                } else if (!drawSpaceIcon(canvas, type, x, y, radius)) {
                     paint.setColor(SPACE_COLORS[type]);
                     canvas.drawCircle(x, y, radius, paint);
                 }
@@ -441,32 +544,31 @@ final class DualScreen {
                     paint.setStyle(Paint.Style.STROKE);
                     paint.setStrokeWidth(sp(4));
                     paint.setColor(Color.WHITE);
-                    canvas.drawCircle(x, y, sp(22), paint);
+                    canvas.drawCircle(x, y, sp(23), paint);
                     paint.setStyle(Paint.Style.FILL);
                 }
-                paint.setColor(COLORS[character]);
-                canvas.drawCircle(x, y, sp(16), paint);
-                paint.setColor(Color.WHITE);
-                paint.setTextAlign(Paint.Align.CENTER);
-                paint.setTextSize(sp(15));
-                String initial = character == 7 ? "DK" : character == 6 ? "Wa" : NAMES[character].substring(0, 1);
-                canvas.drawText(initial, x, y + sp(5), paint);
+                drawToken(canvas, character, x, y, sp(18));
             }
 
             // Turn and scores along the top.
             paint.setTextAlign(Paint.Align.LEFT);
             paint.setTextSize(sp(18));
-            float column = width / 5;
+            float column = (width - sp(150)) / 2; // two players a row, after the turn counter
             paint.setColor(Color.WHITE);
             canvas.drawText(tr("Turn ", "Tour ") + (int) data[2] + "/" + (int) data[3], sp(16), sp(36), paint);
             for (int p = 0; p < 4; ++p) {
                 int o = HEADER + p * PLAYER_STRIDE;
                 int character = Math.max(0, Math.min(7, (int) data[o + 2]));
-                float x = column * (p + 1);
-                paint.setColor(COLORS[character]);
-                canvas.drawCircle(x + sp(8), sp(30), sp(8), paint);
+                float x = sp(150) + column * (p % 2);
+                float row = sp(30) + (p / 2) * sp(44);
+                drawToken(canvas, character, x + sp(8), row, sp(16));
+                paint.setTextAlign(Paint.Align.LEFT);
+                paint.setTextSize(sp(20));
                 paint.setColor(p == current ? 0xFFFFD34D : Color.WHITE);
-                canvas.drawText("★" + (int) data[o + 4] + "  ●" + (int) data[o + 3], x + sp(22), sp(36), paint);
+                // The status bar's own star and coin icons; drawn symbols without them.
+                float cursor = x + sp(32);
+                cursor = drawCount(canvas, starIcon, "★", (int) data[o + 4], cursor, row);
+                drawCount(canvas, coinIcon, "●", (int) data[o + 3], cursor + sp(14), row);
             }
 
             if (!live) {
@@ -476,6 +578,26 @@ final class DualScreen {
                 paint.setTextSize(sp(22));
                 canvas.drawText(tr("Mini-game in progress", "Mini-jeu en cours"), width / 2, height / 2, paint);
             }
+        }
+
+        // An icon (or its stand-in symbol) and a count after it; returns where the text ends.
+        private float drawCount(Canvas canvas, Bitmap icon, String symbol, int count, float x, float row) {
+            String text = String.valueOf(count);
+            if (icon == null) {
+                text = symbol + text;
+            } else {
+                float h = sp(26);
+                float w = h * icon.getWidth() / Math.max(1, icon.getHeight());
+                src.set(0, 0, icon.getWidth(), icon.getHeight());
+                dst.set(x, row - h / 2, x + w, row + h / 2);
+                int color = paint.getColor();
+                paint.setAlpha(255);
+                canvas.drawBitmap(icon, src, dst, paint);
+                paint.setColor(color);
+                x += w + sp(3);
+            }
+            canvas.drawText(text, x, row + sp(7), paint);
+            return x + paint.measureText(text);
         }
 
         private void drawStar(Canvas canvas, float cx, float cy, float r) {
