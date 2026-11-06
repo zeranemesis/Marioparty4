@@ -299,6 +299,7 @@ public class PartyBoardActivity extends SDLActivity {
                 Log.w(TAG, "Unable to return to the online lobby", e);
             }
         }
+        DualScreen.hide();
         super.onDestroy();
         // After SDL's onDestroy, which waits for the game: nothing draws into
         // the headset's surface any more.
@@ -330,6 +331,13 @@ public class PartyBoardActivity extends SDLActivity {
     protected void onResume() {
         super.onResume();
         hideSystemBars();
+        DualScreen.show(this);
+    }
+
+    @Override
+    protected void onStop() {
+        DualScreen.hide();
+        super.onStop();
     }
 
     @Override

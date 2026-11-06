@@ -27,6 +27,7 @@
 
 #include <port/settings.h>
 #include <port/test_input.h>
+#include <port/dual_screen.h>
 #include <port/gamepad_priority.hpp>
 
 namespace partyboard::ui {
@@ -317,6 +318,7 @@ void update() noexcept
     input::sync_input_block();
     // After the screen controller, so a test script's presses win (src/port/test_input.cpp).
     PartyBoard_TestInputFrame();
+    PartyBoard_DualScreenFrame();
 }
 
 std::filesystem::path resource_path(const std::filesystem::path &filename) noexcept
