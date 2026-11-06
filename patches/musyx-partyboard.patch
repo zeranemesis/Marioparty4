@@ -4348,7 +4348,7 @@ index 04d7029..4721631 100644
    svoice->cFlags |= 0x20;
    synthKeyStateUpdate(svoice);
  }
-@@ -668,15 +687,13 @@ static void mcmdSetADSR(SYNTH_VOICE* svoice, MSTEP* cstep) {
+@@ -668,15 +687,16 @@ static void mcmdSetADSR(SYNTH_VOICE* svoice, MSTEP* cstep) {
  
    if ((adsr_ptr = dataGetCurve(cstep->para[0] >> 8)) != NULL) {
      if (!(u8)(cstep->para[0] >> 24)) {
@@ -4365,11 +4365,14 @@ index 04d7029..4721631 100644
      } else {
 -      sScale =
 -          dspDLSVolTab[(u16)(adsr_ptr->data.dls.slevel >> 8 | adsr_ptr->data.dls.slevel << 8) >> 5];
-+      sScale = dspDLSVolTab[readCurveU16(adsr_ptr->data.dls.slevel) >> 5];
++      /* Some curves store sustain above 0x1000 (Mario Party 4 uses 0x2000): the index then
++       * runs past the 129-entry table, which reads garbage (0 on ARM64, so the voice dies at
++       * setup and whole music channels go silent on Android). Clamp to full sustain. */
++      sScale = dspDLSVolTab[MIN(readCurveU16(adsr_ptr->data.dls.slevel) >> 5, 128)];
        adsr.data.dls.atime =
            ((u8*)&adsr_ptr->data.dls.atime)[0] << 0 | ((u8*)&adsr_ptr->data.dls.atime)[1] << 8 |
            ((u8*)&adsr_ptr->data.dls.atime)[2] << 16 | ((u8*)&adsr_ptr->data.dls.atime)[3] << 24;
-@@ -684,7 +701,7 @@ static void mcmdSetADSR(SYNTH_VOICE* svoice, MSTEP* cstep) {
+@@ -684,7 +704,7 @@ static void mcmdSetADSR(SYNTH_VOICE* svoice, MSTEP* cstep) {
            ((u8*)&adsr_ptr->data.dls.dtime)[0] << 0 | ((u8*)&adsr_ptr->data.dls.dtime)[1] << 8 |
            ((u8*)&adsr_ptr->data.dls.dtime)[2] << 16 | ((u8*)&adsr_ptr->data.dls.dtime)[3] << 24;
        adsr.data.dls.slevel = 4096.f * sScale;
@@ -4378,7 +4381,7 @@ index 04d7029..4721631 100644
        ascale =
            ((u8*)&adsr_ptr->data.dls.ascale)[0] << 0 | ((u8*)&adsr_ptr->data.dls.ascale)[1] << 8 |
            ((u8*)&adsr_ptr->data.dls.ascale)[2] << 16 | ((u8*)&adsr_ptr->data.dls.ascale)[3] << 24;
-@@ -767,8 +784,8 @@ static void mcmdSetPitchADSR(SYNTH_VOICE* svoice, MSTEP* cstep) {
+@@ -767,8 +787,8 @@ static void mcmdSetPitchADSR(SYNTH_VOICE* svoice, MSTEP* cstep) {
        (((u8*)&adsr_ptr->data.dls.dtime)[0] << 0) | (((u8*)&adsr_ptr->data.dls.dtime)[1] << 8) |
        (((u8*)&adsr_ptr->data.dls.dtime)[2] << 16) | (((u8*)&adsr_ptr->data.dls.dtime)[3] << 24);
  
@@ -4389,7 +4392,7 @@ index 04d7029..4721631 100644
    ascale =
        (((u8*)&adsr_ptr->data.dls.ascale)[0] << 0) | (((u8*)&adsr_ptr->data.dls.ascale)[1] << 8) |
        (((u8*)&adsr_ptr->data.dls.ascale)[2] << 16) | (((u8*)&adsr_ptr->data.dls.ascale)[3] << 24);
-@@ -1855,6 +1872,9 @@ u32 macStart(u16 macid, u8 priority, u8 maxVoices,
+@@ -1855,6 +1875,9 @@ u32 macStart(u16 macid, u8 priority, u8 maxVoices,
  
      if ((voice = voiceAllocate(priority, maxVoices, allocId, (key & 0x80) ? 1 : 0)) != -1) {
        svoice = &synthVoice[voice];
@@ -4399,7 +4402,7 @@ index 04d7029..4721631 100644
        vidRemoveVoiceReferences(svoice);
        macMakeInactive(svoice, MAC_STATE_STOPPED);
        svoice->cFlags = (svoice->cFlags & 0x10) | 2;
-@@ -1902,6 +1922,16 @@ u32 macStart(u16 macid, u8 priority, u8 maxVoices,
+@@ -1902,6 +1925,16 @@ u32 macStart(u16 macid, u8 priority, u8 maxVoices,
        svoice->setup.itdMode = itd != 0 ? 0 : 1;
        svoice->mesgNum = svoice->mesgRead = svoice->mesgWrite = 0;
        svoice->id = voice | ((macid << 16) | (key << 8));
@@ -4416,7 +4419,7 @@ index 04d7029..4721631 100644
        voiceSetPriority(svoice, priority);
  
        if ((vid = vidMakeNew(svoice, new_vid)) != -1) {
-@@ -1915,6 +1945,15 @@ u32 macStart(u16 macid, u8 priority, u8 maxVoices,
+@@ -1915,6 +1948,15 @@ u32 macStart(u16 macid, u8 priority, u8 maxVoices,
  
        voiceFree(svoice);
      }
