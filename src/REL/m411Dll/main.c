@@ -388,6 +388,13 @@ void fn_1_1074(void)
 
 void fn_1_1498(s16 layer)
 {
+#ifdef TARGET_PC
+    // Camera 0 shoots the puzzle photo into a 4:3 texture: undo the adaptive widescreen, which
+    // showed past the scenery and left black strips on the pieces.
+    if (Hu3DCameraNo == 0 && Hu3DCamera[0].aspect != 1.2f / PartyBoard_WidescreenAspectScale()) {
+        Hu3DCameraPerspectiveSet(1, 15.0f, 20.0f, 25000.0f, 1.2f / PartyBoard_WidescreenAspectScale());
+    }
+#endif
     if (Hu3DCameraNo == 1) {
         GXSetTexCopySrc(0, 0, 320, 240);
         GXSetTexCopyDst(320, 240, GX_TF_RGB5A3, GX_FALSE);
