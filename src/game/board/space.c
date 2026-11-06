@@ -846,6 +846,11 @@ static void DrawSpaces(HU3DMODEL *model, Mtx matrix)
     }
     spaceDrawCnt = 0;
     camera = &boardCamera;
+#ifdef TARGET_PC
+    // The board camera feeds Hu3D's; take Hu3D's view, which is interpolated above 60 FPS like
+    // the board itself. Its raw tick view put the spaces off the ground and made them flicker.
+    Hu3DCameraSet(Hu3DCameraNo, lookat);
+#else
     BoardCameraPosGet(&pos);
     BoardCameraTargetGet(&target);
     MTXPerspective(proj, camera->fov, PARTYBOARD_WIDESCREEN_ASPECT(camera->aspect), camera->nnear, camera->ffar);
@@ -853,6 +858,7 @@ static void DrawSpaces(HU3DMODEL *model, Mtx matrix)
     MTXLookAt(lookat, &pos, &camera->up, &target);
     GXSetViewport(camera->viewport_x, camera->viewport_y, camera->viewport_w, camera->viewport_h, camera->viewport_near, camera->viewport_far);
     GXSetScissor(camera->viewport_x, camera->viewport_y, camera->viewport_w, camera->viewport_h);
+#endif
     {
         BoardSpace *space_curr;
         BoardSpace *space_hilite;
