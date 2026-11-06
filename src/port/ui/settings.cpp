@@ -530,6 +530,12 @@ SettingsWindow::SettingsWindow(bool prelaunch)
                     config::Save();
                 },
             });
+        config_bool_select(leftPane, rightPane, getSettings().video.keepOriginalHud,
+            {
+                .key = "Original HUD Placement",
+                .helpText = "With the adaptive widescreen, keeps the HUD where the original 4:3 picture had it, centred, instead of moving it towards the screen edges.",
+                .isDisabled = [] { return !getSettings().video.enableAdaptiveWidescreen.getValue(); },
+            });
         config_bool_select(leftPane, rightPane, getSettings().game.pauseOnFocusLost,
             {
                 .key = "Pause on Focus Lost",

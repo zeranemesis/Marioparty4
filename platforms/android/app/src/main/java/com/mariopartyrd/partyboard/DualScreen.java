@@ -236,6 +236,15 @@ final class DualScreen {
             toggle(tr("Adaptive widescreen", "Écran large adaptatif", "Adaptives Breitbild", "Panorámica adaptable", "Widescreen adattivo"),
                 tr("Fills the screen without stretching the scene.", "Remplit l'écran sans étirer la scène.", "Füllt den Bildschirm, ohne die Szene zu strecken.", "Llena la pantalla sin estirar la escena.", "Riempie lo schermo senza allungare la scena."),
                 "video.enableAdaptiveWidescreen");
+            if (nativeGetSetting("video.enableAdaptiveWidescreen") > 0) {
+                toggle(tr("Original HUD placement", "HUD à sa place d'origine", "Original-HUD-Anordnung", "HUD en su sitio original", "HUD nella posizione originale"),
+                    tr("Keeps the HUD centred as on the GameCube instead of at the screen edges.",
+                        "Garde le HUD centré comme sur la GameCube, au lieu de l'envoyer vers les bords.",
+                        "Hält das HUD zentriert wie auf dem GameCube, statt es an die Ränder zu schieben.",
+                        "Mantiene el HUD centrado como en GameCube en lugar de llevarlo a los bordes.",
+                        "Tiene l'HUD centrato come sul GameCube invece di spostarlo ai bordi."),
+                    "video.keepOriginalHud");
+            }
             toggle(tr("Original 4:3 picture", "Image 4:3 d'origine", "Originales 4:3-Bild", "Imagen 4:3 original", "Immagine 4:3 originale"),
                 tr("Keeps the GameCube's proportions, with bars.", "Garde les proportions de la GameCube, avec des bandes.", "Behält die Proportionen des GameCube bei, mit Balken.", "Mantiene las proporciones de GameCube, con franjas.", "Mantiene le proporzioni del GameCube, con bande."),
                 "video.lockAspectRatio");

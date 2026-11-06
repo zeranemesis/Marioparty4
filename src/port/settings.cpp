@@ -30,6 +30,7 @@ UserSettings g_userSettings = {
         .targetFrameRate {"video.targetFrameRate", 60},
         .lockAspectRatio {"video.lockAspectRatio", kLockAspectRatioByDefault},
         .enableAdaptiveWidescreen {"video.enableAdaptiveWidescreen", false},
+        .keepOriginalHud {"video.keepOriginalHud", false},
         .enableFpsOverlay {"game.enableFpsOverlay", false},
         .fpsOverlayCorner {"game.fpsOverlayCorner", 0},
     },
@@ -117,6 +118,7 @@ void registerSettings() {
     Register(g_userSettings.video.targetFrameRate);
     Register(g_userSettings.video.lockAspectRatio);
     Register(g_userSettings.video.enableAdaptiveWidescreen);
+    Register(g_userSettings.video.keepOriginalHud);
     Register(g_userSettings.video.enableFpsOverlay);
     Register(g_userSettings.video.fpsOverlayCorner);
 
@@ -240,6 +242,9 @@ static partyboard::widescreen::HudSpan WidescreenHudSpan(float scale)
     int width = 0;
     int height = 0;
     SDL_Rect safe {};
+    if (scale != 1.0f && partyboard::getSettings().video.keepOriginalHud.getValue()) {
+        return partyboard::widescreen::original_hud_span(scale);
+    }
     if (scale == 1.0f || window == nullptr || !SDL_GetWindowSize(window, &width, &height)
         || !SDL_GetWindowSafeArea(window, &safe)) {
         return {};

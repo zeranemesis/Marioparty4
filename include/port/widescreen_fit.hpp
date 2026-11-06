@@ -38,6 +38,11 @@ inline HudSpan hud_span(float scale, float windowWidth, float safeX, float safeW
     return {(lo + hi - 1.0f) * 0.5f, hi - lo};
 }
 
+// The HUD left where the 4:3 picture had it, in the middle of the window: no HUD x moves.
+inline HudSpan original_hud_span(float scale) {
+    return {0.0f, 1.0f / scale};
+}
+
 // Where HUD x (0..2 * centerX) is drawn in the widened HUD projection, which
 // runs from centerX - centerX * scale to centerX + centerX * scale. The middle
 // half stays where it was, over the 3D scene it belongs to (the scene keeps
