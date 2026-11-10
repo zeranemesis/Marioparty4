@@ -1,6 +1,6 @@
 {
   "version": "0.21.1",
   "downloadUrl": "https://github.com/zeranemesis/Marioparty4/releases/download/v0.21.1/PartyBoard-win-x64.zip",
-  "sha256": "3DC3311DA64A60D3B058FB24A50EE47B01DBCA5E2D5EF0BD91C1020D214316FC",
+  "sha256": "7AC4C0132205DD007FB6594038A6388FC0642EBC342883240814B3E7F2536EF4",
   "notes": "Android: the missing music instruments are back. Dual-screen handhelds (AYN Thor): a live board map and the settings on the bottom screen. New \"Original HUD placement\" setting: with the widescreen, the HUD stays centred as on the GameCube. Fixes board spaces flickering above 60 FPS, the shop item leaving its window in widescreen and black strips on the Photo Finish pieces."
 }
