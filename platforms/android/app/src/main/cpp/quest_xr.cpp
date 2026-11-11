@@ -14,8 +14,9 @@
 //
 // Before the first board or minigame, while the table is not calibrated, the
 // game waits (PartyBoardQuest_TableSetupHold) for the player to lay the right
-// controller at the table's center. The table of the headset's room scan
-// under it (table_scene.cpp) gives the height and the model's size.
+// controller at the table's center. Its position fixes the center; the headset
+// fixes the model's facing direction. Existing room table data, when already
+// permitted, may suggest height/size, but scanning the entire room is optional.
 //
 // Everything OpenXR runs on one thread, started by nativeStart: set-up, the
 // frame loop and tear-down. The controllers go to Java (QuestVr.onControllers),
@@ -25,6 +26,7 @@
 #include "stereo_view.hpp"
 #include "table_anchor.hpp"
 #include "table_fit.hpp"
+#include "table_orientation.hpp"
 #include "table_scene.hpp"
 #include "xr_util.hpp"
 
@@ -72,7 +74,6 @@ constexpr float kControllerGripToTableMeters = 0.035f;
 constexpr size_t kStableCalibrationSamples = 30;
 constexpr XrDuration kStableCalibrationDuration = 750'000'000;
 constexpr float kCalibrationPositionTolerance = 0.005f;
-constexpr float kCalibrationYawTolerance = 0.08f;
 // The model's scale: meters per game unit (a board is some 4000 units wide).
 constexpr float kMinModelScale = 0.00003f;
 constexpr float kMaxModelScale = 0.002f;
@@ -234,10 +235,8 @@ struct App {
   bool calibrating = false;
   bool calibrationConfirmed = false;
   bool calibrationConfirmArmed = false;
-  bool scanArmed = false;           // A (scan the room) was released since the panel opened
   bool skipArmed = false;           // B (later) too
   bool calibrationSkipped = false;  // B: not before the next session
-  bool permissionRequested = false; // the spatial data permission, asked once a session
   int shownSceneState = -1;         // TableScene::State on the panel
   std::deque<XrPosef> calibrationSamples;
   XrTime calibrationStableSince = 0;
@@ -890,10 +889,9 @@ bool locate_tracked(XrSpace space, XrSpace base, XrTime time, XrPosef& pose) {
   if (XR_FAILED(xrLocateSpace(space, base, time, &location))) {
     return false;
   }
+  // Table calibration never uses the controller's orientation.
   constexpr XrSpaceLocationFlags kTracked = XR_SPACE_LOCATION_POSITION_VALID_BIT |
-                                             XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
-                                             XR_SPACE_LOCATION_POSITION_TRACKED_BIT |
-                                             XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+                                             XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
   if ((location.locationFlags & kTracked) != kTracked) {
     return false;
   }
@@ -1039,7 +1037,6 @@ void begin_table_calibration(App& app, JNIEnv* env, int buttons) {
   app.calibrating = true;
   app.calibrationConfirmed = false;
   app.calibrationConfirmArmed = (buttons & kButtonX) == 0;
-  app.scanArmed = (buttons & kButtonA) == 0;
   app.skipArmed = (buttons & kButtonB) == 0;
   app.placing = true;
   app.grabbing = false;
@@ -1048,16 +1045,9 @@ void begin_table_calibration(App& app, JNIEnv* env, int buttons) {
   app.calibrationSamples.clear();
   app.calibrationStableSince = 0;
   LOGI("Automatic table calibration started");
-  // The room scan may have changed since the last look (the player scanned it
-  // from the headset's settings), or the permission is still to be asked.
-  if (app.scene.available()) {
-    if (g_scenePermission.load() != 1 && !app.permissionRequested && g_java.requestScenePermission != nullptr) {
-      app.permissionRequested = true;
-      env->CallStaticVoidMethod(g_java.questVr, g_java.requestScenePermission);
-      clear_exception(env);
-    }
-    app.scene.query();
-  }
+  // Do not request a room scan or spatial-data permission for calibration.
+  // If the user previously gave permission, TableScene already loads the
+  // existing table data; otherwise placement works from the controller alone.
   notify_placement(app, env);
 }
 
@@ -1077,22 +1067,13 @@ void skip_table_calibration(App& app, JNIEnv* env, int heldButtons) {
   notify_placement(app, env);
 }
 
-void sample_table_calibration(App& app, const XrPosef* grip, XrTime time, int pressed, int heldButtons, JNIEnv* env) {
+void sample_table_calibration(App& app, const XrPosef* grip, const XrPosef* head, XrTime time, int pressed,
+                              int heldButtons, JNIEnv* env) {
   if ((heldButtons & kButtonB) == 0) {
     app.skipArmed = true;
   } else if (app.skipArmed && (pressed & kButtonB) != 0) {
     skip_table_calibration(app, env, heldButtons);
     return;
-  }
-  // A: scan the room in Space Setup (the panel shows the table when back).
-  if ((heldButtons & kButtonA) == 0) {
-    app.scanArmed = true;
-  } else if (app.scanArmed && (pressed & kButtonA) != 0) {
-    app.scanArmed = false;
-    if (app.scene.request_capture()) {
-      tick(app);
-      notify_placement(app, env);
-    }
   }
   if (!app.calibrationConfirmed) {
     if ((heldButtons & kButtonX) == 0) {
@@ -1112,40 +1093,22 @@ void sample_table_calibration(App& app, const XrPosef* grip, XrTime time, int pr
     app.calibrationStableSince = 0;
     return;
   }
-  const float qx = grip->orientation.x;
-  const float qy = grip->orientation.y;
-  const float qz = grip->orientation.z;
-  const float qw = grip->orientation.w;
-  const float normSquared = qx * qx + qy * qy + qz * qz + qw * qw;
-  const bool finitePose = std::isfinite(grip->position.x) && std::isfinite(grip->position.y) &&
-                          std::isfinite(grip->position.z) && std::isfinite(normSquared) && normSquared >= 0.25f &&
-                          normSquared <= 4.0f;
-  if (!finitePose) {
+  // Only the controller POSITION matters: the user can lay it on the table
+  // at any angle. Head position and headset yaw determine the board facing.
+  if (!std::isfinite(grip->position.x) || !std::isfinite(grip->position.y) ||
+      !std::isfinite(grip->position.z)) {
     app.calibrationSamples.clear();
     app.calibrationStableSince = 0;
     return;
   }
-  const float inverseNorm = 1.0f / std::sqrt(normSquared);
-  const XrQuaternionf orientation{qx * inverseNorm, qy * inverseNorm, qz * inverseNorm, qw * inverseNorm};
-  const XrVector3f forward = rotate(orientation, {0.0f, 0.0f, 1.0f});
-  const float horizontalForward = std::hypot(forward.x, forward.z);
-  if (!std::isfinite(horizontalForward) || horizontalForward < 0.25f) {
-    app.calibrationSamples.clear();
-    app.calibrationStableSince = 0;
-    return;
-  }
-  XrPosef uprightGrip{};
-  uprightGrip.position = grip->position;
-  uprightGrip.orientation = yaw_rotation(std::atan2(forward.x, forward.z));
+  XrPosef point = identity_pose();
+  point.position = grip->position;
   if (!app.calibrationSamples.empty()) {
     const XrPosef& first = app.calibrationSamples.front();
-    const float dx = uprightGrip.position.x - first.position.x;
-    const float dy = uprightGrip.position.y - first.position.y;
-    const float dz = uprightGrip.position.z - first.position.z;
-    const float yawDelta = std::remainder(yaw_of(uprightGrip.orientation) - yaw_of(first.orientation),
-                                          2.0f * 3.14159265358979323846f);
-    if (dx * dx + dy * dy + dz * dz > kCalibrationPositionTolerance * kCalibrationPositionTolerance ||
-        std::abs(yawDelta) > kCalibrationYawTolerance) {
+    const float dx = point.position.x - first.position.x;
+    const float dy = point.position.y - first.position.y;
+    const float dz = point.position.z - first.position.z;
+    if (dx * dx + dy * dy + dz * dz > kCalibrationPositionTolerance * kCalibrationPositionTolerance) {
       app.calibrationSamples.clear();
       app.calibrationStableSince = 0;
     }
@@ -1153,28 +1116,32 @@ void sample_table_calibration(App& app, const XrPosef* grip, XrTime time, int pr
   if (app.calibrationSamples.empty()) {
     app.calibrationStableSince = time;
   }
-  app.calibrationSamples.push_back(uprightGrip);
+  app.calibrationSamples.push_back(point);
   if (app.calibrationSamples.size() < kStableCalibrationSamples || app.calibrationStableSince == 0 ||
       time - app.calibrationStableSince < kStableCalibrationDuration) {
     return;
   }
 
   XrPosef calibrated = identity_pose();
-  float yawSin = 0.0f, yawCos = 0.0f;
   for (const auto& sample : app.calibrationSamples) {
     calibrated.position.x += sample.position.x / static_cast<float>(app.calibrationSamples.size());
     calibrated.position.y += sample.position.y / static_cast<float>(app.calibrationSamples.size());
     calibrated.position.z += sample.position.z / static_cast<float>(app.calibrationSamples.size());
-    const float yaw = yaw_of(sample.orientation);
-    yawSin += std::sin(yaw);
-    yawCos += std::cos(yaw);
   }
   calibrated.position.y -= kControllerGripToTableMeters;
-  calibrated.orientation = yaw_rotation(std::atan2(yawSin, yawCos));
-  // The scanned table under the controller: its top's height (the scan
-  // measures it better than the grip's offset), and the model sized so the
-  // scene spans the table from there. The center and the turn stay the
-  // controller's: the player laid it where the game goes.
+  // Freeze the direction toward the user at calibration time: do not rotate
+  // the board as the head later moves. When seated right above the center,
+  // use the headset's own yaw instead of the controller's orientation.
+  float boardYaw = 0.0f;
+  if (head == nullptr || !table_yaw_from_head(calibrated.position.x, calibrated.position.z,
+                                              head->position.x, head->position.z,
+                                              yaw_of(head->orientation), boardYaw)) {
+    return; // wait for valid head tracking, without losing stable samples
+  }
+  calibrated.orientation = yaw_rotation(boardYaw);
+  // If an existing scan already knows this table, use its top height and
+  // width for a suggested board size. Otherwise keep the adjustable default.
+  // The center is from the controller, but the orientation is from the head.
   const std::vector<ScannedTable> tables = app.scene.tables(time);
   if (const ScannedTable* table =
           pick_table(tables, calibrated.position.x, calibrated.position.y, calibrated.position.z)) {
@@ -1505,7 +1472,8 @@ void run_frame(App& app, JNIEnv* env, unsigned& rumbleSerial) {
   // In placement mode A starts table calibration; the other controls finish it.
   constexpr int kEndPlacement = kButtonB | kButtonMenu | kButtonRightStick;
   if (app.calibrating) {
-    sample_table_calibration(app, haveRightGrip ? &rightGrip : nullptr, time, pressed, input.buttons, env);
+    sample_table_calibration(app, haveRightGrip ? &rightGrip : nullptr, haveHead ? &head : nullptr,
+                             time, pressed, input.buttons, env);
   } else if ((pressed & kButtonRightStick) != 0 || (app.placing && (pressed & kEndPlacement) != 0)) {
     if (app.placing) {
       end_placement(app, env, time, input.buttons);
